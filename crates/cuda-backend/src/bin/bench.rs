@@ -5,7 +5,7 @@ use openvm_cuda_backend::{
     prelude::EF,
     sponge::DuplexSpongeGpu,
 };
-use openvm_cuda_common::copy::MemCopyD2D;
+use openvm_cuda_common::{copy::MemCopyD2D, stream::CudaStream};
 use p3_field::PrimeCharacteristicRing;
 
 fn parse_usize(var: &str, default: usize) -> usize {
@@ -21,6 +21,7 @@ fn bench_fractional_sumcheck() -> Result<(), Box<dyn std::error::Error>> {
     let repeats = parse_usize("SWIRL_BENCH_REPEATS", 3);
     let warmups = parse_usize("SWIRL_BENCH_WARMUPS", 1);
 
+    let stream = CudaStream::new_non_blocking()?;
     let template = make_synthetic_leaves(n)?;
 
     println!("run_idx,is_warmup,elapsed_ms");
@@ -32,10 +33,17 @@ fn bench_fractional_sumcheck() -> Result<(), Box<dyn std::error::Error>> {
         let mut transcript = DuplexSpongeGpu::default();
         let mut mem = openvm_cuda_common::memory_manager::MemTracker::start("bench.fractional");
 
-        openvm_cuda_common::stream::current_stream_sync().expect("sync before timing");
+        stream.synchronize().expect("sync before timing");
         let t0 = std::time::Instant::now();
-        let _ = fractional_sumcheck_gpu(&mut transcript, leaves, EF::ZERO, false, &mut mem)?;
-        openvm_cuda_common::stream::current_stream_sync().expect("sync after timing");
+        let _ = fractional_sumcheck_gpu(
+            &mut transcript,
+            leaves,
+            EF::ZERO,
+            false,
+            &mut mem,
+            stream.as_raw(),
+        )?;
+        stream.synchronize().expect("sync after timing");
         let ms = t0.elapsed().as_secs_f64() * 1000.0;
 
         println!("{run_idx},{},{:.4}", is_warmup as u8, ms);

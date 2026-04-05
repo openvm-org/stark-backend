@@ -3,8 +3,7 @@ use std::{ffi::c_void, sync::Arc};
 use getset::Getters;
 use itertools::Itertools;
 use openvm_cuda_common::{
-    copy::cuda_memcpy, d_buffer::DeviceBuffer, memory_manager::MemTracker,
-    stream::cudaStreamPerThread,
+    copy::cuda_memcpy, d_buffer::DeviceBuffer, memory_manager::MemTracker, stream::cudaStream_t,
 };
 use openvm_stark_backend::{
     p3_util::log2_strict_usize,
@@ -55,6 +54,7 @@ pub fn stacked_commit<MH: GpuMerkleHash + MerkleTreeConstructor>(
     k_whir: usize,
     traces: &[&DeviceMatrix<F>],
     prover_config: GpuProverConfig,
+    stream: cudaStream_t,
 ) -> Result<(MH::Digest, StackedPcsDataGpu<F, MH::Digest>), ProverError> {
     let mut mem = MemTracker::start("prover.stacked_commit");
     mem.tracing_info("before stacked_commit");
@@ -66,15 +66,16 @@ pub fn stacked_commit<MH: GpuMerkleHash + MerkleTreeConstructor>(
         "stacked_matrix_dimensions"
     );
     let opt_stacked_matrix = if prover_config.cache_stacked_matrix {
-        Some(stack_traces(&layout, traces)?)
+        Some(stack_traces(&layout, traces, stream)?)
     } else {
         None
     };
-    let rs_matrix = rs_code_matrix(log_blowup, &layout, traces, &opt_stacked_matrix)?;
+    let rs_matrix = rs_code_matrix(log_blowup, &layout, traces, &opt_stacked_matrix, stream)?;
     let tree = MerkleTreeGpu::<F, MH::Digest>::new_with_hash::<MH>(
         rs_matrix,
         1 << k_whir,
         prover_config.cache_rs_code_matrix,
+        stream,
     )?;
     let root = tree.root();
     let data = StackedPcsDataGpu {
@@ -94,9 +95,10 @@ pub fn stacked_matrix(
     l_skip: usize,
     n_stack: usize,
     traces: &[&DeviceMatrix<F>],
+    stream: cudaStream_t,
 ) -> Result<(PleMatrix<F>, StackedLayout), ProverError> {
     let layout = get_stacked_layout(l_skip, n_stack, traces);
-    let matrix = stack_traces(&layout, traces)?;
+    let matrix = stack_traces(&layout, traces, stream)?;
     Ok((matrix, layout))
 }
 
@@ -120,15 +122,18 @@ pub(crate) fn get_stacked_layout(
 pub(crate) fn stack_traces(
     layout: &StackedLayout,
     traces: &[&DeviceMatrix<F>],
+    stream: cudaStream_t,
 ) -> Result<PleMatrix<F>, StackTracesError> {
     let mem = MemTracker::start("prover.stack_traces");
     let l_skip = layout.l_skip();
     let height = layout.height();
     let width = layout.width();
     let mut q_evals = DeviceBuffer::<F>::with_capacity(width.checked_mul(height).unwrap());
-    stack_traces_into_expanded(layout, traces, &mut q_evals, height)?;
+    stack_traces_into_expanded(layout, traces, &mut q_evals, height, stream)?;
     mem.emit_metrics();
-    Ok(PleMatrix::from_evals(l_skip, q_evals, height, width))
+    Ok(PleMatrix::from_evals(
+        l_skip, q_evals, height, width, stream,
+    ))
 }
 
 /// `buffer` should be the buffer to write the stacked traces into.
@@ -139,6 +144,7 @@ pub(crate) fn stack_traces_into_expanded(
     traces: &[&DeviceMatrix<F>],
     buffer: &mut DeviceBuffer<F>,
     padded_height: usize,
+    stream: cudaStream_t,
 ) -> Result<(), StackTracesError> {
     let l_skip = layout.l_skip();
     debug_assert_eq!(padded_height % layout.height(), 0);
@@ -175,15 +181,8 @@ pub(crate) fn stack_traces_into_expanded(
             unsafe {
                 let src = trace.buffer().as_ptr().add(*j * trace.height());
                 let dst = buffer.as_mut_ptr().add(start);
-                batch_expand_pad_wide(
-                    dst,
-                    src,
-                    trace.height() as u32,
-                    stride as u32,
-                    1,
-                    cudaStreamPerThread,
-                )
-                .map_err(StackTracesError::BatchExpandPadWide)?;
+                batch_expand_pad_wide(dst, src, trace.height() as u32, stride as u32, 1, stream)
+                    .map_err(StackTracesError::BatchExpandPadWide)?;
             }
         }
     }
@@ -202,6 +201,7 @@ pub fn rs_code_matrix(
     layout: &StackedLayout,
     traces: &[&DeviceMatrix<F>],
     stacked_matrix: &Option<PleMatrix<F>>,
+    stream: cudaStream_t,
 ) -> Result<DeviceMatrix<F>, RsCodeMatrixError> {
     let mem = MemTracker::start_and_reset_peak("prover.rs_code_matrix");
     let l_skip = layout.l_skip();
@@ -222,12 +222,12 @@ pub fn rs_code_matrix(
                 width as u32,
                 codeword_height as u32,
                 height as u32,
-                cudaStreamPerThread,
+                stream,
             )
             .map_err(RsCodeMatrixError::BatchExpandPad)?;
         }
     } else {
-        stack_traces_into_expanded(layout, traces, &mut codewords, codeword_height)
+        stack_traces_into_expanded(layout, traces, &mut codewords, codeword_height, stream)
             .map_err(RsCodeMatrixError::StackTraces)?;
         // Currently codewords has the stacked matrix, batch expanded, in evaluation form on
         // hyperprism. We convert it to mixed form, i.e., unroll `PleMatrix::from_evals`.
@@ -238,14 +238,8 @@ pub fn rs_code_matrix(
             // (width cols) * (codeword_height / 2^l_skip chunks per col). Use natural ordering.
             let num_uni_poly = width * (codeword_height >> l_skip);
             unsafe {
-                batch_ntt_small(
-                    &mut codewords,
-                    l_skip,
-                    num_uni_poly,
-                    true,
-                    cudaStreamPerThread,
-                )
-                .map_err(RsCodeMatrixError::CustomBatchIntt)?;
+                batch_ntt_small(&mut codewords, l_skip, num_uni_poly, true, stream)
+                    .map_err(RsCodeMatrixError::CustomBatchIntt)?;
             }
         }
     }
@@ -271,6 +265,7 @@ pub fn rs_code_matrix(
                 l_skip as u32 - 1, // end_log_step (inclusive)
                 false,             // coeffs to evals (NOT eval to coeff)
                 false,             // natural order
+                stream,
             )
             .map_err(|error| RsCodeMatrixError::MleInterpolateStage2d { error, step: 1 })?;
         }
@@ -284,7 +279,7 @@ pub fn rs_code_matrix(
             log_codeword_height as u32,
             codeword_height as u32,
             width as u32,
-            cudaStreamPerThread,
+            stream,
         )
         .map_err(RsCodeMatrixError::BitRev)?;
     }
@@ -297,6 +292,7 @@ pub fn rs_code_matrix(
         width as u32,
         false, // bit-reversal already done
         false,
+        stream,
     );
     let code_matrix = DeviceMatrix::new(Arc::new(codewords), codeword_height, width);
     mem.emit_metrics();
@@ -340,6 +336,7 @@ impl<F, Digest> StackedPcsDataGpu<F, Digest> {
 #[cfg(test)]
 mod tests {
     use itertools::Itertools;
+    use openvm_cuda_common::stream::cudaStreamPerThread;
     use openvm_stark_backend::{
         prover::ColMajorMatrix,
         test_utils::{InteractionsFixture11, TestFixture},
@@ -358,15 +355,20 @@ mod tests {
             .map(|v| v.into_iter().map(F::from_u32).collect_vec());
         let mats = columns
             .into_iter()
-            .map(|c| transport_matrix_h2d_col_major(&ColMajorMatrix::new(c, 1)).unwrap())
+            .map(|c| {
+                transport_matrix_h2d_col_major(&ColMajorMatrix::new(c, 1), cudaStreamPerThread)
+                    .unwrap()
+            })
             .collect_vec();
         let mat_refs = mats.iter().collect_vec();
         let l_skip = 0;
-        let (stacked_mat, _layout) = stacked_matrix(0, 2, &mat_refs).unwrap();
+        let (stacked_mat, _layout) = stacked_matrix(0, 2, &mat_refs, cudaStreamPerThread).unwrap();
         assert_eq!(stacked_mat.height(), 4);
         assert_eq!(stacked_mat.width(), 2);
-        let stacked_h_mat =
-            transport_matrix_d2h_col_major(&stacked_mat.to_evals(l_skip).unwrap()).unwrap();
+        let stacked_h_mat = transport_matrix_d2h_col_major(
+            &stacked_mat.to_evals(l_skip, cudaStreamPerThread).unwrap(),
+        )
+        .unwrap();
         assert_eq!(
             stacked_h_mat.values,
             [1, 2, 3, 4, 5, 6, 7, 0].map(F::from_u32).to_vec()
@@ -376,16 +378,25 @@ mod tests {
     #[test]
     fn test_stacked_matrix_manual_1() {
         let ctx = TestFixture::<SC>::generate_proving_ctx(&InteractionsFixture11);
-        let [send_trace, rcv_trace] = [0, 1]
-            .map(|i| transport_matrix_h2d_col_major(&ctx.per_trace[i].1.common_main).unwrap());
+        let [send_trace, rcv_trace] = [0, 1].map(|i| {
+            transport_matrix_h2d_col_major(&ctx.per_trace[i].1.common_main, cudaStreamPerThread)
+                .unwrap()
+        });
         let l_skip = 2;
         let n_stack = 8;
-        let (stacked_mat, _layout) =
-            stacked_matrix(l_skip, n_stack, &[&rcv_trace, &send_trace]).unwrap();
+        let (stacked_mat, _layout) = stacked_matrix(
+            l_skip,
+            n_stack,
+            &[&rcv_trace, &send_trace],
+            cudaStreamPerThread,
+        )
+        .unwrap();
         assert_eq!(stacked_mat.height(), 1 << (l_skip + n_stack));
         assert_eq!(stacked_mat.width(), 1);
-        let stacked_h_mat =
-            transport_matrix_d2h_col_major(&stacked_mat.to_evals(l_skip).unwrap()).unwrap();
+        let stacked_h_mat = transport_matrix_d2h_col_major(
+            &stacked_mat.to_evals(l_skip, cudaStreamPerThread).unwrap(),
+        )
+        .unwrap();
         let mut expected = vec![F::ZERO; 1 << (l_skip + n_stack)];
         expected[..24].copy_from_slice(
             &[
@@ -403,15 +414,21 @@ mod tests {
             .map(|v| v.into_iter().map(F::from_u32).collect_vec());
         let mats = columns
             .into_iter()
-            .map(|c| transport_matrix_h2d_col_major(&ColMajorMatrix::new(c, 1)).unwrap())
+            .map(|c| {
+                transport_matrix_h2d_col_major(&ColMajorMatrix::new(c, 1), cudaStreamPerThread)
+                    .unwrap()
+            })
             .collect_vec();
         let mat_refs = mats.iter().collect_vec();
         let l_skip = 2;
-        let (stacked_mat, _layout) = stacked_matrix(l_skip, 0, &mat_refs).unwrap();
+        let (stacked_mat, _layout) =
+            stacked_matrix(l_skip, 0, &mat_refs, cudaStreamPerThread).unwrap();
         assert_eq!(stacked_mat.height(), 4);
         assert_eq!(stacked_mat.width(), 3);
-        let stacked_h_mat =
-            transport_matrix_d2h_col_major(&stacked_mat.to_evals(l_skip).unwrap()).unwrap();
+        let stacked_h_mat = transport_matrix_d2h_col_major(
+            &stacked_mat.to_evals(l_skip, cudaStreamPerThread).unwrap(),
+        )
+        .unwrap();
         assert_eq!(
             stacked_h_mat.values,
             [1, 2, 3, 4, 5, 0, 6, 0, 7, 0, 0, 0]
@@ -426,15 +443,21 @@ mod tests {
             .map(|v| v.into_iter().map(F::from_u32).collect_vec());
         let mats = columns
             .into_iter()
-            .map(|c| transport_matrix_h2d_col_major(&ColMajorMatrix::new(c, 1)).unwrap())
+            .map(|c| {
+                transport_matrix_h2d_col_major(&ColMajorMatrix::new(c, 1), cudaStreamPerThread)
+                    .unwrap()
+            })
             .collect_vec();
         let mat_refs = mats.iter().collect_vec();
         let l_skip = 3;
-        let (stacked_mat, _layout) = stacked_matrix(l_skip, 0, &mat_refs).unwrap();
+        let (stacked_mat, _layout) =
+            stacked_matrix(l_skip, 0, &mat_refs, cudaStreamPerThread).unwrap();
         assert_eq!(stacked_mat.height(), 8);
         assert_eq!(stacked_mat.width(), 3);
-        let stacked_h_mat =
-            transport_matrix_d2h_col_major(&stacked_mat.to_evals(l_skip).unwrap()).unwrap();
+        let stacked_h_mat = transport_matrix_d2h_col_major(
+            &stacked_mat.to_evals(l_skip, cudaStreamPerThread).unwrap(),
+        )
+        .unwrap();
         assert_eq!(
             stacked_h_mat.values,
             [

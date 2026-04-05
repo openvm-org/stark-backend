@@ -5,7 +5,7 @@ use openvm_cuda_common::{
     copy::{cuda_memcpy, MemCopyD2H, MemCopyH2D},
     d_buffer::DeviceBuffer,
     error::MemCopyError,
-    stream::{cudaStreamPerThread, current_stream_sync},
+    stream::{cudaStream_t, sync_stream},
 };
 use openvm_stark_backend::{
     keygen::types::MultiStarkProvingKey,
@@ -36,14 +36,19 @@ impl<HS: GpuHashScheme> DeviceDataTransporter<HS::SC, GenericGpuBackend<HS>> for
         &self,
         mpk: &MultiStarkProvingKey<HS::SC>,
     ) -> DeviceMultiStarkProvingKey<GenericGpuBackend<HS>> {
+        let stream = self.ctx.stream.as_raw();
         let _span = info_span!("transport_pk_to_device").entered();
         let per_air = mpk
             .per_air
             .iter()
             .map(|pk| {
                 let preprocessed_data = pk.preprocessed_data.as_ref().map(|d| {
-                    transport_and_unstack_single_data_h2d::<HS>(d.as_ref(), self.prover_config())
-                        .unwrap()
+                    transport_and_unstack_single_data_h2d::<HS>(
+                        d.as_ref(),
+                        self.prover_config(),
+                        stream,
+                    )
+                    .unwrap()
                 });
                 let other_data = AirDataGpu::new(pk).unwrap();
                 let num_monomials = other_data
@@ -62,7 +67,7 @@ impl<HS: GpuHashScheme> DeviceDataTransporter<HS::SC, GenericGpuBackend<HS>> for
             })
             .collect();
         // Synchronize in case the proving key is shared between threads/streams
-        current_stream_sync().unwrap();
+        self.ctx.stream.synchronize().unwrap();
 
         DeviceMultiStarkProvingKey::new(
             per_air,
@@ -74,14 +79,16 @@ impl<HS: GpuHashScheme> DeviceDataTransporter<HS::SC, GenericGpuBackend<HS>> for
     }
 
     fn transport_matrix_to_device(&self, matrix: &ColMajorMatrix<F>) -> DeviceMatrix<F> {
-        transport_matrix_h2d_col_major(matrix).unwrap()
+        let stream = self.ctx.stream.as_raw();
+        transport_matrix_h2d_col_major(matrix, stream).unwrap()
     }
 
     fn transport_pcs_data_to_device(
         &self,
         pcs_data: &StackedPcsData<F, HS::Digest>,
     ) -> StackedPcsDataGpu<F, HS::Digest> {
-        transport_pcs_data_h2d::<HS::Digest>(pcs_data, self.prover_config()).unwrap()
+        let stream = self.ctx.stream.as_raw();
+        transport_pcs_data_h2d::<HS::Digest>(pcs_data, self.prover_config(), stream).unwrap()
     }
 
     fn transport_matrix_from_device_to_host(&self, matrix: &DeviceMatrix<F>) -> ColMajorMatrix<F> {
@@ -91,10 +98,11 @@ impl<HS: GpuHashScheme> DeviceDataTransporter<HS::SC, GenericGpuBackend<HS>> for
 
 pub fn transport_matrix_h2d_col_major<T>(
     matrix: &ColMajorMatrix<T>,
+    stream: cudaStream_t,
 ) -> Result<DeviceMatrix<T>, MemCopyError> {
     // matrix is already col-major, so this is just H2D buffer transfer
     let buffer = matrix.values.to_device()?;
-    current_stream_sync()?;
+    unsafe { sync_stream(stream)? };
     Ok(DeviceMatrix::new(
         Arc::new(buffer),
         matrix.height(),
@@ -104,6 +112,7 @@ pub fn transport_matrix_h2d_col_major<T>(
 
 pub fn transport_matrix_h2d_row(
     matrix: &RowMajorMatrix<F>,
+    stream: cudaStream_t,
 ) -> Result<DeviceMatrix<F>, MemCopyError> {
     let data = matrix.values.as_slice();
     let input_buffer = data.to_device().unwrap();
@@ -114,10 +123,10 @@ pub fn transport_matrix_h2d_row(
             &input_buffer,
             Matrix::width(matrix),
             Matrix::height(matrix),
-            cudaStreamPerThread,
+            stream,
         )?;
     }
-    current_stream_sync()?;
+    unsafe { sync_stream(stream)? };
     assert_eq!(output.strong_count(), 1);
     Ok(output)
 }
@@ -128,6 +137,7 @@ pub fn transport_matrix_h2d_row(
 pub fn transport_and_unstack_single_data_h2d<HS: GpuHashScheme>(
     d: &StackedPcsData<F, HS::Digest>,
     prover_config: &GpuProverConfig,
+    stream: cudaStream_t,
 ) -> Result<CommittedTraceData<GenericGpuBackend<HS>>, ProverError> {
     let _span = info_span!("transport_unstack_h2d").entered();
     debug_assert!(d
@@ -170,19 +180,25 @@ pub fn transport_and_unstack_single_data_h2d<HS: GpuHashScheme>(
                 width as u32,
                 height as u32,
                 stride as u32,
-                cudaStreamPerThread,
+                stream,
             )
             .map_err(ProverError::CollapseStrided)?;
         }
         // Wait for kernel to finish so we can safely drop strided_trace
-        current_stream_sync().map_err(ProverError::CurrentStreamSync)?;
+        unsafe { sync_stream(stream) }.map_err(ProverError::CurrentStreamSync)?;
         drop(strided_trace);
         buf
     };
-    let d_matrix = prover_config
-        .cache_stacked_matrix
-        .then(|| PleMatrix::from_evals(l_skip, d_matrix_evals, stacked_height, stacked_width));
-    let d_tree = transport_merkle_tree_h2d(&d.tree, prover_config.cache_rs_code_matrix)?;
+    let d_matrix = prover_config.cache_stacked_matrix.then(|| {
+        PleMatrix::from_evals(
+            l_skip,
+            d_matrix_evals,
+            stacked_height,
+            stacked_width,
+            stream,
+        )
+    });
+    let d_tree = transport_merkle_tree_h2d(&d.tree, prover_config.cache_rs_code_matrix, stream)?;
     let d_data = StackedPcsDataGpu {
         layout: d.layout.clone(),
         matrix: d_matrix,
@@ -205,9 +221,13 @@ pub fn transport_and_unstack_single_data_h2d<HS: GpuHashScheme>(
 pub fn transport_merkle_tree_h2d<F, Digest: Clone>(
     tree: &MerkleTree<F, Digest>,
     cache_backing_matrix: bool,
+    stream: cudaStream_t,
 ) -> Result<MerkleTreeGpu<F, Digest>, MemCopyError> {
     let backing_matrix = if cache_backing_matrix {
-        Some(transport_matrix_h2d_col_major(tree.backing_matrix())?)
+        Some(transport_matrix_h2d_col_major(
+            tree.backing_matrix(),
+            stream,
+        )?)
     } else {
         None
     };
@@ -216,7 +236,7 @@ pub fn transport_merkle_tree_h2d<F, Digest: Clone>(
         .iter()
         .map(|layer| layer.to_device())
         .collect::<Result<Vec<_>, _>>()?;
-    current_stream_sync()?;
+    unsafe { sync_stream(stream)? };
     Ok(MerkleTreeGpu {
         backing_matrix,
         digest_layers,
@@ -228,6 +248,7 @@ pub fn transport_merkle_tree_h2d<F, Digest: Clone>(
 pub fn transport_pcs_data_h2d<D: Copy + Clone + PartialEq + Send + Sync + 'static>(
     pcs_data: &StackedPcsData<F, D>,
     prover_config: &GpuProverConfig,
+    stream: cudaStream_t,
 ) -> Result<StackedPcsDataGpu<F, D>, ProverError> {
     let _span = info_span!("transport_pcs_data_h2d").entered();
     let StackedPcsData {
@@ -240,9 +261,9 @@ pub fn transport_pcs_data_h2d<D: Copy + Clone + PartialEq + Send + Sync + 'stati
     let d_matrix_evals = matrix.values.to_device()?;
     let d_matrix = prover_config
         .cache_stacked_matrix
-        .then(|| PleMatrix::from_evals(layout.l_skip(), d_matrix_evals, height, width));
-    let d_tree = transport_merkle_tree_h2d(tree, prover_config.cache_rs_code_matrix)?;
-    current_stream_sync().map_err(ProverError::CurrentStreamSync)?;
+        .then(|| PleMatrix::from_evals(layout.l_skip(), d_matrix_evals, height, width, stream));
+    let d_tree = transport_merkle_tree_h2d(tree, prover_config.cache_rs_code_matrix, stream)?;
+    unsafe { sync_stream(stream) }.map_err(ProverError::CurrentStreamSync)?;
 
     Ok(StackedPcsDataGpu {
         layout: layout.clone(),
@@ -253,13 +274,14 @@ pub fn transport_pcs_data_h2d<D: Copy + Clone + PartialEq + Send + Sync + 'stati
 
 pub fn transport_air_proving_ctx_to_device<HS: GpuHashScheme>(
     cpu_ctx: AirProvingContext<CpuColMajorBackend<SC>>,
+    stream: cudaStream_t,
 ) -> AirProvingContext<GenericGpuBackend<HS>> {
     let _span = info_span!("transport_air_ctx_h2d").entered();
     assert!(
         cpu_ctx.cached_mains.is_empty(),
         "CPU to GPU transfer of cached traces not supported"
     );
-    let trace = transport_matrix_h2d_col_major(&cpu_ctx.common_main).unwrap();
+    let trace = transport_matrix_h2d_col_major(&cpu_ctx.common_main, stream).unwrap();
     AirProvingContext {
         cached_mains: vec![],
         common_main: trace,
@@ -270,11 +292,12 @@ pub fn transport_air_proving_ctx_to_device<HS: GpuHashScheme>(
 pub fn transport_proving_ctx_to_host(
     gpu_ctx: ProvingContext<GpuBackend>,
     l_skip: usize,
+    stream: cudaStream_t,
 ) -> ProvingContext<CpuColMajorBackend<SC>> {
     let per_trace = gpu_ctx
         .per_trace
         .into_iter()
-        .map(|(i, ctx)| (i, transport_air_proving_ctx_to_host(ctx, l_skip)))
+        .map(|(i, ctx)| (i, transport_air_proving_ctx_to_host(ctx, l_skip, stream)))
         .collect_vec();
     ProvingContext { per_trace }
 }
@@ -282,6 +305,7 @@ pub fn transport_proving_ctx_to_host(
 pub fn transport_air_proving_ctx_to_host(
     gpu_ctx: AirProvingContext<GpuBackend>,
     l_skip: usize,
+    stream: cudaStream_t,
 ) -> AirProvingContext<CpuColMajorBackend<SC>> {
     let trace = transport_matrix_d2h_col_major(&gpu_ctx.common_main).unwrap();
     let cached_mains = gpu_ctx
@@ -291,7 +315,13 @@ pub fn transport_air_proving_ctx_to_host(
             // WARNING: By default this matrix isn't cached. For this to work, ensure that
             // GpuProverConfig fields cache_stacked_matrix and cache_rs_code_matrix are set
             // to be true.
-            let evals_matrix = mat.data.matrix.as_ref().unwrap().to_evals(l_skip).unwrap();
+            let evals_matrix = mat
+                .data
+                .matrix
+                .as_ref()
+                .unwrap()
+                .to_evals(l_skip, stream)
+                .unwrap();
             CommittedTraceData {
                 commitment: mat.commitment,
                 trace: transport_matrix_d2h_col_major(&mat.trace).unwrap(),
@@ -319,6 +349,7 @@ pub fn transport_matrix_d2h_col_major<T>(
 
 pub fn transport_matrix_d2h_row_major(
     matrix: &DeviceMatrix<F>,
+    stream: cudaStream_t,
 ) -> Result<RowMajorMatrix<F>, MemCopyError> {
     let matrix_buffer = DeviceBuffer::<F>::with_capacity(matrix.height() * matrix.width());
     unsafe {
@@ -327,7 +358,7 @@ pub fn transport_matrix_d2h_row_major(
             matrix.buffer(),
             matrix.height(),
             matrix.width(),
-            cudaStreamPerThread,
+            stream,
         )?;
     }
     Ok(RowMajorMatrix::<F>::new(

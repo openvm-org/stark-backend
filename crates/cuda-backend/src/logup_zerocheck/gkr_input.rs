@@ -1,7 +1,7 @@
 use std::cmp::max;
 
 use itertools::Itertools;
-use openvm_cuda_common::{copy::MemCopyH2D, d_buffer::DeviceBuffer, stream::cudaStreamPerThread};
+use openvm_cuda_common::{copy::MemCopyH2D, d_buffer::DeviceBuffer, stream::cudaStream_t};
 use openvm_stark_backend::prover::{
     fractional_sumcheck_gkr::Frac,
     stacked_pcs::{StackedLayout, StackedSlice},
@@ -86,6 +86,7 @@ pub fn collect_trace_interactions<HS: GpuHashScheme>(
 /// Evaluate interactions from trace evaluation matrices to get (p, q) fractional sumcheck input.
 /// Returns leaves buffer (WITHOUT alpha applied) and alpha value to be applied in first tree layer.
 #[instrument(name = "prover.rap_constraints.logup_gkr.input_evals", skip_all)]
+#[allow(clippy::too_many_arguments)]
 pub fn log_gkr_input_evals<HS: GpuHashScheme>(
     trace_interactions: &[Option<TraceInteractionMeta>],
     pk: &DeviceMultiStarkProvingKey<GenericGpuBackend<HS>>,
@@ -94,6 +95,7 @@ pub fn log_gkr_input_evals<HS: GpuHashScheme>(
     alpha_logup: EF,
     d_challenges: &DeviceBuffer<EF>,
     total_leaves: usize,
+    stream: cudaStream_t,
 ) -> Result<(DeviceBuffer<Frac<EF>>, EF), InteractionGpuError> {
     if trace_interactions.iter().all(|meta| meta.is_none()) {
         return Ok((DeviceBuffer::new(), alpha_logup));
@@ -188,7 +190,7 @@ pub fn log_gkr_input_evals<HS: GpuHashScheme>(
                 &rules.d_pair_idxs,
                 height as u32,
                 num_rows_per_tile as u32,
-                cudaStreamPerThread,
+                stream,
             )?;
         }
         if height != lifted_height {
@@ -202,7 +204,7 @@ pub fn log_gkr_input_evals<HS: GpuHashScheme>(
                     tmp.as_mut_ptr(),
                     norm_factor,
                     tmp.len() as u32,
-                    cudaStreamPerThread,
+                    stream,
                 )?;
                 // SAFETY: stacked interaction layout is defined with respect to lifted height, and
                 // the vertical-repeat kernel guards rounded-up tail threads beyond lifted_height.
@@ -212,7 +214,7 @@ pub fn log_gkr_input_evals<HS: GpuHashScheme>(
                     num_interactions as u32,
                     lifted_height as u32,
                     height as u32,
-                    cudaStreamPerThread,
+                    stream,
                 )?;
             }
         }

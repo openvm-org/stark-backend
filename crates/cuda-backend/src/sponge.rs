@@ -9,7 +9,7 @@ use openvm_cuda_common::{
     copy::cuda_memcpy,
     d_buffer::DeviceBuffer,
     error::{CudaError, MemCopyError},
-    stream::cudaStreamPerThread,
+    stream::cudaStream_t,
 };
 use openvm_stark_backend::{
     p3_challenger::{CanObserve, CanSample},
@@ -266,7 +266,7 @@ impl DuplexSpongeGpu {
     ///
     /// After this call, the host state will have observed the witness and sampled,
     /// matching the state after calling `check_witness(bits, witness)`.
-    pub fn grind_gpu(&mut self, bits: usize) -> Result<F, GrindError> {
+    pub fn grind_gpu(&mut self, bits: usize, stream: cudaStream_t) -> Result<F, GrindError> {
         validate_gpu_grind_bits(bits)?;
         // Trivial case: 0 bits mean no PoW is required and any witness is valid.
         if bits == 0 {
@@ -281,7 +281,7 @@ impl DuplexSpongeGpu {
                 self.device.as_ptr(),
                 bits as u32,
                 F::ORDER_U32 - 1,
-                cudaStreamPerThread,
+                stream,
             )?
         };
 
@@ -343,12 +343,12 @@ pub trait GpuFiatShamirTranscript<Config: StarkProtocolConfig>:
     /// sampling, the result has `bits` trailing zero bits.  Implementations should sync
     /// host state to device, launch a CUDA grinding kernel, then update the host state
     /// to match (observe witness + consume one sample).
-    fn grind_gpu(&mut self, bits: usize) -> Result<Config::F, GrindError>;
+    fn grind_gpu(&mut self, bits: usize, stream: cudaStream_t) -> Result<Config::F, GrindError>;
 }
 
 impl GpuFiatShamirTranscript<SC> for DuplexSpongeGpu {
-    fn grind_gpu(&mut self, bits: usize) -> Result<F, GrindError> {
-        DuplexSpongeGpu::grind_gpu(self, bits)
+    fn grind_gpu(&mut self, bits: usize, stream: cudaStream_t) -> Result<F, GrindError> {
+        DuplexSpongeGpu::grind_gpu(self, bits, stream)
     }
 }
 
@@ -356,6 +356,7 @@ impl GpuFiatShamirTranscript<SC> for DuplexSpongeGpu {
 mod tests {
     use std::time::Instant;
 
+    use openvm_cuda_common::stream::cudaStreamPerThread;
     use openvm_stark_sdk::config::baby_bear_poseidon2::default_duplex_sponge;
     use p3_field::PrimeCharacteristicRing;
 
@@ -470,7 +471,7 @@ mod tests {
         // Warmup: run one GPU grind to initialize CUDA context
         {
             let mut warmup = DuplexSpongeGpu::default();
-            let _ = warmup.grind_gpu(8);
+            let _ = warmup.grind_gpu(8, cudaStreamPerThread);
         }
 
         // Test multiple bit counts to see scaling
@@ -508,7 +509,9 @@ mod tests {
 
             // Time GPU grinding
             let gpu_start = Instant::now();
-            let gpu_witness = gpu_sponge.grind_gpu(bits).expect("GPU grinding failed");
+            let gpu_witness = gpu_sponge
+                .grind_gpu(bits, cudaStreamPerThread)
+                .expect("GPU grinding failed");
             let gpu_time = gpu_start.elapsed();
 
             // Verify both found valid witnesses (witnesses may differ but both should be valid)

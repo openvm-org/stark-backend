@@ -5,7 +5,7 @@ use openvm_cuda_common::{
     copy::{MemCopyD2H, MemCopyH2D},
     d_buffer::DeviceBuffer,
     memory_manager::MemTracker,
-    stream::cudaStreamPerThread,
+    stream::cudaStream_t,
 };
 use openvm_stark_backend::prover::MatrixDimensions;
 use p3_util::log2_strict_usize;
@@ -92,6 +92,7 @@ pub trait MerkleTreeConstructor: GpuMerkleHash {
         matrix: DeviceMatrix<F>,
         rows_per_query: usize,
         cache_backing_matrix: bool,
+        stream: cudaStream_t,
     ) -> Result<MerkleTreeGpu<F, Self::Digest>, MerkleTreeError>;
 }
 
@@ -99,6 +100,7 @@ pub trait MerkleProofQueryDigest: BatchQueryMerkle + Copy + Send + Sync + 'stati
     fn batch_query_merkle_proofs(
         trees: &[&MerkleTreeGpu<F, Self>],
         query_indices: &[usize],
+        stream: cudaStream_t,
     ) -> Result<Vec<Vec<Vec<Self>>>, MerkleTreeError>;
 }
 
@@ -130,14 +132,16 @@ impl<D: Copy + Send + Sync + 'static> MerkleTreeGpu<F, D> {
         matrix: DeviceMatrix<F>,
         rows_per_query: usize,
         cache_backing_matrix: bool,
+        stream: cudaStream_t,
     ) -> Result<Self, MerkleTreeError> {
-        MH::new_merkle_tree(matrix, rows_per_query, cache_backing_matrix)
+        MH::new_merkle_tree(matrix, rows_per_query, cache_backing_matrix, stream)
     }
 
     fn new_generic_with_hash<MH: GpuMerkleHash<Digest = D>>(
         matrix: DeviceMatrix<F>,
         rows_per_query: usize,
         cache_backing_matrix: bool,
+        stream: cudaStream_t,
     ) -> Result<Self, MerkleTreeError> {
         let mem = MemTracker::start("prover.merkle_tree");
         let height = matrix.height();
@@ -153,6 +157,7 @@ impl<D: Copy + Send + Sync + 'static> MerkleTreeGpu<F, D> {
                 matrix.width(),
                 query_stride,
                 k,
+                stream,
             )
             .map_err(MerkleTreeError::CompressingRowHashes)?;
         }
@@ -169,7 +174,7 @@ impl<D: Copy + Send + Sync + 'static> MerkleTreeGpu<F, D> {
             // - `layer` is properly allocated with half the size of `prev_layer` and does not
             //   overlap with it.
             unsafe {
-                MH::compress_layer(&mut layer, prev_layer, layer_len).map_err(|error| {
+                MH::compress_layer(&mut layer, prev_layer, layer_len, stream).map_err(|error| {
                     MerkleTreeError::AdjacentCompressLayer {
                         error,
                         layer: layer_idx,
@@ -197,6 +202,7 @@ impl<D: Copy + Send + Sync + 'static> MerkleTreeGpu<F, D> {
         query_indices: &[usize],
         query_stride: usize,
         rows_per_query: usize,
+        stream: cudaStream_t,
     ) -> Result<
         Vec<
             // per tree
@@ -238,7 +244,7 @@ impl<D: Copy + Send + Sync + 'static> MerkleTreeGpu<F, D> {
                         matrix.width() as u64,
                         matrix.height() as u64,
                         d_row_idxs.len(),
-                        cudaStreamPerThread,
+                        stream,
                     )
                     .map_err(|error| MerkleTreeError::MatrixGetRows { error, matrix_idx })?;
                 }
@@ -259,11 +265,13 @@ impl MerkleTreeConstructor for Poseidon2MerkleHash {
         matrix: DeviceMatrix<F>,
         rows_per_query: usize,
         cache_backing_matrix: bool,
+        stream: cudaStream_t,
     ) -> Result<MerkleTreeGpu<F, Self::Digest>, MerkleTreeError> {
         MerkleTreeGpu::<F, Self::Digest>::new_generic_with_hash::<Self>(
             matrix,
             rows_per_query,
             cache_backing_matrix,
+            stream,
         )
     }
 }
@@ -274,11 +282,13 @@ impl MerkleTreeConstructor for crate::hash_scheme::Bn254Poseidon2MerkleHash {
         matrix: DeviceMatrix<F>,
         rows_per_query: usize,
         cache_backing_matrix: bool,
+        stream: cudaStream_t,
     ) -> Result<MerkleTreeGpu<F, Self::Digest>, MerkleTreeError> {
         MerkleTreeGpu::<F, Self::Digest>::new_generic_with_hash::<Self>(
             matrix,
             rows_per_query,
             cache_backing_matrix,
+            stream,
         )
     }
 }
@@ -292,8 +302,14 @@ impl MerkleTreeGpu<F, Digest> {
         matrix: DeviceMatrix<F>,
         rows_per_query: usize,
         cache_backing_matrix: bool,
+        stream: cudaStream_t,
     ) -> Result<Self, MerkleTreeError> {
-        Self::new_with_hash::<Poseidon2MerkleHash>(matrix, rows_per_query, cache_backing_matrix)
+        Self::new_with_hash::<Poseidon2MerkleHash>(
+            matrix,
+            rows_per_query,
+            cache_backing_matrix,
+            stream,
+        )
     }
 }
 
@@ -302,6 +318,7 @@ impl<D: BatchQueryMerkle + Send + Sync + 'static> MerkleTreeGpu<F, D> {
     fn batch_query_proofs(
         trees: &[&Self],
         query_indices: &[usize],
+        stream: cudaStream_t,
     ) -> Result<Vec<Vec<Vec<D>>>, MerkleTreeError> {
         if trees.is_empty() {
             return Ok(Vec::new());
@@ -365,7 +382,7 @@ impl<D: BatchQueryMerkle + Send + Sync + 'static> MerkleTreeGpu<F, D> {
                 &d_indices,
                 num_queries,
                 d_layers_ptr.len(),
-                cudaStreamPerThread,
+                stream,
             )
             .map_err(MerkleTreeError::QueryDigestLayers)?;
         }
@@ -397,6 +414,7 @@ impl<D: BatchQueryMerkle + Send + Sync + 'static> MerkleTreeGpu<F, D> {
     pub fn batch_query_merkle_proofs(
         trees: &[&Self],
         query_indices: &[usize],
+        stream: cudaStream_t,
     ) -> Result<
         Vec<
             // per tree
@@ -410,7 +428,7 @@ impl<D: BatchQueryMerkle + Send + Sync + 'static> MerkleTreeGpu<F, D> {
     where
         D: MerkleProofQueryDigest,
     {
-        D::batch_query_merkle_proofs(trees, query_indices)
+        D::batch_query_merkle_proofs(trees, query_indices, stream)
     }
 }
 
@@ -418,8 +436,9 @@ impl MerkleProofQueryDigest for Digest {
     fn batch_query_merkle_proofs(
         trees: &[&MerkleTreeGpu<F, Self>],
         query_indices: &[usize],
+        stream: cudaStream_t,
     ) -> Result<Vec<Vec<Vec<Self>>>, MerkleTreeError> {
-        MerkleTreeGpu::<F, Self>::batch_query_proofs(trees, query_indices)
+        MerkleTreeGpu::<F, Self>::batch_query_proofs(trees, query_indices, stream)
     }
 }
 
@@ -428,8 +447,9 @@ impl MerkleProofQueryDigest for Bn254Digest {
     fn batch_query_merkle_proofs(
         trees: &[&MerkleTreeGpu<F, Self>],
         query_indices: &[usize],
+        stream: cudaStream_t,
     ) -> Result<Vec<Vec<Vec<Self>>>, MerkleTreeError> {
-        MerkleTreeGpu::<F, Self>::batch_query_proofs(trees, query_indices)
+        MerkleTreeGpu::<F, Self>::batch_query_proofs(trees, query_indices, stream)
     }
 }
 
@@ -441,6 +461,7 @@ impl<D: Copy + Send + Sync + 'static> MerkleTreeGpu<EF, D> {
         matrix: DeviceMatrix<EF>,
         rows_per_query: usize,
         cache_backing_matrix: bool,
+        stream: cudaStream_t,
     ) -> Result<Self, MerkleTreeError> {
         let height = matrix.height();
         assert!(height.is_power_of_two());
@@ -455,6 +476,7 @@ impl<D: Copy + Send + Sync + 'static> MerkleTreeGpu<EF, D> {
                 matrix.width(),
                 query_stride,
                 k,
+                stream,
             )
             .map_err(MerkleTreeError::CompressingRowHashesExt)?;
         }
@@ -471,7 +493,7 @@ impl<D: Copy + Send + Sync + 'static> MerkleTreeGpu<EF, D> {
             // - `layer` is properly allocated with half the size of `prev_layer` and does not
             //   overlap with it.
             unsafe {
-                MH::compress_layer(&mut layer, prev_layer, layer_len).map_err(|error| {
+                MH::compress_layer(&mut layer, prev_layer, layer_len, stream).map_err(|error| {
                     MerkleTreeError::AdjacentCompressLayer {
                         error,
                         layer: layer_idx,
@@ -503,7 +525,13 @@ impl MerkleTreeGpu<EF, Digest> {
         matrix: DeviceMatrix<EF>,
         rows_per_query: usize,
         cache_backing_matrix: bool,
+        stream: cudaStream_t,
     ) -> Result<Self, MerkleTreeError> {
-        Self::new_with_hash::<Poseidon2MerkleHash>(matrix, rows_per_query, cache_backing_matrix)
+        Self::new_with_hash::<Poseidon2MerkleHash>(
+            matrix,
+            rows_per_query,
+            cache_backing_matrix,
+            stream,
+        )
     }
 }

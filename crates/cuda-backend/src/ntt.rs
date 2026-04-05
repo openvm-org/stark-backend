@@ -6,7 +6,7 @@ use std::{
 use openvm_cuda_common::{
     common::{device_reset_epoch, get_device},
     d_buffer::DeviceBuffer,
-    stream::cudaStreamPerThread,
+    stream::{cudaStreamPerThread, cudaStream_t},
 };
 
 use crate::{cuda::ntt, prelude::F};
@@ -54,6 +54,7 @@ struct NttImpl<'a> {
     poly_count: u32,
     is_intt: bool,
     stage: u32,
+    stream: cudaStream_t,
 }
 
 impl<'a> NttImpl<'a> {
@@ -63,6 +64,7 @@ impl<'a> NttImpl<'a> {
         padded_poly_size: u32,
         poly_count: u32,
         is_intt: bool,
+        stream: cudaStream_t,
     ) -> Self {
         ensure_initialized(is_intt).expect("failed to initialize CUDA NTT twiddle tables");
         Self {
@@ -72,6 +74,7 @@ impl<'a> NttImpl<'a> {
             poly_count,
             is_intt,
             stage: 0,
+            stream,
         }
     }
 
@@ -88,7 +91,7 @@ impl<'a> NttImpl<'a> {
                 self.padded_poly_size,
                 self.poly_count,
                 self.is_intt,
-                cudaStreamPerThread,
+                self.stream,
             )
             .expect("failed to launch CUDA mixed-radix NTT step");
         }
@@ -110,6 +113,7 @@ pub fn batch_ntt(
     width: u32,
     bit_reverse: bool,
     is_intt: bool,
+    stream: cudaStream_t,
 ) {
     if log_trace_height == 0 {
         return;
@@ -130,13 +134,20 @@ pub fn batch_ntt(
                 log_trace_height,
                 padded_poly_size,
                 width,
-                cudaStreamPerThread,
+                stream,
             )
             .expect("failed to launch CUDA bit-reversal permutation");
         }
     }
 
-    let mut _impl = NttImpl::new(buffer, log_trace_height, padded_poly_size, width, is_intt);
+    let mut _impl = NttImpl::new(
+        buffer,
+        log_trace_height,
+        padded_poly_size,
+        width,
+        is_intt,
+        stream,
+    );
     if log_trace_height <= 10 {
         _impl.step(log_trace_height);
     } else if log_trace_height <= 17 {

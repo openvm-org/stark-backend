@@ -5,7 +5,7 @@ use openvm_cuda_common::{
     copy::{MemCopyD2H, MemCopyH2D},
     d_buffer::DeviceBuffer,
     memory_manager::MemTracker,
-    stream::cudaStreamPerThread,
+    stream::cudaStream_t,
 };
 use openvm_stark_backend::{
     proof::{MerkleProof, WhirProof},
@@ -65,6 +65,7 @@ pub fn prove_whir_opening_gpu<HS, TS>(
     transcript: &mut TS,
     mut stacked_per_commit: Vec<StackedPcsData2<HS::Digest>>,
     u: &[EF],
+    stream: cudaStream_t,
 ) -> Result<WhirProof<HS::SC>, WhirProverError>
 where
     HS: GpuHashScheme,
@@ -90,7 +91,7 @@ where
     // Proof-of-work grinding before μ batching challenge.
     // This amplifies soundness of the initial batching step.
     let mu_pow_witness = transcript
-        .grind_gpu(whir_params.mu_pow_bits)
+        .grind_gpu(whir_params.mu_pow_bits, stream)
         .map_err(WhirProverError::MuGrind)?;
     // Sample randomness for algebraic batching.
     // We batch the codewords for \hat{q}_j together _before_ applying WHIR.
@@ -131,7 +132,7 @@ where
                 &d_packets,
                 &d_mu_powers,
                 1 << l_skip,
-                cudaStreamPerThread,
+                stream,
             )
             .map_err(WhirProverError::AlgebraicBatch)?;
         }
@@ -149,19 +150,13 @@ where
     // coefficients c_z(x) of f(Z, x) for a fixed boolean assignment x in H_{m - l_skip}.
     unsafe {
         let num_poly = f_ple_evals.len() >> l_skip;
-        batch_ntt_small(
-            &mut f_ple_evals,
-            l_skip,
-            num_poly,
-            true,
-            cudaStreamPerThread,
-        )
-        .map_err(WhirProverError::CustomBatchIntt)?;
+        batch_ntt_small(&mut f_ple_evals, l_skip, num_poly, true, stream)
+            .map_err(WhirProverError::CustomBatchIntt)?;
     }
     let mut f_coeffs = DeviceBuffer::<EF>::with_capacity(height);
     // SAFETY: `f_ple_evals` is constructed with length `height * D_EF`.
     unsafe {
-        transpose_fp_to_fpext_vec(&mut f_coeffs, &f_ple_evals, cudaStreamPerThread)
+        transpose_fp_to_fpext_vec(&mut f_coeffs, &f_ple_evals, stream)
             .map_err(WhirProverError::Transpose)?;
     }
     drop(f_ple_evals);
@@ -173,7 +168,7 @@ where
         let step = 1u32 << i;
         // SAFETY: `f_coeffs` has length `2^m` with `m >= l_skip`.
         unsafe {
-            mle_interpolate_stage_ext(&mut f_coeffs, step, false, cudaStreamPerThread)
+            mle_interpolate_stage_ext(&mut f_coeffs, step, false, stream)
                 .map_err(|error| WhirProverError::MleInterpolate { error, step })?;
         }
     }
@@ -187,7 +182,7 @@ where
     // For initial \hat{w} = mobius_eq(u, -), these moments are exactly eq(u, -).
     let mut w_moments = DeviceBuffer::<EF>::with_capacity(1 << m);
     unsafe {
-        evals_eq_hypercube(&mut w_moments, u).map_err(WhirProverError::EvalEq)?;
+        evals_eq_hypercube(&mut w_moments, u, stream).map_err(WhirProverError::EvalEq)?;
     }
 
     let mut whir_sumcheck_polys: Vec<[EF; 2]> = vec![];
@@ -224,10 +219,7 @@ where
             debug_assert!(w_moments.len() >= f_height);
             let output_height = f_height / 2;
             let tmp_buffer_capacity = unsafe {
-                _whir_sumcheck_coeff_moments_required_temp_buffer_size(
-                    f_height as u32,
-                    cudaStreamPerThread,
-                )
+                _whir_sumcheck_coeff_moments_required_temp_buffer_size(f_height as u32, stream)
             };
             if d_sumcheck_tmp.len() < tmp_buffer_capacity as usize {
                 d_sumcheck_tmp = DeviceBuffer::<EF>::with_capacity(tmp_buffer_capacity as usize);
@@ -244,7 +236,7 @@ where
                     &mut d_s_evals,
                     &mut d_sumcheck_tmp,
                     f_height as u32,
-                    cudaStreamPerThread,
+                    stream,
                 )
                 .map_err(|error| WhirProverError::SumcheckMleRound {
                     error,
@@ -260,7 +252,7 @@ where
 
             folding_pow_witnesses.push(
                 transcript
-                    .grind_gpu(whir_params.folding_pow_bits)
+                    .grind_gpu(whir_params.folding_pow_bits, stream)
                     .map_err(WhirProverError::FoldingGrind)?,
             );
             let alpha = transcript.sample_ext();
@@ -277,7 +269,7 @@ where
                     &mut new_w_moments,
                     alpha,
                     f_height as u32,
-                    cudaStreamPerThread,
+                    stream,
                 )
                 .map_err(|error| WhirProverError::FoldMle {
                     error,
@@ -302,7 +294,7 @@ where
                 &f_coeffs,
                 f_height as u64,
                 f_height as u32,
-                cudaStreamPerThread,
+                stream,
             )
             .map_err(|error| WhirProverError::SplitExtPoly { error, whir_round })?;
         }
@@ -322,7 +314,7 @@ where
                     D_EF as u32,
                     codeword_height as u32,
                     f_height as u32,
-                    cudaStreamPerThread,
+                    stream,
                 )
                 .map_err(|error| WhirProverError::BatchExpandPad { error, whir_round })?;
 
@@ -333,6 +325,7 @@ where
                     D_EF as u32,
                     true,
                     false,
+                    stream,
                 );
             }
 
@@ -340,6 +333,7 @@ where
                 DeviceMatrix::new(Arc::new(g_rs), codeword_height, D_EF),
                 1 << k_whir,
                 true,
+                stream,
             )
             .map_err(WhirProverError::MerkleTree)?;
             let g_commit = g_tree.root();
@@ -351,13 +345,8 @@ where
             // - `g_coeffs` is coefficient form of `\hat{g}`, which is degree `2^{m-k_whir}`.
             // - `g_coeffs` is F-column major matrix.
             let g_opened_value = unsafe {
-                eval_poly_ext_at_point_from_base(
-                    &g_coeffs,
-                    1 << (m - k_whir),
-                    z_0,
-                    cudaStreamPerThread,
-                )
-                .map_err(|error| WhirProverError::EvalPolyAtPoint { error, whir_round })?
+                eval_poly_ext_at_point_from_base(&g_coeffs, 1 << (m - k_whir), z_0, stream)
+                    .map_err(|error| WhirProverError::EvalPolyAtPoint { error, whir_round })?
             };
             transcript.observe_ext(g_opened_value);
             ood_values.push(g_opened_value);
@@ -385,7 +374,7 @@ where
         let mut query_indices = Vec::with_capacity(num_queries);
         query_phase_pow_witnesses.push(
             transcript
-                .grind_gpu(whir_params.query_phase_pow_bits)
+                .grind_gpu(whir_params.query_phase_pow_bits, stream)
                 .map_err(WhirProverError::QueryPhaseGrind)?,
         );
         // Sample query indices first
@@ -413,7 +402,7 @@ where
                     let traces = d.traces.iter().collect_vec();
                     debug_assert!(!traces.is_empty());
                     let backing_matrix =
-                        rs_code_matrix(log_blowup, layout, &traces, &d.inner.matrix)
+                        rs_code_matrix(log_blowup, layout, &traces, &d.inner.matrix, stream)
                             .map_err(WhirProverError::RsCodeMatrix)?;
                     d.traces.clear();
                     *backing_mat_owned = Some(backing_matrix);
@@ -426,6 +415,7 @@ where
                 <MerkleTreeGpu<F, HS::Digest>>::batch_query_merkle_proofs(
                     trees.as_slice(),
                     &query_indices,
+                    stream,
                 )
                 .map_err(WhirProverError::MerkleTree)?;
 
@@ -447,6 +437,7 @@ where
                 &query_indices,
                 query_stride,
                 num_rows_per_query,
+                stream,
             )
             .map_err(WhirProverError::MerkleTree)?
             .into_iter()
@@ -470,16 +461,21 @@ where
         } else {
             let tree: &MerkleTreeGpu<F, HS::Digest> = rs_tree.as_ref().unwrap();
             codeword_merkle_proofs[whir_round - 1] =
-                <MerkleTreeGpu<F, HS::Digest>>::batch_query_merkle_proofs(&[tree], &query_indices)
-                    .map_err(WhirProverError::MerkleTree)?
-                    .pop()
-                    .expect("exactly 1 tree");
+                <MerkleTreeGpu<F, HS::Digest>>::batch_query_merkle_proofs(
+                    &[tree],
+                    &query_indices,
+                    stream,
+                )
+                .map_err(WhirProverError::MerkleTree)?
+                .pop()
+                .expect("exactly 1 tree");
             codeword_opened_values[whir_round - 1] =
                 MerkleTreeGpu::<F, HS::Digest>::batch_open_rows(
                     &[tree.backing_matrix.as_ref().unwrap()],
                     &query_indices,
                     tree.query_stride(),
                     tree.rows_per_query,
+                    stream,
                 )
                 .map_err(WhirProverError::MerkleTree)?
                 .pop()
@@ -531,7 +527,7 @@ where
                     gamma,
                     num_queries as u32,
                     log_height,
-                    cudaStreamPerThread,
+                    stream,
                 )
                 .map_err(|error| WhirProverError::WMomentsAccumulate { error, whir_round })?;
             }
@@ -667,12 +663,14 @@ mod tests {
         }
 
         let mut prover_sponge = DuplexSpongeGpu::default();
+        let stream = device.ctx.stream.as_raw();
 
         let proof = prove_whir_opening_gpu::<crate::DefaultHashScheme, _>(
             &params,
             &mut prover_sponge,
             stacked_per_commit,
             &z_cube,
+            stream,
         )
         .unwrap();
 

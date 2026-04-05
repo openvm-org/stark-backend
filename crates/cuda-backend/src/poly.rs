@@ -5,7 +5,7 @@ use openvm_cuda_common::{
     copy::{MemCopyD2D, MemCopyH2D},
     d_buffer::DeviceBuffer,
     error::CudaError,
-    stream::cudaStreamPerThread,
+    stream::cudaStream_t,
 };
 use openvm_stark_backend::prover::MatrixDimensions;
 use p3_field::PrimeCharacteristicRing;
@@ -51,7 +51,13 @@ impl<F> MatrixDimensions for PleMatrix<F> {
 
 impl PleMatrix<F> {
     /// Creates a `PleMatrix`. This doubles the VRAM footprint to cache the `mixed` buffer.
-    pub fn from_evals(l_skip: usize, evals: DeviceBuffer<F>, height: usize, width: usize) -> Self {
+    pub fn from_evals(
+        l_skip: usize,
+        evals: DeviceBuffer<F>,
+        height: usize,
+        width: usize,
+        stream: cudaStream_t,
+    ) -> Self {
         validate_gpu_l_skip(l_skip).expect("GPU PleMatrix requires l_skip <= 10");
         let mut mixed = evals;
         if l_skip > 0 {
@@ -59,8 +65,7 @@ impl PleMatrix<F> {
             // (width cols) * (height / 2^l_skip chunks per col). Use natural ordering.
             let num_uni_poly = width * (height >> l_skip);
             unsafe {
-                batch_ntt_small(&mut mixed, l_skip, num_uni_poly, true, cudaStreamPerThread)
-                    .unwrap();
+                batch_ntt_small(&mut mixed, l_skip, num_uni_poly, true, stream).unwrap();
             }
         }
         Self {
@@ -70,7 +75,11 @@ impl PleMatrix<F> {
         }
     }
 
-    pub fn to_evals(&self, l_skip: usize) -> Result<DeviceMatrix<F>, KernelError> {
+    pub fn to_evals(
+        &self,
+        l_skip: usize,
+        stream: cudaStream_t,
+    ) -> Result<DeviceMatrix<F>, KernelError> {
         validate_gpu_l_skip(l_skip)?;
         let width = self.width();
         let height = self.height();
@@ -81,8 +90,7 @@ impl PleMatrix<F> {
             // cols) * (height / 2^l_skip chunks per col). Use natural ordering.
             let num_uni_poly = width * (height >> l_skip);
             unsafe {
-                batch_ntt_small(&mut evals, l_skip, num_uni_poly, false, cudaStreamPerThread)
-                    .unwrap();
+                batch_ntt_small(&mut evals, l_skip, num_uni_poly, false, stream).unwrap();
             }
         }
         Ok(DeviceMatrix::new(Arc::new(evals), height, width))
@@ -91,7 +99,11 @@ impl PleMatrix<F> {
 
 /// Assumes that `evals` is column-major matrix of evaluations on a hypercube `H_n`.
 /// In-place interpolates `evals` from evaluations to coefficient form.
-pub fn mle_evals_to_coeffs_inplace(evals: &mut DeviceBuffer<F>, n: usize) -> Result<(), CudaError> {
+pub fn mle_evals_to_coeffs_inplace(
+    evals: &mut DeviceBuffer<F>,
+    n: usize,
+    stream: cudaStream_t,
+) -> Result<(), CudaError> {
     if n == 0 {
         return Ok(());
     }
@@ -110,6 +122,7 @@ pub fn mle_evals_to_coeffs_inplace(evals: &mut DeviceBuffer<F>, n: usize) -> Res
             n as u32 - 1,
             true,
             false,
+            stream,
         )
     }
 }
@@ -141,6 +154,7 @@ pub unsafe fn mle_interpolate_stages(
     end_log_step: u32,
     is_eval_to_coeff: bool,
     right_pad: bool,
+    stream: cudaStream_t,
 ) -> Result<(), CudaError> {
     if start_log_step > end_log_step {
         return Ok(());
@@ -165,7 +179,7 @@ pub unsafe fn mle_interpolate_stages(
             num_stages,
             is_eval_to_coeff,
             right_pad,
-            cudaStreamPerThread,
+            stream,
         )?;
 
         current_log_step = warp_end + 1;
@@ -188,7 +202,7 @@ pub unsafe fn mle_interpolate_stages(
             shared_end,
             is_eval_to_coeff,
             right_pad,
-            cudaStreamPerThread,
+            stream,
         )?;
 
         current_log_step = shared_end + 1;
@@ -210,7 +224,7 @@ pub unsafe fn mle_interpolate_stages(
             padded_height,
             step,
             is_eval_to_coeff,
-            cudaStreamPerThread,
+            stream,
         )?;
         current_log_step += 1;
     }
@@ -230,7 +244,11 @@ pub unsafe fn mle_interpolate_stages(
 /// # Safety
 /// - `n` is set to the length of `xs`.
 /// - `out` must have length `>= 2^n`.
-pub unsafe fn evals_eq_hypercube(out: &mut DeviceBuffer<EF>, xs: &[EF]) -> Result<(), KernelError> {
+pub unsafe fn evals_eq_hypercube(
+    out: &mut DeviceBuffer<EF>,
+    xs: &[EF],
+    stream: cudaStream_t,
+) -> Result<(), KernelError> {
     let n = xs.len();
     assert!(out.len() >= 1 << n);
     // Use memcpy instead of memset since EF will be in Montgomery form.
@@ -238,8 +256,7 @@ pub unsafe fn evals_eq_hypercube(out: &mut DeviceBuffer<EF>, xs: &[EF]) -> Resul
 
     for (i, &x_i) in xs.iter().enumerate() {
         let step = 1 << i;
-        eq_hypercube_stage_ext(out.as_mut_ptr(), x_i, step, cudaStreamPerThread)
-            .map_err(KernelError::Kernel)?;
+        eq_hypercube_stage_ext(out.as_mut_ptr(), x_i, step, stream).map_err(KernelError::Kernel)?;
     }
     Ok(())
 }
@@ -260,6 +277,7 @@ pub unsafe fn evals_eq_hypercube(out: &mut DeviceBuffer<EF>, xs: &[EF]) -> Resul
 pub unsafe fn evals_mobius_eq_hypercube(
     out: &mut DeviceBuffer<EF>,
     omega: &[EF],
+    stream: cudaStream_t,
 ) -> Result<(), KernelError> {
     let n = omega.len();
     assert!(out.len() >= 1 << n);
@@ -268,7 +286,7 @@ pub unsafe fn evals_mobius_eq_hypercube(
 
     for (i, &omega_i) in omega.iter().enumerate() {
         let step = 1 << i;
-        mobius_eq_hypercube_stage_ext(out.as_mut_ptr(), omega_i, step, cudaStreamPerThread)
+        mobius_eq_hypercube_stage_ext(out.as_mut_ptr(), omega_i, step, stream)
             .map_err(KernelError::Kernel)?;
     }
     Ok(())
@@ -305,7 +323,7 @@ impl<F> EqEvalSegments<F> {
 // Currently only implement kernels for EF.
 impl EqEvalSegments<EF> {
     /// Creates a new `EqEvalSegments` instance with `max_n = x.len()`.
-    pub fn new(x: &[EF]) -> Result<Self, KernelError> {
+    pub fn new(x: &[EF], stream: cudaStream_t) -> Result<Self, KernelError> {
         let max_n = x.len();
         let mut buffer = DeviceBuffer::with_capacity(2 << max_n);
         // Index 0 should never to be used, but we initialize it to zero.
@@ -324,14 +342,8 @@ impl EqEvalSegments<EF> {
                 let dst = buffer.as_mut_ptr().add(2 * step);
                 // The `eq_i` segment starts at offset `2^i`
                 let src = buffer.as_ptr().add(step);
-                eq_hypercube_nonoverlapping_stage_ext(
-                    dst,
-                    src,
-                    x_i,
-                    step as u32,
-                    cudaStreamPerThread,
-                )
-                .map_err(KernelError::Kernel)?;
+                eq_hypercube_nonoverlapping_stage_ext(dst, src, x_i, step as u32, stream)
+                    .map_err(KernelError::Kernel)?;
             }
         }
         Ok(Self { buffer, max_n })
@@ -360,7 +372,11 @@ impl EqEvalLayers<EF> {
     /// Creates a new `EqEvalLayers` instance with `layers.len() = x.len() + 1`.
     ///
     /// Inserts `x_i` from the front for each layer.
-    pub fn new_rev<'a>(n: usize, x: impl IntoIterator<Item = &'a EF>) -> Result<Self, KernelError> {
+    pub fn new_rev<'a>(
+        n: usize,
+        x: impl IntoIterator<Item = &'a EF>,
+        stream: cudaStream_t,
+    ) -> Result<Self, KernelError> {
         let mut layers = Vec::with_capacity(n + 1);
         let layer_0 = [EF::ONE].to_device().map_err(KernelError::MemCopy)?;
         layers.push(layer_0);
@@ -372,7 +388,7 @@ impl EqEvalLayers<EF> {
             unsafe {
                 let dst = buffer.as_mut_ptr();
                 let src = layers.last().unwrap().as_ptr();
-                eq_hypercube_interleaved_stage_ext(dst, src, x_i, step as u32, cudaStreamPerThread)
+                eq_hypercube_interleaved_stage_ext(dst, src, x_i, step as u32, stream)
                     .map_err(KernelError::Kernel)?;
             }
             layers.push(buffer);
@@ -384,7 +400,11 @@ impl EqEvalLayers<EF> {
     ///
     /// Inserts `x_i` from the back for each layer. This matches behavior of
     /// [`EqEvalSegments::new`].
-    pub fn new<'a>(n: usize, x: impl IntoIterator<Item = &'a EF>) -> Result<Self, KernelError> {
+    pub fn new<'a>(
+        n: usize,
+        x: impl IntoIterator<Item = &'a EF>,
+        stream: cudaStream_t,
+    ) -> Result<Self, KernelError> {
         let mut layers = Vec::with_capacity(n + 1);
         let layer_0 = [EF::ONE].to_device().map_err(KernelError::MemCopy)?;
         layers.push(layer_0);
@@ -396,14 +416,8 @@ impl EqEvalLayers<EF> {
             unsafe {
                 let dst = buffer.as_mut_ptr();
                 let src = layers.last().unwrap().as_ptr();
-                eq_hypercube_nonoverlapping_stage_ext(
-                    dst,
-                    src,
-                    x_i,
-                    step as u32,
-                    cudaStreamPerThread,
-                )
-                .map_err(KernelError::Kernel)?;
+                eq_hypercube_nonoverlapping_stage_ext(dst, src, x_i, step as u32, stream)
+                    .map_err(KernelError::Kernel)?;
             }
             layers.push(buffer);
         }
@@ -426,15 +440,15 @@ pub struct SqrtHyperBuffer {
 impl SqrtHyperBuffer {
     /// Build a buffer from `xi`. Note that last elements of `xi` correspond to the lowest index
     /// bits.
-    pub fn from_xi(xi: &[EF]) -> Result<Self, KernelError> {
+    pub fn from_xi(xi: &[EF], stream: cudaStream_t) -> Result<Self, KernelError> {
         let low = {
             let mut res = DeviceBuffer::with_capacity(1 << (xi.len() / 2));
-            unsafe { evals_eq_hypercube(&mut res, &xi[..xi.len() / 2])? };
+            unsafe { evals_eq_hypercube(&mut res, &xi[..xi.len() / 2], stream)? };
             res
         };
         let high = {
             let mut res = DeviceBuffer::with_capacity(1 << xi.len().div_ceil(2));
-            unsafe { evals_eq_hypercube(&mut res, &xi[xi.len() / 2..])? };
+            unsafe { evals_eq_hypercube(&mut res, &xi[xi.len() / 2..], stream)? };
             res
         };
         Ok(Self {
@@ -445,20 +459,15 @@ impl SqrtHyperBuffer {
         })
     }
 
-    pub fn fold_columns(&mut self, r: EF) -> Result<(), CudaError> {
+    pub fn fold_columns(&mut self, r: EF, stream: cudaStream_t) -> Result<(), CudaError> {
         assert!(self.size > 1);
         if self.size > self.low_capacity {
             unsafe {
-                fold_mle_column(
-                    &mut self.high,
-                    self.size / self.low_capacity,
-                    r,
-                    cudaStreamPerThread,
-                )?;
+                fold_mle_column(&mut self.high, self.size / self.low_capacity, r, stream)?;
             }
         } else {
             unsafe {
-                fold_mle_column(&mut self.low, self.size, r, cudaStreamPerThread)?;
+                fold_mle_column(&mut self.low, self.size, r, stream)?;
             }
         };
         self.size /= 2;
@@ -485,13 +494,13 @@ impl SqrtEqLayers {
     /// This is meant to match behavior of [SqrtHyperBuffer::from_xi] but with layers.
     ///
     /// Example: This means `[a,b,c,d]` should be sent to `low: [[d], [d, c]], high: [[b], [b, a]]`.
-    pub fn from_xi(xi: &[EF]) -> Result<Self, KernelError> {
+    pub fn from_xi(xi: &[EF], stream: cudaStream_t) -> Result<Self, KernelError> {
         let n = xi.len();
         let low_n = n / 2;
         let high_n = n - low_n;
 
-        let low = EqEvalLayers::new(low_n, xi[high_n..].iter().rev())?;
-        let high = EqEvalLayers::new(high_n, xi[..high_n].iter().rev())?;
+        let low = EqEvalLayers::new(low_n, xi[high_n..].iter().rev(), stream)?;
+        let high = EqEvalLayers::new(high_n, xi[..high_n].iter().rev(), stream)?;
 
         Ok(Self { low, high })
     }
