@@ -340,7 +340,7 @@ constexpr uint32_t MAX_THREADS = 128;
 
 // (Not a launcher) Utility function to calculate required size of temp sum buffer.
 // Required length of *temp_sum_buffer in FpExt elements
-extern "C" size_t _zerocheck_mle_temp_sums_buffer_size(uint32_t num_x, uint32_t num_y) {
+extern "C" size_t _zerocheck_mle_temp_sums_buffer_size(uint32_t num_x, uint32_t num_y, cudaStream_t stream) {
     return mle_rounds_config::temp_sums_buffer_size(num_x, num_y, MAX_THREADS);
 }
 
@@ -348,7 +348,8 @@ extern "C" size_t _zerocheck_mle_temp_sums_buffer_size(uint32_t num_x, uint32_t 
 extern "C" size_t _zerocheck_mle_intermediates_buffer_size(
     uint32_t buffer_size,
     uint32_t num_x,
-    uint32_t num_y
+    uint32_t num_y,
+    cudaStream_t stream
 ) {
     return mle_rounds_config::intermediates_buffer_size(
         buffer_size, num_x, num_y, ZEROCHECK_BUFFER_THRESHOLD, MAX_THREADS
@@ -406,7 +407,7 @@ extern "C" int _zerocheck_eval_mle(
 
 // (Not a launcher) Utility function to calculate required size of temp sum buffer.
 // Required length of *temp_sum_buffer in FracExt elements
-extern "C" size_t _logup_mle_temp_sums_buffer_size(uint32_t num_x, uint32_t num_y) {
+extern "C" size_t _logup_mle_temp_sums_buffer_size(uint32_t num_x, uint32_t num_y, cudaStream_t stream) {
     return mle_rounds_config::temp_sums_buffer_size(num_x, num_y, MAX_THREADS);
 }
 
@@ -414,7 +415,8 @@ extern "C" size_t _logup_mle_temp_sums_buffer_size(uint32_t num_x, uint32_t num_
 extern "C" size_t _logup_mle_intermediates_buffer_size(
     uint32_t buffer_size,
     uint32_t num_x,
-    uint32_t num_y
+    uint32_t num_y,
+    cudaStream_t stream
 ) {
     return mle_rounds_config::intermediates_buffer_size(
         buffer_size, num_x, num_y, LOGUP_BUFFER_THRESHOLD, MAX_THREADS

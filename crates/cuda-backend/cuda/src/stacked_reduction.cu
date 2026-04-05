@@ -392,7 +392,8 @@ inline std::pair<dim3, dim3> stacked_reduction_round0_launch_params(
 extern "C" uint32_t _stacked_reduction_r0_required_temp_buffer_size(
     uint32_t trace_height,
     uint32_t trace_width,
-    uint32_t l_skip
+    uint32_t l_skip,
+    cudaStream_t stream
 ) {
     auto [grid, block] = stacked_reduction_round0_launch_params(trace_height, trace_width, l_skip);
     return ((grid.x * grid.y) << l_skip) * NUM_G;

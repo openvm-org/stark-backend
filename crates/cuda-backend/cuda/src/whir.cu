@@ -242,7 +242,7 @@ inline std::pair<dim3, dim3> whir_sumcheck_coeff_moments_launch_params(uint32_t 
     return kernel_launch_params(height >> 1, 256);
 }
 
-extern "C" uint32_t _whir_sumcheck_coeff_moments_required_temp_buffer_size(uint32_t height) {
+extern "C" uint32_t _whir_sumcheck_coeff_moments_required_temp_buffer_size(uint32_t height, cudaStream_t stream) {
     auto [grid, block] = whir_sumcheck_coeff_moments_launch_params(height);
     return grid.x * S_DEG;
 }
