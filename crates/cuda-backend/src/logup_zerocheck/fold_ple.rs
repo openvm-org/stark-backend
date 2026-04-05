@@ -1,6 +1,6 @@
 use std::{cmp::max, sync::Arc};
 
-use openvm_cuda_common::{d_buffer::DeviceBuffer, stream::cudaStreamPerThread};
+use openvm_cuda_common::{d_buffer::DeviceBuffer, stream::cudaStream_t};
 use openvm_stark_backend::prover::MatrixDimensions;
 
 use super::errors::FoldPleError;
@@ -19,6 +19,7 @@ pub fn fold_ple_evals_rotate(
     trace_evals: &DeviceMatrix<F>,
     d_inv_lagrange_denoms_r0: &DeviceBuffer<EF>,
     need_rot: bool,
+    stream: cudaStream_t,
 ) -> Result<DeviceMatrix<EF>, FoldPleError> {
     validate_gpu_l_skip(l_skip)?;
     let width = trace_evals.width();
@@ -37,6 +38,7 @@ pub fn fold_ple_evals_rotate(
             folded_buf.as_mut_ptr(),
             d_inv_lagrange_denoms_r0,
             false,
+            stream,
         )?;
 
         if need_rot {
@@ -48,6 +50,7 @@ pub fn fold_ple_evals_rotate(
                 folded_buf.as_mut_ptr().add(num_x * width),
                 d_inv_lagrange_denoms_r0,
                 true,
+                stream,
             )?;
         }
     }
@@ -72,6 +75,7 @@ pub unsafe fn fold_ple_evals_gpu(
     output: *mut EF,
     d_inv_lagrange_denoms_r0: &DeviceBuffer<EF>,
     rotate: bool,
+    stream: cudaStream_t,
 ) -> Result<(), FoldPleError> {
     validate_gpu_l_skip(l_skip)?;
     let height = mat.height();
@@ -98,7 +102,7 @@ pub unsafe fn fold_ple_evals_gpu(
             l_skip as u32,
             num_x as u32,
             rotate,
-            cudaStreamPerThread,
+            stream,
         )?;
     }
     Ok(())

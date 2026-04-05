@@ -20,7 +20,7 @@ use openvm_cuda_common::{
     d_buffer::DeviceBuffer,
     error::MemCopyError,
     memory_manager::MemTracker,
-    stream::cudaStreamPerThread,
+    stream::cudaStream_t,
 };
 use openvm_stark_backend::{
     air_builders::symbolic::SymbolicConstraints,
@@ -112,6 +112,7 @@ pub fn prove_zerocheck_and_logup_gpu<HS, TS>(
     save_memory: bool,
     monomial_num_y_threshold: u32,
     sm_count: u32,
+    stream: cudaStream_t,
 ) -> Result<(GkrProof<HS::SC>, BatchConstraintProof<HS::SC>, Vec<EF>), LogupZerocheckError>
 where
     HS: GpuHashScheme,
@@ -149,7 +150,7 @@ where
 
     // Grind to increase soundness of random sampling for LogUp
     let logup_pow_witness = transcript
-        .grind_gpu(mpk.params.logup.pow_bits)
+        .grind_gpu(mpk.params.logup.pow_bits, stream)
         .map_err(LogupZerocheckError::Grind)?;
     let alpha_logup = transcript.sample_ext();
     let beta_logup = transcript.sample_ext();
@@ -166,6 +167,7 @@ where
         save_memory,
         monomial_num_y_threshold,
         sm_count,
+        stream,
     )?;
     let n_global = prover.n_global;
 
@@ -183,6 +185,7 @@ where
             alpha_logup,
             &prover.d_challenges,
             total_leaves,
+            stream,
         )?
     } else {
         (DeviceBuffer::new(), EF::ZERO)
@@ -203,7 +206,7 @@ where
     prover.mem.emit_metrics_with_label("prover.gkr_input_evals");
 
     let (frac_sum_proof, mut xi) =
-        fractional_sumcheck_gpu(transcript, inputs, alpha, true, &mut prover.mem)?;
+        fractional_sumcheck_gpu(transcript, inputs, alpha, true, &mut prover.mem, stream)?;
     while xi.len() != l_skip + n_global {
         xi.push(transcript.sample_ext());
     }
@@ -466,6 +469,7 @@ pub struct LogupZerocheckGpu<'a, HS: GpuHashScheme> {
     gkr_mem_contribution: usize,
     /// Memory limit for batch MLE intermediate buffers (set after GKR input eval)
     memory_limit_bytes: usize,
+    stream: cudaStream_t,
 }
 
 impl<'a, HS: GpuHashScheme> LogupZerocheckGpu<'a, HS> {
@@ -480,6 +484,7 @@ impl<'a, HS: GpuHashScheme> LogupZerocheckGpu<'a, HS> {
         save_memory: bool,
         monomial_num_y_threshold: u32,
         sm_count: u32,
+        stream: cudaStream_t,
     ) -> Result<Self, LogupZerocheckError> {
         let mem = MemTracker::start("prover.logup_zerocheck_prover");
         let l_skip = pk.params.l_skip;
@@ -590,6 +595,7 @@ impl<'a, HS: GpuHashScheme> LogupZerocheckGpu<'a, HS> {
             gkr_mem_contribution: 0,
             memory_limit_bytes: 0, // Set after GKR input eval
             monomial_num_y_threshold,
+            stream,
         })
     }
 
@@ -618,7 +624,7 @@ impl<'a, HS: GpuHashScheme> LogupZerocheckGpu<'a, HS> {
         for (air_idx, air_pk) in self.pk.per_air.iter().enumerate() {
             if air_pk.other_data.zerocheck_monomials.is_some() {
                 self.lambda_combinations[air_idx] = Some(
-                    compute_lambda_combinations(self.pk, air_idx, lambda_pows_ref)
+                    compute_lambda_combinations(self.pk, air_idx, lambda_pows_ref, self.stream)
                         .map_err(LogupZerocheckError::LambdaCombinations)?,
                 );
             }
@@ -685,6 +691,7 @@ impl<'a, HS: GpuHashScheme> LogupZerocheckGpu<'a, HS> {
                         &self.d_eq_3b_per_trace[trace_idx],
                         &self.eq_3b_per_trace[trace_idx],
                         &self.beta_pows,
+                        self.stream,
                     )
                     .map_err(LogupZerocheckError::LogupCombinations)?,
                 );
@@ -696,9 +703,12 @@ impl<'a, HS: GpuHashScheme> LogupZerocheckGpu<'a, HS> {
         for &n in &self.n_per_trace {
             let n_lift = n.max(0) as usize;
             if let Entry::Vacant(entry) = self.eq_xis.entry(n_lift) {
-                let layers =
-                    EqEvalLayers::new_rev(n_lift, xi[l_skip..l_skip + n_lift].iter().rev())
-                        .map_err(LogupZerocheckError::EqEvalLayers)?;
+                let layers = EqEvalLayers::new_rev(
+                    n_lift,
+                    xi[l_skip..l_skip + n_lift].iter().rev(),
+                    self.stream,
+                )
+                .map_err(LogupZerocheckError::EqEvalLayers)?;
                 entry.insert(layers);
             }
         }
@@ -788,6 +798,7 @@ impl<'a, HS: GpuHashScheme> LogupZerocheckGpu<'a, HS> {
                 num_cosets_zc as u32,
                 omega_root,
                 max_temp_bytes,
+                self.stream,
             )?;
             if !sum_buffer.is_empty() {
                 let q_evals = sum_buffer.to_host()?;
@@ -844,6 +855,7 @@ impl<'a, HS: GpuHashScheme> LogupZerocheckGpu<'a, HS> {
                 num_cosets_logup as u32,
                 omega_root,
                 max_temp_bytes,
+                self.stream,
             )?;
             if !sum.is_empty() {
                 let evals = sum.to_host()?;
@@ -915,6 +927,7 @@ impl<'a, HS: GpuHashScheme> LogupZerocheckGpu<'a, HS> {
                         trace,
                         &d_inv_lagrange_denoms_r0,
                         need_rot,
+                        self.stream,
                     )?;
                     results.push(folded);
                 }
@@ -928,6 +941,7 @@ impl<'a, HS: GpuHashScheme> LogupZerocheckGpu<'a, HS> {
                         trace,
                         &d_inv_lagrange_denoms_r0,
                         need_rot,
+                        self.stream,
                     )?;
                     results.push(folded);
                 }
@@ -940,6 +954,7 @@ impl<'a, HS: GpuHashScheme> LogupZerocheckGpu<'a, HS> {
                     trace,
                     &d_inv_lagrange_denoms_r0,
                     need_rot,
+                    self.stream,
                 )?;
                 mem_limit = mem_limit.saturating_sub(folded.buffer().len() * size_of::<EF>());
                 results.push(folded);
@@ -979,7 +994,7 @@ impl<'a, HS: GpuHashScheme> LogupZerocheckGpu<'a, HS> {
                         is_first,
                         is_last,
                         num_x,
-                        cudaStreamPerThread,
+                        self.stream,
                     )
                     .map_err(LogupZerocheckError::FoldSelectorsRound0)?;
                 }
@@ -1137,7 +1152,7 @@ impl<'a, HS: GpuHashScheme> LogupZerocheckGpu<'a, HS> {
                         &d_columns,
                         sp_deg,
                         num_y,
-                        cudaStreamPerThread,
+                        self.stream,
                     )
                     .map_err(|e| LogupZerocheckError::InterpolateColumns(e.into()))?;
                 }
@@ -1217,8 +1232,12 @@ impl<'a, HS: GpuHashScheme> LogupZerocheckGpu<'a, HS> {
                         .expect("missing logup monomial combinations for late trace")
                 })
                 .collect();
-            let batch =
-                LogupMonomialBatch::new(late_logup_traces.iter().copied(), self.pk, &logup_combs)?;
+            let batch = LogupMonomialBatch::new(
+                late_logup_traces.iter().copied(),
+                self.pk,
+                &logup_combs,
+                self.stream,
+            )?;
             let out = batch
                 .evaluate(1)
                 .map_err(LogupZerocheckError::MleInteractionEval)?;
@@ -1237,7 +1256,8 @@ impl<'a, HS: GpuHashScheme> LogupZerocheckGpu<'a, HS> {
                 .iter()
                 .map(|t| self.lambda_combinations[t.air_idx].as_ref().unwrap())
                 .collect();
-            let batch = ZerocheckMonomialBatch::new(late_mono_traces, self.pk, &lambda_combs)?;
+            let batch =
+                ZerocheckMonomialBatch::new(late_mono_traces, self.pk, &lambda_combs, self.stream)?;
             let out = batch
                 .evaluate(1)
                 .map_err(LogupZerocheckError::MleConstraintEval)?;
@@ -1260,6 +1280,7 @@ impl<'a, HS: GpuHashScheme> LogupZerocheckGpu<'a, HS> {
                 &mut logup_out,
                 &mut self.logup_tilde_evals,
                 self.memory_limit_bytes,
+                self.stream,
             )
             .map_err(LogupZerocheckError::MleInteractionEval)?;
         }
@@ -1290,6 +1311,7 @@ impl<'a, HS: GpuHashScheme> LogupZerocheckGpu<'a, HS> {
                 sp_deg as u32,
                 &mut zc_out,
                 self.memory_limit_bytes,
+                self.stream,
             )
             .map_err(LogupZerocheckError::MleConstraintEval)?;
         }
@@ -1307,6 +1329,7 @@ impl<'a, HS: GpuHashScheme> LogupZerocheckGpu<'a, HS> {
                 self.sm_count,
                 sp_deg as u32,
                 None,
+                self.stream,
             )?;
             let out = batch
                 .evaluate(sp_deg as u32)
@@ -1324,7 +1347,8 @@ impl<'a, HS: GpuHashScheme> LogupZerocheckGpu<'a, HS> {
                 .iter()
                 .map(|t| self.lambda_combinations[t.air_idx].as_ref().unwrap())
                 .collect();
-            let batch = ZerocheckMonomialBatch::new(low_mono_traces, self.pk, &lambda_combs)?;
+            let batch =
+                ZerocheckMonomialBatch::new(low_mono_traces, self.pk, &lambda_combs, self.stream)?;
             let out = batch
                 .evaluate(sp_deg as u32)
                 .map_err(LogupZerocheckError::MleConstraintEval)?;
@@ -1456,7 +1480,7 @@ impl<'a, HS: GpuHashScheme> LogupZerocheckGpu<'a, HS> {
                     &d_log_output_heights,
                     max_output_cells.try_into().unwrap(),
                     r_round,
-                    cudaStreamPerThread,
+                    self.stream,
                 )
                 .map_err(LogupZerocheckError::BatchFoldMle)?;
             }

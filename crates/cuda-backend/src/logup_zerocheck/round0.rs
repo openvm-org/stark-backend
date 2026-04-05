@@ -1,6 +1,6 @@
 use itertools::Itertools;
 use openvm_cuda_common::{
-    copy::MemCopyH2D, d_buffer::DeviceBuffer, error::CudaError, stream::cudaStreamPerThread,
+    copy::MemCopyH2D, d_buffer::DeviceBuffer, error::CudaError, stream::cudaStream_t,
 };
 use openvm_stark_backend::{
     air_builders::symbolic::{
@@ -61,6 +61,7 @@ pub fn evaluate_round0_constraints_gpu<HS: GpuHashScheme>(
     num_cosets: u32,
     g_shift: F,
     max_temp_bytes: usize,
+    stream: cudaStream_t,
 ) -> Result<DeviceBuffer<EF>, Round0EvalError> {
     let constraints_dag = &pk.vk.symbolic_constraints;
     if constraints_dag.constraints.constraint_idx.is_empty() || num_cosets == 0 {
@@ -79,7 +80,7 @@ pub fn evaluate_round0_constraints_gpu<HS: GpuHashScheme>(
             num_x,
             num_cosets,
             max_temp_bytes,
-            cudaStreamPerThread,
+            stream,
         )
     };
     let mut intermediates = if intermed_capacity > 0 {
@@ -96,7 +97,7 @@ pub fn evaluate_round0_constraints_gpu<HS: GpuHashScheme>(
             num_x,
             num_cosets,
             max_temp_bytes,
-            cudaStreamPerThread,
+            stream,
         )
     };
     debug!("zerocheck:temp_sums_buffer_capacity={temp_sums_buffer_capacity}");
@@ -140,7 +141,7 @@ pub fn evaluate_round0_constraints_gpu<HS: GpuHashScheme>(
             num_cosets,
             g_shift,
             max_temp_bytes,
-            cudaStreamPerThread,
+            stream,
         )?;
     }
 
@@ -168,6 +169,7 @@ pub fn evaluate_round0_interactions_gpu<HS: GpuHashScheme>(
     num_cosets: u32,
     g_shift: F,
     max_temp_bytes: usize,
+    stream: cudaStream_t,
 ) -> Result<DeviceBuffer<Frac<EF>>, Round0EvalError> {
     // Check if this trace has interactions
     if eq_3bs.is_empty() {
@@ -242,7 +244,7 @@ pub fn evaluate_round0_interactions_gpu<HS: GpuHashScheme>(
             num_x,
             num_cosets,
             max_temp_bytes,
-            cudaStreamPerThread,
+            stream,
         )
     };
     let mut intermediates = if intermed_capacity > 0 {
@@ -259,7 +261,7 @@ pub fn evaluate_round0_interactions_gpu<HS: GpuHashScheme>(
             num_x,
             num_cosets,
             max_temp_bytes,
-            cudaStreamPerThread,
+            stream,
         )
     };
     debug!("logup_r0:tmp_sums_buffer_capacity={temp_sums_buffer_capacity}");
@@ -301,7 +303,7 @@ pub fn evaluate_round0_interactions_gpu<HS: GpuHashScheme>(
             num_cosets,
             g_shift,
             max_temp_bytes,
-            cudaStreamPerThread,
+            stream,
         )?;
     }
 

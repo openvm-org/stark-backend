@@ -5,7 +5,7 @@ use openvm_cuda_common::{
     copy::{cuda_memcpy, MemCopyD2H, MemCopyH2D},
     d_buffer::DeviceBuffer,
     memory_manager::MemTracker,
-    stream::cudaStreamPerThread,
+    stream::cudaStream_t,
 };
 use openvm_stark_backend::{
     dft::Radix2BowersSerial,
@@ -51,6 +51,7 @@ use crate::{
 pub const STACKED_REDUCTION_S_DEG: usize = 2;
 
 pub struct StackedReductionGpu<D = Digest> {
+    stream: cudaStream_t,
     sm_count: u32,
 
     l_skip: usize,
@@ -202,6 +203,7 @@ where
     HS: GpuHashScheme,
     TS: GpuFiatShamirTranscript<HS::SC>,
 {
+    let stream = device.ctx.stream.as_raw();
     let n_stack = device.config().n_stack;
     // Batching randomness
     let lambda = transcript.sample_ext();
@@ -215,6 +217,7 @@ where
         r,
         lambda,
         device.sm_count(),
+        stream,
     )?;
 
     // Round 0: univariate sumcheck
@@ -279,6 +282,7 @@ impl<D: Copy + Clone + Send + Sync + 'static> StackedReductionGpu<D> {
         r: &[EF],
         lambda: EF,
         sm_count: u32,
+        stream: cudaStream_t,
     ) -> Result<Self, StackedReductionError> {
         ensure_device_ntt_twiddles_initialized().map_err(StackedReductionError::InitNttTwiddles)?;
         let mem = MemTracker::start("prover.stacked_reduction_new");
@@ -410,7 +414,7 @@ impl<D: Copy + Clone + Send + Sync + 'static> StackedReductionGpu<D> {
                 .saturating_sub(l_skip)
         );
         let eq_r_ns =
-            EqEvalSegments::new(&r[1..]).map_err(StackedReductionError::EqEvalSegments)?;
+            EqEvalSegments::new(&r[1..], stream).map_err(StackedReductionError::EqEvalSegments)?;
 
         let eq_const = eval_eq_uni_at_one(l_skip, r[0] * omega_skip);
         let eq_ub_per_trace = vec![EF::ONE; unstacked_cols.len()];
@@ -437,6 +441,7 @@ impl<D: Copy + Clone + Send + Sync + 'static> StackedReductionGpu<D> {
         };
 
         Ok(Self {
+            stream,
             sm_count,
             l_skip,
             n_stack,
@@ -527,7 +532,7 @@ impl<D: Copy + Clone + Send + Sync + 'static> StackedReductionGpu<D> {
                     trace_height as u32,
                     trace_width as u32,
                     l_skip as u32,
-                    cudaStreamPerThread,
+                    self.stream,
                 )
             } as usize;
 
@@ -548,7 +553,7 @@ impl<D: Copy + Clone + Send + Sync + 'static> StackedReductionGpu<D> {
                     trace_height,
                     trace_width,
                     l_skip,
-                    cudaStreamPerThread,
+                    self.stream,
                 )
                 .map_err(StackedReductionError::SumcheckRound0)?;
             };
@@ -741,7 +746,7 @@ impl<D: Copy + Clone + Send + Sync + 'static> StackedReductionGpu<D> {
                         trace.height(),
                         trace.width(),
                         l_skip,
-                        cudaStreamPerThread,
+                        self.stream,
                     )
                     .map_err(StackedReductionError::FoldPle)?;
                 }
@@ -767,11 +772,11 @@ impl<D: Copy + Clone + Send + Sync + 'static> StackedReductionGpu<D> {
                 eq_uni_u0r0_rot,
                 self.eq_const * eq_uni_u01,
                 n_max as u32,
-                cudaStreamPerThread,
+                self.stream,
             )
             .map_err(StackedReductionError::InitKRot)?;
         }
-        vector_scalar_multiply_ext(&mut self.eq_r_ns.buffer, eq_uni_u0r0, cudaStreamPerThread)
+        vector_scalar_multiply_ext(&mut self.eq_r_ns.buffer, eq_uni_u0r0, self.stream)
             .map_err(StackedReductionError::VectorScalarMul)?;
 
         // Compute the special eq values for n = -l_skip..0
@@ -878,7 +883,7 @@ impl<D: Copy + Clone + Send + Sync + 'static> StackedReductionGpu<D> {
                         window_len,
                         l_skip,
                         round,
-                        cudaStreamPerThread,
+                        self.stream,
                     )
                     .map_err(StackedReductionError::SumcheckMleRoundDegenerate)?;
                 }
@@ -901,7 +906,7 @@ impl<D: Copy + Clone + Send + Sync + 'static> StackedReductionGpu<D> {
                         window_len,
                         num_y,
                         self.sm_count,
-                        cudaStreamPerThread,
+                        self.stream,
                     )
                     .map_err(StackedReductionError::SumcheckMleRound)?;
                 };
@@ -949,7 +954,7 @@ impl<D: Copy + Clone + Send + Sync + 'static> StackedReductionGpu<D> {
                 self.stacked_height(round + 1) as u32,
                 self.q_width_max * output_height,
                 u_round,
-                cudaStreamPerThread,
+                self.stream,
             )
             .map_err(StackedReductionError::FoldMle)?;
         }
@@ -973,7 +978,7 @@ impl<D: Copy + Clone + Send + Sync + 'static> StackedReductionGpu<D> {
                         &self.eq_r_ns,
                         u_round,
                         output_max_n,
-                        cudaStreamPerThread,
+                        self.stream,
                     )
                     .map_err(StackedReductionError::TriangularFoldMle)?;
                 }
@@ -993,7 +998,7 @@ impl<D: Copy + Clone + Send + Sync + 'static> StackedReductionGpu<D> {
                         &self.k_rot_ns,
                         u_round,
                         output_max_n,
-                        cudaStreamPerThread,
+                        self.stream,
                     )
                     .map_err(StackedReductionError::TriangularFoldMle)?;
                 }

@@ -263,7 +263,7 @@ fn test_bn254_merkle_gpu_matches_host_large_matrix() {
         DeviceMatrix::new(Arc::new(host_matrix.to_device().unwrap()), height, width);
     let gpu_tree = MerkleTreeGpu::<F, Bn254Digest>::new_with_hash::<
         crate::hash_scheme::Bn254Poseidon2MerkleHash,
-    >(device_matrix, rows_per_query, true)
+    >(device_matrix, rows_per_query, true, cudaStreamPerThread)
     .unwrap();
     let gpu_layers = gpu_tree
         .digest_layers
@@ -360,7 +360,7 @@ fn test_bn254_row_hash_gpu_matches_host_multi_block_rows() {
         DeviceMatrix::new(Arc::new(host_matrix.to_device().unwrap()), height, width);
     let gpu_tree = MerkleTreeGpu::<F, Bn254Digest>::new_with_hash::<
         crate::hash_scheme::Bn254Poseidon2MerkleHash,
-    >(device_matrix, rows_per_query, true)
+    >(device_matrix, rows_per_query, true, cudaStreamPerThread)
     .unwrap();
     let gpu_layer0 = gpu_tree.digest_layers[0].to_host().unwrap();
 
@@ -397,7 +397,7 @@ fn test_bn254_row_hash_ext_gpu_matches_host_multi_block_rows() {
         DeviceMatrix::new(Arc::new(host_matrix.to_device().unwrap()), height, width);
     let gpu_tree = MerkleTreeGpu::<EF, Bn254Digest>::new_with_hash::<
         crate::hash_scheme::Bn254Poseidon2MerkleHash,
-    >(device_matrix, rows_per_query, true)
+    >(device_matrix, rows_per_query, true, cudaStreamPerThread)
     .unwrap();
     let gpu_layer0 = gpu_tree.digest_layers[0].to_host().unwrap();
 
@@ -443,7 +443,7 @@ fn test_merkle_gpu_supports_1024_rows_per_query() {
         DeviceMatrix::new(Arc::new(host_matrix.to_device().unwrap()), height, width);
     let tree = MerkleTreeGpu::<F, crate::prelude::Digest>::new_with_hash::<
         crate::hash_scheme::Poseidon2MerkleHash,
-    >(device_matrix, rows_per_query, true)
+    >(device_matrix, rows_per_query, true, cudaStreamPerThread)
     .expect("rows_per_query=1024 should be supported");
 
     assert_eq!(tree.query_stride(), 1);
@@ -465,19 +465,25 @@ fn test_merkle_batch_query_zero_work_returns_empty() {
         DeviceMatrix::new(Arc::new(host_matrix.to_device().unwrap()), height, width);
     let tree = MerkleTreeGpu::<F, crate::prelude::Digest>::new_with_hash::<
         crate::hash_scheme::Poseidon2MerkleHash,
-    >(device_matrix, rows_per_query, true)
+    >(device_matrix, rows_per_query, true, cudaStreamPerThread)
     .unwrap();
 
-    let proofs =
-        MerkleTreeGpu::<F, crate::prelude::Digest>::batch_query_merkle_proofs(&[&tree], &[0])
-            .unwrap();
+    let proofs = MerkleTreeGpu::<F, crate::prelude::Digest>::batch_query_merkle_proofs(
+        &[&tree],
+        &[0],
+        cudaStreamPerThread,
+    )
+    .unwrap();
     assert_eq!(proofs.len(), 1);
     assert_eq!(proofs[0].len(), 1);
     assert!(proofs[0][0].is_empty());
 
-    let empty_queries =
-        MerkleTreeGpu::<F, crate::prelude::Digest>::batch_query_merkle_proofs(&[&tree], &[])
-            .unwrap();
+    let empty_queries = MerkleTreeGpu::<F, crate::prelude::Digest>::batch_query_merkle_proofs(
+        &[&tree],
+        &[],
+        cudaStreamPerThread,
+    )
+    .unwrap();
     assert_eq!(empty_queries.len(), 1);
     assert!(empty_queries[0].is_empty());
 }
@@ -494,9 +500,14 @@ fn test_merkle_batch_open_rows_empty_queries_returns_empty() {
     let device_matrix =
         DeviceMatrix::new(Arc::new(host_matrix.to_device().unwrap()), height, width);
 
-    let opened_rows =
-        MerkleTreeGpu::<F, crate::prelude::Digest>::batch_open_rows(&[&device_matrix], &[], 1, 1)
-            .unwrap();
+    let opened_rows = MerkleTreeGpu::<F, crate::prelude::Digest>::batch_open_rows(
+        &[&device_matrix],
+        &[],
+        1,
+        1,
+        cudaStreamPerThread,
+    )
+    .unwrap();
     assert_eq!(opened_rows.len(), 1);
     assert!(opened_rows[0].is_empty());
 }
@@ -748,7 +759,8 @@ fn test_monomial_vs_dag_equivalence() {
     let n = log2_strict_usize(height) as isize - l_skip as isize;
     let n_lift = n.max(0) as usize;
 
-    let eq_xis = EqEvalSegments::new(&xi[l_skip..]).expect("failed to compute eq_xis");
+    let eq_xis =
+        EqEvalSegments::new(&xi[l_skip..], cudaStreamPerThread).expect("failed to compute eq_xis");
 
     let sel_height = 1 << n_lift;
     let mut sel_cols = F::zero_vec(3 * sel_height);
@@ -792,6 +804,7 @@ fn test_monomial_vs_dag_equivalence() {
         &air_ctx.common_main,
         &d_inv_lagrange_denoms_r0,
         true,
+        cudaStreamPerThread,
     )
     .unwrap();
 
@@ -904,14 +917,25 @@ fn test_monomial_vs_dag_equivalence() {
             eq_3bs_ptr: std::ptr::null(),
         };
 
-        let dag_builder =
-            ZerocheckMleBatchBuilder::new(std::iter::once(&trace_ctx), &pk, s_deg as u32).unwrap();
+        let dag_builder = ZerocheckMleBatchBuilder::new(
+            std::iter::once(&trace_ctx),
+            &pk,
+            s_deg as u32,
+            cudaStreamPerThread,
+        )
+        .unwrap();
         let dag_output = dag_builder.evaluate(&d_lambda_pows, s_deg as u32).unwrap();
         let dag_results: Vec<EF> = dag_output.to_host().expect("copy DAG output");
 
-        let lambda_comb = compute_lambda_combinations(&pk, 0, &d_lambda_pows).unwrap();
-        let mono_batch =
-            ZerocheckMonomialBatch::new(std::iter::once(&trace_ctx), &pk, &[&lambda_comb]).unwrap();
+        let lambda_comb =
+            compute_lambda_combinations(&pk, 0, &d_lambda_pows, cudaStreamPerThread).unwrap();
+        let mono_batch = ZerocheckMonomialBatch::new(
+            std::iter::once(&trace_ctx),
+            &pk,
+            &[&lambda_comb],
+            cudaStreamPerThread,
+        )
+        .unwrap();
         let mono_output = mono_batch.evaluate(s_deg as u32).unwrap();
         let mono_results: Vec<EF> = mono_output.to_host().expect("copy monomial output");
 

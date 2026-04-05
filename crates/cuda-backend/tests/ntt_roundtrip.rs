@@ -2,6 +2,7 @@ use openvm_cuda_backend::{ntt::batch_ntt, prelude::F};
 use openvm_cuda_common::{
     copy::{MemCopyD2H, MemCopyH2D},
     d_buffer::DeviceBuffer,
+    stream::cudaStreamPerThread,
 };
 use p3_field::PrimeCharacteristicRing;
 
@@ -19,8 +20,8 @@ fn ntt_roundtrip_max_log_domain_size() {
     let mut device = DeviceBuffer::<F>::with_capacity(n);
     host.copy_to(&mut device).expect("host->device copy failed");
 
-    batch_ntt(&device, LOG_N, 0, 1, true, false);
-    batch_ntt(&device, LOG_N, 0, 1, true, true);
+    batch_ntt(&device, LOG_N, 0, 1, true, false, cudaStreamPerThread);
+    batch_ntt(&device, LOG_N, 0, 1, true, true, cudaStreamPerThread);
 
     let output = device.to_host().expect("device->host copy failed");
     for (i, got) in output.iter().enumerate() {

@@ -159,6 +159,15 @@ pub fn current_stream_sync() -> Result<(), CudaError> {
     check(unsafe { cudaStreamSynchronize(cudaStreamPerThread) })
 }
 
+/// Synchronize the given explicit CUDA stream, blocking until all previously
+/// enqueued work on `stream` has completed.
+///
+/// # Safety
+/// The caller must ensure that `stream` is a valid CUDA stream handle.
+pub unsafe fn sync_stream(stream: cudaStream_t) -> Result<(), CudaError> {
+    check(cudaStreamSynchronize(stream))
+}
+
 struct CudaThreadCleanup {
     touched_cuda: Cell<bool>,
 }

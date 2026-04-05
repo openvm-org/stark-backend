@@ -7,7 +7,7 @@ use openvm_cuda_common::{
     copy::MemCopyH2D,
     d_buffer::DeviceBuffer,
     error::{CudaError, MemCopyError},
-    stream::cudaStreamPerThread,
+    stream::cudaStream_t,
 };
 use openvm_stark_backend::prover::{fractional_sumcheck_gkr::Frac, DeviceMultiStarkProvingKey};
 use p3_field::PrimeCharacteristicRing;
@@ -81,6 +81,7 @@ pub(crate) fn compute_lambda_combinations<HS: GpuHashScheme>(
     pk: &DeviceMultiStarkProvingKey<GenericGpuBackend<HS>>,
     air_idx: usize,
     lambda_pows: &DeviceBuffer<EF>,
+    stream: cudaStream_t,
 ) -> Result<DeviceBuffer<EF>, CudaError> {
     let monomials = pk.per_air[air_idx]
         .other_data
@@ -95,7 +96,7 @@ pub(crate) fn compute_lambda_combinations<HS: GpuHashScheme>(
             monomials.d_lambda_terms.as_ptr(),
             lambda_pows,
             monomials.num_monomials,
-            cudaStreamPerThread,
+            stream,
         )?;
     }
     Ok(buf)
@@ -115,6 +116,7 @@ pub(crate) struct ZerocheckMonomialBatch<'a> {
     block_ctxs: DeviceBuffer<BlockCtx>,
     air_ctxs: DeviceBuffer<MonomialAirCtx>,
     air_offsets: DeviceBuffer<u32>,
+    stream: cudaStream_t,
 }
 
 impl<'a> ZerocheckMonomialBatch<'a> {
@@ -130,6 +132,7 @@ impl<'a> ZerocheckMonomialBatch<'a> {
         traces: impl IntoIterator<Item = &'a TraceCtx>,
         pk: &DeviceMultiStarkProvingKey<GenericGpuBackend<HS>>,
         lambda_combinations: &[&DeviceBuffer<EF>],
+        stream: cudaStream_t,
     ) -> Result<Self, MemCopyError> {
         let traces: Vec<_> = traces.into_iter().collect();
         assert!(
@@ -215,6 +218,7 @@ impl<'a> ZerocheckMonomialBatch<'a> {
             block_ctxs,
             air_ctxs,
             air_offsets,
+            stream,
         })
     }
 
@@ -261,7 +265,7 @@ impl<'a> ZerocheckMonomialBatch<'a> {
                 num_x,
                 num_airs as u32,
                 THREADS_PER_BLOCK,
-                cudaStreamPerThread,
+                self.stream,
             )?;
         }
 
@@ -288,6 +292,7 @@ pub(crate) struct ZerocheckMonomialParYBatch<'a> {
     air_offsets: DeviceBuffer<u32>,
     num_blocks: u32,
     chunk_size: u32,
+    stream: cudaStream_t,
 }
 
 impl<'a> ZerocheckMonomialParYBatch<'a> {
@@ -310,6 +315,7 @@ impl<'a> ZerocheckMonomialParYBatch<'a> {
         sm_count: u32,
         num_x: u32,
         max_monomials_per_thread: Option<u32>,
+        stream: cudaStream_t,
     ) -> Result<Self, MemCopyError> {
         let traces: Vec<_> = traces.into_iter().collect();
         assert!(
@@ -440,6 +446,7 @@ impl<'a> ZerocheckMonomialParYBatch<'a> {
             air_offsets,
             num_blocks,
             chunk_size,
+            stream,
         })
     }
 
@@ -488,7 +495,7 @@ impl<'a> ZerocheckMonomialParYBatch<'a> {
                 num_airs as u32,
                 self.chunk_size,
                 THREADS_PER_BLOCK_PAR_Y,
-                cudaStreamPerThread,
+                self.stream,
             )?;
         }
 
@@ -510,6 +517,7 @@ pub struct LogupCombinations {
 /// Precompute logup combinations for a single AIR's interaction monomials.
 ///
 /// The AIR must have nonempty interaction monomials.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn compute_logup_combinations<HS: GpuHashScheme>(
     pk: &DeviceMultiStarkProvingKey<GenericGpuBackend<HS>>,
     air_idx: usize,
@@ -517,6 +525,7 @@ pub(crate) fn compute_logup_combinations<HS: GpuHashScheme>(
     d_eq_3bs: &DeviceBuffer<EF>,
     eq_3bs_host: &[EF],
     beta_pows_host: &[EF],
+    stream: cudaStream_t,
 ) -> Result<LogupCombinations, CudaError> {
     let monomials = pk.per_air[air_idx]
         .other_data
@@ -538,7 +547,7 @@ pub(crate) fn compute_logup_combinations<HS: GpuHashScheme>(
                 monomials.d_numer_terms.as_ptr(),
                 d_eq_3bs,
                 monomials.num_numer_monomials,
-                cudaStreamPerThread,
+                stream,
             )?;
         }
     }
@@ -559,7 +568,7 @@ pub(crate) fn compute_logup_combinations<HS: GpuHashScheme>(
                 d_beta_pows,
                 d_eq_3bs,
                 monomials.num_denom_monomials,
-                cudaStreamPerThread,
+                stream,
             )?;
         }
     }
@@ -599,6 +608,7 @@ pub(crate) struct LogupMonomialBatch<'a> {
     denom_ctxs: DeviceBuffer<LogupMonomialCtx>,
     air_offsets: DeviceBuffer<u32>,
     num_blocks: u32,
+    stream: cudaStream_t,
 }
 
 impl<'a> LogupMonomialBatch<'a> {
@@ -614,6 +624,7 @@ impl<'a> LogupMonomialBatch<'a> {
         traces: impl IntoIterator<Item = &'a TraceCtx>,
         pk: &DeviceMultiStarkProvingKey<GenericGpuBackend<HS>>,
         logup_combinations: &[&LogupCombinations],
+        stream: cudaStream_t,
     ) -> Result<Self, MemCopyError> {
         let traces: Vec<_> = traces.into_iter().collect();
         assert!(
@@ -743,6 +754,7 @@ impl<'a> LogupMonomialBatch<'a> {
             denom_ctxs,
             air_offsets,
             num_blocks,
+            stream,
         })
     }
 
@@ -791,7 +803,7 @@ impl<'a> LogupMonomialBatch<'a> {
                 num_x,
                 num_airs as u32,
                 THREADS_PER_BLOCK_LOGUP,
-                cudaStreamPerThread,
+                self.stream,
             )?;
         }
 
