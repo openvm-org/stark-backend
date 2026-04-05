@@ -235,7 +235,7 @@ extern "C" int _whir_algebraic_batch_traces(
     whir_algebraic_batch_traces_kernel<<<grid, block, 0, stream>>>(
         output, packets, mu_powers, stacked_height, num_packets, skip_domain
     );
-    return CHECK_KERNEL_ON(stream);
+    return CHECK_KERNEL();
 }
 
 inline std::pair<dim3, dim3> whir_sumcheck_coeff_moments_launch_params(uint32_t height) {
@@ -261,7 +261,7 @@ extern "C" int _whir_sumcheck_coeff_moments_round(
         f_coeffs, w_moments, tmp_block_sums, height
     );
 
-    int err = CHECK_KERNEL_ON(stream);
+    int err = CHECK_KERNEL();
     if (err != 0)
         return err;
 
@@ -272,7 +272,7 @@ extern "C" int _whir_sumcheck_coeff_moments_round(
     sumcheck::static_final_reduce_block_sums<S_DEG>
         <<<S_DEG, reduce_block, reduce_shmem, stream>>>(tmp_block_sums, output, num_blocks);
 
-    return CHECK_KERNEL_ON(stream);
+    return CHECK_KERNEL();
 }
 
 extern "C" int _whir_fold_coeffs_and_moments(
@@ -286,7 +286,7 @@ extern "C" int _whir_fold_coeffs_and_moments(
     whir_fold_coeffs_and_moments_kernel<<<grid, block, 0, stream>>>(
         f_coeffs, w_moments, f_folded_coeffs, w_folded_moments, alpha, height >> 1
     );
-    return CHECK_KERNEL_ON(stream);
+    return CHECK_KERNEL();
 }
 
 extern "C" int _w_moments_accumulate(
@@ -301,5 +301,5 @@ extern "C" int _w_moments_accumulate(
     w_moments_accumulate_kernel<<<grid, block, 0, stream>>>(
         w_moments, z0_pows2, z_pows2, gamma, num_queries, log_height, height
     );
-    return CHECK_KERNEL_ON(stream);
+    return CHECK_KERNEL();
 }

@@ -92,7 +92,7 @@ extern "C" int _precompute_lambda_combinations(
     precompute_lambda_combinations_kernel<<<blocks, threads, 0, stream>>>(
         out, headers, lambda_terms, lambda_pows, num_monomials
     );
-    return CHECK_KERNEL_ON(stream);
+    return CHECK_KERNEL();
 }
 
 // ============================================================================
@@ -175,7 +175,7 @@ extern "C" int _zerocheck_monomial_batched(
     zerocheck_monomial_kernel<<<grid, block, shmem, stream>>>(
         tmp_sums, block_ctxs, air_ctxs, threads_per_block
     );
-    int err = CHECK_KERNEL_ON(stream);
+    int err = CHECK_KERNEL();
     if (err != 0)
         return err;
 
@@ -190,7 +190,7 @@ extern "C" int _zerocheck_monomial_batched(
         tmp_sums, output, air_block_offsets, num_x
     );
 
-    return CHECK_KERNEL_ON(stream);
+    return CHECK_KERNEL();
 }
 
 // ============================================================================
@@ -283,7 +283,7 @@ extern "C" int _zerocheck_monomial_par_y_batched(
     zerocheck_monomial_par_y_kernel<<<grid, block, shmem, stream>>>(
         tmp_sums, block_ctxs, air_ctxs, threads_per_block, chunk_size
     );
-    int err = CHECK_KERNEL_ON(stream);
+    int err = CHECK_KERNEL();
     if (err != 0)
         return err;
 
@@ -297,7 +297,7 @@ extern "C" int _zerocheck_monomial_par_y_batched(
         tmp_sums, output, air_block_offsets, num_x
     );
 
-    return CHECK_KERNEL_ON(stream);
+    return CHECK_KERNEL();
 }
 
 // ============================================================================
@@ -344,7 +344,7 @@ extern "C" int _precompute_logup_numer_combinations(
     precompute_logup_combinations_kernel<false><<<blocks, threads, 0, stream>>>(
         out, headers, terms, nullptr, eq_3bs, num_monomials
     );
-    return CHECK_KERNEL_ON(stream);
+    return CHECK_KERNEL();
 }
 
 extern "C" int _precompute_logup_denom_combinations(
@@ -362,7 +362,7 @@ extern "C" int _precompute_logup_denom_combinations(
     precompute_logup_combinations_kernel<true><<<blocks, threads, 0, stream>>>(
         out, headers, terms, beta_pows, eq_3bs, num_monomials
     );
-    return CHECK_KERNEL_ON(stream);
+    return CHECK_KERNEL();
 }
 
 // AIR context for logup monomial MLE evaluation
@@ -469,7 +469,7 @@ extern "C" int _logup_monomial_batched(
     logup_monomial_kernel<false><<<grid, block, shmem, stream>>>(
         tmp_sums, block_ctxs, common_ctxs, numer_ctxs
     );
-    int err = CHECK_KERNEL_ON(stream);
+    int err = CHECK_KERNEL();
     if (err != 0)
         return err;
 
@@ -477,7 +477,7 @@ extern "C" int _logup_monomial_batched(
     logup_monomial_kernel<true><<<grid, block, shmem, stream>>>(
         tmp_sums, block_ctxs, common_ctxs, denom_ctxs
     );
-    err = CHECK_KERNEL_ON(stream);
+    err = CHECK_KERNEL();
     if (err != 0)
         return err;
 
@@ -495,7 +495,7 @@ extern "C" int _logup_monomial_batched(
         2 * num_x
     );
 
-    return CHECK_KERNEL_ON(stream);
+    return CHECK_KERNEL();
 }
 
 } // namespace logup_zerocheck_mle

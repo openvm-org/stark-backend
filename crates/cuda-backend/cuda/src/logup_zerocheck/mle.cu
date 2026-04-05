@@ -389,7 +389,7 @@ extern "C" int _zerocheck_eval_mle(
     } else {
         zerocheck_mle_kernel<false><<<grid, block, shmem_bytes, stream>>>(ZEROCHECK_KERNEL_ARGS);
     }
-    int err = CHECK_KERNEL_ON(stream);
+    int err = CHECK_KERNEL();
     if (err != 0)
         return err;
 
@@ -401,7 +401,7 @@ extern "C" int _zerocheck_eval_mle(
     sumcheck::final_reduce_block_sums<<<num_x, reduce_block, reduce_shmem, stream>>>(
         tmp_sums_buffer, output, num_blocks
     );
-    return CHECK_KERNEL_ON(stream);
+    return CHECK_KERNEL();
 }
 
 // (Not a launcher) Utility function to calculate required size of temp sum buffer.
@@ -455,7 +455,7 @@ extern "C" int _logup_eval_mle(
     } else {
         logup_mle_kernel<false><<<grid, block, shmem_bytes, stream>>>(LOGUP_KERNEL_ARGS);
     }
-    int err = CHECK_KERNEL_ON(stream);
+    int err = CHECK_KERNEL();
     if (err != 0)
         return err;
 
@@ -468,7 +468,7 @@ extern "C" int _logup_eval_mle(
     sumcheck::final_reduce_block_sums<<<2 * num_x, reduce_block, reduce_shmem, stream>>>(
         reinterpret_cast<FpExt *>(tmp_sums_buffer), reinterpret_cast<FpExt *>(output), num_blocks
     );
-    return CHECK_KERNEL_ON(stream);
+    return CHECK_KERNEL();
 }
 
 } // namespace logup_zerocheck_mle

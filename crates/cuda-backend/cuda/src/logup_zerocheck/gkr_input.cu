@@ -260,7 +260,7 @@ extern "C" int _logup_gkr_input_eval(
             num_rows_per_tile
         );
     }
-    return CHECK_KERNEL_ON(stream);
+    return CHECK_KERNEL();
 }
 
 } // namespace logup_gkr_input_evaluation

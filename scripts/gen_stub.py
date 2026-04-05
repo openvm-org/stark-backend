@@ -138,6 +138,9 @@ out.append('#define DIGEST_SIZE 8')
 out.append('using Digest = F[DIGEST_SIZE];')
 out.append('#endif')
 
+# -- CUDA runtime type placeholder ------------------------------------------
+out.append('using cudaStream_t = void*;')
+
 # -- Fallback array dimension constants ------------------------------------
 for dim in undefined_array_dims:
     out.append(f'#ifndef {dim}')

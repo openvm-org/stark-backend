@@ -396,7 +396,7 @@ extern "C" int _zerocheck_batch_eval_mle(
     zerocheck_batch_mle_kernel<<<grid, block, shmem_bytes, stream>>>(
         tmp_sums_buffer, block_ctxs, zc_ctxs, lambda_pows, lambda_len
     );
-    int err = CHECK_KERNEL_ON(stream);
+    int err = CHECK_KERNEL();
     if (err != 0)
         return err;
 
@@ -410,7 +410,7 @@ extern "C" int _zerocheck_batch_eval_mle(
         tmp_sums_buffer, output, air_block_offsets, num_x
     );
 
-    return CHECK_KERNEL_ON(stream);
+    return CHECK_KERNEL();
 }
 
 extern "C" int _logup_batch_eval_mle(
@@ -431,7 +431,7 @@ extern "C" int _logup_batch_eval_mle(
     size_t shmem_bytes = div_ceil(block.x, WARP_SIZE) * sizeof(FpExt);
 
     logup_batch_mle_kernel<<<grid, block, shmem_bytes, stream>>>(tmp_sums_buffer, block_ctxs, logup_ctxs);
-    int err = CHECK_KERNEL_ON(stream);
+    int err = CHECK_KERNEL();
     if (err != 0)
         return err;
 
@@ -449,7 +449,7 @@ extern "C" int _logup_batch_eval_mle(
         2 * num_x
     );
 
-    return CHECK_KERNEL_ON(stream);
+    return CHECK_KERNEL();
 }
 
 } // namespace logup_zerocheck_mle

@@ -67,7 +67,7 @@ extern "C" int _generate_device_ntt_twiddles(Fp *d_twiddles, cudaStream_t stream
     );
     cudaStreamSynchronize(stream);
 
-    return CHECK_KERNEL_ON(stream);
+    return CHECK_KERNEL();
 }
 
 // ============================================================================
@@ -128,7 +128,7 @@ int launch_batch_ntt_small(
             buffer, l_skip, cnt_blocks
         );
 
-    return CHECK_KERNEL_ON(stream);
+    return CHECK_KERNEL();
 }
 
 extern "C" int _batch_ntt_small(

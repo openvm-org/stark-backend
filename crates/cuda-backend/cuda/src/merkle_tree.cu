@@ -231,7 +231,7 @@ extern "C" int _poseidon2_compressing_row_hashes(
     poseidon2_compressing_row_hashes_kernel<<<grid, block, shmem_bytes, stream>>>(
         out, matrix, width, height, query_stride, log_rows_per_query
     );
-    return CHECK_KERNEL_ON(stream);
+    return CHECK_KERNEL();
 }
 
 extern "C" int _poseidon2_compressing_row_hashes_ext(
@@ -254,7 +254,7 @@ extern "C" int _poseidon2_compressing_row_hashes_ext(
     poseidon2_compressing_row_hashes_ext_kernel<<<grid, block, shmem_bytes, stream>>>(
         out, matrix, width, height, query_stride, log_rows_per_query
     );
-    return CHECK_KERNEL_ON(stream);
+    return CHECK_KERNEL();
 }
 
 extern "C" int _poseidon2_strided_compress_layer(
@@ -266,7 +266,7 @@ extern "C" int _poseidon2_strided_compress_layer(
     poseidon2_strided_compress_layer_kernel<<<grid, block, 0, stream>>>(
         output, prev_layer, output_size, stride
     );
-    return CHECK_KERNEL_ON(stream);
+    return CHECK_KERNEL();
 }
 
 // NOTE[jpw]: adding this function in CUDA to ensure the compiler can optimize stride = 1 (not sure this would happen across FFI boundary).
@@ -277,7 +277,7 @@ extern "C" int _poseidon2_adjacent_compress_layer(
     size_t output_size, cudaStream_t stream) {
     auto [grid, block] = kernel_launch_params(output_size);
     poseidon2_strided_compress_layer_kernel<<<grid, block, 0, stream>>>(output, prev_layer, output_size, 1);
-    return CHECK_KERNEL_ON(stream);
+    return CHECK_KERNEL();
 }
 
 extern "C" int _query_digest_layers(
@@ -300,5 +300,5 @@ extern "C" int _query_digest_layers(
     query_digest_layers<<<grid, block, 0, stream>>>(
         d_digest_matrix, d_layers_ptr, d_indices, num_query, num_layer
     );
-    return CHECK_KERNEL_ON(stream);
+    return CHECK_KERNEL();
 }

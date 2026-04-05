@@ -236,7 +236,7 @@ int matrix_transpose_impl(T *output, const T *input, size_t col_size, size_t row
 
     matrix_transpose_kernel<T><<<grid, block, 0, stream>>>(output, input, col_size, row_size);
 
-    return CHECK_KERNEL_ON(stream);
+    return CHECK_KERNEL();
 }
 
 extern "C" int _matrix_transpose_fp(Fp *output, const Fp *input, size_t col_size, size_t row_size, cudaStream_t stream) {
@@ -273,7 +273,7 @@ extern "C" int _matrix_get_rows_fp(
     matrix_get_rows_fp_kernel<<<grid, block, 0, stream>>>(
         output, input, row_indices, matrix_width, matrix_height
     );
-    return CHECK_KERNEL_ON(stream);
+    return CHECK_KERNEL();
 }
 
 extern "C" int _split_ext_to_base_col_major_matrix(
@@ -287,7 +287,7 @@ extern "C" int _split_ext_to_base_col_major_matrix(
     split_ext_to_base_col_major_matrix_kernel<<<grid, block, 0, stream>>>(
         d_matrix, d_poly, poly_len, matrix_height
     );
-    return CHECK_KERNEL_ON(stream);
+    return CHECK_KERNEL();
 }
 
 extern "C" int _batch_rotate_pad(
@@ -304,7 +304,7 @@ extern "C" int _batch_rotate_pad(
     grid.y = std::min(num_poly, MAX_GRID_DIM);
     grid.z = (num_poly + grid.y - 1) / grid.y;
     batch_rotate_pad_kernel<<<grid, block, 0, stream>>>(out, in, width, num_x, domain_size, padded_size);
-    return CHECK_KERNEL_ON(stream);
+    return CHECK_KERNEL();
 }
 
 extern "C" int _lift_padded_matrix_evals(
@@ -319,7 +319,7 @@ extern "C" int _lift_padded_matrix_evals(
     lift_padded_matrix_evals_kernel<<<grid, block, 0, stream>>>(
         matrix, width, height, lifted_height, padded_height
     );
-    return CHECK_KERNEL_ON(stream);
+    return CHECK_KERNEL();
 }
 
 extern "C" int _collapse_strided_matrix(
@@ -333,7 +333,7 @@ extern "C" int _collapse_strided_matrix(
     auto lifted_height = height * stride;
     auto [grid, block] = kernel_launch_2d_params(height, width);
     collapse_strided_matrix_kernel<<<grid, block, 0, stream>>>(out, in, width, lifted_height, height, stride);
-    return CHECK_KERNEL_ON(stream);
+    return CHECK_KERNEL();
 }
 
 extern "C" int _batch_expand_pad(
@@ -346,7 +346,7 @@ extern "C" int _batch_expand_pad(
 ) {
     auto [grid, block] = kernel_launch_params(outSize);
     batch_expand_pad_kernel<<<grid, block, 0, stream>>>(out, in, polyCount, outSize, inSize);
-    return CHECK_KERNEL_ON(stream);
+    return CHECK_KERNEL();
 }
 
 extern "C" int _batch_expand_pad_wide(
@@ -362,5 +362,5 @@ extern "C" int _batch_expand_pad_wide(
     grid.z = (width + grid.y - 1) / grid.y;
     assert(grid.z <= MAX_GRID_DIM);
     batch_expand_pad_wide_kernel<<<grid, block, 0, stream>>>(out, in, width, padded_height, height);
-    return CHECK_KERNEL_ON(stream);
+    return CHECK_KERNEL();
 }

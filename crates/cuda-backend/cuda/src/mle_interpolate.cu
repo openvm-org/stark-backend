@@ -226,7 +226,7 @@ int launch_mle_interpolate_stage(Field *buffer, size_t buffer_len, uint32_t step
     size_t total_pairs = buffer_len >> 1;
     auto [grid, block] = kernel_launch_params(total_pairs);
     mle_interpolate_stage_kernel<Field, EvalToCoeff><<<grid, block, 0, stream>>>(buffer, total_pairs, step);
-    return CHECK_KERNEL_ON(stream);
+    return CHECK_KERNEL();
 }
 
 extern "C" int _mle_interpolate_stage(
@@ -279,7 +279,7 @@ int launch_mle_interpolate_stage_2d(
     grid.y = width;
     mle_interpolate_stage_2d_kernel<Field, EvalToCoeff>
         <<<grid, block, 0, stream>>>(buffer, padded_height, span, step);
-    return CHECK_KERNEL_ON(stream);
+    return CHECK_KERNEL();
 }
 
 extern "C" int _mle_interpolate_stage_2d(
@@ -324,7 +324,7 @@ int launch_mle_interpolate_fused_2d(
     grid.y = width;
     mle_interpolate_fused_2d_kernel<EvalToCoeff, NumStages, RightPad>
         <<<grid, block, 0, stream>>>(buffer, padded_height, log_stride, start_step);
-    return CHECK_KERNEL_ON(stream);
+    return CHECK_KERNEL();
 }
 
 // Recursive template dispatch for num_stages (1-5)
@@ -409,7 +409,7 @@ int launch_mle_interpolate_shared_2d(
         <<<grid, block_size, smem_size, stream>>>(
             buffer, padded_height, log_stride, start_log_step, end_log_step
         );
-    return CHECK_KERNEL_ON(stream);
+    return CHECK_KERNEL();
 }
 
 extern "C" int _mle_interpolate_shared_2d(

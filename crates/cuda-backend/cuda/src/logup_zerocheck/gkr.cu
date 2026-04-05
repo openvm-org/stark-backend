@@ -889,7 +889,7 @@ template <bool revert, bool apply_alpha>
 int launch_frac_build_tree_layer(FracExt *layer, size_t layer_size, FpExt alpha, cudaStream_t stream) {
     auto [grid, block] = kernel_launch_params(layer_size);
     frac_build_tree_layer_kernel<revert, apply_alpha><<<grid, block, 0, stream>>>(layer, layer_size, alpha);
-    return CHECK_KERNEL_ON(stream);
+    return CHECK_KERNEL();
 }
 
 extern "C" int _frac_build_tree_layer(
@@ -921,7 +921,7 @@ extern "C" int _frac_build_tree_two_layers(FracExt *layer, size_t half_i1, cudaS
     // which has higher register pressure than the single-layer build kernel.
     auto [grid, block] = kernel_launch_params(half_i1, 256);
     frac_build_tree_two_layers_kernel<<<grid, block, 0, stream>>>(layer, (uint32_t)half_i1);
-    return CHECK_KERNEL_ON(stream);
+    return CHECK_KERNEL();
 }
 
 inline uint32_t min_blocks_target_for_device(uint32_t blocks_per_sm, uint32_t fallback_blocks) {
@@ -984,7 +984,7 @@ inline int final_reduce_block_sums(FpExt *tmp_block_sums, FpExt *out, uint32_t n
     size_t reduce_shmem = std::max(1u, reduce_warps) * sizeof(FpExt);
     sumcheck::static_final_reduce_block_sums<GKR_SP_DEG>
         <<<GKR_SP_DEG, reduce_block, reduce_shmem, stream>>>(tmp_block_sums, out, num_blocks);
-    return CHECK_KERNEL_ON(stream);
+    return CHECK_KERNEL();
 }
 
 extern "C" int _frac_compute_round(
@@ -1013,7 +1013,7 @@ extern "C" int _frac_compute_round(
         lambda,
         tmp_block_sums
     );
-    int err = CHECK_KERNEL_ON(stream);
+    int err = CHECK_KERNEL();
     if (err != 0)
         return err;
 
@@ -1049,7 +1049,7 @@ extern "C" int _frac_compute_round_and_revert(
         lambda,
         tmp_block_sums
     );
-    int err = CHECK_KERNEL_ON(stream);
+    int err = CHECK_KERNEL();
     if (err != 0)
         return err;
 
@@ -1094,7 +1094,7 @@ extern "C" int _frac_compute_round_and_fold(
         tmp_block_sums,
         dst_pq_buffer
     );
-    int err = CHECK_KERNEL_ON(stream);
+    int err = CHECK_KERNEL();
     if (err != 0)
         return err;
 
@@ -1137,7 +1137,7 @@ extern "C" int _frac_compute_round_and_fold_inplace(
         r_prev,
         tmp_block_sums
     );
-    int err = CHECK_KERNEL_ON(stream);
+    int err = CHECK_KERNEL();
     if (err != 0)
         return err;
 
@@ -1212,7 +1212,7 @@ extern "C" int _frac_precompute_m_build(
     if (launch_err != 0) {
         return launch_err;
     }
-    int err = CHECK_KERNEL_ON(stream);
+    int err = CHECK_KERNEL();
     if (err != 0) {
         return err;
     }
@@ -1225,7 +1225,7 @@ extern "C" int _frac_precompute_m_build(
         (uint32_t)total_entries,
         m_total
     );
-    return CHECK_KERNEL_ON(stream);
+    return CHECK_KERNEL();
 }
 
 extern "C" int _frac_precompute_m_eval_round(
@@ -1250,7 +1250,7 @@ extern "C" int _frac_precompute_m_eval_round(
         eq_suffix,
         out
     );
-    return CHECK_KERNEL_ON(stream);
+    return CHECK_KERNEL();
 }
 
 extern "C" int _frac_multifold(
@@ -1269,7 +1269,7 @@ extern "C" int _frac_multifold(
 
 #define DISPATCH_MULTIFOLD(W) \
     multifold_kernel<W><<<grid, block, 0, stream>>>(src, dst, (uint32_t)out_len, eq_r_window); \
-    return CHECK_KERNEL_ON(stream);
+    return CHECK_KERNEL();
 
     switch (w) {
         case 2: { DISPATCH_MULTIFOLD(2) }
@@ -1293,20 +1293,20 @@ extern "C" int _frac_fold_fpext_columns(const FracExt *src, FracExt *dst, size_t
     fold_ef_columns_kernel<<<grid, block, 0, stream>>>(
         reinterpret_cast<const FpExt *>(src), reinterpret_cast<FpExt *>(dst), quarter_fpext, r
     );
-    return CHECK_KERNEL_ON(stream);
+    return CHECK_KERNEL();
 }
 
 extern "C" int _frac_add_alpha(FracExt *data, size_t len, FpExt alpha, cudaStream_t stream) {
     auto [grid, block] = kernel_launch_params(len);
     add_alpha_kernel<<<grid, block, 0, stream>>>(data, len, alpha);
-    return CHECK_KERNEL_ON(stream);
+    return CHECK_KERNEL();
 }
 
 extern "C" int _frac_vector_scalar_multiply_ext_fp(FracExt *frac_vec, Fp scalar, uint32_t length, cudaStream_t stream) {
     auto [grid, block] = kernel_launch_params(length);
     frac_vector_scalar_multiply_kernel<Fp, FpExt>
         <<<grid, block, 0, stream>>>(reinterpret_cast<std::pair<FpExt, FpExt> *>(frac_vec), scalar, length);
-    return CHECK_KERNEL_ON(stream);
+    return CHECK_KERNEL();
 }
 
 
@@ -1459,7 +1459,7 @@ extern "C" int _bit_rev_frac_ext_build_k2(
     uint32_t grid_x = (uint32_t)(domain_size / Z_COUNT / bsize);
     bit_rev_frac_build_k2_kernel<<<dim3(grid_x), bsize, shmem_bytes, stream>>>(
         inout, lg_domain_size, alpha);
-    return CHECK_KERNEL_ON(stream);
+    return CHECK_KERNEL();
 }
 
 } // namespace fractional_sumcheck_gkr

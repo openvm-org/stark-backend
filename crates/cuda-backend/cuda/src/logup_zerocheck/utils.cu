@@ -183,7 +183,7 @@ extern "C" int _fold_ple_from_evals(
             new_height
         );
     }
-    return CHECK_KERNEL_ON(stream);
+    return CHECK_KERNEL();
 }
 
 extern "C" int _interpolate_columns(
@@ -195,7 +195,7 @@ extern "C" int _interpolate_columns(
     auto [grid, block] = kernel_launch_params(num_y * num_columns, 512);
 
     interpolate_columns_kernel<<<grid, block, 0, stream>>>(interpolated, columns, s_deg, num_y, num_columns);
-    return CHECK_KERNEL_ON(stream);
+    return CHECK_KERNEL();
 }
 
 extern "C" int _frac_matrix_vertically_repeat(
@@ -209,7 +209,7 @@ extern "C" int _frac_matrix_vertically_repeat(
     grid.z = (width + grid.y - 1) / grid.y;
     assert(grid.z <= MAX_GRID_DIM);
     frac_matrix_vertically_repeat_kernel<<<grid, block, 0, stream>>>(out, in, width, lifted_height, height);
-    return CHECK_KERNEL_ON(stream);
+    return CHECK_KERNEL();
 }
 
 extern "C" int _frac_matrix_vertically_repeat_ext(
@@ -233,7 +233,7 @@ extern "C" int _frac_matrix_vertically_repeat_ext(
         lifted_height,
         height
     );
-    return CHECK_KERNEL_ON(stream);
+    return CHECK_KERNEL();
 }
 
 } // namespace

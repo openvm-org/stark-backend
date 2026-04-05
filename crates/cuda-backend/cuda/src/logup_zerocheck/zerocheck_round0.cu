@@ -576,7 +576,7 @@ int launch_zerocheck_ntt_evaluate_constraints(
             height,
             g_shift
         );
-    int err = CHECK_KERNEL_ON(stream);
+    int err = CHECK_KERNEL();
     if (err != 0) {
         return err;
     }
@@ -590,7 +590,7 @@ int launch_zerocheck_ntt_evaluate_constraints(
         tmp_sums_buffer, output, num_blocks
     );
 
-    return CHECK_KERNEL_ON(stream);
+    return CHECK_KERNEL();
 }
 
 // Generate dispatcher for num_cosets (1-4) x is_global x needs_shmem
@@ -651,7 +651,7 @@ int launch_zerocheck_coset_parallel(
             height,
             g_shift
         );
-    int err = CHECK_KERNEL_ON(stream);
+    int err = CHECK_KERNEL();
     if (err != 0) {
         return err;
     }
@@ -665,7 +665,7 @@ int launch_zerocheck_coset_parallel(
         tmp_sums_buffer, output, num_blocks
     );
 
-    return CHECK_KERNEL_ON(stream);
+    return CHECK_KERNEL();
 }
 
 extern "C" int _zerocheck_ntt_eval_constraints(
@@ -751,7 +751,7 @@ extern "C" int _fold_selectors_round0(
 ) {
     auto [grid, block] = kernel_launch_params(num_x);
     fold_selectors_round0_kernel<<<grid, block, 0, stream>>>(out, in, is_first, is_last, num_x);
-    return CHECK_KERNEL_ON(stream);
+    return CHECK_KERNEL();
 }
 
 } // namespace zerocheck_round0
