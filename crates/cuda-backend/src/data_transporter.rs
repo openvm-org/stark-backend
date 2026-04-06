@@ -185,7 +185,7 @@ pub fn transport_and_unstack_single_data_h2d<HS: GpuHashScheme>(
             .map_err(ProverError::CollapseStrided)?;
         }
         // Wait for kernel to finish so we can safely drop strided_trace
-        unsafe { sync_stream(ctx.stream.as_raw()) }.map_err(ProverError::CurrentStreamSync)?;
+        unsafe { sync_stream(ctx.stream.as_raw()) }.map_err(ProverError::StreamSynchronize)?;
         drop(strided_trace);
         buf
     };
@@ -254,7 +254,7 @@ pub fn transport_pcs_data_h2d<D: Copy + Clone + PartialEq + Send + Sync + 'stati
         .cache_stacked_matrix
         .then(|| PleMatrix::from_evals(layout.l_skip(), d_matrix_evals, height, width, ctx));
     let d_tree = transport_merkle_tree_h2d(tree, prover_config.cache_rs_code_matrix, ctx)?;
-    unsafe { sync_stream(ctx.stream.as_raw()) }.map_err(ProverError::CurrentStreamSync)?;
+    unsafe { sync_stream(ctx.stream.as_raw()) }.map_err(ProverError::StreamSynchronize)?;
 
     Ok(StackedPcsDataGpu {
         layout: layout.clone(),

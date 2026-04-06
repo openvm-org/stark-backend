@@ -518,7 +518,7 @@ impl VirtualMemoryPool {
     }
 
     // ========================================================================
-    // Defragmentation — legacy PTDS path
+    // Defragmentation
     // ========================================================================
 
     fn defragment_or_create_new_pages(
