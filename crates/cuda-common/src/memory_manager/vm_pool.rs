@@ -245,6 +245,12 @@ impl VirtualMemoryPool {
                     ByteSize::b(total_mem as u64)
                 );
             }
+            // Ensure the event recorded during pre-allocation is completed before
+            // any caller uses the pool. Without this, find_best_fit's Phase 1b
+            // may see the event as not-yet-completed (race with GPU processing)
+            // and fall through to defragment_or_create_new_pages, remapping the
+            // pre-allocated pages to a different VA location.
+            init_stream.synchronize().expect("init_stream sync failed");
         }
 
         pool
