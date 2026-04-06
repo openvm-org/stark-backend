@@ -126,9 +126,15 @@ fn verify_field(
     ) -> i32,
 ) -> Result<(), String> {
     // Create test data
-    let d_a = random_u32s(n * elems_per_field, 11111).to_device().unwrap();
-    let d_b = random_u32s(n * elems_per_field, 22222).to_device().unwrap();
-    let d_c = random_u32s(n * elems_per_field, 33333).to_device().unwrap();
+    let d_a = random_u32s(n * elems_per_field, 11111)
+        .to_device_on(bench_ctx())
+        .unwrap();
+    let d_b = random_u32s(n * elems_per_field, 22222)
+        .to_device_on(bench_ctx())
+        .unwrap();
+    let d_c = random_u32s(n * elems_per_field, 33333)
+        .to_device_on(bench_ctx())
+        .unwrap();
 
     // Initialize
     cuda_check(unsafe { init_fn(d_a.as_mut_raw_ptr(), d_a.as_ptr(), n) });
@@ -136,14 +142,14 @@ fn verify_field(
     cuda_check(unsafe { init_fn(d_c.as_mut_raw_ptr(), d_c.as_ptr(), n) });
 
     // Test 1: a * inv(a) = 1
-    let d_failures = DeviceBuffer::<u32>::with_capacity(1);
-    d_failures.fill_zero().unwrap();
+    let d_failures = DeviceBuffer::<u32>::with_capacity_on(1, bench_ctx());
+    d_failures.fill_zero_on(bench_ctx()).unwrap();
     cuda_check(unsafe { inv_fn(d_failures.as_mut_raw_ptr() as *mut u32, d_a.as_raw_ptr(), n) });
-    let inv_failures = d_failures.to_host().unwrap();
+    let inv_failures = d_failures.to_host_on(bench_ctx()).unwrap();
 
     // Test 2: Distributivity
-    let d_failures2 = DeviceBuffer::<u32>::with_capacity(1);
-    d_failures2.fill_zero().unwrap();
+    let d_failures2 = DeviceBuffer::<u32>::with_capacity_on(1, bench_ctx());
+    d_failures2.fill_zero_on(bench_ctx()).unwrap();
     cuda_check(unsafe {
         distrib_fn(
             d_failures2.as_mut_raw_ptr() as *mut u32,
@@ -153,7 +159,7 @@ fn verify_field(
             n,
         )
     });
-    let distrib_failures = d_failures2.to_host().unwrap();
+    let distrib_failures = d_failures2.to_host_on(bench_ctx()).unwrap();
 
     if inv_failures[0] != 0 {
         return Err(format!(

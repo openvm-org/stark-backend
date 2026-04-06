@@ -5,13 +5,18 @@
 //!
 //! Throughput is reported in Gops/s (Giga-operations per second = billion ops/sec).
 
-use std::{ffi::c_void, time::Instant};
+use std::{ffi::c_void, sync::OnceLock, time::Instant};
 
 use openvm_cuda_common::{
     copy::MemCopyH2D,
     d_buffer::DeviceBuffer,
-    stream::{cudaStreamPerThread, cudaStream_t, CudaStream},
+    stream::{cudaStream_t, DeviceContext},
 };
+
+pub fn bench_ctx() -> &'static DeviceContext {
+    static CTX: OnceLock<DeviceContext> = OnceLock::new();
+    CTX.get_or_init(|| DeviceContext::for_current_device().expect("benchmark CUDA context"))
+}
 
 // ============================================================================
 // FFI Bindings
@@ -485,28 +490,28 @@ mod ffi {
 
 macro_rules! wrap_init_u32 {
     ($vis:vis $name:ident) => {
-        /// Launches the benchmark init kernel on the PTDS benchmark stream.
+        /// Launches the benchmark init kernel on the benchmark stream.
         ///
         /// # Safety
         /// The caller must provide valid device pointers for `out` and `raw_data`,
         /// and `out` must have capacity for `n` field elements of the target type.
         #[inline]
         $vis unsafe extern "C" fn $name(out: *mut c_void, raw_data: *const u32, n: usize) -> i32 {
-            ffi::$name(out, raw_data, n, cudaStreamPerThread)
+            ffi::$name(out, raw_data, n, bench_ctx().stream.as_raw())
         }
     };
 }
 
 macro_rules! wrap_init_u64 {
     ($vis:vis $name:ident) => {
-        /// Launches the benchmark init kernel on the PTDS benchmark stream.
+        /// Launches the benchmark init kernel on the benchmark stream.
         ///
         /// # Safety
         /// The caller must provide valid device pointers for `out` and `raw_data`,
         /// and `out` must have capacity for `n` field elements of the target type.
         #[inline]
         $vis unsafe extern "C" fn $name(out: *mut c_void, raw_data: *const u64, n: usize) -> i32 {
-            ffi::$name(out, raw_data, n, cudaStreamPerThread)
+            ffi::$name(out, raw_data, n, bench_ctx().stream.as_raw())
         }
     };
 }
@@ -521,7 +526,7 @@ macro_rules! wrap_binary {
             n: usize,
             reps: i32,
         ) -> i32 {
-            ffi::$name(out, a, b, n, reps, cudaStreamPerThread)
+            ffi::$name(out, a, b, n, reps, bench_ctx().stream.as_raw())
         }
     };
 }
@@ -530,7 +535,7 @@ macro_rules! wrap_unary {
     ($name:ident) => {
         #[inline]
         unsafe extern "C" fn $name(out: *mut c_void, a: *const c_void, n: usize, reps: i32) -> i32 {
-            ffi::$name(out, a, n, reps, cudaStreamPerThread)
+            ffi::$name(out, a, n, reps, bench_ctx().stream.as_raw())
         }
     };
 }
@@ -609,14 +614,14 @@ wrap_init_u32!(init_poseidon2_bb);
 
 #[inline]
 unsafe extern "C" fn run_poseidon2_bb(states: *mut c_void, n: usize, reps: i32) -> i32 {
-    ffi::run_poseidon2_bb(states, n, reps, cudaStreamPerThread)
+    ffi::run_poseidon2_bb(states, n, reps, bench_ctx().stream.as_raw())
 }
 
 wrap_init_u32!(init_poseidon2_kb);
 
 #[inline]
 unsafe extern "C" fn run_poseidon2_kb(states: *mut c_void, n: usize, reps: i32) -> i32 {
-    ffi::run_poseidon2_kb(states, n, reps, cudaStreamPerThread)
+    ffi::run_poseidon2_kb(states, n, reps, bench_ctx().stream.as_raw())
 }
 
 /// Check CUDA return code, panic on error
@@ -626,8 +631,7 @@ pub fn cuda_check(code: i32) {
 
 /// Sync and check
 pub fn sync() {
-    let stream = CudaStream::ptds();
-    stream.synchronize().expect("sync failed");
+    bench_ctx().stream.synchronize().expect("sync failed");
 }
 
 // ============================================================================
@@ -808,9 +812,9 @@ pub fn bench_fp(config: &BenchConfig) -> FieldBenchResult {
     let reps = config.ops_per_element;
 
     // Only 3 device buffers: a, b, out (init works in-place)
-    let d_a = random_u32s(n, 12345).to_device().unwrap();
-    let d_b = random_u32s(n, 67890).to_device().unwrap();
-    let d_out = DeviceBuffer::<u32>::with_capacity(n);
+    let d_a = random_u32s(n, 12345).to_device_on(bench_ctx()).unwrap();
+    let d_b = random_u32s(n, 67890).to_device_on(bench_ctx()).unwrap();
+    let d_out = DeviceBuffer::<u32>::with_capacity_on(n, bench_ctx());
 
     // Benchmark init (in-place: raw u32 -> Fp) - also initializes d_a
     let init = measure(config, n as u64, || {
@@ -864,9 +868,9 @@ pub fn bench_fp4(config: &BenchConfig) -> FieldBenchResult {
     let n = config.num_elements;
     let reps = config.ops_per_element;
 
-    let d_a = random_u32s(n * 4, 11111).to_device().unwrap();
-    let d_b = random_u32s(n * 4, 22222).to_device().unwrap();
-    let d_out = DeviceBuffer::<u32>::with_capacity(n * 4);
+    let d_a = random_u32s(n * 4, 11111).to_device_on(bench_ctx()).unwrap();
+    let d_b = random_u32s(n * 4, 22222).to_device_on(bench_ctx()).unwrap();
+    let d_out = DeviceBuffer::<u32>::with_capacity_on(n * 4, bench_ctx());
 
     let init = measure(config, n as u64, || {
         cuda_check(unsafe { init_fp4(d_a.as_mut_raw_ptr(), d_a.as_ptr(), n) });
@@ -920,9 +924,9 @@ pub fn bench_fpext(config: &BenchConfig) -> FieldBenchResult {
     let reps = config.ops_per_element;
 
     // Only 3 device buffers: a, b, out (init works in-place)
-    let d_a = random_u32s(n * 4, 12345).to_device().unwrap();
-    let d_b = random_u32s(n * 4, 67890).to_device().unwrap();
-    let d_out = DeviceBuffer::<u32>::with_capacity(n * 4);
+    let d_a = random_u32s(n * 4, 12345).to_device_on(bench_ctx()).unwrap();
+    let d_b = random_u32s(n * 4, 67890).to_device_on(bench_ctx()).unwrap();
+    let d_out = DeviceBuffer::<u32>::with_capacity_on(n * 4, bench_ctx());
 
     // Benchmark init (in-place: raw u32s -> FpExt) - also initializes d_a
     let init = measure(config, n as u64, || {
@@ -977,9 +981,9 @@ pub fn bench_fp5(config: &BenchConfig) -> FieldBenchResult {
     let reps = config.ops_per_element;
 
     // Only 3 device buffers: a, b, out (init works in-place)
-    let d_a = random_u32s(n * 5, 12345).to_device().unwrap();
-    let d_b = random_u32s(n * 5, 67890).to_device().unwrap();
-    let d_out = DeviceBuffer::<u32>::with_capacity(n * 5);
+    let d_a = random_u32s(n * 5, 12345).to_device_on(bench_ctx()).unwrap();
+    let d_b = random_u32s(n * 5, 67890).to_device_on(bench_ctx()).unwrap();
+    let d_out = DeviceBuffer::<u32>::with_capacity_on(n * 5, bench_ctx());
 
     // Benchmark init (in-place: raw u32s -> Fp5) - also initializes d_a
     let init = measure(config, n as u64, || {
@@ -1034,9 +1038,9 @@ pub fn bench_fp6(config: &BenchConfig) -> FieldBenchResult {
     let reps = config.ops_per_element;
 
     // Only 3 device buffers: a, b, out (init works in-place)
-    let d_a = random_u32s(n * 6, 12345).to_device().unwrap();
-    let d_b = random_u32s(n * 6, 67890).to_device().unwrap();
-    let d_out = DeviceBuffer::<u32>::with_capacity(n * 6);
+    let d_a = random_u32s(n * 6, 12345).to_device_on(bench_ctx()).unwrap();
+    let d_b = random_u32s(n * 6, 67890).to_device_on(bench_ctx()).unwrap();
+    let d_out = DeviceBuffer::<u32>::with_capacity_on(n * 6, bench_ctx());
 
     // Benchmark init (in-place: raw u32s -> Fp6) - also initializes d_a
     let init = measure(config, n as u64, || {
@@ -1090,9 +1094,9 @@ pub fn bench_fp2x3(config: &BenchConfig) -> FieldBenchResult {
     let n = config.num_elements;
     let reps = config.ops_per_element;
 
-    let d_a = random_u32s(n * 6, 12345).to_device().unwrap();
-    let d_b = random_u32s(n * 6, 67890).to_device().unwrap();
-    let d_out = DeviceBuffer::<u32>::with_capacity(n * 6);
+    let d_a = random_u32s(n * 6, 12345).to_device_on(bench_ctx()).unwrap();
+    let d_b = random_u32s(n * 6, 67890).to_device_on(bench_ctx()).unwrap();
+    let d_out = DeviceBuffer::<u32>::with_capacity_on(n * 6, bench_ctx());
 
     let init = measure(config, n as u64, || {
         cuda_check(unsafe { init_fp2x3(d_a.as_mut_raw_ptr(), d_a.as_ptr(), n) });
@@ -1145,9 +1149,9 @@ pub fn bench_fp3x2(config: &BenchConfig) -> FieldBenchResult {
     let n = config.num_elements;
     let reps = config.ops_per_element;
 
-    let d_a = random_u32s(n * 6, 12345).to_device().unwrap();
-    let d_b = random_u32s(n * 6, 67890).to_device().unwrap();
-    let d_out = DeviceBuffer::<u32>::with_capacity(n * 6);
+    let d_a = random_u32s(n * 6, 12345).to_device_on(bench_ctx()).unwrap();
+    let d_b = random_u32s(n * 6, 67890).to_device_on(bench_ctx()).unwrap();
+    let d_out = DeviceBuffer::<u32>::with_capacity_on(n * 6, bench_ctx());
 
     let init = measure(config, n as u64, || {
         cuda_check(unsafe { init_fp3x2(d_a.as_mut_raw_ptr(), d_a.as_ptr(), n) });
@@ -1201,9 +1205,9 @@ pub fn bench_kb(config: &BenchConfig) -> FieldBenchResult {
     let reps = config.ops_per_element;
 
     // Only 3 device buffers: a, b, out (init works in-place)
-    let d_a = random_u32s(n, 12345).to_device().unwrap();
-    let d_b = random_u32s(n, 67890).to_device().unwrap();
-    let d_out = DeviceBuffer::<u32>::with_capacity(n);
+    let d_a = random_u32s(n, 12345).to_device_on(bench_ctx()).unwrap();
+    let d_b = random_u32s(n, 67890).to_device_on(bench_ctx()).unwrap();
+    let d_out = DeviceBuffer::<u32>::with_capacity_on(n, bench_ctx());
 
     // Benchmark init (in-place: raw u32 -> Kb) - also initializes d_a
     let init = measure(config, n as u64, || {
@@ -1258,9 +1262,9 @@ pub fn bench_kb5(config: &BenchConfig) -> FieldBenchResult {
     let reps = config.ops_per_element;
 
     // Kb5 has 5 u32s per element
-    let d_a = random_u32s(n * 5, 11111).to_device().unwrap();
-    let d_b = random_u32s(n * 5, 22222).to_device().unwrap();
-    let d_out = DeviceBuffer::<u32>::with_capacity(n * 5);
+    let d_a = random_u32s(n * 5, 11111).to_device_on(bench_ctx()).unwrap();
+    let d_b = random_u32s(n * 5, 22222).to_device_on(bench_ctx()).unwrap();
+    let d_out = DeviceBuffer::<u32>::with_capacity_on(n * 5, bench_ctx());
 
     let init = measure(config, n as u64, || {
         cuda_check(unsafe { init_kb5(d_a.as_mut_raw_ptr(), d_a.as_ptr(), n) });
@@ -1314,9 +1318,9 @@ pub fn bench_kb6(config: &BenchConfig) -> FieldBenchResult {
     let reps = config.ops_per_element;
 
     // Kb6 has 6 u32s per element
-    let d_a = random_u32s(n * 6, 33333).to_device().unwrap();
-    let d_b = random_u32s(n * 6, 44444).to_device().unwrap();
-    let d_out = DeviceBuffer::<u32>::with_capacity(n * 6);
+    let d_a = random_u32s(n * 6, 33333).to_device_on(bench_ctx()).unwrap();
+    let d_b = random_u32s(n * 6, 44444).to_device_on(bench_ctx()).unwrap();
+    let d_out = DeviceBuffer::<u32>::with_capacity_on(n * 6, bench_ctx());
 
     let init = measure(config, n as u64, || {
         cuda_check(unsafe { init_kb6(d_a.as_mut_raw_ptr(), d_a.as_ptr(), n) });
@@ -1370,9 +1374,9 @@ pub fn bench_kb2x3(config: &BenchConfig) -> FieldBenchResult {
     let reps = config.ops_per_element;
 
     // Kb2x3 has 6 u32s per element
-    let d_a = random_u32s(n * 6, 55555).to_device().unwrap();
-    let d_b = random_u32s(n * 6, 66666).to_device().unwrap();
-    let d_out = DeviceBuffer::<u32>::with_capacity(n * 6);
+    let d_a = random_u32s(n * 6, 55555).to_device_on(bench_ctx()).unwrap();
+    let d_b = random_u32s(n * 6, 66666).to_device_on(bench_ctx()).unwrap();
+    let d_out = DeviceBuffer::<u32>::with_capacity_on(n * 6, bench_ctx());
 
     let init = measure(config, n as u64, || {
         cuda_check(unsafe { init_kb2x3(d_a.as_mut_raw_ptr(), d_a.as_ptr(), n) });
@@ -1426,9 +1430,9 @@ pub fn bench_kb3x2(config: &BenchConfig) -> FieldBenchResult {
     let reps = config.ops_per_element;
 
     // Kb3x2 has 6 u32s per element
-    let d_a = random_u32s(n * 6, 77777).to_device().unwrap();
-    let d_b = random_u32s(n * 6, 88888).to_device().unwrap();
-    let d_out = DeviceBuffer::<u32>::with_capacity(n * 6);
+    let d_a = random_u32s(n * 6, 77777).to_device_on(bench_ctx()).unwrap();
+    let d_b = random_u32s(n * 6, 88888).to_device_on(bench_ctx()).unwrap();
+    let d_out = DeviceBuffer::<u32>::with_capacity_on(n * 6, bench_ctx());
 
     let init = measure(config, n as u64, || {
         cuda_check(unsafe { init_kb3x2(d_a.as_mut_raw_ptr(), d_a.as_ptr(), n) });
@@ -1485,9 +1489,9 @@ pub fn bench_gl(config: &BenchConfig) -> FieldBenchResult {
     let h_a = random_u64s(n, 99999);
     let h_b = random_u64s(n, 88888);
 
-    let d_a = h_a.to_device().unwrap();
-    let d_b = h_b.to_device().unwrap();
-    let d_out = DeviceBuffer::<u64>::with_capacity(n);
+    let d_a = h_a.to_device_on(bench_ctx()).unwrap();
+    let d_b = h_b.to_device_on(bench_ctx()).unwrap();
+    let d_out = DeviceBuffer::<u64>::with_capacity_on(n, bench_ctx());
 
     let init = measure(config, n as u64, || {
         cuda_check(unsafe { init_gl(d_a.as_mut_raw_ptr(), d_a.as_ptr(), n) });
@@ -1545,9 +1549,9 @@ pub fn bench_gl3(config: &BenchConfig) -> FieldBenchResult {
     let h_a = random_u64s(n * 3, 77777);
     let h_b = random_u64s(n * 3, 66666);
 
-    let d_a = h_a.to_device().unwrap();
-    let d_b = h_b.to_device().unwrap();
-    let d_out = DeviceBuffer::<u64>::with_capacity(n * 3);
+    let d_a = h_a.to_device_on(bench_ctx()).unwrap();
+    let d_b = h_b.to_device_on(bench_ctx()).unwrap();
+    let d_out = DeviceBuffer::<u64>::with_capacity_on(n * 3, bench_ctx());
 
     let init = measure(config, n as u64, || {
         cuda_check(unsafe { init_gl3(d_a.as_mut_raw_ptr(), d_a.as_ptr(), n) });
@@ -1613,7 +1617,9 @@ pub fn bench_poseidon2_bb(config: &BenchConfig) -> Poseidon2BenchResult {
     let reps = config.ops_per_element;
 
     // 16 u32s per poseidon2 state
-    let d_states = random_u32s(n * 16, 55555).to_device().unwrap();
+    let d_states = random_u32s(n * 16, 55555)
+        .to_device_on(bench_ctx())
+        .unwrap();
 
     // Initialize: raw u32 -> Fp field elements
     cuda_check(unsafe { init_poseidon2_bb(d_states.as_mut_raw_ptr(), d_states.as_ptr(), n) });
@@ -1636,7 +1642,9 @@ pub fn bench_poseidon2_kb(config: &BenchConfig) -> Poseidon2BenchResult {
     let reps = config.ops_per_element;
 
     // 16 u32s per poseidon2 state
-    let d_states = random_u32s(n * 16, 66666).to_device().unwrap();
+    let d_states = random_u32s(n * 16, 66666)
+        .to_device_on(bench_ctx())
+        .unwrap();
 
     // Initialize: raw u32 -> Kb field elements
     cuda_check(unsafe { init_poseidon2_kb(d_states.as_mut_raw_ptr(), d_states.as_ptr(), n) });

@@ -10,9 +10,7 @@ use bytesize::ByteSize;
 
 use crate::{
     error::{check, MemoryError},
-    stream::{
-        cudaStreamPerThread, cudaStream_t, current_stream_id, device_synchronize, StreamGuard,
-    },
+    stream::{cudaStream_t, device_synchronize, StreamGuard},
 };
 
 mod cuda;
@@ -45,20 +43,9 @@ fn init() {
 }
 
 /// Allocation record for the small-allocation path (`cudaMallocAsync`).
-enum AllocRecord {
-    /// Legacy PTDS allocation (during transition).
-    Legacy { size: usize },
-    /// Tracked allocation on an explicit stream.
-    Tracked { size: usize, stream: StreamGuard },
-}
-
-impl AllocRecord {
-    fn size(&self) -> usize {
-        match self {
-            AllocRecord::Legacy { size } => *size,
-            AllocRecord::Tracked { size, .. } => *size,
-        }
-    }
+struct AllocRecord {
+    size: usize,
+    stream: StreamGuard,
 }
 
 pub struct MemoryManager {
@@ -87,38 +74,6 @@ impl MemoryManager {
         }
     }
 
-    /// Legacy PTDS allocation path.
-    fn d_malloc(&mut self, size: usize) -> Result<*mut c_void, MemoryError> {
-        assert!(size != 0, "Requested size must be non-zero");
-
-        let mut tracked_size = size;
-        let ptr = if size < self.pool.page_size {
-            let mut ptr: *mut c_void = std::ptr::null_mut();
-            check(unsafe { cudaMallocAsync(&mut ptr, size, cudaStreamPerThread) }).map_err(
-                |e| {
-                    tracing::error!("cudaMallocAsync failed: size={}: {:?}", size, e);
-                    MemoryError::from(e)
-                },
-            )?;
-            self.allocated_ptrs.insert(
-                NonNull::new(ptr).expect("BUG: cudaMallocAsync returned null"),
-                AllocRecord::Legacy { size },
-            );
-            ptr
-        } else {
-            tracked_size = size.next_multiple_of(self.pool.page_size);
-            let stream_id = current_stream_id()?;
-            self.pool.malloc_internal(tracked_size, stream_id)?
-        };
-
-        self.current_size += tracked_size;
-        if self.current_size > self.max_used_size {
-            self.max_used_size = self.current_size;
-        }
-        Ok(ptr)
-    }
-
-    /// Explicit-stream allocation path.
     fn d_malloc_on(
         &mut self,
         size: usize,
@@ -135,7 +90,7 @@ impl MemoryManager {
             })?;
             self.allocated_ptrs.insert(
                 NonNull::new(ptr).expect("BUG: cudaMallocAsync returned null"),
-                AllocRecord::Tracked {
+                AllocRecord {
                     size,
                     stream: stream.clone(),
                 },
@@ -143,7 +98,7 @@ impl MemoryManager {
             ptr
         } else {
             tracked_size = size.next_multiple_of(self.pool.page_size);
-            self.pool.malloc_internal_on(tracked_size, stream)?
+            self.pool.malloc_internal(tracked_size, stream)?
         };
 
         self.current_size += tracked_size;
@@ -153,41 +108,25 @@ impl MemoryManager {
         Ok(ptr)
     }
 
-    /// Two-stage free: first resolves the record under the lock, returning an optional
+    /// Two-stage free: first resolves the record under the lock, returning the
     /// `StreamGuard` that must be dropped AFTER the lock is released.
     ///
     /// # Safety
     /// The pointer `ptr` must be a valid, previously allocated device pointer.
     /// The caller must ensure that `ptr` is not used after this function is called.
-    unsafe fn d_free_under_lock(
-        &mut self,
-        ptr: *mut c_void,
-    ) -> Result<Option<StreamGuard>, MemoryError> {
+    unsafe fn d_free_under_lock(&mut self, ptr: *mut c_void) -> Result<StreamGuard, MemoryError> {
         let nn = NonNull::new(ptr).ok_or(MemoryError::NullPointer)?;
 
         if let Some(record) = self.allocated_ptrs.remove(&nn) {
-            let size = record.size();
+            let size = record.size;
             self.current_size -= size;
-            match record {
-                AllocRecord::Legacy { .. } => {
-                    check(unsafe { cudaFreeAsync(ptr, cudaStreamPerThread) }).map_err(|e| {
-                        tracing::error!("cudaFreeAsync failed: ptr={:p}: {:?}", ptr, e);
-                        MemoryError::from(e)
-                    })?;
-                    Ok(None)
-                }
-                AllocRecord::Tracked { stream, .. } => {
-                    check(unsafe { cudaFreeAsync(ptr, stream.as_raw()) }).map_err(|e| {
-                        tracing::error!("cudaFreeAsync failed: ptr={:p}: {:?}", ptr, e);
-                        MemoryError::from(e)
-                    })?;
-                    // Return the guard so it's dropped after the lock is released
-                    Ok(Some(stream))
-                }
-            }
+            check(unsafe { cudaFreeAsync(ptr, record.stream.as_raw()) }).map_err(|e| {
+                tracing::error!("cudaFreeAsync failed: ptr={:p}: {:?}", ptr, e);
+                MemoryError::from(e)
+            })?;
+            Ok(record.stream)
         } else {
-            let stream_id = current_stream_id()?;
-            let (freed_size, guard) = self.pool.free_internal(ptr, stream_id)?;
+            let (freed_size, guard) = self.pool.free_internal(ptr)?;
             self.current_size -= freed_size;
             Ok(guard)
         }
@@ -199,8 +138,9 @@ impl Drop for MemoryManager {
         device_synchronize().unwrap();
         let ptrs: Vec<*mut c_void> = self.allocated_ptrs.keys().map(|nn| nn.as_ptr()).collect();
         for &ptr in &ptrs {
-            if let Err(e) = unsafe { self.d_free_under_lock(ptr) } {
-                tracing::error!("MemoryManager drop: failed to free {:p}: {:?}", ptr, e);
+            match unsafe { self.d_free_under_lock(ptr) } {
+                Ok(guard) => drop(guard),
+                Err(e) => tracing::error!("MemoryManager drop: failed to free {:p}: {:?}", ptr, e),
             }
         }
     }
@@ -212,14 +152,6 @@ impl Default for MemoryManager {
     }
 }
 
-/// Legacy PTDS allocation.
-pub fn d_malloc(size: usize) -> Result<*mut c_void, MemoryError> {
-    let manager = MEMORY_MANAGER.get().unwrap();
-    let mut manager = manager.lock().map_err(|_| MemoryError::LockError)?;
-    manager.d_malloc(size)
-}
-
-/// Explicit-stream allocation.
 pub fn d_malloc_on(size: usize, stream: &StreamGuard) -> Result<*mut c_void, MemoryError> {
     let manager = MEMORY_MANAGER.get().unwrap();
     let mut manager = manager.lock().map_err(|_| MemoryError::LockError)?;
@@ -233,7 +165,6 @@ pub unsafe fn d_free(ptr: *mut c_void) -> Result<(), MemoryError> {
     let manager = MEMORY_MANAGER.get().unwrap();
     let mut manager = manager.lock().map_err(|_| MemoryError::LockError)?;
     let guard = manager.d_free_under_lock(ptr)?;
-    // Drop the lock before dropping the StreamGuard
     drop(manager);
     drop(guard);
     Ok(())

@@ -1,10 +1,9 @@
 use std::{ffi::c_void, fmt::Debug, ptr};
 
 use crate::{
-    copy::MemCopyD2H,
     error::{check, CudaError},
-    memory_manager::{d_free, d_malloc, d_malloc_on},
-    stream::{cudaStreamPerThread, cudaStream_t, DeviceContext},
+    memory_manager::{d_free, d_malloc_on},
+    stream::{cudaStream_t, DeviceContext},
 };
 
 #[link(name = "cudart")]
@@ -65,33 +64,6 @@ impl<T> DeviceBuffer<T> {
         }
     }
 
-    /// Allocate device memory for `len` elements of type `T` (PTDS path).
-    pub fn with_capacity(len: usize) -> Self {
-        tracing::debug!(
-            "Creating device buffer of size {} (sizeof type = {})",
-            len,
-            size_of::<T>()
-        );
-        assert_ne!(len, 0, "Zero capacity request is wrong");
-        let size_bytes = std::mem::size_of::<T>() * len;
-        let raw_ptr = d_malloc(size_bytes).expect("GPU allocation failed");
-        #[cfg(feature = "touchemall")]
-        {
-            // 0xffffffff is `Fp::invalid()` and shouldn't occur in a trace
-            unsafe {
-                cudaMemsetAsync(raw_ptr, 0xff, size_bytes, cudaStreamPerThread);
-            }
-        }
-        let typed_ptr = raw_ptr as *mut T;
-
-        DeviceBuffer {
-            ptr: typed_ptr,
-            len,
-            #[cfg(feature = "debug-cuda-stream")]
-            alloc_stream: cudaStreamPerThread,
-        }
-    }
-
     /// Allocate device memory for `len` elements of type `T` on an explicit stream.
     pub fn with_capacity_on(len: usize, ctx: &DeviceContext) -> Self {
         tracing::debug!(
@@ -118,13 +90,6 @@ impl<T> DeviceBuffer<T> {
         }
     }
 
-    /// Fills the buffer with zeros (PTDS path).
-    pub fn fill_zero(&self) -> Result<(), CudaError> {
-        assert_ne!(self.len, 0, "Empty buffer");
-        let size_bytes = std::mem::size_of::<T>() * self.len;
-        check(unsafe { cudaMemsetAsync(self.as_mut_raw_ptr(), 0, size_bytes, cudaStreamPerThread) })
-    }
-
     /// Fills the buffer with zeros on an explicit stream.
     pub fn fill_zero_on(&self, ctx: &DeviceContext) -> Result<(), CudaError> {
         assert_ne!(self.len, 0, "Empty buffer");
@@ -136,24 +101,6 @@ impl<T> DeviceBuffer<T> {
         );
         let size_bytes = std::mem::size_of::<T>() * self.len;
         check(unsafe { cudaMemsetAsync(self.as_mut_raw_ptr(), 0, size_bytes, ctx.stream.as_raw()) })
-    }
-
-    /// Fills a suffix of the buffer with zeros (PTDS path).
-    /// The `start_idx` is the index in the buffer, in `T` elements.
-    pub fn fill_zero_suffix(&self, start_idx: usize) -> Result<(), CudaError> {
-        assert!(
-            start_idx < self.len,
-            "start index has to be smaller than length"
-        );
-        let size_bytes = std::mem::size_of::<T>() * (self.len - start_idx);
-        check(unsafe {
-            cudaMemsetAsync(
-                self.as_mut_ptr().add(start_idx) as *mut c_void,
-                0,
-                size_bytes,
-                cudaStreamPerThread,
-            )
-        })
     }
 
     /// Fills a suffix of the buffer with zeros on an explicit stream.
@@ -264,20 +211,29 @@ impl<T> Drop for DeviceBuffer<T> {
 
 impl<T: Debug> Debug for DeviceBuffer<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let host_vec = self.to_host().unwrap();
-        write!(f, "DeviceBuffer (len = {}): {:?}", self.len(), host_vec)
+        write!(
+            f,
+            "DeviceBuffer(len = {}, ptr = {:?})",
+            self.len(),
+            self.ptr
+        )
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::copy::MemCopyH2D;
+    use crate::copy::{MemCopyD2H, MemCopyH2D};
+
+    fn test_ctx() -> DeviceContext {
+        DeviceContext::for_current_device().unwrap()
+    }
 
     #[test]
     fn test_device_buffer_float() {
+        let ctx = test_ctx();
         // Create a DeviceBuffer of 10 floats
-        let db = DeviceBuffer::<f32>::with_capacity(10);
+        let db = DeviceBuffer::<f32>::with_capacity_on(10, &ctx);
 
         assert_eq!(db.len(), 10);
         assert!(!db.as_ptr().is_null());
@@ -288,9 +244,10 @@ mod tests {
 
     #[test]
     fn test_device_buffer_fill_zero() {
+        let ctx = test_ctx();
         let v: Vec<u64> = (0..10).collect();
-        let d_array = v.to_device().unwrap();
-        d_array.fill_zero().unwrap();
-        assert_eq!(d_array.to_host().unwrap(), vec![0; v.len()]);
+        let d_array = v.to_device_on(&ctx).unwrap();
+        d_array.fill_zero_on(&ctx).unwrap();
+        assert_eq!(d_array.to_host_on(&ctx).unwrap(), vec![0; v.len()]);
     }
 }

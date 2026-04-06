@@ -55,14 +55,6 @@ impl<T> DeviceMatrix<T> {
         }
     }
 
-    pub fn with_capacity(height: usize, width: usize) -> Self {
-        Self {
-            buffer: Arc::new(DeviceBuffer::with_capacity(height * width)),
-            height,
-            width,
-        }
-    }
-
     pub fn with_capacity_on(height: usize, width: usize, ctx: &DeviceContext) -> Self {
         let buffer = DeviceBuffer::with_capacity_on(height * width, ctx);
         Self::new(Arc::new(buffer), height, width)
@@ -103,8 +95,8 @@ impl<T> MatrixDimensions for DeviceMatrix<T> {
 }
 
 impl<T> MemCopyD2H<T> for DeviceMatrix<T> {
-    fn to_host(&self) -> Result<Vec<T>, MemCopyError> {
-        self.buffer.to_host()
+    fn to_host_on(&self, ctx: &DeviceContext) -> Result<Vec<T>, MemCopyError> {
+        self.buffer.to_host_on(ctx)
     }
 }
 
@@ -214,7 +206,8 @@ mod tests {
 
     #[test]
     fn test_device_matrix() {
-        let buffer = Arc::new(DeviceBuffer::<i32>::with_capacity(12));
+        let ctx = DeviceContext::for_current_device().unwrap();
+        let buffer = Arc::new(DeviceBuffer::<i32>::with_capacity_on(12, &ctx));
         let matrix = DeviceMatrix::<i32>::new(buffer, 3, 4);
         assert_eq!(matrix.height(), 3);
         assert_eq!(matrix.width(), 4);
