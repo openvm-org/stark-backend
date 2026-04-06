@@ -12,7 +12,7 @@ use crate::{
 pub enum ProverError {
     #[error("MemCopy: {0}")]
     MemCopy(#[from] MemCopyError),
-    #[error("current_stream_sync: {0}")]
+    #[error("stream_synchronize: {0}")]
     CurrentStreamSync(CudaError),
     #[error("collapse_strided_matrix: {0}")]
     CollapseStrided(CudaError),

@@ -5,7 +5,7 @@
 //! new allocations happen before the current stream is synchronized, physical peak memory can
 //! temporarily include both the old and new buffers even though MemTracker only sees the logical
 //! max. Callers that care about physical peak should ensure a current-stream sync after use (e.g.
-//! by calling `to_host()` on outputs or `current_stream_sync()`).
+//! by calling `to_host_on()` on outputs or synchronizing the owning stream).
 
 use std::{
     cmp::max,
