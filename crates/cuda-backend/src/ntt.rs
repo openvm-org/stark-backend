@@ -6,7 +6,7 @@ use std::{
 use openvm_cuda_common::{
     common::{device_reset_epoch, get_device},
     d_buffer::DeviceBuffer,
-    stream::{CudaStream, DeviceContext, StreamGuard},
+    stream::DeviceContext,
 };
 
 use crate::{cuda::ntt, prelude::F};
@@ -34,10 +34,7 @@ fn ensure_initialized(inverse: bool) -> Result<(), openvm_cuda_common::error::Cu
     }
 
     {
-        let ctx = DeviceContext {
-            device_id: get_device()? as u32,
-            stream: StreamGuard::new(CudaStream::new_non_blocking()?),
-        };
+        let ctx = DeviceContext::for_device(device_key.0 as u32)?;
         let partial_twiddles = DeviceBuffer::<[F; WINDOW_SIZE]>::with_capacity_on(WINDOW_NUM, &ctx);
         let twiddles = DeviceBuffer::<F>::with_capacity_on(RADIX_TWIDDLES_SIZE, &ctx);
         unsafe {

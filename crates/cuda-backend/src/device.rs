@@ -1,8 +1,5 @@
 use getset::{CopyGetters, Getters, MutGetters};
-use openvm_cuda_common::{
-    common::get_device,
-    stream::{CudaStream, DeviceContext, StreamGuard},
-};
+use openvm_cuda_common::{common::get_device, stream::DeviceContext};
 use openvm_stark_backend::SystemParams;
 
 use crate::cuda::{
@@ -50,10 +47,7 @@ impl GpuDevice {
             ..Default::default()
         };
         let id = get_device().unwrap() as u32;
-        let ctx = DeviceContext {
-            device_id: id,
-            stream: StreamGuard::new(CudaStream::new_non_blocking()?),
-        };
+        let ctx = DeviceContext::for_device(id)?;
         let sm_count = get_sm_count(id, ctx.stream.as_raw()).expect("failed to get SM count");
         let config = GpuDeviceConfig {
             config: params,

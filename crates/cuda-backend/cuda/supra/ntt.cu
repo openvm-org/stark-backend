@@ -238,7 +238,7 @@ extern "C" int _ct_mixed_radix_narrow(
     #define NTT_ARGUMENTS radix, lg_domain_size, stage, iterations, \
             d_inout, padded_poly_size, poly_count, is_intt, domain_size_inverse[lg_domain_size]
 
-    // [DIFF]: N -> dim3(N, poly_count) in grid_size; stream -> cudaStreamPerThread
+    // [DIFF]: N -> dim3(N, poly_count) in grid_size; stream -> caller-provided stream
     if (num_blocks < Z_COUNT)
         _CT_NTT<1><<<dim3(num_blocks, grid_y, grid_z), block_size, shared_sz, stream>>>(NTT_ARGUMENTS);
     else if (stage == 0 || lg_domain_size < 12)

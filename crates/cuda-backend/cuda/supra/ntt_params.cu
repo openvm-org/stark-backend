@@ -5,7 +5,7 @@
  * 
  * LOCAL CHANGES (high level):
  * - 2025-08-13: NTTParameters constructor async on custom stream
- * - 2025-08-26: NTTParameters constructor on cudaStreamPerThread
+ * - 2025-08-26: NTTParameters constructor on caller-provided stream
  * - 2025-09-05: Stop using __constant__ for twiddles[0]
  * - 2025-09-10: Delete NTTParameters & add extern "C" launcher
  * - 2025-10-02: move all twiddles to __constant__

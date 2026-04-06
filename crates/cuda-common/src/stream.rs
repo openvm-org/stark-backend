@@ -129,12 +129,17 @@ pub struct DeviceContext {
 }
 
 impl DeviceContext {
-    pub fn for_current_device() -> Result<Self, CudaError> {
-        let device_id = crate::common::get_device()? as u32;
+    pub fn for_device(device_id: u32) -> Result<Self, CudaError> {
+        crate::common::set_device_by_id(device_id as i32)?;
         Ok(Self {
             device_id,
             stream: StreamGuard::new(CudaStream::new_non_blocking()?),
         })
+    }
+
+    pub fn for_current_device() -> Result<Self, CudaError> {
+        let device_id = crate::common::get_device()? as u32;
+        Self::for_device(device_id)
     }
 }
 
