@@ -176,7 +176,7 @@ static int bit_rev_impl(T* d_out, const T* d_inp,
     uint32_t grid_y = poly_count < MAX_Y ? poly_count : MAX_Y;
     uint32_t grid_z = (poly_count + grid_y - 1) / grid_y;
 
-    // [DIFF]: N -> dim3(N, poly_count) in grid_size; stream -> cudaStreamPerThread
+    // [DIFF]: N -> dim3(N, poly_count) in grid_size; stream -> caller-provided stream
     if (domain_size <= 1024)
         bit_rev_permutation<T><<<dim3(1u, grid_y, grid_z), domain_size, 0, stream>>>
                             (d_out, d_inp, lg_domain_size, padded_poly_size, poly_count);

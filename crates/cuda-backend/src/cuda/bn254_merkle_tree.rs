@@ -9,7 +9,7 @@ use openvm_cuda_common::{
     common::{device_reset_epoch, get_device},
     d_buffer::DeviceBuffer,
     error::CudaError,
-    stream::{cudaStream_t, CudaStream, DeviceContext, StreamGuard},
+    stream::{cudaStream_t, DeviceContext},
 };
 use openvm_stark_sdk::config::baby_bear_bn254_poseidon2::Bn254Scalar;
 
@@ -272,10 +272,7 @@ pub fn init_bn254_poseidon2_rc() -> Result<(), CudaError> {
         return Ok(());
     }
 
-    let ctx = DeviceContext {
-        device_id: device_key.0 as u32,
-        stream: StreamGuard::new(CudaStream::new_non_blocking()?),
-    };
+    let ctx = DeviceContext::for_device(device_key.0 as u32)?;
 
     // Width-3 constants (leaf hashing)
     let (initial, partial, terminal) = RC_W3_CONSTANTS.get_or_init(compute_bn254_rc_w3_constants);
