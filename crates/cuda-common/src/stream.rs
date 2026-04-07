@@ -45,14 +45,17 @@ impl std::fmt::Debug for CudaStream {
 unsafe impl Send for CudaStream {}
 unsafe impl Sync for CudaStream {}
 
+/// `cudaStreamNonBlocking` flag: no implicit synchronization with the legacy
+/// default stream (stream 0).
+const CUDA_STREAM_NON_BLOCKING: u32 = 0x1;
+
 impl CudaStream {
     /// Creates a new non-blocking CUDA stream using `cudaStreamCreateWithFlags`
     /// with `cudaStreamNonBlocking`. Non-blocking streams have no implicit
     /// synchronization with the legacy default stream (stream 0).
     pub fn new_non_blocking() -> Result<Self, CudaError> {
         let mut stream: cudaStream_t = std::ptr::null_mut();
-        // 0x1 = cudaStreamNonBlocking
-        check(unsafe { cudaStreamCreateWithFlags(&mut stream, 0x1) })?;
+        check(unsafe { cudaStreamCreateWithFlags(&mut stream, CUDA_STREAM_NON_BLOCKING) })?;
         let host_event = Mutex::new(CudaEvent::new()?);
         Ok(Self { stream, host_event })
     }
@@ -74,6 +77,9 @@ impl CudaStream {
     }
 
     /// Record a per-stream event and synchronize to complete all pending D2H copies.
+    /// Uses event-based sync rather than cudaStreamSynchronize because this waits
+    /// only for work up to the event point, allowing future selective sync patterns
+    /// (e.g., wait for a specific copy without draining the entire stream).
     pub fn to_host_sync(&self) -> Result<(), CudaError> {
         let event = self.host_event.lock().unwrap();
         unsafe { event.record(self.stream) }?;
@@ -85,7 +91,8 @@ impl Drop for CudaStream {
     fn drop(&mut self) {
         if !self.stream.is_null() {
             // Non-blocking: CUDA defers destruction until the stream is idle
-            unsafe { cudaStreamDestroy(self.stream) };
+            let err = unsafe { cudaStreamDestroy(self.stream) };
+            debug_assert_eq!(err, 0, "cudaStreamDestroy failed with error code: {err}");
             self.stream = std::ptr::null_mut();
         }
     }
@@ -253,7 +260,8 @@ impl CudaEvent {
 
 impl Drop for CudaEvent {
     fn drop(&mut self) {
-        unsafe { cudaEventDestroy(self.event) };
+        let err = unsafe { cudaEventDestroy(self.event) };
+        debug_assert_eq!(err, 0, "cudaEventDestroy failed with error code: {err}");
     }
 }
 
