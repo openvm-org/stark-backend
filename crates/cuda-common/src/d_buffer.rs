@@ -67,9 +67,10 @@ impl<T> DeviceBuffer<T> {
     /// Allocate device memory for `len` elements of type `T` on an explicit stream.
     pub fn with_capacity_on(len: usize, ctx: &DeviceContext) -> Self {
         tracing::debug!(
-            "Creating device buffer of size {} (sizeof type = {}) on stream",
+            "Creating device buffer of size {} (sizeof type = {}) on stream {:?}",
             len,
-            size_of::<T>()
+            size_of::<T>(),
+            ctx.stream
         );
         assert_ne!(len, 0, "Zero capacity request is wrong");
         let size_bytes = std::mem::size_of::<T>() * len;
@@ -91,6 +92,9 @@ impl<T> DeviceBuffer<T> {
     }
 
     /// Fills the buffer with zeros on an explicit stream.
+    ///
+    /// The caller should use the same stream that allocated this buffer.
+    /// `fill_zero` is async; same-stream guarantees ordering without explicit sync.
     pub fn fill_zero_on(&self, ctx: &DeviceContext) -> Result<(), CudaError> {
         assert_ne!(self.len, 0, "Empty buffer");
         #[cfg(feature = "debug-cuda-stream")]

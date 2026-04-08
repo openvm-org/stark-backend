@@ -112,8 +112,9 @@ impl MemoryManager {
     /// `StreamGuard` that must be dropped AFTER the lock is released.
     ///
     /// # Safety
-    /// The pointer `ptr` must be a valid, previously allocated device pointer.
-    /// The caller must ensure that `ptr` is not used after this function is called.
+    /// - The pointer `ptr` must be a valid, previously allocated device pointer.
+    /// - The caller must ensure that `ptr` is not used after this function is called.
+    /// - The caller must hold the `MEMORY_MANAGER` lock before calling this method.
     unsafe fn d_free_under_lock(&mut self, ptr: *mut c_void) -> Result<StreamGuard, MemoryError> {
         let nn = NonNull::new(ptr).ok_or(MemoryError::NullPointer)?;
 

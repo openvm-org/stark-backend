@@ -387,7 +387,9 @@ extern "C" int _zerocheck_batch_eval_mle(
     uint32_t num_blocks,
     uint32_t num_x,
     uint32_t num_airs,
-    uint32_t threads_per_block, cudaStream_t stream) {
+    uint32_t threads_per_block,
+    cudaStream_t stream
+) {
     if (!valid_grid_y_dim(num_x)) {
         return cudaErrorInvalidValue;
     }
@@ -424,7 +426,9 @@ extern "C" int _logup_batch_eval_mle(
     uint32_t num_blocks,
     uint32_t num_x,
     uint32_t num_airs,
-    uint32_t threads_per_block, cudaStream_t stream) {
+    uint32_t threads_per_block,
+    cudaStream_t stream
+) {
     if (!valid_frac_grid_y_dim(num_x)) {
         return cudaErrorInvalidValue;
     }
