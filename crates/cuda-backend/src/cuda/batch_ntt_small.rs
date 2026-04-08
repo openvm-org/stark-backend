@@ -59,10 +59,10 @@ pub fn ensure_device_ntt_twiddles_initialized() -> Result<(), CudaError> {
         // Temporary staging buffer for the generated twiddles. The CUDA side copies from this
         // buffer into constant memory and synchronizes before returning, so it is safe to free
         // the buffer once `generate_device_ntt_twiddles` completes.
-        let ctx = DeviceContext::for_device(device_key.0 as u32)?;
-        let twiddles = DeviceBuffer::<F>::with_capacity_on(DEVICE_NTT_TWIDDLES_SIZE, &ctx);
+        let device_ctx = DeviceContext::for_device(device_key.0 as u32)?;
+        let twiddles = DeviceBuffer::<F>::with_capacity_on(DEVICE_NTT_TWIDDLES_SIZE, &device_ctx);
         unsafe {
-            generate_device_ntt_twiddles(&twiddles, ctx.stream.as_raw())?;
+            generate_device_ntt_twiddles(&twiddles, device_ctx.stream.as_raw())?;
         }
     }
     initialized.insert(device_key);

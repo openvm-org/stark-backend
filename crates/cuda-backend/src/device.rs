@@ -32,7 +32,7 @@ pub struct GpuProverConfig {
 #[derive(Clone)]
 pub struct GpuDevice {
     pub config: GpuDeviceConfig,
-    pub ctx: DeviceContext,
+    pub device_ctx: DeviceContext,
 }
 
 impl GpuDevice {
@@ -47,8 +47,9 @@ impl GpuDevice {
             ..Default::default()
         };
         let id = get_device().unwrap() as u32;
-        let ctx = DeviceContext::for_device(id)?;
-        let sm_count = get_sm_count(id, ctx.stream.as_raw()).expect("failed to get SM count");
+        let device_ctx = DeviceContext::for_device(id)?;
+        let sm_count =
+            get_sm_count(id, device_ctx.stream.as_raw()).expect("failed to get SM count");
         let config = GpuDeviceConfig {
             params,
             prover_config,
@@ -56,7 +57,7 @@ impl GpuDevice {
             sm_count,
         };
 
-        Ok(Self { config, ctx })
+        Ok(Self { config, device_ctx })
     }
 
     // Delegate accessors to inner config

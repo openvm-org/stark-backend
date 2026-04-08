@@ -178,9 +178,9 @@ impl DuplexSpongeGpu {
     }
 
     /// Ensure the device buffer is allocated.
-    fn ensure_device_allocated(&mut self, ctx: &DeviceContext) {
+    fn ensure_device_allocated(&mut self, device_ctx: &DeviceContext) {
         if self.device.is_empty() {
-            self.device = DeviceBuffer::with_capacity_on(1, ctx);
+            self.device = DeviceBuffer::with_capacity_on(1, device_ctx);
         }
     }
 
@@ -190,8 +190,8 @@ impl DuplexSpongeGpu {
     ///
     /// This converts from `DuplexChallenger`'s representation (with buffered input/output)
     /// to `DeviceSpongeState`'s representation (with indices pointing into state).
-    pub fn sync_h2d(&mut self, ctx: &DeviceContext) -> Result<(), MemCopyError> {
-        self.ensure_device_allocated(ctx);
+    pub fn sync_h2d(&mut self, device_ctx: &DeviceContext) -> Result<(), MemCopyError> {
+        self.ensure_device_allocated(device_ctx);
 
         // Convert DuplexChallenger state to DeviceSpongeState format:
         // - DuplexChallenger buffers input values before writing to sponge_state
@@ -219,7 +219,7 @@ impl DuplexSpongeGpu {
                 self.device.as_mut_ptr() as *mut c_void,
                 &device_state as *const DeviceSpongeState as *const c_void,
                 std::mem::size_of::<DeviceSpongeState>(),
-                ctx,
+                device_ctx,
             )
         }
     }
@@ -264,14 +264,14 @@ impl DuplexSpongeGpu {
     ///
     /// After this call, the host state will have observed the witness and sampled,
     /// matching the state after calling `check_witness(bits, witness)`.
-    pub fn grind_gpu(&mut self, bits: usize, ctx: &DeviceContext) -> Result<F, GrindError> {
+    pub fn grind_gpu(&mut self, bits: usize, device_ctx: &DeviceContext) -> Result<F, GrindError> {
         validate_gpu_grind_bits(bits)?;
         // Trivial case: 0 bits mean no PoW is required and any witness is valid.
         if bits == 0 {
             return Ok(F::ZERO);
         }
         // 1. Sync host state to device
-        self.sync_h2d(ctx)?;
+        self.sync_h2d(device_ctx)?;
 
         // 2. Launch grinding kernel
         let witness_u32 = unsafe {
@@ -279,7 +279,7 @@ impl DuplexSpongeGpu {
                 self.device.as_ptr(),
                 bits as u32,
                 F::ORDER_U32 - 1,
-                ctx,
+                device_ctx,
             )?
         };
 
@@ -341,12 +341,16 @@ pub trait GpuFiatShamirTranscript<Config: StarkProtocolConfig>:
     /// sampling, the result has `bits` trailing zero bits.  Implementations should sync
     /// host state to device, launch a CUDA grinding kernel, then update the host state
     /// to match (observe witness + consume one sample).
-    fn grind_gpu(&mut self, bits: usize, ctx: &DeviceContext) -> Result<Config::F, GrindError>;
+    fn grind_gpu(
+        &mut self,
+        bits: usize,
+        device_ctx: &DeviceContext,
+    ) -> Result<Config::F, GrindError>;
 }
 
 impl GpuFiatShamirTranscript<SC> for DuplexSpongeGpu {
-    fn grind_gpu(&mut self, bits: usize, ctx: &DeviceContext) -> Result<F, GrindError> {
-        DuplexSpongeGpu::grind_gpu(self, bits, ctx)
+    fn grind_gpu(&mut self, bits: usize, device_ctx: &DeviceContext) -> Result<F, GrindError> {
+        DuplexSpongeGpu::grind_gpu(self, bits, device_ctx)
     }
 }
 
@@ -476,11 +480,11 @@ mod tests {
     /// where parallelism amortizes the overhead.
     #[test]
     fn test_grind_cpu_vs_gpu() {
-        let ctx = test_ctx();
+        let device_ctx = test_ctx();
         // Warmup: run one GPU grind to initialize CUDA context
         {
             let mut warmup = DuplexSpongeGpu::default();
-            let _ = warmup.grind_gpu(8, &ctx);
+            let _ = warmup.grind_gpu(8, &device_ctx);
         }
 
         // Test multiple bit counts to see scaling
@@ -519,7 +523,7 @@ mod tests {
             // Time GPU grinding
             let gpu_start = Instant::now();
             let gpu_witness = gpu_sponge
-                .grind_gpu(bits, &ctx)
+                .grind_gpu(bits, &device_ctx)
                 .expect("GPU grinding failed");
             let gpu_time = gpu_start.elapsed();
 

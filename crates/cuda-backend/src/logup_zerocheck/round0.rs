@@ -61,7 +61,7 @@ pub fn evaluate_round0_constraints_gpu<HS: GpuHashScheme>(
     num_cosets: u32,
     g_shift: F,
     max_temp_bytes: usize,
-    ctx: &DeviceContext,
+    device_ctx: &DeviceContext,
 ) -> Result<DeviceBuffer<EF>, Round0EvalError> {
     let constraints_dag = &pk.vk.symbolic_constraints;
     if constraints_dag.constraints.constraint_idx.is_empty() || num_cosets == 0 {
@@ -70,7 +70,7 @@ pub fn evaluate_round0_constraints_gpu<HS: GpuHashScheme>(
     }
     validate_round0_num_cosets(num_x, skip_domain, num_cosets)?;
 
-    let stream = ctx.stream.as_raw();
+    let stream = device_ctx.stream.as_raw();
     let rules = &pk.other_data.zerocheck_round0;
 
     let buffer_size: u32 = rules.inner.buffer_size;
@@ -86,7 +86,7 @@ pub fn evaluate_round0_constraints_gpu<HS: GpuHashScheme>(
     };
     let mut intermediates = if intermed_capacity > 0 {
         debug!("zerocheck:intermediates_capacity={intermed_capacity}");
-        DeviceBuffer::<F>::with_capacity_on(intermed_capacity, ctx)
+        DeviceBuffer::<F>::with_capacity_on(intermed_capacity, device_ctx)
     } else {
         DeviceBuffer::<F>::new()
     };
@@ -102,7 +102,8 @@ pub fn evaluate_round0_constraints_gpu<HS: GpuHashScheme>(
         )
     };
     debug!("zerocheck:temp_sums_buffer_capacity={temp_sums_buffer_capacity}");
-    let mut temp_sums_buffer = DeviceBuffer::<EF>::with_capacity_on(temp_sums_buffer_capacity, ctx);
+    let mut temp_sums_buffer =
+        DeviceBuffer::<EF>::with_capacity_on(temp_sums_buffer_capacity, device_ctx);
     let used_temp_bytes =
         intermed_capacity * size_of::<F>() + temp_sums_buffer_capacity * size_of::<EF>();
     if used_temp_bytes > max_temp_bytes {
@@ -117,8 +118,10 @@ pub fn evaluate_round0_constraints_gpu<HS: GpuHashScheme>(
         .map(|cd| cd.trace.buffer().as_ptr())
         .unwrap_or(std::ptr::null());
 
-    let mut sp_evals =
-        DeviceBuffer::<EF>::with_capacity_on(num_cosets as usize * skip_domain as usize, ctx);
+    let mut sp_evals = DeviceBuffer::<EF>::with_capacity_on(
+        num_cosets as usize * skip_domain as usize,
+        device_ctx,
+    );
     // SAFETY:
     // - No bounds checks are done in this kernel. It fully assumes that the Rules are trusted and
     //   all nodes are valid.
@@ -170,14 +173,14 @@ pub fn evaluate_round0_interactions_gpu<HS: GpuHashScheme>(
     num_cosets: u32,
     g_shift: F,
     max_temp_bytes: usize,
-    ctx: &DeviceContext,
+    device_ctx: &DeviceContext,
 ) -> Result<DeviceBuffer<Frac<EF>>, Round0EvalError> {
     // Check if this trace has interactions
     if eq_3bs.is_empty() {
         return Ok(DeviceBuffer::new());
     }
     validate_round0_num_cosets(num_x, skip_domain, num_cosets)?;
-    let stream = ctx.stream.as_raw();
+    let stream = device_ctx.stream.as_raw();
     let large_domain = num_cosets * skip_domain;
 
     // We create a new "interactions DAG" where the new .constraints are the interaction [count,
@@ -230,13 +233,13 @@ pub fn evaluate_round0_interactions_gpu<HS: GpuHashScheme>(
                 denom_weights[message_rule_idx] += eq_3bs[interaction_idx] * beta_pows[message_idx];
             }
         }
-        let d_numer_weights = numer_weights.to_device_on(ctx)?;
-        let d_denom_weights = denom_weights.to_device_on(ctx)?;
+        let d_numer_weights = numer_weights.to_device_on(device_ctx)?;
+        let d_denom_weights = denom_weights.to_device_on(device_ctx)?;
         (rules, d_numer_weights, d_denom_weights, denom_sum_init)
     };
 
     let encoded_rules = rules.rules.iter().map(|c| c.encode()).collect_vec();
-    let d_rules = encoded_rules.to_device_on(ctx)?;
+    let d_rules = encoded_rules.to_device_on(device_ctx)?;
 
     let buffer_size: u32 = rules.buffer_size.try_into().unwrap();
     let intermed_capacity = unsafe {
@@ -251,7 +254,7 @@ pub fn evaluate_round0_interactions_gpu<HS: GpuHashScheme>(
     };
     let mut intermediates = if intermed_capacity > 0 {
         debug!("logup_r0:intermediates_capacity={intermed_capacity}");
-        DeviceBuffer::<F>::with_capacity_on(intermed_capacity, ctx)
+        DeviceBuffer::<F>::with_capacity_on(intermed_capacity, device_ctx)
     } else {
         DeviceBuffer::<F>::new()
     };
@@ -268,7 +271,7 @@ pub fn evaluate_round0_interactions_gpu<HS: GpuHashScheme>(
     };
     debug!("logup_r0:tmp_sums_buffer_capacity={temp_sums_buffer_capacity}");
     let mut temp_sums_buffer =
-        DeviceBuffer::<Frac<EF>>::with_capacity_on(temp_sums_buffer_capacity, ctx);
+        DeviceBuffer::<Frac<EF>>::with_capacity_on(temp_sums_buffer_capacity, device_ctx);
     let used_temp_bytes =
         intermed_capacity * size_of::<F>() + temp_sums_buffer_capacity * size_of::<Frac<EF>>();
     if used_temp_bytes > max_temp_bytes {
@@ -283,7 +286,7 @@ pub fn evaluate_round0_interactions_gpu<HS: GpuHashScheme>(
         .map(|cd| cd.trace.buffer().as_ptr())
         .unwrap_or(std::ptr::null());
 
-    let mut s_evals = DeviceBuffer::<Frac<EF>>::with_capacity_on(large_domain as usize, ctx);
+    let mut s_evals = DeviceBuffer::<Frac<EF>>::with_capacity_on(large_domain as usize, device_ctx);
 
     unsafe {
         logup_bary_eval_interactions_round0(

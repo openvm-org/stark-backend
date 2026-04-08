@@ -70,7 +70,7 @@ where
             cfg.k_whir(),
             traces,
             *self.prover_config(),
-            &self.ctx,
+            &self.device_ctx,
         )
     }
 }
@@ -119,7 +119,7 @@ impl<HS: GpuHashScheme, TS: GpuFiatShamirTranscript<HS::SC>>
             save_memory,
             monomial_num_y_threshold,
             self.sm_count(),
-            &self.ctx,
+            &self.device_ctx,
         )?;
         mem.emit_metrics();
         Ok(((gkr_proof, batch_constraint_proof), r))
@@ -192,7 +192,7 @@ where
             transcript,
             stacked_per_commit,
             &u_cube,
-            &self.ctx,
+            &self.device_ctx,
         )?;
         mem.emit_metrics();
         mem.reset_peak();

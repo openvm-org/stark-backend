@@ -34,14 +34,15 @@ fn ensure_initialized(inverse: bool) -> Result<(), openvm_cuda_common::error::Cu
     }
 
     {
-        let ctx = DeviceContext::for_device(device_key.0 as u32)?;
-        let partial_twiddles = DeviceBuffer::<[F; WINDOW_SIZE]>::with_capacity_on(WINDOW_NUM, &ctx);
-        let twiddles = DeviceBuffer::<F>::with_capacity_on(RADIX_TWIDDLES_SIZE, &ctx);
+        let device_ctx = DeviceContext::for_device(device_key.0 as u32)?;
+        let partial_twiddles =
+            DeviceBuffer::<[F; WINDOW_SIZE]>::with_capacity_on(WINDOW_NUM, &device_ctx);
+        let twiddles = DeviceBuffer::<F>::with_capacity_on(RADIX_TWIDDLES_SIZE, &device_ctx);
         unsafe {
             // Both CUDA helpers upload into constant memory and synchronize before returning, so
             // these staging buffers are safe to free once the calls complete.
-            ntt::generate_all_twiddles(&twiddles, inverse, ctx.stream.as_raw())?;
-            ntt::generate_partial_twiddles(&partial_twiddles, inverse, ctx.stream.as_raw())?;
+            ntt::generate_all_twiddles(&twiddles, inverse, device_ctx.stream.as_raw())?;
+            ntt::generate_partial_twiddles(&partial_twiddles, inverse, device_ctx.stream.as_raw())?;
         }
     }
     initialized.insert(device_key);
@@ -55,7 +56,7 @@ struct NttImpl<'a> {
     poly_count: u32,
     is_intt: bool,
     stage: u32,
-    ctx: DeviceContext,
+    device_ctx: DeviceContext,
 }
 
 impl<'a> NttImpl<'a> {
@@ -65,7 +66,7 @@ impl<'a> NttImpl<'a> {
         padded_poly_size: u32,
         poly_count: u32,
         is_intt: bool,
-        ctx: &DeviceContext,
+        device_ctx: &DeviceContext,
     ) -> Self {
         ensure_initialized(is_intt).expect("failed to initialize CUDA NTT twiddle tables");
         Self {
@@ -75,7 +76,7 @@ impl<'a> NttImpl<'a> {
             poly_count,
             is_intt,
             stage: 0,
-            ctx: ctx.clone(),
+            device_ctx: device_ctx.clone(),
         }
     }
 
@@ -92,7 +93,7 @@ impl<'a> NttImpl<'a> {
                 self.padded_poly_size,
                 self.poly_count,
                 self.is_intt,
-                self.ctx.stream.as_raw(),
+                self.device_ctx.stream.as_raw(),
             )
             .expect("failed to launch CUDA mixed-radix NTT step");
         }
@@ -114,7 +115,7 @@ pub fn batch_ntt(
     width: u32,
     bit_reverse: bool,
     is_intt: bool,
-    ctx: &DeviceContext,
+    device_ctx: &DeviceContext,
 ) {
     if log_trace_height == 0 {
         return;
@@ -135,7 +136,7 @@ pub fn batch_ntt(
                 log_trace_height,
                 padded_poly_size,
                 width,
-                ctx.stream.as_raw(),
+                device_ctx.stream.as_raw(),
             )
             .expect("failed to launch CUDA bit-reversal permutation");
         }
@@ -147,7 +148,7 @@ pub fn batch_ntt(
         padded_poly_size,
         width,
         is_intt,
-        ctx,
+        device_ctx,
     );
     if log_trace_height <= 10 {
         _impl.step(log_trace_height);

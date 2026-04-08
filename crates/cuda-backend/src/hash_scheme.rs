@@ -56,7 +56,7 @@ pub trait GpuMerkleHash: Copy + Clone + Send + Sync + 'static {
         width: usize,
         query_stride: usize,
         log_rows_per_query: usize,
-        ctx: &DeviceContext,
+        device_ctx: &DeviceContext,
     ) -> Result<(), CudaError>;
 
     /// Compress rows of an extension-field matrix into digest leaves.
@@ -71,7 +71,7 @@ pub trait GpuMerkleHash: Copy + Clone + Send + Sync + 'static {
         width: usize,
         query_stride: usize,
         log_rows_per_query: usize,
-        ctx: &DeviceContext,
+        device_ctx: &DeviceContext,
     ) -> Result<(), CudaError>;
 
     /// Compress adjacent pairs of digests to build an inner Merkle layer.
@@ -85,7 +85,7 @@ pub trait GpuMerkleHash: Copy + Clone + Send + Sync + 'static {
         output: &mut DeviceBuffer<Self::Digest>,
         prev_layer: &DeviceBuffer<Self::Digest>,
         output_size: usize,
-        ctx: &DeviceContext,
+        device_ctx: &DeviceContext,
     ) -> Result<(), CudaError>;
 }
 
@@ -127,7 +127,7 @@ impl GpuMerkleHash for Poseidon2MerkleHash {
         width: usize,
         query_stride: usize,
         log_rows_per_query: usize,
-        ctx: &DeviceContext,
+        device_ctx: &DeviceContext,
     ) -> Result<(), CudaError> {
         poseidon2_compressing_row_hashes(
             out,
@@ -135,7 +135,7 @@ impl GpuMerkleHash for Poseidon2MerkleHash {
             width,
             query_stride,
             log_rows_per_query,
-            ctx.stream.as_raw(),
+            device_ctx.stream.as_raw(),
         )
     }
 
@@ -145,7 +145,7 @@ impl GpuMerkleHash for Poseidon2MerkleHash {
         width: usize,
         query_stride: usize,
         log_rows_per_query: usize,
-        ctx: &DeviceContext,
+        device_ctx: &DeviceContext,
     ) -> Result<(), CudaError> {
         poseidon2_compressing_row_hashes_ext(
             out,
@@ -153,7 +153,7 @@ impl GpuMerkleHash for Poseidon2MerkleHash {
             width,
             query_stride,
             log_rows_per_query,
-            ctx.stream.as_raw(),
+            device_ctx.stream.as_raw(),
         )
     }
 
@@ -161,9 +161,14 @@ impl GpuMerkleHash for Poseidon2MerkleHash {
         output: &mut DeviceBuffer<Self::Digest>,
         prev_layer: &DeviceBuffer<Self::Digest>,
         output_size: usize,
-        ctx: &DeviceContext,
+        device_ctx: &DeviceContext,
     ) -> Result<(), CudaError> {
-        poseidon2_adjacent_compress_layer(output, prev_layer, output_size, ctx.stream.as_raw())
+        poseidon2_adjacent_compress_layer(
+            output,
+            prev_layer,
+            output_size,
+            device_ctx.stream.as_raw(),
+        )
     }
 }
 
@@ -210,7 +215,7 @@ impl GpuMerkleHash for Bn254Poseidon2MerkleHash {
         width: usize,
         query_stride: usize,
         log_rows_per_query: usize,
-        ctx: &DeviceContext,
+        device_ctx: &DeviceContext,
     ) -> Result<(), CudaError> {
         bn254_poseidon2_compressing_row_hashes(
             out,
@@ -218,7 +223,7 @@ impl GpuMerkleHash for Bn254Poseidon2MerkleHash {
             width,
             query_stride,
             log_rows_per_query,
-            ctx.stream.as_raw(),
+            device_ctx.stream.as_raw(),
         )
     }
 
@@ -228,7 +233,7 @@ impl GpuMerkleHash for Bn254Poseidon2MerkleHash {
         width: usize,
         query_stride: usize,
         log_rows_per_query: usize,
-        ctx: &DeviceContext,
+        device_ctx: &DeviceContext,
     ) -> Result<(), CudaError> {
         bn254_poseidon2_compressing_row_hashes_ext(
             out,
@@ -236,7 +241,7 @@ impl GpuMerkleHash for Bn254Poseidon2MerkleHash {
             width,
             query_stride,
             log_rows_per_query,
-            ctx.stream.as_raw(),
+            device_ctx.stream.as_raw(),
         )
     }
 
@@ -244,13 +249,13 @@ impl GpuMerkleHash for Bn254Poseidon2MerkleHash {
         output: &mut DeviceBuffer<Self::Digest>,
         prev_layer: &DeviceBuffer<Self::Digest>,
         output_size: usize,
-        ctx: &DeviceContext,
+        device_ctx: &DeviceContext,
     ) -> Result<(), CudaError> {
         bn254_poseidon2_adjacent_compress_layer(
             output,
             prev_layer,
             output_size,
-            ctx.stream.as_raw(),
+            device_ctx.stream.as_raw(),
         )
     }
 }

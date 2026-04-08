@@ -303,7 +303,7 @@ fn eq_tail_ptrs(
 fn copy_to_device_ptr<T: Copy>(
     dst: *mut T,
     src: &[T],
-    ctx: &DeviceContext,
+    device_ctx: &DeviceContext,
 ) -> Result<(), FractionalSumcheckError> {
     if src.is_empty() {
         return Ok(());
@@ -313,7 +313,7 @@ fn copy_to_device_ptr<T: Copy>(
             dst as *mut c_void,
             src.as_ptr() as *const c_void,
             std::mem::size_of_val(src),
-            ctx,
+            device_ctx,
         )?;
     }
     Ok(())
@@ -329,13 +329,14 @@ fn observe_and_update<SC, TS>(
     prev_s_eval: &mut EF,
     xi_j: EF,
     eq_r_acc: &mut EF,
-    ctx: &DeviceContext,
+    device_ctx: &DeviceContext,
 ) -> Result<EF, FractionalSumcheckError>
 where
     SC: StarkProtocolConfig<EF = EF>,
     TS: FiatShamirTranscript<SC>,
 {
-    let (s_evals, sp_evals) = reconstruct_s_evals(d_sum_evals, *prev_s_eval, xi_j, *eq_r_acc, ctx)?;
+    let (s_evals, sp_evals) =
+        reconstruct_s_evals(d_sum_evals, *prev_s_eval, xi_j, *eq_r_acc, device_ctx)?;
 
     for &eval in &s_evals {
         transcript.observe_ext(eval);
@@ -369,13 +370,13 @@ fn do_sumcheck_round_and_revert<SC, TS>(
     prev_s_eval: &mut EF,
     xi_j: EF,
     eq_r_acc: &mut EF,
-    ctx: &DeviceContext,
+    device_ctx: &DeviceContext,
 ) -> Result<EF, FractionalSumcheckError>
 where
     SC: StarkProtocolConfig<EF = EF>,
     TS: FiatShamirTranscript<SC>,
 {
-    let stream = ctx.stream.as_raw();
+    let stream = device_ctx.stream.as_raw();
     unsafe {
         frac_compute_round_and_revert(
             eq_buffer,
@@ -397,7 +398,7 @@ where
         prev_s_eval,
         xi_j,
         eq_r_acc,
-        ctx,
+        device_ctx,
     )
 }
 
@@ -421,13 +422,13 @@ fn do_fused_sumcheck_round<SC, TS>(
     prev_s_eval: &mut EF,
     xi_j: EF,
     eq_r_acc: &mut EF,
-    ctx: &DeviceContext,
+    device_ctx: &DeviceContext,
 ) -> Result<EF, FractionalSumcheckError>
 where
     SC: StarkProtocolConfig<EF = EF>,
     TS: FiatShamirTranscript<SC>,
 {
-    let stream = ctx.stream.as_raw();
+    let stream = device_ctx.stream.as_raw();
     unsafe {
         frac_compute_round_and_fold(
             eq_buffer,
@@ -451,7 +452,7 @@ where
         prev_s_eval,
         xi_j,
         eq_r_acc,
-        ctx,
+        device_ctx,
     )
 }
 
@@ -471,13 +472,13 @@ fn do_fused_sumcheck_round_inplace<SC, TS>(
     prev_s_eval: &mut EF,
     xi_j: EF,
     eq_r_acc: &mut EF,
-    ctx: &DeviceContext,
+    device_ctx: &DeviceContext,
 ) -> Result<EF, FractionalSumcheckError>
 where
     SC: StarkProtocolConfig<EF = EF>,
     TS: FiatShamirTranscript<SC>,
 {
-    let stream = ctx.stream.as_raw();
+    let stream = device_ctx.stream.as_raw();
     unsafe {
         frac_compute_round_and_fold_inplace(
             eq_buffer,
@@ -500,7 +501,7 @@ where
         prev_s_eval,
         xi_j,
         eq_r_acc,
-        ctx,
+        device_ctx,
     )
 }
 
@@ -513,7 +514,7 @@ pub fn fractional_sumcheck_gpu<SC, TS>(
     alpha: EF,
     assert_zero: bool,
     mem: &mut MemTracker,
-    ctx: &DeviceContext,
+    device_ctx: &DeviceContext,
 ) -> Result<(FracSumcheckProof<SC>, Vec<EF>), FractionalSumcheckError>
 where
     SC: StarkProtocolConfig<EF = EF>,
@@ -530,7 +531,7 @@ where
             vec![],
         ));
     };
-    let stream = ctx.stream.as_raw();
+    let stream = device_ctx.stream.as_raw();
     let total_leaves = layer.len();
     // total_rounds = l_skip + n_logup
     let total_rounds = log2_strict_usize(total_leaves);
@@ -604,8 +605,8 @@ where
     }
     mem.emit_metrics_with_label("frac_sumcheck.segment_tree");
     mem.tracing_info("fractional_sumcheck_gkr: after building segment tree");
-    let mut copy_scratch = DeviceBuffer::<Frac<EF>>::with_capacity_on(1, ctx);
-    let root = copy_from_device(&layer, 0, &mut copy_scratch, ctx)?;
+    let mut copy_scratch = DeviceBuffer::<Frac<EF>>::with_capacity_on(1, device_ctx);
+    let root = copy_from_device(&layer, 0, &mut copy_scratch, device_ctx)?;
     unsafe {
         frac_build_tree_layer(&mut layer, 2, true, EF::ZERO, false, stream)
             .map_err(FractionalSumcheckError::SegmentTree)?;
@@ -625,8 +626,8 @@ where
     let mut claims_per_layer = Vec::with_capacity(total_rounds);
     let mut sumcheck_polys = Vec::with_capacity(total_rounds);
 
-    let first_left = copy_from_device(&layer, 0, &mut copy_scratch, ctx)?;
-    let first_right = copy_from_device(&layer, 1, &mut copy_scratch, ctx)?;
+    let first_left = copy_from_device(&layer, 0, &mut copy_scratch, device_ctx)?;
+    let first_right = copy_from_device(&layer, 1, &mut copy_scratch, device_ctx)?;
     claims_per_layer.push(GkrLayerClaims {
         p_xi_0: first_left.p,
         q_xi_0: first_left.q,
@@ -643,7 +644,7 @@ where
     }
     let mu_1 = transcript.sample_ext();
     let mut xi_prev = vec![mu_1];
-    let mut d_sum_evals = DeviceBuffer::<EF>::with_capacity_on(2, ctx);
+    let mut d_sum_evals = DeviceBuffer::<EF>::with_capacity_on(2, device_ctx);
 
     let precompute_m_env = precompute_m_enabled();
 
@@ -662,7 +663,7 @@ where
         0
     };
     let mut work_buffer = if max_work_size > 0 {
-        DeviceBuffer::<Frac<EF>>::with_capacity_on(max_work_size, ctx)
+        DeviceBuffer::<Frac<EF>>::with_capacity_on(max_work_size, device_ctx)
     } else {
         DeviceBuffer::new()
     };
@@ -673,7 +674,7 @@ where
         0
     };
     let mut tmp_block_sums = if max_tmp_buffer_capacity > 0 {
-        DeviceBuffer::<EF>::with_capacity_on(max_tmp_buffer_capacity, ctx)
+        DeviceBuffer::<EF>::with_capacity_on(max_tmp_buffer_capacity, device_ctx)
     } else {
         DeviceBuffer::new()
     };
@@ -695,7 +696,7 @@ where
         debug_assert_eq!(xi_prev.len(), round);
         // eq_buffer stores eq(xi_prev[j..], x) for x in H_{xi_prev.len()-j} for
         // j=1,...,xi_prev.len()-1.
-        let mut eq_buffer = SqrtEqLayers::from_xi(&xi_prev[1..], ctx)
+        let mut eq_buffer = SqrtEqLayers::from_xi(&xi_prev[1..], device_ctx)
             .map_err(FractionalSumcheckError::EvalEqHypercube)?;
 
         let mut round_polys_eval = Vec::with_capacity(round);
@@ -707,7 +708,7 @@ where
         let tmp_buffer_capacity =
             unsafe { _frac_compute_round_temp_buffer_size((1 << round) as u32, stream) } as usize;
         if tmp_buffer_capacity > tmp_block_sums.len() {
-            tmp_block_sums = DeviceBuffer::<EF>::with_capacity_on(tmp_buffer_capacity, ctx);
+            tmp_block_sums = DeviceBuffer::<EF>::with_capacity_on(tmp_buffer_capacity, device_ctx);
         }
 
         let last_outer_round = round == total_rounds - 1;
@@ -743,7 +744,7 @@ where
             &mut prev_s_eval,
             xi_prev[0],
             &mut eq_r_acc,
-            ctx,
+            device_ctx,
         )?;
 
         // Fused rounds 1..(round-1): compute + fold using prev_r.
@@ -774,7 +775,7 @@ where
                             &mut prev_s_eval,
                             xi_j,
                             &mut eq_r_acc,
-                            ctx,
+                            device_ctx,
                         )?,
                         BufferTarget::WorkToLayer => do_fused_sumcheck_round(
                             &mut eq_buffer,
@@ -791,7 +792,7 @@ where
                             &mut prev_s_eval,
                             xi_j,
                             &mut eq_r_acc,
-                            ctx,
+                            device_ctx,
                         )?,
                         BufferTarget::InPlaceLayer => do_fused_sumcheck_round_inplace(
                             &mut eq_buffer,
@@ -807,7 +808,7 @@ where
                             &mut prev_s_eval,
                             xi_j,
                             &mut eq_r_acc,
-                            ctx,
+                            device_ctx,
                         )?,
                         BufferTarget::InPlaceWork => do_fused_sumcheck_round_inplace(
                             &mut eq_buffer,
@@ -823,7 +824,7 @@ where
                             &mut prev_s_eval,
                             xi_j,
                             &mut eq_r_acc,
-                            ctx,
+                            device_ctx,
                         )?,
                     };
 
@@ -883,11 +884,11 @@ where
 
                 if eq_r_prefix_buffer.is_empty() {
                     eq_r_prefix_buffer =
-                        DeviceBuffer::<EF>::with_capacity_on(1usize << GKR_WINDOW_SIZE, ctx);
+                        DeviceBuffer::<EF>::with_capacity_on(1usize << GKR_WINDOW_SIZE, device_ctx);
                 }
                 if eq_suffix_buffer.is_empty() {
                     eq_suffix_buffer =
-                        DeviceBuffer::<EF>::with_capacity_on(1usize << GKR_WINDOW_SIZE, ctx);
+                        DeviceBuffer::<EF>::with_capacity_on(1usize << GKR_WINDOW_SIZE, device_ctx);
                 }
 
                 let mut base = base;
@@ -906,7 +907,7 @@ where
                     };
                     if m_buffer.is_empty() {
                         let max_m_len = 1usize << (2 * GKR_WINDOW_SIZE);
-                        m_buffer = DeviceBuffer::<EF>::with_capacity_on(max_m_len, ctx);
+                        m_buffer = DeviceBuffer::<EF>::with_capacity_on(max_m_len, device_ctx);
                     }
                     let m_ptr = m_buffer.as_mut_ptr();
                     // Reuse tmp_block_sums for eq_r_window upload.
@@ -935,7 +936,8 @@ where
                     let m_len = (1usize << w) * (1usize << w);
                     let partial_len = num_blocks * m_len;
                     if partial_len > m_partial_buffer.len() {
-                        m_partial_buffer = DeviceBuffer::<EF>::with_capacity_on(partial_len, ctx);
+                        m_partial_buffer =
+                            DeviceBuffer::<EF>::with_capacity_on(partial_len, device_ctx);
                     }
 
                     let (eq_tail_low, eq_tail_high, eq_low_cap, _) =
@@ -977,12 +979,12 @@ where
                         copy_to_device_ptr(
                             eq_r_prefix_buffer.as_mut_ptr(),
                             &eq_r_prefix_host[..(1usize << prefix_bits)],
-                            ctx,
+                            device_ctx,
                         )?;
                         copy_to_device_ptr(
                             eq_suffix_buffer.as_mut_ptr(),
                             &eq_suffix_host[..(1usize << suffix_bits)],
-                            ctx,
+                            device_ctx,
                         )?;
                         unsafe {
                             frac_precompute_m_eval_round_raw(
@@ -1005,7 +1007,7 @@ where
                             &mut prev_s_eval,
                             xi_prev[base + t],
                             &mut eq_r_acc,
-                            ctx,
+                            device_ctx,
                         )?;
                         prev_r = r;
                         window_rs.push(r);
@@ -1020,12 +1022,16 @@ where
                         copy_to_device_ptr(
                             d_eq_r_window,
                             &eq_r_window_host[..(1 << (w + 1))],
-                            ctx,
+                            device_ctx,
                         )?;
                         (rem_n + 1, w + 1)
                     } else {
                         eval_mle_table(&window_rs, &mut eq_r_window_host);
-                        copy_to_device_ptr(d_eq_r_window, &eq_r_window_host[..(1 << w)], ctx)?;
+                        copy_to_device_ptr(
+                            d_eq_r_window,
+                            &eq_r_window_host[..(1 << w)],
+                            device_ctx,
+                        )?;
                         (rem_n, w)
                     };
 
@@ -1074,7 +1080,7 @@ where
                         &mut prev_s_eval,
                         xi_prev[base],
                         &mut eq_r_acc,
-                        ctx,
+                        device_ctx,
                     )?;
 
                     for &xi_j in xi_prev.iter().skip(base + 1) {
@@ -1093,7 +1099,7 @@ where
                             &mut prev_s_eval,
                             xi_j,
                             &mut eq_r_acc,
-                            ctx,
+                            device_ctx,
                         )?;
                         pq_size >>= 1;
                     }
@@ -1109,8 +1115,8 @@ where
         }
 
         let pq_host = [
-            copy_from_device(active, 0, &mut copy_scratch, ctx)?,
-            copy_from_device(active, pq_size / 2, &mut copy_scratch, ctx)?,
+            copy_from_device(active, 0, &mut copy_scratch, device_ctx)?,
+            copy_from_device(active, pq_size / 2, &mut copy_scratch, device_ctx)?,
         ];
 
         claims_per_layer.push(GkrLayerClaims {
@@ -1148,7 +1154,7 @@ fn copy_from_device<T: Copy>(
     buf: &DeviceBuffer<T>,
     index: usize,
     scratch: &mut DeviceBuffer<T>,
-    ctx: &DeviceContext,
+    device_ctx: &DeviceContext,
 ) -> Result<T, FractionalSumcheckError> {
     debug_assert!(!scratch.is_empty());
     unsafe {
@@ -1156,10 +1162,10 @@ fn copy_from_device<T: Copy>(
             scratch.as_mut_raw_ptr(),
             buf.as_ptr().add(index) as *const std::ffi::c_void,
             std::mem::size_of::<T>(),
-            ctx,
+            device_ctx,
         )?;
     }
-    let host = scratch.to_host_on(ctx)?;
+    let host = scratch.to_host_on(device_ctx)?;
     Ok(host[0])
 }
 
@@ -1184,9 +1190,9 @@ fn reconstruct_s_evals(
     prev_s_eval: EF,
     xi_j: EF,
     eq_r_acc: EF,
-    ctx: &DeviceContext,
+    device_ctx: &DeviceContext,
 ) -> Result<([EF; GKR_S_DEG], [EF; GKR_S_DEG]), FractionalSumcheckError> {
-    let sp_vec = d_sum_evals.to_host_on(ctx)?;
+    let sp_vec = d_sum_evals.to_host_on(device_ctx)?;
     debug_assert_eq!(sp_vec.len(), GKR_S_DEG - 1);
 
     // sp_evals holds evaluations of degree 2 poly `eq(xi_{j+1..}, r_{j+1..}) * s'(X)` at {0,1,2}
@@ -1222,7 +1228,7 @@ fn reconstruct_s_evals(
 /// Generate random fractional leaves on device for benchmarking.
 pub fn make_synthetic_leaves(
     n: usize,
-    ctx: &DeviceContext,
+    device_ctx: &DeviceContext,
 ) -> Result<DeviceBuffer<Frac<EF>>, FractionalSumcheckError> {
     use openvm_cuda_common::copy::cuda_memcpy_on;
     use rand::{rngs::StdRng, Rng, SeedableRng};
@@ -1232,13 +1238,13 @@ pub fn make_synthetic_leaves(
     let host: Vec<(EF, EF)> = (0..size)
         .map(|_| (rng.random::<EF>(), rng.random::<EF>()))
         .collect();
-    let d_leaves = DeviceBuffer::<Frac<EF>>::with_capacity_on(size, ctx);
+    let d_leaves = DeviceBuffer::<Frac<EF>>::with_capacity_on(size, device_ctx);
     unsafe {
         cuda_memcpy_on::<false, true>(
             d_leaves.as_mut_raw_ptr(),
             host.as_ptr() as *const std::ffi::c_void,
             std::mem::size_of_val(host.as_slice()),
-            ctx,
+            device_ctx,
         )?;
     }
     Ok(d_leaves)
@@ -1279,13 +1285,19 @@ mod tests {
                 if enable_precompute_m { "1" } else { "0" },
             );
         }
-        let ctx = test_ctx();
+        let device_ctx = test_ctx();
         let mut transcript = DuplexSpongeGpu::default();
-        let leaves = make_synthetic_leaves(n, &ctx)?;
+        let leaves = make_synthetic_leaves(n, &device_ctx)?;
         let mut mem = MemTracker::start("test.precompute_m");
-        let result =
-            fractional_sumcheck_gpu(&mut transcript, leaves, EF::ZERO, false, &mut mem, &ctx)?;
-        ctx.stream.synchronize().expect("sync");
+        let result = fractional_sumcheck_gpu(
+            &mut transcript,
+            leaves,
+            EF::ZERO,
+            false,
+            &mut mem,
+            &device_ctx,
+        )?;
+        device_ctx.stream.synchronize().expect("sync");
         Ok(result)
     }
 

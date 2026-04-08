@@ -56,7 +56,7 @@ impl PleMatrix<F> {
         evals: DeviceBuffer<F>,
         height: usize,
         width: usize,
-        ctx: &DeviceContext,
+        device_ctx: &DeviceContext,
     ) -> Self {
         validate_gpu_l_skip(l_skip).expect("GPU PleMatrix requires l_skip <= 10");
         let mut mixed = evals;
@@ -65,8 +65,14 @@ impl PleMatrix<F> {
             // (width cols) * (height / 2^l_skip chunks per col). Use natural ordering.
             let num_uni_poly = width * (height >> l_skip);
             unsafe {
-                batch_ntt_small(&mut mixed, l_skip, num_uni_poly, true, ctx.stream.as_raw())
-                    .unwrap();
+                batch_ntt_small(
+                    &mut mixed,
+                    l_skip,
+                    num_uni_poly,
+                    true,
+                    device_ctx.stream.as_raw(),
+                )
+                .unwrap();
             }
         }
         Self {
@@ -79,20 +85,26 @@ impl PleMatrix<F> {
     pub fn to_evals(
         &self,
         l_skip: usize,
-        ctx: &DeviceContext,
+        device_ctx: &DeviceContext,
     ) -> Result<DeviceMatrix<F>, KernelError> {
         validate_gpu_l_skip(l_skip)?;
         let width = self.width();
         let height = self.height();
         // D2D copy so we can do in-place NTT
-        let mut evals = self.mixed.device_copy_on(ctx)?;
+        let mut evals = self.mixed.device_copy_on(device_ctx)?;
         if l_skip > 0 {
             // For univariate coordinate, perform NTT for each 2^l_skip chunk per column: (width
             // cols) * (height / 2^l_skip chunks per col). Use natural ordering.
             let num_uni_poly = width * (height >> l_skip);
             unsafe {
-                batch_ntt_small(&mut evals, l_skip, num_uni_poly, false, ctx.stream.as_raw())
-                    .unwrap();
+                batch_ntt_small(
+                    &mut evals,
+                    l_skip,
+                    num_uni_poly,
+                    false,
+                    device_ctx.stream.as_raw(),
+                )
+                .unwrap();
             }
         }
         Ok(DeviceMatrix::new(Arc::new(evals), height, width))
@@ -104,7 +116,7 @@ impl PleMatrix<F> {
 pub fn mle_evals_to_coeffs_inplace(
     evals: &mut DeviceBuffer<F>,
     n: usize,
-    ctx: &DeviceContext,
+    device_ctx: &DeviceContext,
 ) -> Result<(), CudaError> {
     if n == 0 {
         return Ok(());
@@ -124,7 +136,7 @@ pub fn mle_evals_to_coeffs_inplace(
             n as u32 - 1,
             true,
             false,
-            ctx.stream.as_raw(),
+            device_ctx.stream.as_raw(),
         )
     }
 }
@@ -249,18 +261,18 @@ pub unsafe fn mle_interpolate_stages(
 pub unsafe fn evals_eq_hypercube(
     out: &mut DeviceBuffer<EF>,
     xs: &[EF],
-    ctx: &DeviceContext,
+    device_ctx: &DeviceContext,
 ) -> Result<(), KernelError> {
     let n = xs.len();
     assert!(out.len() >= 1 << n);
     // Use memcpy instead of memset since EF will be in Montgomery form.
     [EF::ONE]
-        .copy_to_on(out, ctx)
+        .copy_to_on(out, device_ctx)
         .map_err(KernelError::MemCopy)?;
 
     for (i, &x_i) in xs.iter().enumerate() {
         let step = 1 << i;
-        eq_hypercube_stage_ext(out.as_mut_ptr(), x_i, step, ctx.stream.as_raw())
+        eq_hypercube_stage_ext(out.as_mut_ptr(), x_i, step, device_ctx.stream.as_raw())
             .map_err(KernelError::Kernel)?;
     }
     Ok(())
@@ -282,18 +294,18 @@ pub unsafe fn evals_eq_hypercube(
 pub unsafe fn evals_mobius_eq_hypercube(
     out: &mut DeviceBuffer<EF>,
     omega: &[EF],
-    ctx: &DeviceContext,
+    device_ctx: &DeviceContext,
 ) -> Result<(), KernelError> {
     let n = omega.len();
     assert!(out.len() >= 1 << n);
     // Use memcpy instead of memset since EF will be in Montgomery form.
     [EF::ONE]
-        .copy_to_on(out, ctx)
+        .copy_to_on(out, device_ctx)
         .map_err(KernelError::MemCopy)?;
 
     for (i, &omega_i) in omega.iter().enumerate() {
         let step = 1 << i;
-        mobius_eq_hypercube_stage_ext(out.as_mut_ptr(), omega_i, step, ctx.stream.as_raw())
+        mobius_eq_hypercube_stage_ext(out.as_mut_ptr(), omega_i, step, device_ctx.stream.as_raw())
             .map_err(KernelError::Kernel)?;
     }
     Ok(())
@@ -330,13 +342,13 @@ impl<F> EqEvalSegments<F> {
 // Currently only implement kernels for EF.
 impl EqEvalSegments<EF> {
     /// Creates a new `EqEvalSegments` instance with `max_n = x.len()`.
-    pub fn new(x: &[EF], ctx: &DeviceContext) -> Result<Self, KernelError> {
+    pub fn new(x: &[EF], device_ctx: &DeviceContext) -> Result<Self, KernelError> {
         let max_n = x.len();
-        let mut buffer = DeviceBuffer::with_capacity_on(2 << max_n, ctx);
+        let mut buffer = DeviceBuffer::with_capacity_on(2 << max_n, device_ctx);
         // Index 0 should never to be used, but we initialize it to zero.
         // Index 1 is set to eq_0 = 1 for initial state
         [EF::ZERO, EF::ONE]
-            .copy_to_on(&mut buffer, ctx)
+            .copy_to_on(&mut buffer, device_ctx)
             .map_err(KernelError::MemCopy)?;
         // At step i, we populate `eq_{i+1}` starting at offset `2^{i+1}`
         for (i, &x_i) in x.iter().enumerate() {
@@ -354,7 +366,7 @@ impl EqEvalSegments<EF> {
                     src,
                     x_i,
                     step as u32,
-                    ctx.stream.as_raw(),
+                    device_ctx.stream.as_raw(),
                 )
                 .map_err(KernelError::Kernel)?;
             }
@@ -388,21 +400,29 @@ impl EqEvalLayers<EF> {
     pub fn new_rev<'a>(
         n: usize,
         x: impl IntoIterator<Item = &'a EF>,
-        ctx: &DeviceContext,
+        device_ctx: &DeviceContext,
     ) -> Result<Self, KernelError> {
         let mut layers = Vec::with_capacity(n + 1);
-        let layer_0 = [EF::ONE].to_device_on(ctx).map_err(KernelError::MemCopy)?;
+        let layer_0 = [EF::ONE]
+            .to_device_on(device_ctx)
+            .map_err(KernelError::MemCopy)?;
         layers.push(layer_0);
         for (i, &x_i) in x.into_iter().enumerate() {
             let step = 1 << i;
-            let buffer = DeviceBuffer::with_capacity_on(2 * step, ctx);
+            let buffer = DeviceBuffer::with_capacity_on(2 * step, device_ctx);
             // SAFETY:
             // - `buffer` has length `2^{i+1}`
             unsafe {
                 let dst = buffer.as_mut_ptr();
                 let src = layers.last().unwrap().as_ptr();
-                eq_hypercube_interleaved_stage_ext(dst, src, x_i, step as u32, ctx.stream.as_raw())
-                    .map_err(KernelError::Kernel)?;
+                eq_hypercube_interleaved_stage_ext(
+                    dst,
+                    src,
+                    x_i,
+                    step as u32,
+                    device_ctx.stream.as_raw(),
+                )
+                .map_err(KernelError::Kernel)?;
             }
             layers.push(buffer);
         }
@@ -416,14 +436,16 @@ impl EqEvalLayers<EF> {
     pub fn new<'a>(
         n: usize,
         x: impl IntoIterator<Item = &'a EF>,
-        ctx: &DeviceContext,
+        device_ctx: &DeviceContext,
     ) -> Result<Self, KernelError> {
         let mut layers = Vec::with_capacity(n + 1);
-        let layer_0 = [EF::ONE].to_device_on(ctx).map_err(KernelError::MemCopy)?;
+        let layer_0 = [EF::ONE]
+            .to_device_on(device_ctx)
+            .map_err(KernelError::MemCopy)?;
         layers.push(layer_0);
         for (i, &x_i) in x.into_iter().enumerate() {
             let step = 1 << i;
-            let buffer = DeviceBuffer::with_capacity_on(2 * step, ctx);
+            let buffer = DeviceBuffer::with_capacity_on(2 * step, device_ctx);
             // SAFETY:
             // - `buffer` has length `2^{i+1}`
             unsafe {
@@ -434,7 +456,7 @@ impl EqEvalLayers<EF> {
                     src,
                     x_i,
                     step as u32,
-                    ctx.stream.as_raw(),
+                    device_ctx.stream.as_raw(),
                 )
                 .map_err(KernelError::Kernel)?;
             }
@@ -459,15 +481,15 @@ pub struct SqrtHyperBuffer {
 impl SqrtHyperBuffer {
     /// Build a buffer from `xi`. Note that last elements of `xi` correspond to the lowest index
     /// bits.
-    pub fn from_xi(xi: &[EF], ctx: &DeviceContext) -> Result<Self, KernelError> {
+    pub fn from_xi(xi: &[EF], device_ctx: &DeviceContext) -> Result<Self, KernelError> {
         let low = {
-            let mut res = DeviceBuffer::with_capacity_on(1 << (xi.len() / 2), ctx);
-            unsafe { evals_eq_hypercube(&mut res, &xi[..xi.len() / 2], ctx)? };
+            let mut res = DeviceBuffer::with_capacity_on(1 << (xi.len() / 2), device_ctx);
+            unsafe { evals_eq_hypercube(&mut res, &xi[..xi.len() / 2], device_ctx)? };
             res
         };
         let high = {
-            let mut res = DeviceBuffer::with_capacity_on(1 << xi.len().div_ceil(2), ctx);
-            unsafe { evals_eq_hypercube(&mut res, &xi[xi.len() / 2..], ctx)? };
+            let mut res = DeviceBuffer::with_capacity_on(1 << xi.len().div_ceil(2), device_ctx);
+            unsafe { evals_eq_hypercube(&mut res, &xi[xi.len() / 2..], device_ctx)? };
             res
         };
         Ok(Self {
@@ -478,7 +500,7 @@ impl SqrtHyperBuffer {
         })
     }
 
-    pub fn fold_columns(&mut self, r: EF, ctx: &DeviceContext) -> Result<(), CudaError> {
+    pub fn fold_columns(&mut self, r: EF, device_ctx: &DeviceContext) -> Result<(), CudaError> {
         assert!(self.size > 1);
         if self.size > self.low_capacity {
             unsafe {
@@ -486,12 +508,12 @@ impl SqrtHyperBuffer {
                     &mut self.high,
                     self.size / self.low_capacity,
                     r,
-                    ctx.stream.as_raw(),
+                    device_ctx.stream.as_raw(),
                 )?;
             }
         } else {
             unsafe {
-                fold_mle_column(&mut self.low, self.size, r, ctx.stream.as_raw())?;
+                fold_mle_column(&mut self.low, self.size, r, device_ctx.stream.as_raw())?;
             }
         };
         self.size /= 2;
@@ -518,13 +540,13 @@ impl SqrtEqLayers {
     /// This is meant to match behavior of [SqrtHyperBuffer::from_xi] but with layers.
     ///
     /// Example: This means `[a,b,c,d]` should be sent to `low: [[d], [d, c]], high: [[b], [b, a]]`.
-    pub fn from_xi(xi: &[EF], ctx: &DeviceContext) -> Result<Self, KernelError> {
+    pub fn from_xi(xi: &[EF], device_ctx: &DeviceContext) -> Result<Self, KernelError> {
         let n = xi.len();
         let low_n = n / 2;
         let high_n = n - low_n;
 
-        let low = EqEvalLayers::new(low_n, xi[high_n..].iter().rev(), ctx)?;
-        let high = EqEvalLayers::new(high_n, xi[..high_n].iter().rev(), ctx)?;
+        let low = EqEvalLayers::new(low_n, xi[high_n..].iter().rev(), device_ctx)?;
+        let high = EqEvalLayers::new(high_n, xi[..high_n].iter().rev(), device_ctx)?;
 
         Ok(Self { low, high })
     }
