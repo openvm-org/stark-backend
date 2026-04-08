@@ -36,11 +36,11 @@ pub unsafe fn sponge_grind(
     init_state: *const DeviceSpongeState,
     bits: u32,
     max_witness: u32,
-    ctx: &DeviceContext,
+    device_ctx: &DeviceContext,
 ) -> Result<u32, GrindError> {
     validate_gpu_grind_bits(bits as usize)?;
-    let mut d_result = DeviceBuffer::with_capacity_on(1, ctx);
-    [u32::MAX].copy_to_on(&mut d_result, ctx)?;
+    let mut d_result = DeviceBuffer::with_capacity_on(1, device_ctx);
+    [u32::MAX].copy_to_on(&mut d_result, device_ctx)?;
     for start in (0..=max_witness).step_by(1 << bits) {
         CudaError::from_result(_sponge_grind(
             init_state,
@@ -48,10 +48,10 @@ pub unsafe fn sponge_grind(
             start,
             max_witness,
             d_result.as_mut_ptr(),
-            ctx.stream.as_raw(),
+            device_ctx.stream.as_raw(),
         ))?;
 
-        let result = d_result.to_host_on(ctx)?[0];
+        let result = d_result.to_host_on(device_ctx)?[0];
         if result < u32::MAX {
             return Ok(result);
         }

@@ -51,7 +51,7 @@ use crate::{
 pub const STACKED_REDUCTION_S_DEG: usize = 2;
 
 pub struct StackedReductionGpu<D = Digest> {
-    ctx: DeviceContext,
+    device_ctx: DeviceContext,
     sm_count: u32,
 
     l_skip: usize,
@@ -216,7 +216,7 @@ where
         r,
         lambda,
         device.sm_count(),
-        device.ctx.clone(),
+        device.device_ctx.clone(),
     )?;
 
     // Round 0: univariate sumcheck
@@ -281,7 +281,7 @@ impl<D: Copy + Clone + Send + Sync + 'static> StackedReductionGpu<D> {
         r: &[EF],
         lambda: EF,
         sm_count: u32,
-        ctx: DeviceContext,
+        device_ctx: DeviceContext,
     ) -> Result<Self, StackedReductionError> {
         ensure_device_ntt_twiddles_initialized().map_err(StackedReductionError::InitNttTwiddles)?;
         let mem = MemTracker::start("prover.stacked_reduction_new");
@@ -290,7 +290,7 @@ impl<D: Copy + Clone + Send + Sync + 'static> StackedReductionGpu<D> {
 
         let omega_skip = F::two_adic_generator(l_skip);
         let omega_skip_pows = omega_skip.powers().take(1 << l_skip).collect_vec();
-        let d_omega_skip_pows = omega_skip_pows.to_device_on(&ctx)?;
+        let d_omega_skip_pows = omega_skip_pows.to_device_on(&device_ctx)?;
 
         // NOTE: DeviceMatrix contains an Arc, so clone is lightweight [for now].
         // PERF[jpw]: stack the traces all at once. To save memory, we could either stack and drop
@@ -344,7 +344,7 @@ impl<D: Copy + Clone + Send + Sync + 'static> StackedReductionGpu<D> {
             .map(|d| d.layout().width() as u32)
             .collect_vec();
         let q_width_max = *q_widths.iter().max().unwrap();
-        let d_q_widths = q_widths.to_device_on(&ctx)?;
+        let d_q_widths = q_widths.to_device_on(&device_ctx)?;
 
         let total_num_cols: usize = stacked_per_commit
             .iter()
@@ -392,9 +392,9 @@ impl<D: Copy + Clone + Send + Sync + 'static> StackedReductionGpu<D> {
                 lambda_pows[lambda_rot_idx] = lambda_pows_used[lambda_rot_idx];
             }
         }
-        let d_lambda_pows = lambda_pows.to_device_on(&ctx)?;
+        let d_lambda_pows = lambda_pows.to_device_on(&device_ctx)?;
 
-        let d_unstacked_cols = unstacked_cols.to_device_on(&ctx)?;
+        let d_unstacked_cols = unstacked_cols.to_device_on(&device_ctx)?;
         let max_window_len = ht_diff_idxs
             .windows(2)
             .map(|window| window[1] - window[0])
@@ -412,35 +412,36 @@ impl<D: Copy + Clone + Send + Sync + 'static> StackedReductionGpu<D> {
                 .unwrap_or(0)
                 .saturating_sub(l_skip)
         );
-        let eq_r_ns =
-            EqEvalSegments::new(&r[1..], &ctx).map_err(StackedReductionError::EqEvalSegments)?;
+        let eq_r_ns = EqEvalSegments::new(&r[1..], &device_ctx)
+            .map_err(StackedReductionError::EqEvalSegments)?;
 
         let eq_const = eval_eq_uni_at_one(l_skip, r[0] * omega_skip);
         let eq_ub_per_trace = vec![EF::ONE; unstacked_cols.len()];
         let d_q_eval_ptrs = if stacked_per_commit.is_empty() {
             DeviceBuffer::new()
         } else {
-            DeviceBuffer::with_capacity_on(stacked_per_commit.len(), &ctx)
+            DeviceBuffer::with_capacity_on(stacked_per_commit.len(), &device_ctx)
         };
         let d_input_ptrs = if stacked_per_commit.is_empty() {
             DeviceBuffer::new()
         } else {
-            DeviceBuffer::with_capacity_on(stacked_per_commit.len(), &ctx)
+            DeviceBuffer::with_capacity_on(stacked_per_commit.len(), &device_ctx)
         };
         let d_output_ptrs = if stacked_per_commit.is_empty() {
             DeviceBuffer::new()
         } else {
-            DeviceBuffer::with_capacity_on(stacked_per_commit.len(), &ctx)
+            DeviceBuffer::with_capacity_on(stacked_per_commit.len(), &device_ctx)
         };
-        let d_accum = DeviceBuffer::<u64>::with_capacity_on(STACKED_REDUCTION_S_DEG * D_EF, &ctx);
+        let d_accum =
+            DeviceBuffer::<u64>::with_capacity_on(STACKED_REDUCTION_S_DEG * D_EF, &device_ctx);
         let d_eq_ub = if max_window_len > 0 {
-            DeviceBuffer::with_capacity_on(max_window_len, &ctx)
+            DeviceBuffer::with_capacity_on(max_window_len, &device_ctx)
         } else {
             DeviceBuffer::new()
         };
 
         Ok(Self {
-            ctx,
+            device_ctx,
             sm_count,
             l_skip,
             n_stack,
@@ -495,16 +496,17 @@ impl<D: Copy + Clone + Send + Sync + 'static> StackedReductionGpu<D> {
 
         // Accumulation buffers for G0, G1, G2 (on identity coset)
         // d_g_pos: for n >= 0 traces
-        let mut d_g_pos = DeviceBuffer::<EF>::with_capacity_on(NUM_G * skip_domain, &self.ctx);
+        let mut d_g_pos =
+            DeviceBuffer::<EF>::with_capacity_on(NUM_G * skip_domain, &self.device_ctx);
         d_g_pos
-            .fill_zero_on(&self.ctx)
+            .fill_zero_on(&self.device_ctx)
             .map_err(StackedReductionError::FillZero)?;
 
         // d_g_neg[k]: for traces with |n| = k+1, where n < 0 and k in 0..l_skip
         let mut d_g_neg: Vec<DeviceBuffer<EF>> = (0..l_skip)
             .map(|_| {
-                let b = DeviceBuffer::with_capacity_on(NUM_G * skip_domain, &self.ctx);
-                b.fill_zero_on(&self.ctx)
+                let b = DeviceBuffer::with_capacity_on(NUM_G * skip_domain, &self.device_ctx);
+                b.fill_zero_on(&self.device_ctx)
                     .map_err(StackedReductionError::FillZero)?;
                 Ok(b)
             })
@@ -532,12 +534,13 @@ impl<D: Copy + Clone + Send + Sync + 'static> StackedReductionGpu<D> {
                     trace_height as u32,
                     trace_width as u32,
                     l_skip as u32,
-                    self.ctx.stream.as_raw(),
+                    self.device_ctx.stream.as_raw(),
                 )
             } as usize;
 
             if block_sums_len > self.d_block_sums.len() {
-                self.d_block_sums = DeviceBuffer::<EF>::with_capacity_on(block_sums_len, &self.ctx);
+                self.d_block_sums =
+                    DeviceBuffer::<EF>::with_capacity_on(block_sums_len, &self.device_ctx);
             }
 
             unsafe {
@@ -553,7 +556,7 @@ impl<D: Copy + Clone + Send + Sync + 'static> StackedReductionGpu<D> {
                     trace_height,
                     trace_width,
                     l_skip,
-                    self.ctx.stream.as_raw(),
+                    self.device_ctx.stream.as_raw(),
                 )
                 .map_err(StackedReductionError::SumcheckRound0)?;
             };
@@ -589,7 +592,7 @@ impl<D: Copy + Clone + Send + Sync + 'static> StackedReductionGpu<D> {
         let mut s_0_coeffs = vec![EF::ZERO; large_uni_domain];
 
         // --- Process n >= 0 bucket ---
-        let g_pos = d_g_pos.to_host_on(&self.ctx)?;
+        let g_pos = d_g_pos.to_host_on(&self.device_ctx)?;
         if !g_pos.iter().all(|&x| x == EF::ZERO) {
             // Build E polynomials for n >= 0
             let e0 = eq_uni_poly::<F, EF>(l_skip, self.r_0);
@@ -613,7 +616,7 @@ impl<D: Copy + Clone + Send + Sync + 'static> StackedReductionGpu<D> {
         // --- Process n < 0 buckets ---
         for (bucket_idx, d_g_neg_bucket) in d_g_neg.into_iter().enumerate() {
             let n_abs = bucket_idx + 1;
-            let g_neg = d_g_neg_bucket.to_host_on(&self.ctx)?;
+            let g_neg = d_g_neg_bucket.to_host_on(&self.device_ctx)?;
             if g_neg.iter().all(|&x| x == EF::ZERO) {
                 continue;
             }
@@ -709,7 +712,7 @@ impl<D: Copy + Clone + Send + Sync + 'static> StackedReductionGpu<D> {
         let skip_domain = 1 << l_skip;
         let inv_lagrange_denoms =
             compute_barycentric_inv_lagrange_denoms(l_skip, &self.omega_skip_pows, u_0);
-        let d_inv_lagrange_denoms = inv_lagrange_denoms.to_device_on(&self.ctx)?;
+        let d_inv_lagrange_denoms = inv_lagrange_denoms.to_device_on(&self.device_ctx)?;
 
         for stacked in &self.stacked_per_commit {
             let layout = stacked.layout();
@@ -717,10 +720,10 @@ impl<D: Copy + Clone + Send + Sync + 'static> StackedReductionGpu<D> {
             let stacked_width = layout.width();
             debug_assert_eq!(layout.height(), 1 << (l_skip + n_stack));
             let folded_evals =
-                DeviceBuffer::<EF>::with_capacity_on(num_x * stacked_width, &self.ctx);
+                DeviceBuffer::<EF>::with_capacity_on(num_x * stacked_width, &self.device_ctx);
             // We must fill with zeros because some parts will be left empty due to stacking
             folded_evals
-                .fill_zero_on(&self.ctx)
+                .fill_zero_on(&self.device_ctx)
                 .map_err(StackedReductionError::FillZero)?;
             let mut dst_offset = 0;
             for trace in &stacked.traces {
@@ -747,7 +750,7 @@ impl<D: Copy + Clone + Send + Sync + 'static> StackedReductionGpu<D> {
                         trace.height(),
                         trace.width(),
                         l_skip,
-                        self.ctx.stream.as_raw(),
+                        self.device_ctx.stream.as_raw(),
                     )
                     .map_err(StackedReductionError::FoldPle)?;
                 }
@@ -762,8 +765,8 @@ impl<D: Copy + Clone + Send + Sync + 'static> StackedReductionGpu<D> {
         let eq_uni_u0r0_rot = eval_eq_uni(l_skip, u_0, r_0 * omega_skip);
         let eq_uni_u01 = eval_eq_uni_at_one(l_skip, u_0);
         debug_assert_eq!(self.eq_r_ns.buffer.len(), 2 << n_max);
-        self.k_rot_ns.buffer = DeviceBuffer::with_capacity_on(2 << n_max, &self.ctx);
-        [EF::ZERO].copy_to_on(&mut self.k_rot_ns.buffer, &self.ctx)?;
+        self.k_rot_ns.buffer = DeviceBuffer::with_capacity_on(2 << n_max, &self.device_ctx);
+        [EF::ZERO].copy_to_on(&mut self.k_rot_ns.buffer, &self.device_ctx)?;
         unsafe {
             // SAFETY:
             // - We allocated `k_rot_ns` with same capacity as `eq_r_ns` above.
@@ -773,14 +776,14 @@ impl<D: Copy + Clone + Send + Sync + 'static> StackedReductionGpu<D> {
                 eq_uni_u0r0_rot,
                 self.eq_const * eq_uni_u01,
                 n_max as u32,
-                self.ctx.stream.as_raw(),
+                self.device_ctx.stream.as_raw(),
             )
             .map_err(StackedReductionError::InitKRot)?;
         }
         vector_scalar_multiply_ext(
             &mut self.eq_r_ns.buffer,
             eq_uni_u0r0,
-            self.ctx.stream.as_raw(),
+            self.device_ctx.stream.as_raw(),
         )
         .map_err(StackedReductionError::VectorScalarMul)?;
 
@@ -814,7 +817,7 @@ impl<D: Copy + Clone + Send + Sync + 'static> StackedReductionGpu<D> {
         let l_skip = self.l_skip;
 
         let q_eval_ptrs = self.q_evals.iter().map(|q| q.as_ptr()).collect_vec();
-        q_eval_ptrs.copy_to_on(&mut self.d_q_eval_ptrs, &self.ctx)?;
+        q_eval_ptrs.copy_to_on(&mut self.d_q_eval_ptrs, &self.device_ctx)?;
 
         if self.n_max >= (round - 1) {
             // Move stable eq, k_rot to stable vectors
@@ -830,7 +833,7 @@ impl<D: Copy + Clone + Send + Sync + 'static> StackedReductionGpu<D> {
                     tmp.as_mut_ptr() as *mut c_void,
                     self.eq_r_ns.get_ptr(0) as *const c_void,
                     size_of::<EF>(),
-                    &self.ctx,
+                    &self.device_ctx,
                 )?;
 
                 self.eq_stable.push(tmp[0]);
@@ -840,7 +843,7 @@ impl<D: Copy + Clone + Send + Sync + 'static> StackedReductionGpu<D> {
                     tmp.as_mut_ptr() as *mut c_void,
                     self.k_rot_ns.get_ptr(0) as *const c_void,
                     size_of::<EF>(),
-                    &self.ctx,
+                    &self.device_ctx,
                 )?;
 
                 self.k_rot_stable.push(tmp[0]);
@@ -859,7 +862,7 @@ impl<D: Copy + Clone + Send + Sync + 'static> StackedReductionGpu<D> {
 
             // Zero-initialize accumulator for atomic adds
             self.d_accum
-                .fill_zero_on(&self.ctx)
+                .fill_zero_on(&self.device_ctx)
                 .map_err(StackedReductionError::FillZero)?;
 
             if log_height < l_skip + round {
@@ -873,9 +876,10 @@ impl<D: Copy + Clone + Send + Sync + 'static> StackedReductionGpu<D> {
                 // this transfer can be minimized.
                 let eq_ub_slice = &self.eq_ub_per_trace[window[0]..window[1]];
                 if eq_ub_slice.len() > self.d_eq_ub.len() {
-                    self.d_eq_ub = DeviceBuffer::with_capacity_on(eq_ub_slice.len(), &self.ctx);
+                    self.d_eq_ub =
+                        DeviceBuffer::with_capacity_on(eq_ub_slice.len(), &self.device_ctx);
                 }
-                eq_ub_slice.copy_to_on(&mut self.d_eq_ub, &self.ctx)?;
+                eq_ub_slice.copy_to_on(&mut self.d_eq_ub, &self.device_ctx)?;
                 let stacked_height = self.stacked_height(round);
                 unsafe {
                     stacked_reduction_sumcheck_mle_round_degenerate(
@@ -890,7 +894,7 @@ impl<D: Copy + Clone + Send + Sync + 'static> StackedReductionGpu<D> {
                         window_len,
                         l_skip,
                         round,
-                        self.ctx.stream.as_raw(),
+                        self.device_ctx.stream.as_raw(),
                     )
                     .map_err(StackedReductionError::SumcheckMleRoundDegenerate)?;
                 }
@@ -913,14 +917,14 @@ impl<D: Copy + Clone + Send + Sync + 'static> StackedReductionGpu<D> {
                         window_len,
                         num_y,
                         self.sm_count,
-                        self.ctx.stream.as_raw(),
+                        self.device_ctx.stream.as_raw(),
                     )
                     .map_err(StackedReductionError::SumcheckMleRound)?;
                 };
             }
 
             // D2H copy and reduce modulo P
-            let h_accum = self.d_accum.to_host_on(&self.ctx)?;
+            let h_accum = self.d_accum.to_host_on(&self.device_ctx)?;
             let evals = reduce_raw_u64_to_ef(&h_accum);
             s_evals_batch.push(evals);
         }
@@ -938,13 +942,13 @@ impl<D: Copy + Clone + Send + Sync + 'static> StackedReductionGpu<D> {
             .q_evals
             .iter()
             .map(|q| {
-                let folded = DeviceBuffer::with_capacity_on(q.len() >> 1, &self.ctx);
+                let folded = DeviceBuffer::with_capacity_on(q.len() >> 1, &self.device_ctx);
                 let output_ptr = folded.as_mut_ptr();
                 (folded, q.as_ptr(), output_ptr)
             })
             .multiunzip();
-        input_ptrs.copy_to_on(&mut self.d_input_ptrs, &self.ctx)?;
-        output_ptrs.copy_to_on(&mut self.d_output_ptrs, &self.ctx)?;
+        input_ptrs.copy_to_on(&mut self.d_input_ptrs, &self.device_ctx)?;
+        output_ptrs.copy_to_on(&mut self.d_output_ptrs, &self.device_ctx)?;
 
         // SAFETY:
         // - `d_input_ptrs` points to matrices with widths specified by `d_q_widths` and heights
@@ -961,7 +965,7 @@ impl<D: Copy + Clone + Send + Sync + 'static> StackedReductionGpu<D> {
                 self.stacked_height(round + 1) as u32,
                 self.q_width_max * output_height,
                 u_round,
-                self.ctx.stream.as_raw(),
+                self.device_ctx.stream.as_raw(),
             )
             .map_err(StackedReductionError::FoldMle)?;
         }
@@ -972,8 +976,8 @@ impl<D: Copy + Clone + Send + Sync + 'static> StackedReductionGpu<D> {
             let output_max_n = input_max_n.saturating_sub(1);
             let output_len = 1 << input_max_n;
 
-            let mut buffer = DeviceBuffer::<EF>::with_capacity_on(output_len, &self.ctx);
-            [EF::ZERO].copy_to_on(&mut buffer, &self.ctx)?;
+            let mut buffer = DeviceBuffer::<EF>::with_capacity_on(output_len, &self.device_ctx);
+            [EF::ZERO].copy_to_on(&mut buffer, &self.device_ctx)?;
             // SAFETY:
             // - eq_r_ns has max_n equal to input_max_n
             // - we allocate output for half the size of eq_r_ns
@@ -985,15 +989,15 @@ impl<D: Copy + Clone + Send + Sync + 'static> StackedReductionGpu<D> {
                         &self.eq_r_ns,
                         u_round,
                         output_max_n,
-                        self.ctx.stream.as_raw(),
+                        self.device_ctx.stream.as_raw(),
                     )
                     .map_err(StackedReductionError::TriangularFoldMle)?;
                 }
                 self.eq_r_ns = output;
             }
 
-            let mut buffer = DeviceBuffer::<EF>::with_capacity_on(output_len, &self.ctx);
-            [EF::ZERO].copy_to_on(&mut buffer, &self.ctx)?;
+            let mut buffer = DeviceBuffer::<EF>::with_capacity_on(output_len, &self.device_ctx);
+            [EF::ZERO].copy_to_on(&mut buffer, &self.device_ctx)?;
             // SAFETY:
             // - k_rot_ns has max_n equal to input_max_n
             // - we allocate output for half the size of eq_r_ns
@@ -1005,7 +1009,7 @@ impl<D: Copy + Clone + Send + Sync + 'static> StackedReductionGpu<D> {
                         &self.k_rot_ns,
                         u_round,
                         output_max_n,
-                        self.ctx.stream.as_raw(),
+                        self.device_ctx.stream.as_raw(),
                     )
                     .map_err(StackedReductionError::TriangularFoldMle)?;
                 }
@@ -1032,7 +1036,7 @@ impl<D: Copy + Clone + Send + Sync + 'static> StackedReductionGpu<D> {
         self.q_evals
             .iter()
             .map(|q| {
-                q.to_host_on(&self.ctx)
+                q.to_host_on(&self.device_ctx)
                     .map_err(StackedReductionError::MemCopy)
             })
             .collect::<Result<Vec<_>, _>>()

@@ -36,7 +36,7 @@ use crate::{
 pub fn sumcheck_multilinear_gpu<F: Field>(
     transcript: &mut DuplexSpongeGpu,
     evals: &[F],
-    ctx: &DeviceContext,
+    device_ctx: &DeviceContext,
 ) -> Result<(SumcheckCubeProof<EF>, Vec<EF>), SumcheckError>
 where
     EF: ExtensionField<F>,
@@ -61,16 +61,16 @@ where
 
     // Allocate ping-pong buffers
     let total_size = width * current_height;
-    let mut d_buffer_a = evals_ext.to_device_on(ctx)?;
-    let mut d_buffer_b = DeviceBuffer::<EF>::with_capacity_on(total_size / 2, ctx);
+    let mut d_buffer_a = evals_ext.to_device_on(device_ctx)?;
+    let mut d_buffer_b = DeviceBuffer::<EF>::with_capacity_on(total_size / 2, device_ctx);
 
     // Set up pointer arrays on device
-    let mut d_input_ptrs = DeviceBuffer::<*const EF>::with_capacity_on(num_matrices, ctx);
-    let mut d_output_ptrs = DeviceBuffer::<*mut EF>::with_capacity_on(num_matrices, ctx);
-    let d_widths = [width as u32].to_device_on(ctx)?;
+    let mut d_input_ptrs = DeviceBuffer::<*const EF>::with_capacity_on(num_matrices, device_ctx);
+    let mut d_output_ptrs = DeviceBuffer::<*mut EF>::with_capacity_on(num_matrices, device_ctx);
+    let d_widths = [width as u32].to_device_on(device_ctx)?;
 
     // Buffer for round output [d * WD]
-    let d_round_output = DeviceBuffer::<EF>::with_capacity_on(d * WD, ctx);
+    let d_round_output = DeviceBuffer::<EF>::with_capacity_on(d * WD, device_ctx);
 
     // Sumcheck rounds
     for round in 0..n {
@@ -85,8 +85,8 @@ where
         let input_ptr = input_buf.as_ptr();
         let output_ptr = output_buf.as_mut_ptr();
 
-        [input_ptr].copy_to_on(&mut d_input_ptrs, ctx)?;
-        [output_ptr].copy_to_on(&mut d_output_ptrs, ctx)?;
+        [input_ptr].copy_to_on(&mut d_input_ptrs, device_ctx)?;
+        [output_ptr].copy_to_on(&mut d_output_ptrs, device_ctx)?;
 
         // Call sumcheck_mle_round kernel (uses output_buf as tmp)
         unsafe {
@@ -98,13 +98,13 @@ where
                 num_matrices as u32,
                 current_height as u32,
                 d as u32,
-                ctx.stream.as_raw(),
+                device_ctx.stream.as_raw(),
             )
             .map_err(|e| SumcheckError::SumcheckMleRound(e.into()))?;
         }
 
         // Copy result back to host
-        let h_round_output = d_round_output.to_host_on(ctx)?;
+        let h_round_output = d_round_output.to_host_on(device_ctx)?;
 
         // Observe in transcript
         let s = h_round_output[0..d].to_vec();
@@ -129,7 +129,7 @@ where
                 output_height,
                 width as u32 * output_height,
                 r_round,
-                ctx.stream.as_raw(),
+                device_ctx.stream.as_raw(),
             )
             .map_err(|e| SumcheckError::FoldMle(e.into()))?;
         }
@@ -139,7 +139,7 @@ where
 
     // After all rounds, get final evaluation claim
     let final_buf = if n % 2 == 1 { &d_buffer_b } else { &d_buffer_a };
-    let eval_claim_vec = final_buf.to_host_on(ctx)?;
+    let eval_claim_vec = final_buf.to_host_on(device_ctx)?;
     let eval_claim = eval_claim_vec[0];
 
     transcript.observe_ext(eval_claim);
@@ -170,7 +170,7 @@ pub fn sumcheck_prismalinear_gpu(
     transcript: &mut DuplexSpongeGpu,
     l_skip: usize,
     evals: &[F],
-    ctx: &DeviceContext,
+    device_ctx: &DeviceContext,
 ) -> Result<(SumcheckPrismProof<EF>, Vec<EF>), SumcheckError> {
     let prism_dim = p3_util::log2_strict_usize(evals.len());
     assert!(prism_dim >= l_skip);
@@ -195,8 +195,8 @@ pub fn sumcheck_prismalinear_gpu(
     // ========== Round 0: Special PLE round ==========
     let _round0_span = info_span!("sumcheck_prismalinear.round0").entered();
 
-    let mut d_coeffs = evals.to_device_on(ctx)?;
-    let mut d_s0_coeffs = DeviceBuffer::<F>::with_capacity_on(large_domain_size, ctx);
+    let mut d_coeffs = evals.to_device_on(device_ctx)?;
+    let mut d_s0_coeffs = DeviceBuffer::<F>::with_capacity_on(large_domain_size, device_ctx);
 
     // Step 1: iDFT on skip domain (reinterpreting dimensions)
     // Input: [height=2^(l_skip+n), width=1]
@@ -207,7 +207,7 @@ pub fn sumcheck_prismalinear_gpu(
             l_skip,
             num_x * width,
             true,
-            ctx.stream.as_raw(),
+            device_ctx.stream.as_raw(),
         )
         .map_err(|e| SumcheckError::BatchNttSmall(e.into()))?;
     }
@@ -221,13 +221,13 @@ pub fn sumcheck_prismalinear_gpu(
                 num_x as u32,
                 width as u32,
                 large_domain_size as u32,
-                ctx.stream.as_raw(),
+                device_ctx.stream.as_raw(),
             )
             .map_err(|e| SumcheckError::ReduceOverXAndCols(e.into()))?;
         }
     } else {
         let mut d_coeffs_large =
-            DeviceBuffer::<F>::with_capacity_on(num_x * width * large_domain_size, ctx);
+            DeviceBuffer::<F>::with_capacity_on(num_x * width * large_domain_size, device_ctx);
 
         // Step 2: Copy and pad each column to large domain size
         unsafe {
@@ -237,7 +237,7 @@ pub fn sumcheck_prismalinear_gpu(
                 (num_x * width) as u32,
                 large_domain_size as u32,
                 domain_size as u32,
-                ctx.stream.as_raw(),
+                device_ctx.stream.as_raw(),
             )
             .map_err(|e| SumcheckError::BatchExpandPadWide(e.into()))?;
         }
@@ -249,7 +249,7 @@ pub fn sumcheck_prismalinear_gpu(
                 log_large_domain,
                 num_x * width,
                 false,
-                ctx.stream.as_raw(),
+                device_ctx.stream.as_raw(),
             )
             .map_err(|e| SumcheckError::BatchNttSmall(e.into()))?;
         }
@@ -262,7 +262,7 @@ pub fn sumcheck_prismalinear_gpu(
                 num_x as u32,
                 width as u32,
                 large_domain_size as u32,
-                ctx.stream.as_raw(),
+                device_ctx.stream.as_raw(),
             )
             .map_err(|e| SumcheckError::ReduceOverXAndCols(e.into()))?;
         }
@@ -275,13 +275,13 @@ pub fn sumcheck_prismalinear_gpu(
                 log_large_domain,
                 1,
                 true,
-                ctx.stream.as_raw(),
+                device_ctx.stream.as_raw(),
             )
             .map_err(|e| SumcheckError::BatchNttSmall(e.into()))?;
         }
     }
     // Step 6: Copy to host and convert to extension field
-    let s0_coeffs_host: Vec<F> = d_s0_coeffs.to_host_on(ctx)?;
+    let s0_coeffs_host: Vec<F> = d_s0_coeffs.to_host_on(device_ctx)?;
     drop(d_s0_coeffs);
     let s0_coeffs_ext: Vec<EF> = s0_coeffs_host[0..=s_deg]
         .iter()
@@ -301,7 +301,7 @@ pub fn sumcheck_prismalinear_gpu(
 
     // ========== Fold PLE: Evaluate at r_0 ==========
 
-    let d_folded = DeviceBuffer::<EF>::with_capacity_on(num_x, ctx);
+    let d_folded = DeviceBuffer::<EF>::with_capacity_on(num_x, device_ctx);
     unsafe {
         fold_ple_from_coeffs(
             d_coeffs.as_ptr(),     // Original input (base field, but modified by iDFT)
@@ -310,7 +310,7 @@ pub fn sumcheck_prismalinear_gpu(
             width as u32,
             domain_size as u32,
             r_0,
-            ctx.stream.as_raw(),
+            device_ctx.stream.as_raw(),
         )
         .map_err(|e| SumcheckError::FoldPleFromCoeffs(e.into()))?;
     }
@@ -325,12 +325,12 @@ pub fn sumcheck_prismalinear_gpu(
 
     // Allocate ping-pong buffers for MLE rounds
     let mut d_buffer_a = d_folded; // Reuse folded result
-    let mut d_buffer_b = DeviceBuffer::<EF>::with_capacity_on(current_height / 2, ctx);
+    let mut d_buffer_b = DeviceBuffer::<EF>::with_capacity_on(current_height / 2, device_ctx);
 
-    let mut d_input_ptrs = DeviceBuffer::<*const EF>::with_capacity_on(num_matrices, ctx);
-    let mut d_output_ptrs = DeviceBuffer::<*mut EF>::with_capacity_on(num_matrices, ctx);
-    let d_widths = [width as u32].to_device_on(ctx)?;
-    let d_round_output = DeviceBuffer::<EF>::with_capacity_on(d, ctx);
+    let mut d_input_ptrs = DeviceBuffer::<*const EF>::with_capacity_on(num_matrices, device_ctx);
+    let mut d_output_ptrs = DeviceBuffer::<*mut EF>::with_capacity_on(num_matrices, device_ctx);
+    let d_widths = [width as u32].to_device_on(device_ctx)?;
+    let d_round_output = DeviceBuffer::<EF>::with_capacity_on(d, device_ctx);
 
     for round in 1..=n {
         let (input_buf, output_buf) = if round % 2 == 1 {
@@ -342,8 +342,8 @@ pub fn sumcheck_prismalinear_gpu(
         let input_ptr = input_buf.as_ptr();
         let output_ptr = output_buf.as_mut_ptr();
 
-        [input_ptr].copy_to_on(&mut d_input_ptrs, ctx)?;
-        [output_ptr].copy_to_on(&mut d_output_ptrs, ctx)?;
+        [input_ptr].copy_to_on(&mut d_input_ptrs, device_ctx)?;
+        [output_ptr].copy_to_on(&mut d_output_ptrs, device_ctx)?;
 
         // Sumcheck MLE round
         unsafe {
@@ -355,12 +355,12 @@ pub fn sumcheck_prismalinear_gpu(
                 num_matrices as u32,
                 current_height as u32,
                 d as u32,
-                ctx.stream.as_raw(),
+                device_ctx.stream.as_raw(),
             )
             .map_err(|e| SumcheckError::SumcheckMleRound(e.into()))?;
         }
 
-        let h_round_output = d_round_output.to_host_on(ctx)?;
+        let h_round_output = d_round_output.to_host_on(device_ctx)?;
         let s = h_round_output[0..d].to_vec();
         assert_eq!(s.len(), d);
         transcript.observe_ext(s[0]);
@@ -381,7 +381,7 @@ pub fn sumcheck_prismalinear_gpu(
                 output_height,
                 width as u32 * output_height,
                 r_round,
-                ctx.stream.as_raw(),
+                device_ctx.stream.as_raw(),
             )
             .map_err(|e| SumcheckError::FoldMle(e.into()))?;
         }
@@ -392,7 +392,7 @@ pub fn sumcheck_prismalinear_gpu(
 
     // Get final evaluation claim
     let final_buf = if n % 2 == 1 { &d_buffer_b } else { &d_buffer_a };
-    let eval_claim_vec = final_buf.to_host_on(ctx)?;
+    let eval_claim_vec = final_buf.to_host_on(device_ctx)?;
     let eval_claim = eval_claim_vec[0];
 
     transcript.observe_ext(eval_claim);

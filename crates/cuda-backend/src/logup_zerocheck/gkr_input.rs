@@ -95,17 +95,17 @@ pub fn log_gkr_input_evals<HS: GpuHashScheme>(
     alpha_logup: EF,
     d_challenges: &DeviceBuffer<EF>,
     total_leaves: usize,
-    ctx: &DeviceContext,
+    device_ctx: &DeviceContext,
 ) -> Result<(DeviceBuffer<Frac<EF>>, EF), InteractionGpuError> {
     if trace_interactions.iter().all(|meta| meta.is_none()) {
         return Ok((DeviceBuffer::new(), alpha_logup));
     }
 
-    let leaves = DeviceBuffer::<Frac<EF>>::with_capacity_on(total_leaves, ctx);
-    leaves.fill_zero_on(ctx)?;
+    let leaves = DeviceBuffer::<Frac<EF>>::with_capacity_on(total_leaves, device_ctx);
+    leaves.fill_zero_on(device_ctx)?;
     let null_preprocessed = DeviceBuffer::<F>::new();
 
-    let stream = ctx.stream.as_raw();
+    let stream = device_ctx.stream.as_raw();
     let mut d_partition_ptrs = DeviceBuffer::<u64>::new();
     let mut tmp = DeviceBuffer::<Frac<EF>>::new();
     for meta in trace_interactions.iter().flatten() {
@@ -133,7 +133,7 @@ pub fn log_gkr_input_evals<HS: GpuHashScheme>(
         let d_public_values = if air_ctx.public_values.is_empty() {
             DeviceBuffer::<F>::new()
         } else {
-            air_ctx.public_values.to_device_on(ctx)?
+            air_ctx.public_values.to_device_on(device_ctx)?
         };
 
         let height = air_ctx.height();
@@ -143,17 +143,20 @@ pub fn log_gkr_input_evals<HS: GpuHashScheme>(
             .map(|m| m.buffer().as_ptr() as u64)
             .collect_vec();
         if partition_ptrs.len() > d_partition_ptrs.len() {
-            d_partition_ptrs = DeviceBuffer::with_capacity_on(partition_ptrs.len(), ctx);
+            d_partition_ptrs = DeviceBuffer::with_capacity_on(partition_ptrs.len(), device_ctx);
         }
-        partition_ptrs.copy_to_on(&mut d_partition_ptrs, ctx)?;
+        partition_ptrs.copy_to_on(&mut d_partition_ptrs, device_ctx)?;
 
         let buffer_size = rules.inner.buffer_size;
         // TODO[jpw]: remove magic 10
         let is_global = buffer_size > 10;
         let intermediates = if is_global {
-            DeviceBuffer::<EF>::with_capacity_on((TASK_SIZE as usize) * buffer_size as usize, ctx)
+            DeviceBuffer::<EF>::with_capacity_on(
+                (TASK_SIZE as usize) * buffer_size as usize,
+                device_ctx,
+            )
         } else {
-            DeviceBuffer::<EF>::with_capacity_on(1, ctx)
+            DeviceBuffer::<EF>::with_capacity_on(1, device_ctx)
         };
 
         let num_rows_per_tile = height.div_ceil(TASK_SIZE as usize).max(1);
@@ -171,7 +174,7 @@ pub fn log_gkr_input_evals<HS: GpuHashScheme>(
         let trace_output = if height != lifted_height {
             let required = height * num_interactions;
             if required > tmp.len() {
-                tmp = DeviceBuffer::with_capacity_on(required, ctx);
+                tmp = DeviceBuffer::with_capacity_on(required, device_ctx);
             }
             tmp.as_mut_ptr()
         } else {

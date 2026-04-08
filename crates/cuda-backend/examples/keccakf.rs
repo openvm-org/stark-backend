@@ -120,7 +120,7 @@ fn main() {
                 engine.verify(&vk, &proof).expect("verification failed");
                 println!(
                     "[task {t} - stream {:?}] Proof verified",
-                    engine.device().ctx.stream.as_raw()
+                    engine.device().device_ctx.stream.as_raw()
                 );
             }
         }));

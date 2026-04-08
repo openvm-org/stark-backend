@@ -221,19 +221,19 @@ pub unsafe fn eval_poly_ext_at_point_from_base(
     base_coeffs: &DeviceBuffer<F>,
     coeff_len: usize,
     x: EF,
-    ctx: &DeviceContext,
+    device_ctx: &DeviceContext,
 ) -> Result<EF, KernelError> {
     debug_assert!(base_coeffs.len() >= coeff_len * D_EF);
-    let d_out = DeviceBuffer::<EF>::with_capacity_on(1, ctx);
+    let d_out = DeviceBuffer::<EF>::with_capacity_on(1, device_ctx);
     check(_eval_poly_ext_at_point(
         base_coeffs.as_ptr(),
         coeff_len,
         x,
         d_out.as_mut_ptr(),
-        ctx.stream.as_raw(),
+        device_ctx.stream.as_raw(),
     ))
     .map_err(KernelError::Kernel)?;
-    let out = d_out.to_host_on(ctx).map_err(KernelError::MemCopy)?;
+    let out = d_out.to_host_on(device_ctx).map_err(KernelError::MemCopy)?;
     Ok(out[0])
 }
 

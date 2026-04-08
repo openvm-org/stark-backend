@@ -272,7 +272,7 @@ pub fn init_bn254_poseidon2_rc() -> Result<(), CudaError> {
         return Ok(());
     }
 
-    let ctx = DeviceContext::for_device(device_key.0 as u32)?;
+    let device_ctx = DeviceContext::for_device(device_key.0 as u32)?;
 
     // Width-3 constants (leaf hashing)
     let (initial, partial, terminal) = RC_W3_CONSTANTS.get_or_init(compute_bn254_rc_w3_constants);
@@ -281,7 +281,7 @@ pub fn init_bn254_poseidon2_rc() -> Result<(), CudaError> {
             initial.as_ptr(),
             partial.as_ptr(),
             terminal.as_ptr(),
-            ctx.stream.as_raw(),
+            device_ctx.stream.as_raw(),
         )
     };
     CudaError::from_result(code)?;
@@ -294,7 +294,7 @@ pub fn init_bn254_poseidon2_rc() -> Result<(), CudaError> {
             initial_w2.as_ptr(),
             partial_w2.as_ptr(),
             terminal_w2.as_ptr(),
-            ctx.stream.as_raw(),
+            device_ctx.stream.as_raw(),
         )
     };
     CudaError::from_result(code)?;
@@ -385,14 +385,14 @@ pub unsafe fn bn254_sponge_grind(
     init_state: *const DeviceBn254SpongeState,
     bits: u32,
     max_witness: u32,
-    ctx: &DeviceContext,
+    device_ctx: &DeviceContext,
 ) -> Result<u32, crate::sponge::GrindError> {
     use openvm_cuda_common::copy::{MemCopyD2H, MemCopyH2D};
 
     init_bn254_poseidon2_rc()?;
     validate_gpu_grind_bits(bits as usize)?;
-    let mut d_result: DeviceBuffer<u32> = DeviceBuffer::with_capacity_on(1, ctx);
-    [u32::MAX].copy_to_on(&mut d_result, ctx)?;
+    let mut d_result: DeviceBuffer<u32> = DeviceBuffer::with_capacity_on(1, device_ctx);
+    [u32::MAX].copy_to_on(&mut d_result, device_ctx)?;
 
     for start in (0..=max_witness).step_by(1 << bits) {
         CudaError::from_result(_bn254_sponge_grind(
@@ -401,10 +401,10 @@ pub unsafe fn bn254_sponge_grind(
             start,
             max_witness,
             d_result.as_mut_ptr(),
-            ctx.stream.as_raw(),
+            device_ctx.stream.as_raw(),
         ))?;
 
-        let result = d_result.to_host_on(ctx)?[0];
+        let result = d_result.to_host_on(device_ctx)?[0];
         if result < u32::MAX {
             return Ok(result);
         }
