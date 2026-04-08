@@ -22,4 +22,7 @@ tokio = { workspace = true, features = ["full"] }
 
 [features]
 touchemall = []
+# Tracks the allocating stream per DeviceBuffer and debug-asserts that
+# operations (fill_zero, etc.) use the same stream. Useful for catching
+# accidental cross-stream misuse during development.
 debug-cuda-stream = []

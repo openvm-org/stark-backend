@@ -139,6 +139,10 @@ pub struct DeviceContext {
 }
 
 impl DeviceContext {
+    /// Creates a new `DeviceContext` for the given device.
+    ///
+    /// NOTE: This calls `set_device_by_id` as a side effect, changing the
+    /// current CUDA device for the calling thread.
     pub fn for_device(device_id: u32) -> Result<Self, CudaError> {
         crate::common::set_device_by_id(device_id as i32)?;
         Ok(Self {

@@ -348,7 +348,6 @@ impl VirtualMemoryPool {
             })
     }
 
-    /// Frees a pointer and returns `(size, StreamGuard)`.
     /// Frees a pointer and returns the size of the freed memory.
     /// Coalesces adjacent free regions.
     ///

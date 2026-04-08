@@ -204,6 +204,10 @@ impl<T> Drop for DeviceBuffer<T> {
                 self.len,
                 size_of::<T>()
             );
+            // d_free enqueues cudaFreeAsync on the stream that originally
+            // allocated this buffer (stored in the memory manager's record).
+            // This is correct even when Drop runs on a different thread —
+            // CUDA handles cross-thread stream operations safely.
             unsafe {
                 d_free(self.ptr as *mut c_void).expect("GPU free failed");
             }
