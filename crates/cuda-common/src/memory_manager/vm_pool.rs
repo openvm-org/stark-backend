@@ -261,6 +261,8 @@ impl VirtualMemoryPool {
     // ========================================================================
 
     /// Allocates memory from the pool's free regions.
+    /// Attempts defragmentation if no suitable free region exists.
+    /// Returns an error if there's insufficient memory even after defragmentation.
     pub(super) fn malloc_internal(
         &mut self,
         requested: usize,
@@ -271,11 +273,14 @@ impl VirtualMemoryPool {
             "Requested size must be a multiple of the page size"
         );
 
+        // Phase 0: Cleanup zombie regions
         self.cleanup_zombie_regions();
 
+        // Phase 1: Zero-cost attempts
         let mut best_region = self.find_best_fit(requested, stream);
 
         if best_region.is_none() {
+            // Phase 2: Defragmentation
             best_region = self.defragment_or_create_new_pages(requested, stream)?;
         }
 
@@ -285,6 +290,7 @@ impl VirtualMemoryPool {
                 .remove(&ptr)
                 .expect("BUG: free region address not found after find_best_fit");
 
+            // If region is larger, return the untouched tail with its original guard metadata.
             if region.size > requested {
                 self.reinsert_split_free_region(
                     ptr + requested as u64,
@@ -325,7 +331,7 @@ impl VirtualMemoryPool {
         // 1a. Prefer same stream (smallest fit) — could be not completed
         if let Some((addr, _)) = candidates
             .iter()
-            .filter(|(_, region)| region.stream.is_same_stream(stream))
+            .filter(|(_, region)| region.stream == *stream)
             .min_by_key(|(_, region)| region.size)
         {
             return Some(*addr);
@@ -343,6 +349,9 @@ impl VirtualMemoryPool {
     }
 
     /// Frees a pointer and returns `(size, StreamGuard)`.
+    /// Frees a pointer and returns the size of the freed memory.
+    /// Coalesces adjacent free regions.
+    ///
     /// The `StreamGuard` must be dropped by the caller AFTER releasing the memory manager lock.
     pub(super) fn free_internal(
         &mut self,
@@ -365,6 +374,10 @@ impl VirtualMemoryPool {
     // ========================================================================
 
     /// Reclaims zombie regions whose events have completed.
+    ///
+    /// Zombies are old regions that have been double-mapped to new locations during defrag.
+    /// Once the associated event completes (meaning no GPU work is using the old VA),
+    /// we can safely unmap the old VA and return it to `unmapped_regions` for reuse.
     fn cleanup_zombie_regions(&mut self) {
         let mut i = 0;
         while i < self.zombie_regions.len() {
@@ -385,7 +398,10 @@ impl VirtualMemoryPool {
         }
     }
 
-    /// Inserts a new free region, possibly merging with adjacent same-stream regions.
+    /// Inserts a new free region for `(ptr, size)` into the free regions map, possibly merging
+    /// with adjacent same-stream regions. Records a new event on the stream.
+    ///
+    /// Returns the starting pointer and size of the (possibly merged) free region.
     fn free_region_insert(
         &mut self,
         mut ptr: CUdeviceptr,
@@ -394,16 +410,14 @@ impl VirtualMemoryPool {
     ) -> (CUdeviceptr, usize) {
         // Potential merge with next neighbor
         if let Some((&next_ptr, next_region)) = self.free_regions.range(ptr + 1..).next() {
-            if next_region.stream.is_same_stream(stream) && ptr + size as u64 == next_ptr {
+            if next_region.stream == *stream && ptr + size as u64 == next_ptr {
                 let next_region = self.free_regions.remove(&next_ptr).unwrap();
                 size += next_region.size;
             }
         }
         // Potential merge with previous neighbor
         if let Some((&prev_ptr, prev_region)) = self.free_regions.range(..ptr).next_back() {
-            if prev_region.stream.is_same_stream(stream)
-                && prev_ptr + prev_region.size as u64 == ptr
-            {
+            if prev_region.stream == *stream && prev_ptr + prev_region.size as u64 == ptr {
                 let prev_region = self.free_regions.remove(&prev_ptr).unwrap();
                 ptr = prev_ptr;
                 size += prev_region.size;
@@ -427,6 +441,9 @@ impl VirtualMemoryPool {
     }
 
     /// Reinsert the untouched tail of a split free region without recording a new event.
+    ///
+    /// No new synchronization point was created for these pages, so they keep the original
+    /// event, stream affinity, and age ordering.
     fn reinsert_split_free_region(
         &mut self,
         ptr: CUdeviceptr,
@@ -527,6 +544,10 @@ impl VirtualMemoryPool {
     // Defragmentation
     // ========================================================================
 
+    /// Defragments the pool by reusing existing holes and, if needed, reserving more VA space.
+    /// Moves just enough pages to satisfy `requested`, keeping the remainder in place.
+    ///
+    /// The returned pointer, if not `None`, is guaranteed to exist as a key in `free_regions`.
     fn defragment_or_create_new_pages(
         &mut self,
         requested: usize,
@@ -544,7 +565,9 @@ impl VirtualMemoryPool {
             ByteSize::b(total_free_size as u64),
         );
 
+        // Find a best fit unmapped region
         let dst = self.take_unmapped_region(requested)?;
+        // Sentinel value until we have a valid free region pointer from allocation
         let mut allocated_ptr = CUdeviceptr::MAX;
 
         let mut allocated_dst = dst;
@@ -632,7 +655,7 @@ impl VirtualMemoryPool {
             .free_regions
             .iter()
             .filter(|(&addr, _)| allocate_size == 0 || addr != allocated_ptr)
-            .map(|(&addr, region)| (!region.stream.is_same_stream(stream), region.id, addr))
+            .map(|(&addr, region)| (region.stream != *stream, region.id, addr))
             .collect();
         ordered_free_regions.sort_by_key(|(is_other, id, _)| (*is_other, *id));
         for (other_stream, _, addr) in ordered_free_regions {
@@ -878,7 +901,7 @@ mod tests {
 
         let leftover = pool.free_regions.get(&leftover_addr).unwrap();
         assert_eq!(leftover.size, page_size);
-        assert!(leftover.stream.is_same_stream(&foreign_stream));
+        assert_eq!(leftover.stream, foreign_stream);
         assert_eq!(leftover.id, 42);
         assert!(Arc::ptr_eq(&leftover.event, &original_event));
     }

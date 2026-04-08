@@ -62,7 +62,7 @@ where
         &self,
         traces: &[&DeviceMatrix<F>],
     ) -> Result<(HS::Digest, StackedPcsDataGpu<F, HS::Digest>), Self::Error> {
-        let cfg = self.config();
+        let cfg = self.params();
         stacked_commit::<HS::MerkleHash>(
             cfg.l_skip,
             cfg.n_stack,
@@ -107,7 +107,7 @@ impl<HS: GpuHashScheme, TS: GpuFiatShamirTranscript<HS::SC>>
         // Threshold for monomial evaluation path based on proof type:
         // - App proofs (log_blowup=1): higher threshold (512)
         // - Recursion proofs: lower threshold (64)
-        let monomial_num_y_threshold = if self.config().log_blowup == 1 {
+        let monomial_num_y_threshold = if self.params().log_blowup == 1 {
             512
         } else {
             64
@@ -147,7 +147,7 @@ where
         r: Vec<EF>,
     ) -> Result<Self::OpeningProof, Self::Error> {
         let mut mem = MemTracker::start_and_reset_peak("prover.openings");
-        let params = self.config();
+        let params = self.params();
         #[cfg(debug_assertions)]
         {
             let total_stacked_width: usize = std::iter::once(common_main_pcs_data.layout().width())

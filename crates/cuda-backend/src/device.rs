@@ -12,7 +12,7 @@ use crate::cuda::{
 #[derive(Clone, Getters, CopyGetters, MutGetters)]
 pub struct GpuDeviceConfig {
     #[getset(get = "pub")]
-    pub(crate) config: SystemParams,
+    pub(crate) params: SystemParams,
     #[getset(get = "pub", get_mut = "pub")]
     pub(crate) prover_config: GpuProverConfig,
     pub id: u32,
@@ -50,7 +50,7 @@ impl GpuDevice {
         let ctx = DeviceContext::for_device(id)?;
         let sm_count = get_sm_count(id, ctx.stream.as_raw()).expect("failed to get SM count");
         let config = GpuDeviceConfig {
-            config: params,
+            params,
             prover_config,
             id,
             sm_count,
@@ -60,8 +60,8 @@ impl GpuDevice {
     }
 
     // Delegate accessors to inner config
-    pub fn config(&self) -> &SystemParams {
-        &self.config.config
+    pub fn params(&self) -> &SystemParams {
+        &self.config.params
     }
 
     pub fn prover_config(&self) -> &GpuProverConfig {

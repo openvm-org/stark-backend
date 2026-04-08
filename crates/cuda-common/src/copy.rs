@@ -72,7 +72,7 @@ impl<T> MemCopyH2D<T> for [T] {
     ) -> Result<(), MemCopyError> {
         if self.len() > dst.len() {
             return Err(MemCopyError::SizeMismatch {
-                operation: "copy_to_device_on",
+                operation: "copy_to_on",
                 src_len: self.len(),
                 dst_len: dst.len(),
             });

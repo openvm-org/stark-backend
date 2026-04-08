@@ -110,12 +110,15 @@ impl StreamGuard {
     pub fn new(stream: CudaStream) -> Self {
         Self(Arc::new(stream))
     }
+}
 
-    /// Returns `true` if both guards refer to the same underlying `CudaStream`.
-    pub fn is_same_stream(&self, other: &StreamGuard) -> bool {
+impl PartialEq for StreamGuard {
+    fn eq(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.0, &other.0)
     }
 }
+
+impl Eq for StreamGuard {}
 
 impl Deref for StreamGuard {
     type Target = CudaStream;
