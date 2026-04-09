@@ -201,7 +201,7 @@ pub unsafe fn batch_eq_hypercube_stage(
 ) -> Result<(), CudaError> {
     let width = x.len() as u32;
     debug_assert!(step < height);
-    debug_assert!(out.len() <= (width * height) as usize);
+    debug_assert!(out.len() >= (width * height) as usize);
     check(_batch_eq_hypercube_stage(
         out.as_mut_ptr(),
         x.as_ptr(),
