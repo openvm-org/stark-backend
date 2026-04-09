@@ -82,7 +82,7 @@ __global__ void batch_ntt_kernel(
 ) {
     uint32_t const block_idx = blockIdx.x * blockDim.y + threadIdx.y;
     bool const active_thread = (block_idx < cnt_blocks);
-    buffer += block_idx << l_skip;
+    buffer += static_cast<size_t>(block_idx) << l_skip;
 
 #ifdef CUDA_DEBUG
     assert(blockDim.x <= (1 << l_skip));
