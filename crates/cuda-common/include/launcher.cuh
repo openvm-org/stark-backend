@@ -15,12 +15,18 @@ inline std::pair<dim3, dim3> kernel_launch_params(
     size_t count,
     size_t threads_per_block = MAX_THREADS
 ) {
+    if (count == 0) {
+        return std::make_pair(dim3(0, 1, 1), dim3(1, 1, 1));
+    }
     size_t block = std::min(count, threads_per_block);
     size_t grid = div_ceil(count, block);
     return std::make_pair(dim3(grid, 1, 1), dim3(block, 1, 1));
 }
 
 inline std::pair<dim3, dim3> kernel_launch_2d_params(size_t x, size_t y) {
+    if (x == 0 || y == 0) {
+        return std::make_pair(dim3(0, 0), dim3(1, 1));
+    }
     dim3 block = dim3(std::min(x, WARP_SIZE), std::min(y, WARP_SIZE));
     dim3 grid = dim3(div_ceil(x, block.x), div_ceil(y, block.y));
     return std::make_pair(grid, block);
