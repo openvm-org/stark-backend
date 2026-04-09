@@ -96,7 +96,9 @@ impl<T> DeviceBuffer<T> {
     /// The caller should use the same stream that allocated this buffer.
     /// `fill_zero` is async; same-stream guarantees ordering without explicit sync.
     pub fn fill_zero_on(&self, device_ctx: &GpuDeviceCtx) -> Result<(), CudaError> {
-        assert_ne!(self.len, 0, "Empty buffer");
+        if self.len == 0 {
+            return Ok(());
+        }
         #[cfg(feature = "debug-cuda-stream")]
         debug_assert_eq!(
             device_ctx.stream.as_raw(),
@@ -264,5 +266,13 @@ mod tests {
         let d_array = v.to_device_on(&device_ctx).unwrap();
         d_array.fill_zero_on(&device_ctx).unwrap();
         assert_eq!(d_array.to_host_on(&device_ctx).unwrap(), vec![0; v.len()]);
+    }
+
+    #[test]
+    fn test_device_buffer_fill_zero_empty_is_noop() {
+        let ctx = test_ctx();
+        let d_array = DeviceBuffer::<u64>::new();
+        d_array.fill_zero_on(&ctx).unwrap();
+        assert!(d_array.is_empty());
     }
 }
