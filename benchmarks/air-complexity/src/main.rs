@@ -7,11 +7,11 @@
 //!
 //! Usage (CPU):
 //!   cargo run -p openvm-benchmark-air-complexity --release -- \
-//!     --num-airs 4 --cols-per-air 100 --constraints-per-col 2 --log-total-cells 24
+//!     --num-airs 4 --cols-per-air 100 --constraints-per-col 2 --log-rows-per-air 18
 //!
 //! Usage (GPU):
 //!   cargo run -p openvm-benchmark-air-complexity --release --features cuda -- \
-//!     --num-airs 4 --cols-per-air 100 --constraints-per-col 2 --log-total-cells 24
+//!     --num-airs 4 --cols-per-air 100 --constraints-per-col 2 --log-rows-per-air 18
 //!
 //! To also write a metrics.json file:
 //!   METRICS_OUTPUT=metrics.json cargo run -p openvm-benchmark-air-complexity --release -- ...
@@ -35,7 +35,6 @@ use p3_air::{Air, AirBuilder, BaseAir, BaseAirWithPublicValues};
 use p3_baby_bear::BabyBear;
 use p3_field::PrimeCharacteristicRing;
 use p3_matrix::Matrix;
-use p3_util::log2_ceil_usize;
 
 type F = BabyBear;
 type SC = BabyBearPoseidon2Config;
@@ -62,10 +61,9 @@ struct Args {
     #[arg(long, default_value_t = 0.25)]
     interactions_per_col: f64,
 
-    /// Log2 of target total trace cells across all AIRs. Actual count may differ
-    /// due to rounding trace height to a power of 2.
-    #[arg(long, default_value_t = 28)]
-    log_total_cells: usize,
+    /// Log2 of the number of rows per AIR.
+    #[arg(long, default_value_t = 18)]
+    log_rows_per_air: usize,
 
     /// Log2 of stacked height for the PCS. Default is 24
     /// (MAX_APP_LOG_STACKED_HEIGHT), matching default_app_config() in the
@@ -165,20 +163,6 @@ fn prove(
 }
 
 // ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-fn ratio_str(actual: usize, target: f64) -> String {
-    if (actual as f64 - target).abs() < 0.5 {
-        "exact".to_string()
-    } else if (actual as f64) < target {
-        format!("{:.2}x below target", target / actual as f64)
-    } else {
-        format!("{:.2}x above target", actual as f64 / target)
-    }
-}
-
-// ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
 
@@ -194,17 +178,8 @@ fn run(args: &Args) {
     assert!(args.num_airs > 0);
     assert!(args.cols_per_air > 0);
 
-    // Compute trace height (round up to power of 2)
-    let target_total_cells = 1usize << args.log_total_cells;
-    let cells_per_air = target_total_cells / args.num_airs;
-    let rows_per_air = cells_per_air / args.cols_per_air;
-    assert!(
-        rows_per_air >= 2,
-        "log_total_cells too small for the given num_airs and cols_per_air"
-    );
-    let log_trace_height = log2_ceil_usize(rows_per_air);
-    let trace_height = 1usize << log_trace_height;
-    let actual_total_cells = args.num_airs * args.cols_per_air * trace_height;
+    let trace_height = 1usize << args.log_rows_per_air;
+    let total_cells = args.num_airs * args.cols_per_air * trace_height;
 
     // Compute actual integer counts per AIR from fractional rates
     let constraints_per_air =
@@ -217,12 +192,6 @@ fn run(args: &Args) {
     let constraint_instances = total_constraints * trace_height;
     let bus_interaction_messages = total_bus_interactions * trace_height;
 
-    // Target values for ratio reporting
-    let target_constraints =
-        args.constraints_per_col * args.cols_per_air as f64 * args.num_airs as f64;
-    let target_bus_interactions =
-        args.interactions_per_col * args.cols_per_air as f64 * args.num_airs as f64;
-
     let backend_name = if cfg!(feature = "cuda") {
         "GPU (CUDA)"
     } else {
@@ -234,19 +203,13 @@ fn run(args: &Args) {
     println!("  cols_per_air:           {}", args.cols_per_air);
     println!("  constraints_per_col:    {}", args.constraints_per_col);
     println!("  interactions_per_col:   {}", args.interactions_per_col);
-    println!("  trace_height:           {trace_height} (2^{log_trace_height})");
+    println!("  trace_height:           {trace_height} (2^{})", args.log_rows_per_air);
     println!(
-        "  trace_cells:            {actual_total_cells} ({})",
-        ratio_str(actual_total_cells, target_total_cells as f64)
+        "  trace_cells:            {total_cells} (2^{} rows * {} AIRs * {} columns / AIR)",
+        args.log_rows_per_air, args.num_airs, args.cols_per_air
     );
-    println!(
-        "  constraints:            {total_constraints} ({})",
-        ratio_str(total_constraints, target_constraints)
-    );
-    println!(
-        "  bus_interactions:        {total_bus_interactions} ({})",
-        ratio_str(total_bus_interactions, target_bus_interactions)
-    );
+    println!("  constraints:            {total_constraints}");
+    println!("  bus_interactions:       {total_bus_interactions}");
     println!("  constraint_instances:   {constraint_instances}");
     println!("  bus_interaction_msgs:   {bus_interaction_messages}");
 
