@@ -90,8 +90,8 @@ __global__ void split_ext_to_base_col_major_matrix_kernel(
         return;
     }
 
-    uint32_t col_num = (poly_len / matrix_height); // SPLIT_FACTOR = 2
-    for (uint32_t col_idx = 0; col_idx < col_num; col_idx++) {
+    uint64_t col_num = (poly_len / matrix_height); // SPLIT_FACTOR = 2
+    for (uint64_t col_idx = 0; col_idx < col_num; col_idx++) {
         FpExt ext_val = d_poly[col_idx * matrix_height + row_idx];
         d_matrix[(col_idx * 4 + 0) * matrix_height + row_idx] = ext_val.elems[0];
         d_matrix[(col_idx * 4 + 1) * matrix_height + row_idx] = ext_val.elems[1];
@@ -129,9 +129,10 @@ __global__ void batch_rotate_pad_kernel(
                 pidx_rot -= num_x;
             }
         }
-        out[padded_size * pidx + tidx] = in[domain_size * pidx_rot + tidx_rot];
+        out[static_cast<size_t>(padded_size) * pidx + tidx] =
+            in[static_cast<size_t>(domain_size) * pidx_rot + tidx_rot];
     } else if (tidx < padded_size) {
-        out[padded_size * pidx + tidx] = Fp(0);
+        out[static_cast<size_t>(padded_size) * pidx + tidx] = Fp(0);
     }
 }
 
@@ -151,7 +152,8 @@ __global__ void lift_padded_matrix_evals_kernel(
         return;
     }
     // lhs = rhs when tidx < height
-    matrix[col * padded_height + tidx] = matrix[col * padded_height + (tidx % height)];
+    matrix[static_cast<size_t>(col) * padded_height + tidx] =
+        matrix[static_cast<size_t>(col) * padded_height + (tidx % height)];
 }
 
 // Required: lifted_height = height * stride
@@ -169,7 +171,8 @@ __global__ void collapse_strided_matrix_kernel(
         return;
     }
 
-    out[col * height + row] = in[col * lifted_height + row * stride];
+    out[static_cast<size_t>(col) * height + row] =
+        in[static_cast<size_t>(col) * lifted_height + static_cast<size_t>(row) * stride];
 }
 
 // memory layout of in: column-major
@@ -190,9 +193,9 @@ __global__ void batch_expand_pad_kernel(
         for (uint32_t i = 0; i < polyCount; i++) {
             Fp res = Fp(0);
             if (idx < inSize) {
-                res = in[i * inSize + idx];
+                res = in[static_cast<size_t>(i) * inSize + idx];
             }
-            out[i * outSize + idx] = res;
+            out[static_cast<size_t>(i) * outSize + idx] = res;
         }
     }
 }
@@ -214,9 +217,10 @@ __global__ void batch_expand_pad_wide_kernel(
         return;
     }
     if (row < height) {
-        out[col * padded_height + row] = in[col * height + row];
+        out[static_cast<size_t>(col) * padded_height + row] =
+            in[static_cast<size_t>(col) * height + row];
     } else if (row < padded_height) {
-        out[col * padded_height + row] = Fp(0);
+        out[static_cast<size_t>(col) * padded_height + row] = Fp(0);
     }
 }
 
