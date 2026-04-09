@@ -1,0 +1,22 @@
+[package]
+name = "openvm-benchmark-air-complexity"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+
+[dependencies]
+openvm-stark-backend = { workspace = true, features = ["parallel", "metrics"] }
+openvm-stark-sdk = { workspace = true, features = ["parallel", "metrics"] }
+openvm-cuda-backend = { workspace = true, optional = true }
+
+p3-air.workspace = true
+p3-baby-bear.workspace = true
+p3-field.workspace = true
+p3-matrix.workspace = true
+p3-util.workspace = true
+
+clap = { workspace = true }
+
+[features]
+default = []
+cuda = ["dep:openvm-cuda-backend"]
