@@ -162,6 +162,18 @@ fn prove(
     engine.prove(&d_pk, ctx).unwrap()
 }
 
+fn fmt_num(n: usize) -> String {
+    let s = n.to_string();
+    let mut result = String::with_capacity(s.len() + s.len() / 3);
+    for (i, c) in s.chars().enumerate() {
+        if i > 0 && (s.len() - i).is_multiple_of(3) {
+            result.push(',');
+        }
+        result.push(c);
+    }
+    result
+}
+
 // ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
@@ -193,25 +205,25 @@ fn run(args: &Args) {
     let bus_interaction_messages = total_bus_interactions * trace_height;
 
     let backend_name = if cfg!(feature = "cuda") {
-        "GPU (CUDA)"
+        "GPU"
     } else {
         "CPU"
     };
 
     println!("=== AIR Complexity Benchmark ({backend_name}) ===");
-    println!("  num_airs:               {}", args.num_airs);
-    println!("  cols_per_air:           {}", args.cols_per_air);
+    println!("  num_airs:               {}", fmt_num(args.num_airs));
+    println!("  cols_per_air:           {}", fmt_num(args.cols_per_air));
     println!("  constraints_per_col:    {}", args.constraints_per_col);
     println!("  interactions_per_col:   {}", args.interactions_per_col);
-    println!("  trace_height:           {trace_height} (2^{})", args.log_rows_per_air);
+    println!("  trace_height:           {} (2^{})", fmt_num(trace_height), args.log_rows_per_air);
     println!(
-        "  trace_cells:            {total_cells} (2^{} rows * {} AIRs * {} columns / AIR)",
-        args.log_rows_per_air, args.num_airs, args.cols_per_air
+        "  trace_cells:            {} (2^{} rows * {} AIRs * {} columns / AIR)",
+        fmt_num(total_cells), args.log_rows_per_air, args.num_airs, args.cols_per_air
     );
-    println!("  constraints:            {total_constraints}");
-    println!("  bus_interactions:       {total_bus_interactions}");
-    println!("  constraint_instances:   {constraint_instances}");
-    println!("  bus_interaction_msgs:   {bus_interaction_messages}");
+    println!("  constraints:            {}", fmt_num(total_constraints));
+    println!("  bus_interactions:       {}", fmt_num(total_bus_interactions));
+    println!("  constraint_instances:   {}", fmt_num(constraint_instances));
+    println!("  bus_interaction_msgs:   {}", fmt_num(bus_interaction_messages));
 
     // Create AIRs
     let airs: Vec<AirRef<SC>> = (0..args.num_airs)
@@ -248,11 +260,10 @@ fn run(args: &Args) {
     let start = Instant::now();
     let proof = prove(&params, &pk, cpu_traces);
     let prove_time = start.elapsed();
-    println!("  time: {prove_time:?}");
+    println!("Done proving, time: {prove_time:?}");
 
     // Verify (always CPU)
     println!("Verifying...");
-    let start = Instant::now();
     keygen_engine.verify(&vk, &proof).unwrap();
-    println!("  time: {:?}", start.elapsed());
+    println!("Verifies!");
 }
