@@ -12,7 +12,7 @@ use itertools::Itertools;
 use openvm_cuda_common::copy::{MemCopyD2H, MemCopyH2D};
 use openvm_cuda_common::{
     common::get_device,
-    stream::{CudaStream, DeviceContext, StreamGuard},
+    stream::{CudaStream, GpuDeviceCtx, StreamGuard},
 };
 #[cfg(feature = "baby-bear-bn254-poseidon2")]
 use openvm_stark_backend::{
@@ -62,8 +62,8 @@ use crate::{
 type RefEngine = BabyBearPoseidon2RefEngine<DuplexSponge>;
 type Engine = RefEngine;
 
-fn test_ctx() -> DeviceContext {
-    DeviceContext {
+fn test_ctx() -> GpuDeviceCtx {
+    GpuDeviceCtx {
         device_id: get_device().unwrap() as u32,
         stream: StreamGuard::new(CudaStream::new_non_blocking().unwrap()),
     }

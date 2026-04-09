@@ -3,7 +3,7 @@ use openvm_cuda_common::{
     common::get_device,
     copy::{MemCopyD2H, MemCopyH2D},
     d_buffer::DeviceBuffer,
-    stream::{CudaStream, DeviceContext, StreamGuard},
+    stream::{CudaStream, GpuDeviceCtx, StreamGuard},
 };
 use p3_field::PrimeCharacteristicRing;
 
@@ -11,7 +11,7 @@ use p3_field::PrimeCharacteristicRing;
 #[ignore] // Run explicitly: requires large GPU memory and significant runtime.
 fn ntt_roundtrip_max_log_domain_size() {
     const LOG_N: u32 = 27;
-    let ctx = DeviceContext {
+    let ctx = GpuDeviceCtx {
         device_id: get_device().unwrap() as u32,
         stream: StreamGuard::new(CudaStream::new_non_blocking().unwrap()),
     };

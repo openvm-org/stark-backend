@@ -5,7 +5,7 @@ use openvm_cuda_common::{
     copy::{cuda_memcpy_on, MemCopyD2H, MemCopyH2D},
     d_buffer::DeviceBuffer,
     error::MemCopyError,
-    stream::{sync_stream, DeviceContext},
+    stream::{sync_stream, GpuDeviceCtx},
 };
 use openvm_stark_backend::{
     keygen::types::MultiStarkProvingKey,
@@ -97,7 +97,7 @@ impl<HS: GpuHashScheme> DeviceDataTransporter<HS::SC, GenericGpuBackend<HS>> for
 
 pub fn transport_matrix_h2d_col_major<T>(
     matrix: &ColMajorMatrix<T>,
-    device_ctx: &DeviceContext,
+    device_ctx: &GpuDeviceCtx,
 ) -> Result<DeviceMatrix<T>, MemCopyError> {
     // matrix is already col-major, so this is just H2D buffer transfer
     let buffer = matrix.values.to_device_on(device_ctx)?;
@@ -111,7 +111,7 @@ pub fn transport_matrix_h2d_col_major<T>(
 
 pub fn transport_matrix_h2d_row(
     matrix: &RowMajorMatrix<F>,
-    device_ctx: &DeviceContext,
+    device_ctx: &GpuDeviceCtx,
 ) -> Result<DeviceMatrix<F>, MemCopyError> {
     let data = matrix.values.as_slice();
     let input_buffer = data.to_device_on(device_ctx).unwrap();
@@ -140,7 +140,7 @@ pub fn transport_matrix_h2d_row(
 pub fn transport_and_unstack_single_data_h2d<HS: GpuHashScheme>(
     d: &StackedPcsData<F, HS::Digest>,
     prover_config: &GpuProverConfig,
-    device_ctx: &DeviceContext,
+    device_ctx: &GpuDeviceCtx,
 ) -> Result<CommittedTraceData<GenericGpuBackend<HS>>, ProverError> {
     let _span = info_span!("transport_unstack_h2d").entered();
     debug_assert!(d
@@ -227,7 +227,7 @@ pub fn transport_and_unstack_single_data_h2d<HS: GpuHashScheme>(
 pub fn transport_merkle_tree_h2d<F, Digest: Clone>(
     tree: &MerkleTree<F, Digest>,
     cache_backing_matrix: bool,
-    device_ctx: &DeviceContext,
+    device_ctx: &GpuDeviceCtx,
 ) -> Result<MerkleTreeGpu<F, Digest>, MemCopyError> {
     let backing_matrix = if cache_backing_matrix {
         Some(transport_matrix_h2d_col_major(
@@ -254,7 +254,7 @@ pub fn transport_merkle_tree_h2d<F, Digest: Clone>(
 pub fn transport_pcs_data_h2d<D: Copy + Clone + PartialEq + Send + Sync + 'static>(
     pcs_data: &StackedPcsData<F, D>,
     prover_config: &GpuProverConfig,
-    device_ctx: &DeviceContext,
+    device_ctx: &GpuDeviceCtx,
 ) -> Result<StackedPcsDataGpu<F, D>, ProverError> {
     let _span = info_span!("transport_pcs_data_h2d").entered();
     let StackedPcsData {
@@ -280,7 +280,7 @@ pub fn transport_pcs_data_h2d<D: Copy + Clone + PartialEq + Send + Sync + 'stati
 
 pub fn transport_air_proving_ctx_to_device<HS: GpuHashScheme>(
     cpu_ctx: AirProvingContext<CpuColMajorBackend<SC>>,
-    device_ctx: &DeviceContext,
+    device_ctx: &GpuDeviceCtx,
 ) -> AirProvingContext<GenericGpuBackend<HS>> {
     let _span = info_span!("transport_air_ctx_h2d").entered();
     assert!(
@@ -298,7 +298,7 @@ pub fn transport_air_proving_ctx_to_device<HS: GpuHashScheme>(
 pub fn transport_proving_ctx_to_host(
     gpu_ctx: ProvingContext<GpuBackend>,
     l_skip: usize,
-    device_ctx: &DeviceContext,
+    device_ctx: &GpuDeviceCtx,
 ) -> ProvingContext<CpuColMajorBackend<SC>> {
     let per_trace = gpu_ctx
         .per_trace
@@ -316,7 +316,7 @@ pub fn transport_proving_ctx_to_host(
 pub fn transport_air_proving_ctx_to_host(
     gpu_ctx: AirProvingContext<GpuBackend>,
     l_skip: usize,
-    device_ctx: &DeviceContext,
+    device_ctx: &GpuDeviceCtx,
 ) -> AirProvingContext<CpuColMajorBackend<SC>> {
     let trace = transport_matrix_d2h_col_major(&gpu_ctx.common_main, device_ctx).unwrap();
     let cached_mains = gpu_ctx
@@ -353,7 +353,7 @@ pub fn transport_air_proving_ctx_to_host(
 
 pub fn transport_matrix_d2h_col_major<T>(
     matrix: &DeviceMatrix<T>,
-    device_ctx: &DeviceContext,
+    device_ctx: &GpuDeviceCtx,
 ) -> Result<ColMajorMatrix<T>, MemCopyError> {
     let values_host = matrix.buffer().to_host_on(device_ctx)?;
     Ok(ColMajorMatrix::new(values_host, matrix.width()))
@@ -361,7 +361,7 @@ pub fn transport_matrix_d2h_col_major<T>(
 
 pub fn transport_matrix_d2h_row_major(
     matrix: &DeviceMatrix<F>,
-    device_ctx: &DeviceContext,
+    device_ctx: &GpuDeviceCtx,
 ) -> Result<RowMajorMatrix<F>, MemCopyError> {
     let matrix_buffer =
         DeviceBuffer::<F>::with_capacity_on(matrix.height() * matrix.width(), device_ctx);
@@ -386,7 +386,7 @@ pub fn transport_matrix_d2h_row_major(
 /// If `tree.backing_matrix` is `None`.
 pub fn transport_merkle_tree_to_host(
     tree: &MerkleTreeGpu<F, Digest>,
-    device_ctx: &DeviceContext,
+    device_ctx: &GpuDeviceCtx,
 ) -> MerkleTree<F, Digest> {
     let backing_matrix =
         transport_matrix_d2h_col_major(tree.backing_matrix.as_ref().unwrap(), device_ctx).unwrap();
@@ -405,7 +405,7 @@ pub fn transport_merkle_tree_to_host(
 pub fn assert_eq_host_and_device_matrix_col_maj<T: Clone + Send + Sync + PartialEq + Debug>(
     cpu: &ColMajorMatrix<T>,
     gpu: &DeviceMatrix<T>,
-    device_ctx: &DeviceContext,
+    device_ctx: &GpuDeviceCtx,
 ) {
     assert_eq!(gpu.width(), cpu.width());
     assert_eq!(gpu.height(), cpu.height());
@@ -426,7 +426,7 @@ pub fn assert_eq_host_and_device_matrix_col_maj<T: Clone + Send + Sync + Partial
 pub fn assert_eq_device_matrix<T: Clone + Send + Sync + PartialEq + Debug>(
     a: &DeviceMatrix<T>,
     b: &DeviceMatrix<T>,
-    device_ctx: &DeviceContext,
+    device_ctx: &GpuDeviceCtx,
 ) {
     assert_eq!(a.height(), b.height());
     assert_eq!(a.width(), b.width());
@@ -449,7 +449,7 @@ pub fn assert_eq_device_matrix<T: Clone + Send + Sync + PartialEq + Debug>(
 pub fn assert_eq_host_and_device_matrix<T: Clone + Send + Sync + PartialEq + Debug>(
     cpu: Arc<RowMajorMatrix<T>>,
     gpu: &DeviceMatrix<T>,
-    device_ctx: &DeviceContext,
+    device_ctx: &GpuDeviceCtx,
 ) {
     assert_eq!(gpu.width(), Matrix::width(cpu.as_ref()));
     assert_eq!(gpu.height(), Matrix::height(cpu.as_ref()));

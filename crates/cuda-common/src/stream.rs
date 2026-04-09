@@ -128,18 +128,18 @@ impl Deref for StreamGuard {
 }
 
 // ---------------------------------------------------------------------------
-// DeviceContext — bundles device ID with a stream
+// GpuDeviceCtx — bundles device ID with a stream
 // ---------------------------------------------------------------------------
 
 /// Thin context for all GPU operations in the explicit-stream path.
 #[derive(Clone)]
-pub struct DeviceContext {
+pub struct GpuDeviceCtx {
     pub device_id: u32,
     pub stream: StreamGuard,
 }
 
-impl DeviceContext {
-    /// Creates a new `DeviceContext` for the given device.
+impl GpuDeviceCtx {
+    /// Creates a new `GpuDeviceCtx` for the given device.
     ///
     /// NOTE: This calls `set_device_by_id` as a side effect, changing the
     /// current CUDA device for the calling thread.

@@ -1,7 +1,7 @@
 use std::{fmt::Debug, marker::PhantomData, sync::Arc};
 
 use openvm_cuda_common::{
-    copy::MemCopyD2H, d_buffer::DeviceBuffer, error::MemCopyError, stream::DeviceContext,
+    copy::MemCopyD2H, d_buffer::DeviceBuffer, error::MemCopyError, stream::GpuDeviceCtx,
 };
 use openvm_stark_backend::prover::MatrixDimensions;
 
@@ -55,7 +55,7 @@ impl<T> DeviceMatrix<T> {
         }
     }
 
-    pub fn with_capacity_on(height: usize, width: usize, device_ctx: &DeviceContext) -> Self {
+    pub fn with_capacity_on(height: usize, width: usize, device_ctx: &GpuDeviceCtx) -> Self {
         let buffer = DeviceBuffer::with_capacity_on(height * width, device_ctx);
         Self::new(Arc::new(buffer), height, width)
     }
@@ -95,7 +95,7 @@ impl<T> MatrixDimensions for DeviceMatrix<T> {
 }
 
 impl<T> MemCopyD2H<T> for DeviceMatrix<T> {
-    fn to_host_on(&self, device_ctx: &DeviceContext) -> Result<Vec<T>, MemCopyError> {
+    fn to_host_on(&self, device_ctx: &GpuDeviceCtx) -> Result<Vec<T>, MemCopyError> {
         self.buffer.to_host_on(device_ctx)
     }
 }
@@ -206,7 +206,7 @@ mod tests {
 
     #[test]
     fn test_device_matrix() {
-        let device_ctx = DeviceContext::for_current_device().unwrap();
+        let device_ctx = GpuDeviceCtx::for_current_device().unwrap();
         let buffer = Arc::new(DeviceBuffer::<i32>::with_capacity_on(12, &device_ctx));
         let matrix = DeviceMatrix::<i32>::new(buffer, 3, 4);
         assert_eq!(matrix.height(), 3);

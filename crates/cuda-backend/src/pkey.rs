@@ -1,7 +1,7 @@
 //! Defines the symbolic rule data to precompute and store in the GPU proving key
 use itertools::Itertools;
 use openvm_cuda_common::{
-    copy::MemCopyH2D, d_buffer::DeviceBuffer, error::MemCopyError, stream::DeviceContext,
+    copy::MemCopyH2D, d_buffer::DeviceBuffer, error::MemCopyError, stream::GpuDeviceCtx,
 };
 use openvm_stark_backend::{
     air_builders::symbolic::{
@@ -78,7 +78,7 @@ pub struct InteractionMonomials {
 
 fn to_device_or_empty<T>(
     data: &[T],
-    device_ctx: &DeviceContext,
+    device_ctx: &GpuDeviceCtx,
 ) -> Result<DeviceBuffer<T>, MemCopyError> {
     if data.is_empty() {
         Ok(DeviceBuffer::new())
@@ -90,7 +90,7 @@ fn to_device_or_empty<T>(
 impl AirDataGpu {
     pub fn new<S: StarkProtocolConfig<F = F>>(
         pk: &StarkProvingKey<S>,
-        device_ctx: &DeviceContext,
+        device_ctx: &GpuDeviceCtx,
     ) -> Result<Self, MemCopyError> {
         let dag = &pk.vk.symbolic_constraints;
         let symbolic_constraints = SymbolicConstraints::from(dag);
@@ -124,7 +124,7 @@ impl AirDataGpu {
 impl ZerocheckMonomials {
     pub fn from_expanded(
         expanded: &ExpandedMonomials<F>,
-        device_ctx: &DeviceContext,
+        device_ctx: &GpuDeviceCtx,
     ) -> Result<Self, MemCopyError> {
         // Validate bounds for all monomial headers to prevent out-of-bounds access in CUDA kernel
         let num_variables = expanded.variables.len();
@@ -158,7 +158,7 @@ impl ZerocheckMonomials {
 impl InteractionMonomials {
     pub fn from_expanded(
         expanded: &ExpandedInteractionMonomials<F>,
-        device_ctx: &DeviceContext,
+        device_ctx: &GpuDeviceCtx,
     ) -> Result<Self, MemCopyError> {
         // Validate numerator monomial headers
         let num_numer_vars = expanded.numer_variables.len();
@@ -210,7 +210,7 @@ impl InteractionMonomials {
 impl InteractionEvalRules {
     pub fn new(
         symbolic_constraints: &SymbolicConstraints<F>,
-        device_ctx: &DeviceContext,
+        device_ctx: &GpuDeviceCtx,
     ) -> Result<Self, MemCopyError> {
         let interactions = &symbolic_constraints.interactions;
         let num_interactions = interactions.len();
@@ -302,7 +302,7 @@ impl InteractionEvalRules {
 impl<const BUFFER_VARS: bool> ConstraintOnlyRules<BUFFER_VARS> {
     pub fn new(
         dag: &SymbolicExpressionDag<F>,
-        device_ctx: &DeviceContext,
+        device_ctx: &GpuDeviceCtx,
     ) -> Result<Self, MemCopyError> {
         if dag.num_constraints() == 0 {
             return Ok(Self {

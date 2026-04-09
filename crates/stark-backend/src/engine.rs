@@ -28,6 +28,12 @@ pub struct VerificationData<SC: StarkProtocolConfig> {
 pub type ProverError<E> =
     <<E as StarkEngine>::PD as ProverDevice<<E as StarkEngine>::PB, <E as StarkEngine>::TS>>::Error;
 
+/// Convenience alias for the device context type of a `StarkEngine`.
+pub type EngineDeviceCtx<E> = <<E as StarkEngine>::PD as ProverDevice<
+    <E as StarkEngine>::PB,
+    <E as StarkEngine>::TS,
+>>::DeviceCtx;
+
 /// A helper trait to collect the different steps in multi-trace STARK
 /// keygen and proving.
 pub trait StarkEngine

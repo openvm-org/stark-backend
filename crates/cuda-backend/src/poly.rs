@@ -5,7 +5,7 @@ use openvm_cuda_common::{
     copy::{MemCopyD2D, MemCopyH2D},
     d_buffer::DeviceBuffer,
     error::CudaError,
-    stream::{cudaStream_t, DeviceContext},
+    stream::{cudaStream_t, GpuDeviceCtx},
 };
 use openvm_stark_backend::prover::MatrixDimensions;
 use p3_field::PrimeCharacteristicRing;
@@ -56,7 +56,7 @@ impl PleMatrix<F> {
         evals: DeviceBuffer<F>,
         height: usize,
         width: usize,
-        device_ctx: &DeviceContext,
+        device_ctx: &GpuDeviceCtx,
     ) -> Self {
         validate_gpu_l_skip(l_skip).expect("GPU PleMatrix requires l_skip <= 10");
         let mut mixed = evals;
@@ -85,7 +85,7 @@ impl PleMatrix<F> {
     pub fn to_evals(
         &self,
         l_skip: usize,
-        device_ctx: &DeviceContext,
+        device_ctx: &GpuDeviceCtx,
     ) -> Result<DeviceMatrix<F>, KernelError> {
         validate_gpu_l_skip(l_skip)?;
         let width = self.width();
@@ -116,7 +116,7 @@ impl PleMatrix<F> {
 pub fn mle_evals_to_coeffs_inplace(
     evals: &mut DeviceBuffer<F>,
     n: usize,
-    device_ctx: &DeviceContext,
+    device_ctx: &GpuDeviceCtx,
 ) -> Result<(), CudaError> {
     if n == 0 {
         return Ok(());
@@ -261,7 +261,7 @@ pub unsafe fn mle_interpolate_stages(
 pub unsafe fn evals_eq_hypercube(
     out: &mut DeviceBuffer<EF>,
     xs: &[EF],
-    device_ctx: &DeviceContext,
+    device_ctx: &GpuDeviceCtx,
 ) -> Result<(), KernelError> {
     let n = xs.len();
     assert!(out.len() >= 1 << n);
@@ -294,7 +294,7 @@ pub unsafe fn evals_eq_hypercube(
 pub unsafe fn evals_mobius_eq_hypercube(
     out: &mut DeviceBuffer<EF>,
     omega: &[EF],
-    device_ctx: &DeviceContext,
+    device_ctx: &GpuDeviceCtx,
 ) -> Result<(), KernelError> {
     let n = omega.len();
     assert!(out.len() >= 1 << n);
@@ -342,7 +342,7 @@ impl<F> EqEvalSegments<F> {
 // Currently only implement kernels for EF.
 impl EqEvalSegments<EF> {
     /// Creates a new `EqEvalSegments` instance with `max_n = x.len()`.
-    pub fn new(x: &[EF], device_ctx: &DeviceContext) -> Result<Self, KernelError> {
+    pub fn new(x: &[EF], device_ctx: &GpuDeviceCtx) -> Result<Self, KernelError> {
         let max_n = x.len();
         let mut buffer = DeviceBuffer::with_capacity_on(2 << max_n, device_ctx);
         // Index 0 should never to be used, but we initialize it to zero.
@@ -400,7 +400,7 @@ impl EqEvalLayers<EF> {
     pub fn new_rev<'a>(
         n: usize,
         x: impl IntoIterator<Item = &'a EF>,
-        device_ctx: &DeviceContext,
+        device_ctx: &GpuDeviceCtx,
     ) -> Result<Self, KernelError> {
         let mut layers = Vec::with_capacity(n + 1);
         let layer_0 = [EF::ONE]
@@ -436,7 +436,7 @@ impl EqEvalLayers<EF> {
     pub fn new<'a>(
         n: usize,
         x: impl IntoIterator<Item = &'a EF>,
-        device_ctx: &DeviceContext,
+        device_ctx: &GpuDeviceCtx,
     ) -> Result<Self, KernelError> {
         let mut layers = Vec::with_capacity(n + 1);
         let layer_0 = [EF::ONE]
@@ -481,7 +481,7 @@ pub struct SqrtHyperBuffer {
 impl SqrtHyperBuffer {
     /// Build a buffer from `xi`. Note that last elements of `xi` correspond to the lowest index
     /// bits.
-    pub fn from_xi(xi: &[EF], device_ctx: &DeviceContext) -> Result<Self, KernelError> {
+    pub fn from_xi(xi: &[EF], device_ctx: &GpuDeviceCtx) -> Result<Self, KernelError> {
         let low = {
             let mut res = DeviceBuffer::with_capacity_on(1 << (xi.len() / 2), device_ctx);
             unsafe { evals_eq_hypercube(&mut res, &xi[..xi.len() / 2], device_ctx)? };
@@ -500,7 +500,7 @@ impl SqrtHyperBuffer {
         })
     }
 
-    pub fn fold_columns(&mut self, r: EF, device_ctx: &DeviceContext) -> Result<(), CudaError> {
+    pub fn fold_columns(&mut self, r: EF, device_ctx: &GpuDeviceCtx) -> Result<(), CudaError> {
         assert!(self.size > 1);
         if self.size > self.low_capacity {
             unsafe {
@@ -540,7 +540,7 @@ impl SqrtEqLayers {
     /// This is meant to match behavior of [SqrtHyperBuffer::from_xi] but with layers.
     ///
     /// Example: This means `[a,b,c,d]` should be sent to `low: [[d], [d, c]], high: [[b], [b, a]]`.
-    pub fn from_xi(xi: &[EF], device_ctx: &DeviceContext) -> Result<Self, KernelError> {
+    pub fn from_xi(xi: &[EF], device_ctx: &GpuDeviceCtx) -> Result<Self, KernelError> {
         let n = xi.len();
         let low_n = n / 2;
         let high_n = n - low_n;

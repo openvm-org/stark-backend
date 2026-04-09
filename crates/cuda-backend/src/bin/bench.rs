@@ -8,7 +8,7 @@ use openvm_cuda_backend::{
 use openvm_cuda_common::{
     common::get_device,
     copy::MemCopyD2D,
-    stream::{CudaStream, DeviceContext, StreamGuard},
+    stream::{CudaStream, GpuDeviceCtx, StreamGuard},
 };
 use p3_field::PrimeCharacteristicRing;
 
@@ -25,7 +25,7 @@ fn bench_fractional_sumcheck() -> Result<(), Box<dyn std::error::Error>> {
     let repeats = parse_usize("SWIRL_BENCH_REPEATS", 3);
     let warmups = parse_usize("SWIRL_BENCH_WARMUPS", 1);
 
-    let device_ctx = DeviceContext {
+    let device_ctx = GpuDeviceCtx {
         device_id: get_device()? as u32,
         stream: StreamGuard::new(CudaStream::new_non_blocking()?),
     };

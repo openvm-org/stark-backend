@@ -3,7 +3,7 @@ use std::{ffi::c_void, sync::Arc};
 use getset::Getters;
 use itertools::Itertools;
 use openvm_cuda_common::{
-    copy::cuda_memcpy_on, d_buffer::DeviceBuffer, memory_manager::MemTracker, stream::DeviceContext,
+    copy::cuda_memcpy_on, d_buffer::DeviceBuffer, memory_manager::MemTracker, stream::GpuDeviceCtx,
 };
 use openvm_stark_backend::{
     p3_util::log2_strict_usize,
@@ -54,7 +54,7 @@ pub fn stacked_commit<MH: GpuMerkleHash + MerkleTreeConstructor>(
     k_whir: usize,
     traces: &[&DeviceMatrix<F>],
     prover_config: GpuProverConfig,
-    device_ctx: &DeviceContext,
+    device_ctx: &GpuDeviceCtx,
 ) -> Result<(MH::Digest, StackedPcsDataGpu<F, MH::Digest>), ProverError> {
     let mut mem = MemTracker::start("prover.stacked_commit");
     mem.tracing_info("before stacked_commit");
@@ -95,7 +95,7 @@ pub fn stacked_matrix(
     l_skip: usize,
     n_stack: usize,
     traces: &[&DeviceMatrix<F>],
-    device_ctx: &DeviceContext,
+    device_ctx: &GpuDeviceCtx,
 ) -> Result<(PleMatrix<F>, StackedLayout), ProverError> {
     let layout = get_stacked_layout(l_skip, n_stack, traces);
     let matrix = stack_traces(&layout, traces, device_ctx)?;
@@ -122,7 +122,7 @@ pub(crate) fn get_stacked_layout(
 pub(crate) fn stack_traces(
     layout: &StackedLayout,
     traces: &[&DeviceMatrix<F>],
-    device_ctx: &DeviceContext,
+    device_ctx: &GpuDeviceCtx,
 ) -> Result<PleMatrix<F>, StackTracesError> {
     let mem = MemTracker::start("prover.stack_traces");
     let l_skip = layout.l_skip();
@@ -145,7 +145,7 @@ pub(crate) fn stack_traces_into_expanded(
     traces: &[&DeviceMatrix<F>],
     buffer: &mut DeviceBuffer<F>,
     padded_height: usize,
-    device_ctx: &DeviceContext,
+    device_ctx: &GpuDeviceCtx,
 ) -> Result<(), StackTracesError> {
     let l_skip = layout.l_skip();
     debug_assert_eq!(padded_height % layout.height(), 0);
@@ -212,7 +212,7 @@ pub fn rs_code_matrix(
     layout: &StackedLayout,
     traces: &[&DeviceMatrix<F>],
     stacked_matrix: &Option<PleMatrix<F>>,
-    device_ctx: &DeviceContext,
+    device_ctx: &GpuDeviceCtx,
 ) -> Result<DeviceMatrix<F>, RsCodeMatrixError> {
     let mem = MemTracker::start_and_reset_peak("prover.rs_code_matrix");
     let l_skip = layout.l_skip();
@@ -355,7 +355,7 @@ mod tests {
     use itertools::Itertools;
     use openvm_cuda_common::{
         common::get_device,
-        stream::{CudaStream, DeviceContext, StreamGuard},
+        stream::{CudaStream, GpuDeviceCtx, StreamGuard},
     };
     use openvm_stark_backend::{
         prover::ColMajorMatrix,
@@ -369,8 +369,8 @@ mod tests {
         prelude::{F, SC},
     };
 
-    fn test_ctx() -> DeviceContext {
-        DeviceContext {
+    fn test_ctx() -> GpuDeviceCtx {
+        GpuDeviceCtx {
             device_id: get_device().unwrap() as u32,
             stream: StreamGuard::new(CudaStream::new_non_blocking().unwrap()),
         }

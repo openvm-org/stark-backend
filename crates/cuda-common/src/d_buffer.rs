@@ -3,7 +3,7 @@ use std::{ffi::c_void, fmt::Debug, ptr};
 use crate::{
     error::{check, CudaError},
     memory_manager::{d_free, d_malloc_on},
-    stream::{cudaStream_t, DeviceContext},
+    stream::{cudaStream_t, GpuDeviceCtx},
 };
 
 #[link(name = "cudart")]
@@ -65,7 +65,7 @@ impl<T> DeviceBuffer<T> {
     }
 
     /// Allocate device memory for `len` elements of type `T` on an explicit stream.
-    pub fn with_capacity_on(len: usize, ctx: &DeviceContext) -> Self {
+    pub fn with_capacity_on(len: usize, ctx: &GpuDeviceCtx) -> Self {
         tracing::debug!(
             "Creating device buffer of size {} (sizeof type = {}) on stream {:?}",
             len,
@@ -95,7 +95,7 @@ impl<T> DeviceBuffer<T> {
     ///
     /// The caller should use the same stream that allocated this buffer.
     /// `fill_zero` is async; same-stream guarantees ordering without explicit sync.
-    pub fn fill_zero_on(&self, ctx: &DeviceContext) -> Result<(), CudaError> {
+    pub fn fill_zero_on(&self, ctx: &GpuDeviceCtx) -> Result<(), CudaError> {
         assert_ne!(self.len, 0, "Empty buffer");
         #[cfg(feature = "debug-cuda-stream")]
         debug_assert_eq!(
@@ -111,7 +111,7 @@ impl<T> DeviceBuffer<T> {
     pub fn fill_zero_suffix_on(
         &self,
         start_idx: usize,
-        ctx: &DeviceContext,
+        ctx: &GpuDeviceCtx,
     ) -> Result<(), CudaError> {
         assert!(
             start_idx < self.len,
@@ -233,8 +233,8 @@ mod tests {
     use super::*;
     use crate::copy::{MemCopyD2H, MemCopyH2D};
 
-    fn test_ctx() -> DeviceContext {
-        DeviceContext::for_current_device().unwrap()
+    fn test_ctx() -> GpuDeviceCtx {
+        GpuDeviceCtx::for_current_device().unwrap()
     }
 
     #[test]

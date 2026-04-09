@@ -1,5 +1,5 @@
 use getset::{CopyGetters, Getters, MutGetters};
-use openvm_cuda_common::{common::get_device, stream::DeviceContext};
+use openvm_cuda_common::{common::get_device, stream::GpuDeviceCtx};
 use openvm_stark_backend::SystemParams;
 
 use crate::cuda::{
@@ -28,11 +28,11 @@ pub struct GpuProverConfig {
 }
 
 /// Stream-owning device handle. Wraps [`GpuDeviceConfig`] with a
-/// [`DeviceContext`] that carries the explicit CUDA stream.
+/// [`GpuDeviceCtx`] that carries the explicit CUDA stream.
 #[derive(Clone)]
 pub struct GpuDevice {
     pub config: GpuDeviceConfig,
-    pub device_ctx: DeviceContext,
+    pub device_ctx: GpuDeviceCtx,
 }
 
 impl GpuDevice {
@@ -47,7 +47,7 @@ impl GpuDevice {
             ..Default::default()
         };
         let id = get_device().unwrap() as u32;
-        let device_ctx = DeviceContext::for_device(id)?;
+        let device_ctx = GpuDeviceCtx::for_device(id)?;
         let sm_count =
             get_sm_count(id, device_ctx.stream.as_raw()).expect("failed to get SM count");
         let config = GpuDeviceConfig {
