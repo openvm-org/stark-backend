@@ -1,4 +1,4 @@
-//! Benchmark for measuring proving time vs AIR complexity.
+//! Synthetic proving benchmark.
 //!
 //! Creates configurable synthetic AIRs with:
 //! - Zero witness (all trace cells are 0)
@@ -6,15 +6,15 @@
 //! - Self-canceling bus interactions: `bus_send([x])` + `bus_receive([x])`
 //!
 //! Usage (CPU):
-//!   cargo run -p openvm-benchmark-air-complexity --release -- \
-//!     --num-airs 4 --cols-per-air 100 --constraints-per-col 2 --log-rows-per-air 18
+//!   cargo run -p openvm-benchmark-proving --release -- \
+//!     --num-airs 4 --cols-per-air 100 --constraints-per-col 2 --log-rows-per-air 20
 //!
 //! Usage (GPU):
-//!   cargo run -p openvm-benchmark-air-complexity --release --features cuda -- \
-//!     --num-airs 4 --cols-per-air 100 --constraints-per-col 2 --log-rows-per-air 18
+//!   cargo run -p openvm-benchmark-proving --release --features cuda -- \
+//!     --num-airs 4 --cols-per-air 100 --constraints-per-col 2 --log-rows-per-air 20
 //!
 //! To also write a metrics.json file:
-//!   METRICS_OUTPUT=metrics.json cargo run -p openvm-benchmark-air-complexity --release -- ...
+//!   METRICS_OUTPUT=metrics.json cargo run -p openvm-benchmark-proving --release -- ...
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -40,7 +40,7 @@ type F = BabyBear;
 type SC = BabyBearPoseidon2Config;
 
 #[derive(Parser)]
-#[command(about = "Benchmark proving time vs AIR complexity")]
+#[command(about = "Synthetic proving benchmark")]
 struct Args {
     /// Number of AIRs
     #[arg(long, default_value_t = 1)]
@@ -210,7 +210,7 @@ fn run(args: &Args) {
         "CPU"
     };
 
-    println!("=== AIR Complexity Benchmark ({backend_name}) ===");
+    println!("=== Synthetic Proving Benchmark ({backend_name}) ===");
     println!("  num_airs:               {}", fmt_num(args.num_airs));
     println!("  cols_per_air:           {}", fmt_num(args.cols_per_air));
     println!("  constraints_per_col:    {}", args.constraints_per_col);

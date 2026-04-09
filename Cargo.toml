@@ -18,7 +18,7 @@ members = [
     "crates/cuda-builder",
     "crates/cuda-backend",
     "benchmarks/fields",
-    "benchmarks/air-complexity",
+    "benchmarks/proving",
 ]
 # Only these build by default
 default-members = [
