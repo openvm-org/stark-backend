@@ -25,7 +25,7 @@ use openvm_stark_backend::{
     keygen::types::MultiStarkProvingKey,
     proof::Proof,
     prover::{AirProvingContext, ColMajorMatrix, DeviceDataTransporter, ProvingContext},
-    AirRef, ColumnsAir, PartitionedBaseAir, StarkEngine,
+    AirRef, PartitionedBaseAir, StarkEngine,
 };
 use openvm_stark_sdk::config::{
     app_params_with_100_bits_security,
@@ -93,7 +93,6 @@ impl<F> BaseAir<F> for BenchmarkAir {
     }
 }
 impl<F> BaseAirWithPublicValues<F> for BenchmarkAir {}
-impl<F> ColumnsAir<F> for BenchmarkAir {}
 impl<F> PartitionedBaseAir<F> for BenchmarkAir {}
 
 impl<AB: AirBuilder + InteractionBuilder> Air<AB> for BenchmarkAir {
