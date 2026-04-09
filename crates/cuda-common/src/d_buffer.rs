@@ -123,9 +123,12 @@ impl<T> DeviceBuffer<T> {
         device_ctx: &GpuDeviceCtx,
     ) -> Result<(), CudaError> {
         assert!(
-            start_idx < self.len,
-            "start index has to be smaller than length"
+            start_idx <= self.len,
+            "start index has to be smaller than or equal to length"
         );
+        if start_idx == self.len {
+            return Ok(());
+        }
         #[cfg(feature = "debug-cuda-stream")]
         debug_assert_eq!(
             device_ctx.stream.as_raw(),
@@ -274,5 +277,14 @@ mod tests {
         let d_array = DeviceBuffer::<u64>::new();
         d_array.fill_zero_on(&ctx).unwrap();
         assert!(d_array.is_empty());
+    }
+
+    #[test]
+    fn test_device_buffer_fill_zero_suffix_at_len_is_noop() {
+        let ctx = test_ctx();
+        let v: Vec<u64> = (0..10).collect();
+        let d_array = v.to_device_on(&ctx).unwrap();
+        d_array.fill_zero_suffix_on(v.len(), &ctx).unwrap();
+        assert_eq!(d_array.to_host_on(&ctx).unwrap(), v);
     }
 }
