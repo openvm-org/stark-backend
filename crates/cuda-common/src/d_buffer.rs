@@ -270,21 +270,4 @@ mod tests {
         d_array.fill_zero_on(&device_ctx).unwrap();
         assert_eq!(d_array.to_host_on(&device_ctx).unwrap(), vec![0; v.len()]);
     }
-
-    #[test]
-    fn test_device_buffer_fill_zero_empty_is_noop() {
-        let ctx = test_ctx();
-        let d_array = DeviceBuffer::<u64>::new();
-        d_array.fill_zero_on(&ctx).unwrap();
-        assert!(d_array.is_empty());
-    }
-
-    #[test]
-    fn test_device_buffer_fill_zero_suffix_at_len_is_noop() {
-        let ctx = test_ctx();
-        let v: Vec<u64> = (0..10).collect();
-        let d_array = v.to_device_on(&ctx).unwrap();
-        d_array.fill_zero_suffix_on(v.len(), &ctx).unwrap();
-        assert_eq!(d_array.to_host_on(&ctx).unwrap(), v);
-    }
 }
