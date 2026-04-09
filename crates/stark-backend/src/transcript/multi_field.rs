@@ -65,7 +65,7 @@ where
         // Base-F::ORDER decomposition must extract at least 1 digit per squeeze.
         assert!(
             num_samples_per_elem > 0,
-            "SF::order() must be >= F::order()^2 for base-F::ORDER sampling"
+            "SF::bits() must be > 1 + BIAS_BITS + F::bits() for base-F::ORDER sampling"
         );
 
         Self {
@@ -200,16 +200,36 @@ where
     }
 }
 
-/// Number of uniformly-distributed base-F::ORDER digits extractable from one SF element.
+const BIAS_BITS: usize = 100;
+
+/// Returns the largest `k` such that extracting `k` base-`p` digits from a
+/// uniform `SF` element has statistical distance at most `2^{-BIAS_BITS}` from
+/// uniform, where `p = F::ORDER` and `q = SF::order()`.
 ///
-/// Returns the largest k such that `p^(k+1) <= q`, where p = F::ORDER_U32 and q = SF::order().
+/// # Bias analysis
+///
+/// Extracting `k` base-`p` digits from a uniform `X ∈ Z_q` is equivalent to
+/// computing `X mod p^k`. Write `q = m * p^k + r` with `0 <= r < p^k`. Then:
+///
+/// - residues `0, ..., r - 1` each have `m + 1` preimages in `[0, q)`,
+/// - residues `r, ..., p^k - 1` each have only `m`.
+///
+/// The exact statistical distance from uniform is `r * (p^k - r) / (q * p^k)`,
+/// which by AM-GM is at most `p^k / (4q)`. We pick the largest `k` satisfying
+/// `p^k * 2^(BIAS_BITS - 2) <= q`.
 fn compute_num_samples_per_elem<F: PrimeField32, SF: PrimeField>() -> usize {
     let q = SF::order();
     let p = BigUint::from(F::ORDER_U32);
-    let mut p_pow = &p * &p; // p^2
+
     let mut k = 0usize;
-    while p_pow <= q {
-        p_pow *= &p;
+    let mut p_pow = BigUint::from(1u32); // p^k
+
+    loop {
+        let next = &p_pow * &p; // p^(k+1)
+        if (&next << (BIAS_BITS - 2)) > q {
+            break;
+        }
+        p_pow = next;
         k += 1;
     }
     k
@@ -244,7 +264,7 @@ mod tests {
     fn test_constants_bn254_babybear() {
         let t = TestTranscript::new(MockPerm);
         assert_eq!(t.num_obs_per_elem, 8);
-        assert_eq!(t.num_samples_per_elem, 7);
+        assert_eq!(t.num_samples_per_elem, 5);
     }
 
     #[test]
@@ -269,11 +289,11 @@ mod tests {
             BigUint::from(1u64) + BigUint::from(2u64) * &p + BigUint::from(3u64) * &p * &p;
         let val = Bn254::from_biguint(val_big).unwrap();
         let digits = t.extract_samples(val);
-        assert_eq!(digits.len(), 7);
+        assert_eq!(digits.len(), 5);
         assert_eq!(digits[0], BabyBear::from_int(1u32));
         assert_eq!(digits[1], BabyBear::from_int(2u32));
         assert_eq!(digits[2], BabyBear::from_int(3u32));
-        for digit in &digits[3..7] {
+        for digit in &digits[3..5] {
             assert_eq!(*digit, BabyBear::ZERO);
         }
     }
