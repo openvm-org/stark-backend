@@ -2,7 +2,7 @@ use openvm_cuda_common::{
     copy::MemCopyD2H,
     d_buffer::DeviceBuffer,
     error::{check, CudaError},
-    stream::{cudaStream_t, DeviceContext},
+    stream::{cudaStream_t, GpuDeviceCtx},
 };
 
 use crate::{
@@ -221,7 +221,7 @@ pub unsafe fn eval_poly_ext_at_point_from_base(
     base_coeffs: &DeviceBuffer<F>,
     coeff_len: usize,
     x: EF,
-    device_ctx: &DeviceContext,
+    device_ctx: &GpuDeviceCtx,
 ) -> Result<EF, KernelError> {
     debug_assert!(base_coeffs.len() >= coeff_len * D_EF);
     let d_out = DeviceBuffer::<EF>::with_capacity_on(1, device_ctx);

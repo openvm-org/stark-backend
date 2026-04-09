@@ -1,4 +1,4 @@
-use openvm_cuda_common::{d_buffer::DeviceBuffer, error::CudaError, stream::DeviceContext};
+use openvm_cuda_common::{d_buffer::DeviceBuffer, error::CudaError, stream::GpuDeviceCtx};
 use openvm_stark_backend::{StarkProtocolConfig, SystemParams};
 #[cfg(feature = "baby-bear-bn254-poseidon2")]
 use openvm_stark_sdk::config::baby_bear_bn254_poseidon2::{
@@ -56,7 +56,7 @@ pub trait GpuMerkleHash: Copy + Clone + Send + Sync + 'static {
         width: usize,
         query_stride: usize,
         log_rows_per_query: usize,
-        device_ctx: &DeviceContext,
+        device_ctx: &GpuDeviceCtx,
     ) -> Result<(), CudaError>;
 
     /// Compress rows of an extension-field matrix into digest leaves.
@@ -71,7 +71,7 @@ pub trait GpuMerkleHash: Copy + Clone + Send + Sync + 'static {
         width: usize,
         query_stride: usize,
         log_rows_per_query: usize,
-        device_ctx: &DeviceContext,
+        device_ctx: &GpuDeviceCtx,
     ) -> Result<(), CudaError>;
 
     /// Compress adjacent pairs of digests to build an inner Merkle layer.
@@ -85,7 +85,7 @@ pub trait GpuMerkleHash: Copy + Clone + Send + Sync + 'static {
         output: &mut DeviceBuffer<Self::Digest>,
         prev_layer: &DeviceBuffer<Self::Digest>,
         output_size: usize,
-        device_ctx: &DeviceContext,
+        device_ctx: &GpuDeviceCtx,
     ) -> Result<(), CudaError>;
 }
 
@@ -127,7 +127,7 @@ impl GpuMerkleHash for Poseidon2MerkleHash {
         width: usize,
         query_stride: usize,
         log_rows_per_query: usize,
-        device_ctx: &DeviceContext,
+        device_ctx: &GpuDeviceCtx,
     ) -> Result<(), CudaError> {
         poseidon2_compressing_row_hashes(
             out,
@@ -145,7 +145,7 @@ impl GpuMerkleHash for Poseidon2MerkleHash {
         width: usize,
         query_stride: usize,
         log_rows_per_query: usize,
-        device_ctx: &DeviceContext,
+        device_ctx: &GpuDeviceCtx,
     ) -> Result<(), CudaError> {
         poseidon2_compressing_row_hashes_ext(
             out,
@@ -161,7 +161,7 @@ impl GpuMerkleHash for Poseidon2MerkleHash {
         output: &mut DeviceBuffer<Self::Digest>,
         prev_layer: &DeviceBuffer<Self::Digest>,
         output_size: usize,
-        device_ctx: &DeviceContext,
+        device_ctx: &GpuDeviceCtx,
     ) -> Result<(), CudaError> {
         poseidon2_adjacent_compress_layer(
             output,
@@ -215,7 +215,7 @@ impl GpuMerkleHash for Bn254Poseidon2MerkleHash {
         width: usize,
         query_stride: usize,
         log_rows_per_query: usize,
-        device_ctx: &DeviceContext,
+        device_ctx: &GpuDeviceCtx,
     ) -> Result<(), CudaError> {
         bn254_poseidon2_compressing_row_hashes(
             out,
@@ -233,7 +233,7 @@ impl GpuMerkleHash for Bn254Poseidon2MerkleHash {
         width: usize,
         query_stride: usize,
         log_rows_per_query: usize,
-        device_ctx: &DeviceContext,
+        device_ctx: &GpuDeviceCtx,
     ) -> Result<(), CudaError> {
         bn254_poseidon2_compressing_row_hashes_ext(
             out,
@@ -249,7 +249,7 @@ impl GpuMerkleHash for Bn254Poseidon2MerkleHash {
         output: &mut DeviceBuffer<Self::Digest>,
         prev_layer: &DeviceBuffer<Self::Digest>,
         output_size: usize,
-        device_ctx: &DeviceContext,
+        device_ctx: &GpuDeviceCtx,
     ) -> Result<(), CudaError> {
         bn254_poseidon2_adjacent_compress_layer(
             output,

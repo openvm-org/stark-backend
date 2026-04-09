@@ -7,7 +7,7 @@ use openvm_cuda_common::{
     copy::{MemCopyD2H, MemCopyH2D},
     d_buffer::DeviceBuffer,
     error::MemCopyError,
-    stream::DeviceContext,
+    stream::GpuDeviceCtx,
 };
 use openvm_stark_backend::prover::{fractional_sumcheck_gkr::Frac, DeviceMultiStarkProvingKey};
 
@@ -38,7 +38,7 @@ fn zerocheck_batch_mle_intermediates_buffer_bytes(
     buffer_size: u32,
     num_x: u32,
     num_y: u32,
-    device_ctx: &DeviceContext,
+    device_ctx: &GpuDeviceCtx,
 ) -> usize {
     let stream = device_ctx.stream.as_raw();
     unsafe {
@@ -52,7 +52,7 @@ fn logup_batch_mle_intermediates_buffer_bytes(
     buffer_size: u32,
     num_x: u32,
     num_y: u32,
-    device_ctx: &DeviceContext,
+    device_ctx: &GpuDeviceCtx,
 ) -> usize {
     let stream = device_ctx.stream.as_raw();
     unsafe {
@@ -127,7 +127,7 @@ pub(crate) struct ZerocheckMleBatchBuilder<'a> {
     threads_per_block: u32,
     _intermediates_keepalive: Vec<DeviceBuffer<EF>>,
     /// Cheap clone: just `(device_id, Arc<CudaStream>)`.
-    device_ctx: DeviceContext,
+    device_ctx: GpuDeviceCtx,
 }
 
 impl<'a> ZerocheckMleBatchBuilder<'a> {
@@ -139,7 +139,7 @@ impl<'a> ZerocheckMleBatchBuilder<'a> {
         traces: impl Iterator<Item = &'a TraceCtx>,
         pk: &DeviceMultiStarkProvingKey<GenericGpuBackend<HS>>,
         num_x: u32,
-        device_ctx: &DeviceContext,
+        device_ctx: &GpuDeviceCtx,
     ) -> Result<Self, MemCopyError> {
         let traces: Vec<&TraceCtx> = traces.filter(|t| t.has_constraints).collect();
 
@@ -283,7 +283,7 @@ pub(crate) struct LogupMleBatchBuilder<'a> {
     air_offsets: DeviceBuffer<u32>,
     threads_per_block: u32,
     _intermediates_keepalive: Vec<DeviceBuffer<EF>>,
-    device_ctx: DeviceContext,
+    device_ctx: GpuDeviceCtx,
 }
 
 impl<'a> LogupMleBatchBuilder<'a> {
@@ -296,7 +296,7 @@ impl<'a> LogupMleBatchBuilder<'a> {
         pk: &DeviceMultiStarkProvingKey<GenericGpuBackend<HS>>,
         d_challenges_ptr: *const EF,
         num_x: u32,
-        device_ctx: &DeviceContext,
+        device_ctx: &GpuDeviceCtx,
     ) -> Result<Self, MemCopyError> {
         let traces: Vec<&TraceCtx> = traces.filter(|t| t.has_interactions).collect();
 
@@ -449,7 +449,7 @@ pub(crate) fn evaluate_zerocheck_batched<'a, HS: GpuHashScheme>(
     num_x: u32,
     zc_out: &mut [Vec<EF>],
     memory_limit_bytes: usize,
-    device_ctx: &DeviceContext,
+    device_ctx: &GpuDeviceCtx,
 ) -> Result<(), KernelError> {
     // Collect traces with constraints and their buffer sizes
     let mut zc_traces_with_size: Vec<(&TraceCtx, usize)> = traces
@@ -551,7 +551,7 @@ pub(crate) fn evaluate_logup_batched<HS: GpuHashScheme>(
     logup_out: &mut [[Vec<EF>; 2]],
     logup_tilde_evals: &mut [[EF; 2]],
     memory_limit_bytes: usize,
-    device_ctx: &DeviceContext,
+    device_ctx: &GpuDeviceCtx,
 ) -> Result<(), KernelError> {
     let (low_traces, high_traces): (Vec<&TraceCtx>, Vec<&TraceCtx>) = traces
         .iter()
@@ -682,7 +682,7 @@ fn evaluate_single_logup<HS: GpuHashScheme>(
     num_x: u32,
     logup_out: &mut [Vec<EF>; 2],
     logup_tilde_eval: &mut [EF; 2],
-    device_ctx: &DeviceContext,
+    device_ctx: &GpuDeviceCtx,
 ) -> Result<(), KernelError> {
     let air_pk = &pk.per_air[t.air_idx];
     let out = evaluate_mle_interactions_gpu(
@@ -726,7 +726,7 @@ fn evaluate_mle_constraints_gpu_batch(
     lambda_len: usize,
     num_x: u32,
     threads_per_block: u32,
-    device_ctx: &DeviceContext,
+    device_ctx: &GpuDeviceCtx,
 ) -> Result<DeviceBuffer<EF>, KernelError> {
     let num_blocks = block_ctxs.len();
     let num_airs = zc_ctxs.len();
@@ -767,7 +767,7 @@ fn evaluate_mle_interactions_gpu_batch(
     air_block_offsets: &DeviceBuffer<u32>,
     num_x: u32,
     threads_per_block: u32,
-    device_ctx: &DeviceContext,
+    device_ctx: &GpuDeviceCtx,
 ) -> Result<DeviceBuffer<Frac<EF>>, KernelError> {
     let num_blocks = block_ctxs.len();
     let num_airs = logup_ctxs.len();

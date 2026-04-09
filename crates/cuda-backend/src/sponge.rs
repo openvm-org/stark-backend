@@ -9,7 +9,7 @@ use openvm_cuda_common::{
     copy::cuda_memcpy_on,
     d_buffer::DeviceBuffer,
     error::{CudaError, MemCopyError},
-    stream::DeviceContext,
+    stream::GpuDeviceCtx,
 };
 use openvm_stark_backend::{
     p3_challenger::{CanObserve, CanSample},
@@ -155,7 +155,7 @@ impl Default for DuplexSpongeGpu {
 impl Clone for DuplexSpongeGpu {
     fn clone(&self) -> Self {
         // Device buffer is not cloned — caller must explicitly sync_h2d with a
-        // DeviceContext after cloning if device state is needed.
+        // GpuDeviceCtx after cloning if device state is needed.
         Self {
             host: self.host.clone(),
             device: DeviceBuffer::new(),
@@ -178,7 +178,7 @@ impl DuplexSpongeGpu {
     }
 
     /// Ensure the device buffer is allocated.
-    fn ensure_device_allocated(&mut self, device_ctx: &DeviceContext) {
+    fn ensure_device_allocated(&mut self, device_ctx: &GpuDeviceCtx) {
         if self.device.is_empty() {
             self.device = DeviceBuffer::with_capacity_on(1, device_ctx);
         }
@@ -190,7 +190,7 @@ impl DuplexSpongeGpu {
     ///
     /// This converts from `DuplexChallenger`'s representation (with buffered input/output)
     /// to `DeviceSpongeState`'s representation (with indices pointing into state).
-    pub fn sync_h2d(&mut self, device_ctx: &DeviceContext) -> Result<(), MemCopyError> {
+    pub fn sync_h2d(&mut self, device_ctx: &GpuDeviceCtx) -> Result<(), MemCopyError> {
         self.ensure_device_allocated(device_ctx);
 
         // Convert DuplexChallenger state to DeviceSpongeState format:
@@ -264,7 +264,7 @@ impl DuplexSpongeGpu {
     ///
     /// After this call, the host state will have observed the witness and sampled,
     /// matching the state after calling `check_witness(bits, witness)`.
-    pub fn grind_gpu(&mut self, bits: usize, device_ctx: &DeviceContext) -> Result<F, GrindError> {
+    pub fn grind_gpu(&mut self, bits: usize, device_ctx: &GpuDeviceCtx) -> Result<F, GrindError> {
         validate_gpu_grind_bits(bits)?;
         // Trivial case: 0 bits mean no PoW is required and any witness is valid.
         if bits == 0 {
@@ -344,12 +344,12 @@ pub trait GpuFiatShamirTranscript<Config: StarkProtocolConfig>:
     fn grind_gpu(
         &mut self,
         bits: usize,
-        device_ctx: &DeviceContext,
+        device_ctx: &GpuDeviceCtx,
     ) -> Result<Config::F, GrindError>;
 }
 
 impl GpuFiatShamirTranscript<SC> for DuplexSpongeGpu {
-    fn grind_gpu(&mut self, bits: usize, device_ctx: &DeviceContext) -> Result<F, GrindError> {
+    fn grind_gpu(&mut self, bits: usize, device_ctx: &GpuDeviceCtx) -> Result<F, GrindError> {
         DuplexSpongeGpu::grind_gpu(self, bits, device_ctx)
     }
 }
@@ -360,7 +360,7 @@ mod tests {
 
     use openvm_cuda_common::{
         common::get_device,
-        stream::{CudaStream, DeviceContext, StreamGuard},
+        stream::{CudaStream, GpuDeviceCtx, StreamGuard},
     };
     use openvm_stark_sdk::config::baby_bear_poseidon2::default_duplex_sponge;
     use p3_field::PrimeCharacteristicRing;
@@ -368,8 +368,8 @@ mod tests {
     use super::*;
     use crate::prelude::SC;
 
-    fn test_ctx() -> DeviceContext {
-        DeviceContext {
+    fn test_ctx() -> GpuDeviceCtx {
+        GpuDeviceCtx {
             device_id: get_device().unwrap() as u32,
             stream: StreamGuard::new(CudaStream::new_non_blocking().unwrap()),
         }

@@ -6,7 +6,7 @@ use std::{
 use openvm_cuda_common::{
     common::{device_reset_epoch, get_device},
     d_buffer::DeviceBuffer,
-    stream::DeviceContext,
+    stream::GpuDeviceCtx,
 };
 
 use crate::{cuda::ntt, prelude::F};
@@ -34,7 +34,7 @@ fn ensure_initialized(inverse: bool) -> Result<(), openvm_cuda_common::error::Cu
     }
 
     {
-        let device_ctx = DeviceContext::for_device(device_key.0 as u32)?;
+        let device_ctx = GpuDeviceCtx::for_device(device_key.0 as u32)?;
         let partial_twiddles =
             DeviceBuffer::<[F; WINDOW_SIZE]>::with_capacity_on(WINDOW_NUM, &device_ctx);
         let twiddles = DeviceBuffer::<F>::with_capacity_on(RADIX_TWIDDLES_SIZE, &device_ctx);
@@ -56,7 +56,7 @@ struct NttImpl<'a> {
     poly_count: u32,
     is_intt: bool,
     stage: u32,
-    device_ctx: DeviceContext,
+    device_ctx: GpuDeviceCtx,
 }
 
 impl<'a> NttImpl<'a> {
@@ -66,7 +66,7 @@ impl<'a> NttImpl<'a> {
         padded_poly_size: u32,
         poly_count: u32,
         is_intt: bool,
-        device_ctx: &DeviceContext,
+        device_ctx: &GpuDeviceCtx,
     ) -> Self {
         ensure_initialized(is_intt).expect("failed to initialize CUDA NTT twiddle tables");
         Self {
@@ -115,7 +115,7 @@ pub fn batch_ntt(
     width: u32,
     bit_reverse: bool,
     is_intt: bool,
-    device_ctx: &DeviceContext,
+    device_ctx: &GpuDeviceCtx,
 ) {
     if log_trace_height == 0 {
         return;

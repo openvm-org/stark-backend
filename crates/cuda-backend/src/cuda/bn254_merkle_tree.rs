@@ -9,7 +9,7 @@ use openvm_cuda_common::{
     common::{device_reset_epoch, get_device},
     d_buffer::DeviceBuffer,
     error::CudaError,
-    stream::{cudaStream_t, DeviceContext},
+    stream::{cudaStream_t, GpuDeviceCtx},
 };
 use openvm_stark_sdk::config::baby_bear_bn254_poseidon2::Bn254Scalar;
 
@@ -272,7 +272,7 @@ pub fn init_bn254_poseidon2_rc() -> Result<(), CudaError> {
         return Ok(());
     }
 
-    let device_ctx = DeviceContext::for_device(device_key.0 as u32)?;
+    let device_ctx = GpuDeviceCtx::for_device(device_key.0 as u32)?;
 
     // Width-3 constants (leaf hashing)
     let (initial, partial, terminal) = RC_W3_CONSTANTS.get_or_init(compute_bn254_rc_w3_constants);
@@ -385,7 +385,7 @@ pub unsafe fn bn254_sponge_grind(
     init_state: *const DeviceBn254SpongeState,
     bits: u32,
     max_witness: u32,
-    device_ctx: &DeviceContext,
+    device_ctx: &GpuDeviceCtx,
 ) -> Result<u32, crate::sponge::GrindError> {
     use openvm_cuda_common::copy::{MemCopyD2H, MemCopyH2D};
 

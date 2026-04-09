@@ -7,7 +7,7 @@ use openvm_cuda_common::{
     copy::MemCopyH2D,
     d_buffer::DeviceBuffer,
     error::{CudaError, MemCopyError},
-    stream::DeviceContext,
+    stream::GpuDeviceCtx,
 };
 use openvm_stark_backend::prover::{fractional_sumcheck_gkr::Frac, DeviceMultiStarkProvingKey};
 use p3_field::PrimeCharacteristicRing;
@@ -81,7 +81,7 @@ pub(crate) fn compute_lambda_combinations<HS: GpuHashScheme>(
     pk: &DeviceMultiStarkProvingKey<GenericGpuBackend<HS>>,
     air_idx: usize,
     lambda_pows: &DeviceBuffer<EF>,
-    device_ctx: &DeviceContext,
+    device_ctx: &GpuDeviceCtx,
 ) -> Result<DeviceBuffer<EF>, CudaError> {
     let monomials = pk.per_air[air_idx]
         .other_data
@@ -118,7 +118,7 @@ pub(crate) struct ZerocheckMonomialBatch<'a> {
     air_ctxs: DeviceBuffer<MonomialAirCtx>,
     air_offsets: DeviceBuffer<u32>,
     /// Cheap clone: just `(device_id, Arc<CudaStream>)`.
-    device_ctx: DeviceContext,
+    device_ctx: GpuDeviceCtx,
 }
 
 impl<'a> ZerocheckMonomialBatch<'a> {
@@ -134,7 +134,7 @@ impl<'a> ZerocheckMonomialBatch<'a> {
         traces: impl IntoIterator<Item = &'a TraceCtx>,
         pk: &DeviceMultiStarkProvingKey<GenericGpuBackend<HS>>,
         lambda_combinations: &[&DeviceBuffer<EF>],
-        device_ctx: &DeviceContext,
+        device_ctx: &GpuDeviceCtx,
     ) -> Result<Self, MemCopyError> {
         let traces: Vec<_> = traces.into_iter().collect();
         assert!(
@@ -297,7 +297,7 @@ pub(crate) struct ZerocheckMonomialParYBatch<'a> {
     num_blocks: u32,
     chunk_size: u32,
     /// Cheap clone: just `(device_id, Arc<CudaStream>)`.
-    device_ctx: DeviceContext,
+    device_ctx: GpuDeviceCtx,
 }
 
 impl<'a> ZerocheckMonomialParYBatch<'a> {
@@ -320,7 +320,7 @@ impl<'a> ZerocheckMonomialParYBatch<'a> {
         sm_count: u32,
         num_x: u32,
         max_monomials_per_thread: Option<u32>,
-        device_ctx: &DeviceContext,
+        device_ctx: &GpuDeviceCtx,
     ) -> Result<Self, MemCopyError> {
         let traces: Vec<_> = traces.into_iter().collect();
         assert!(
@@ -533,7 +533,7 @@ pub(crate) fn compute_logup_combinations<HS: GpuHashScheme>(
     d_eq_3bs: &DeviceBuffer<EF>,
     eq_3bs_host: &[EF],
     beta_pows_host: &[EF],
-    device_ctx: &DeviceContext,
+    device_ctx: &GpuDeviceCtx,
 ) -> Result<LogupCombinations, CudaError> {
     let monomials = pk.per_air[air_idx]
         .other_data
@@ -617,7 +617,7 @@ pub(crate) struct LogupMonomialBatch<'a> {
     denom_ctxs: DeviceBuffer<LogupMonomialCtx>,
     air_offsets: DeviceBuffer<u32>,
     num_blocks: u32,
-    device_ctx: DeviceContext,
+    device_ctx: GpuDeviceCtx,
 }
 
 impl<'a> LogupMonomialBatch<'a> {
@@ -633,7 +633,7 @@ impl<'a> LogupMonomialBatch<'a> {
         traces: impl IntoIterator<Item = &'a TraceCtx>,
         pk: &DeviceMultiStarkProvingKey<GenericGpuBackend<HS>>,
         logup_combinations: &[&LogupCombinations],
-        device_ctx: &DeviceContext,
+        device_ctx: &GpuDeviceCtx,
     ) -> Result<Self, MemCopyError> {
         let traces: Vec<_> = traces.into_iter().collect();
         assert!(

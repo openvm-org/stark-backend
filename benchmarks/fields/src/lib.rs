@@ -10,12 +10,12 @@ use std::{ffi::c_void, sync::OnceLock, time::Instant};
 use openvm_cuda_common::{
     copy::MemCopyH2D,
     d_buffer::DeviceBuffer,
-    stream::{cudaStream_t, DeviceContext},
+    stream::{cudaStream_t, GpuDeviceCtx},
 };
 
-pub fn bench_ctx() -> &'static DeviceContext {
-    static CTX: OnceLock<DeviceContext> = OnceLock::new();
-    CTX.get_or_init(|| DeviceContext::for_current_device().expect("benchmark CUDA context"))
+pub fn bench_ctx() -> &'static GpuDeviceCtx {
+    static CTX: OnceLock<GpuDeviceCtx> = OnceLock::new();
+    CTX.get_or_init(|| GpuDeviceCtx::for_current_device().expect("benchmark CUDA context"))
 }
 
 // ============================================================================

@@ -5,7 +5,7 @@ use openvm_cuda_common::{
     copy::{MemCopyD2H, MemCopyH2D},
     d_buffer::DeviceBuffer,
     memory_manager::MemTracker,
-    stream::DeviceContext,
+    stream::GpuDeviceCtx,
 };
 use openvm_stark_backend::{
     proof::{MerkleProof, WhirProof},
@@ -65,7 +65,7 @@ pub fn prove_whir_opening_gpu<HS, TS>(
     transcript: &mut TS,
     mut stacked_per_commit: Vec<StackedPcsData2<HS::Digest>>,
     u: &[EF],
-    device_ctx: &DeviceContext,
+    device_ctx: &GpuDeviceCtx,
 ) -> Result<WhirProof<HS::SC>, WhirProverError>
 where
     HS: GpuHashScheme,

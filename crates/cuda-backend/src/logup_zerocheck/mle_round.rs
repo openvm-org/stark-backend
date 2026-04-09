@@ -1,4 +1,4 @@
-use openvm_cuda_common::{d_buffer::DeviceBuffer, error::CudaError, stream::DeviceContext};
+use openvm_cuda_common::{d_buffer::DeviceBuffer, error::CudaError, stream::GpuDeviceCtx};
 use openvm_stark_backend::prover::fractional_sumcheck_gkr::Frac;
 use tracing::debug;
 
@@ -39,7 +39,7 @@ pub fn evaluate_mle_constraints_gpu(
     rules: &ConstraintOnlyRules<ZEROCHECK_BUFFER_VARS>,
     num_y: u32,
     num_x: u32,
-    device_ctx: &DeviceContext,
+    device_ctx: &GpuDeviceCtx,
 ) -> Result<DeviceBuffer<EF>, KernelError> {
     validate_mle_num_x(num_x)?;
     let stream = device_ctx.stream.as_raw();
@@ -100,7 +100,7 @@ pub fn evaluate_mle_interactions_gpu(
     rules: &InteractionEvalRules,
     num_y: u32,
     num_x: u32,
-    device_ctx: &DeviceContext,
+    device_ctx: &GpuDeviceCtx,
 ) -> Result<DeviceBuffer<Frac<EF>>, KernelError> {
     validate_mle_num_x(num_x)?;
     let stream = device_ctx.stream.as_raw();

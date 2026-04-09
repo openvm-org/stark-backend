@@ -7,7 +7,7 @@ use super::{
 use crate::{
     d_buffer::DeviceBuffer,
     error::MemoryError,
-    stream::{DeviceContext, StreamGuard},
+    stream::{GpuDeviceCtx, StreamGuard},
 };
 
 #[link(name = "cudart")]
@@ -23,8 +23,8 @@ fn get_gpu_free_memory() -> usize {
     free
 }
 
-fn test_ctx() -> DeviceContext {
-    DeviceContext::for_current_device().unwrap()
+fn test_ctx() -> GpuDeviceCtx {
+    GpuDeviceCtx::for_current_device().unwrap()
 }
 
 fn test_stream() -> StreamGuard {

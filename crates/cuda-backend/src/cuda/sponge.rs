@@ -4,7 +4,7 @@ use openvm_cuda_common::{
     copy::{MemCopyD2H, MemCopyH2D},
     d_buffer::DeviceBuffer,
     error::CudaError,
-    stream::{cudaStream_t, DeviceContext},
+    stream::{cudaStream_t, GpuDeviceCtx},
 };
 
 use crate::sponge::{validate_gpu_grind_bits, DeviceSpongeState, GrindError};
@@ -36,7 +36,7 @@ pub unsafe fn sponge_grind(
     init_state: *const DeviceSpongeState,
     bits: u32,
     max_witness: u32,
-    device_ctx: &DeviceContext,
+    device_ctx: &GpuDeviceCtx,
 ) -> Result<u32, GrindError> {
     validate_gpu_grind_bits(bits as usize)?;
     let mut d_result = DeviceBuffer::with_capacity_on(1, device_ctx);

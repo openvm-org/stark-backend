@@ -69,6 +69,11 @@ where
     TS: FiatShamirTranscript<SC>,
 {
     type Error = RefProverError;
+    type DeviceCtx = ();
+
+    fn device_ctx(&self) -> &() {
+        &()
+    }
 }
 
 impl<SC: StarkProtocolConfig> TraceCommitter<CpuColMajorBackend<SC>> for ReferenceDevice<SC>

@@ -4,7 +4,7 @@ use openvm_cuda_common::{
     copy::{cuda_memcpy_on, MemCopyD2H},
     d_buffer::DeviceBuffer,
     memory_manager::MemTracker,
-    stream::DeviceContext,
+    stream::GpuDeviceCtx,
 };
 use openvm_stark_backend::{
     poly_common::{eval_eq_mle, interpolate_linear_at_01, interpolate_quadratic_at_012},
@@ -303,7 +303,7 @@ fn eq_tail_ptrs(
 fn copy_to_device_ptr<T: Copy>(
     dst: *mut T,
     src: &[T],
-    device_ctx: &DeviceContext,
+    device_ctx: &GpuDeviceCtx,
 ) -> Result<(), FractionalSumcheckError> {
     if src.is_empty() {
         return Ok(());
@@ -329,7 +329,7 @@ fn observe_and_update<SC, TS>(
     prev_s_eval: &mut EF,
     xi_j: EF,
     eq_r_acc: &mut EF,
-    device_ctx: &DeviceContext,
+    device_ctx: &GpuDeviceCtx,
 ) -> Result<EF, FractionalSumcheckError>
 where
     SC: StarkProtocolConfig<EF = EF>,
@@ -370,7 +370,7 @@ fn do_sumcheck_round_and_revert<SC, TS>(
     prev_s_eval: &mut EF,
     xi_j: EF,
     eq_r_acc: &mut EF,
-    device_ctx: &DeviceContext,
+    device_ctx: &GpuDeviceCtx,
 ) -> Result<EF, FractionalSumcheckError>
 where
     SC: StarkProtocolConfig<EF = EF>,
@@ -422,7 +422,7 @@ fn do_fused_sumcheck_round<SC, TS>(
     prev_s_eval: &mut EF,
     xi_j: EF,
     eq_r_acc: &mut EF,
-    device_ctx: &DeviceContext,
+    device_ctx: &GpuDeviceCtx,
 ) -> Result<EF, FractionalSumcheckError>
 where
     SC: StarkProtocolConfig<EF = EF>,
@@ -472,7 +472,7 @@ fn do_fused_sumcheck_round_inplace<SC, TS>(
     prev_s_eval: &mut EF,
     xi_j: EF,
     eq_r_acc: &mut EF,
-    device_ctx: &DeviceContext,
+    device_ctx: &GpuDeviceCtx,
 ) -> Result<EF, FractionalSumcheckError>
 where
     SC: StarkProtocolConfig<EF = EF>,
@@ -514,7 +514,7 @@ pub fn fractional_sumcheck_gpu<SC, TS>(
     alpha: EF,
     assert_zero: bool,
     mem: &mut MemTracker,
-    device_ctx: &DeviceContext,
+    device_ctx: &GpuDeviceCtx,
 ) -> Result<(FracSumcheckProof<SC>, Vec<EF>), FractionalSumcheckError>
 where
     SC: StarkProtocolConfig<EF = EF>,
@@ -1154,7 +1154,7 @@ fn copy_from_device<T: Copy>(
     buf: &DeviceBuffer<T>,
     index: usize,
     scratch: &mut DeviceBuffer<T>,
-    device_ctx: &DeviceContext,
+    device_ctx: &GpuDeviceCtx,
 ) -> Result<T, FractionalSumcheckError> {
     debug_assert!(!scratch.is_empty());
     unsafe {
@@ -1190,7 +1190,7 @@ fn reconstruct_s_evals(
     prev_s_eval: EF,
     xi_j: EF,
     eq_r_acc: EF,
-    device_ctx: &DeviceContext,
+    device_ctx: &GpuDeviceCtx,
 ) -> Result<([EF; GKR_S_DEG], [EF; GKR_S_DEG]), FractionalSumcheckError> {
     let sp_vec = d_sum_evals.to_host_on(device_ctx)?;
     debug_assert_eq!(sp_vec.len(), GKR_S_DEG - 1);
@@ -1228,7 +1228,7 @@ fn reconstruct_s_evals(
 /// Generate random fractional leaves on device for benchmarking.
 pub fn make_synthetic_leaves(
     n: usize,
-    device_ctx: &DeviceContext,
+    device_ctx: &GpuDeviceCtx,
 ) -> Result<DeviceBuffer<Frac<EF>>, FractionalSumcheckError> {
     use openvm_cuda_common::copy::cuda_memcpy_on;
     use rand::{rngs::StdRng, Rng, SeedableRng};
@@ -1255,7 +1255,7 @@ mod tests {
     use openvm_cuda_common::{
         common::get_device,
         memory_manager::MemTracker,
-        stream::{CudaStream, DeviceContext, StreamGuard},
+        stream::{CudaStream, GpuDeviceCtx, StreamGuard},
     };
     use p3_field::PrimeCharacteristicRing;
 
@@ -1265,8 +1265,8 @@ mod tests {
     };
     use crate::{prelude::SC, sponge::DuplexSpongeGpu};
 
-    fn test_ctx() -> DeviceContext {
-        DeviceContext {
+    fn test_ctx() -> GpuDeviceCtx {
+        GpuDeviceCtx {
             device_id: get_device().unwrap() as u32,
             stream: StreamGuard::new(CudaStream::new_non_blocking().unwrap()),
         }

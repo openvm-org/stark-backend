@@ -1,6 +1,6 @@
 use itertools::Itertools;
 use openvm_cuda_common::{
-    copy::MemCopyH2D, d_buffer::DeviceBuffer, error::CudaError, stream::DeviceContext,
+    copy::MemCopyH2D, d_buffer::DeviceBuffer, error::CudaError, stream::GpuDeviceCtx,
 };
 use openvm_stark_backend::{
     air_builders::symbolic::{
@@ -61,7 +61,7 @@ pub fn evaluate_round0_constraints_gpu<HS: GpuHashScheme>(
     num_cosets: u32,
     g_shift: F,
     max_temp_bytes: usize,
-    device_ctx: &DeviceContext,
+    device_ctx: &GpuDeviceCtx,
 ) -> Result<DeviceBuffer<EF>, Round0EvalError> {
     let constraints_dag = &pk.vk.symbolic_constraints;
     if constraints_dag.constraints.constraint_idx.is_empty() || num_cosets == 0 {
@@ -173,7 +173,7 @@ pub fn evaluate_round0_interactions_gpu<HS: GpuHashScheme>(
     num_cosets: u32,
     g_shift: F,
     max_temp_bytes: usize,
-    device_ctx: &DeviceContext,
+    device_ctx: &GpuDeviceCtx,
 ) -> Result<DeviceBuffer<Frac<EF>>, Round0EvalError> {
     // Check if this trace has interactions
     if eq_3bs.is_empty() {

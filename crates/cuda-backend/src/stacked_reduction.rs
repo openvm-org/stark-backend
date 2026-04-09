@@ -5,7 +5,7 @@ use openvm_cuda_common::{
     copy::{cuda_memcpy_on, MemCopyD2H, MemCopyH2D},
     d_buffer::DeviceBuffer,
     memory_manager::MemTracker,
-    stream::DeviceContext,
+    stream::GpuDeviceCtx,
 };
 use openvm_stark_backend::{
     dft::Radix2BowersSerial,
@@ -51,7 +51,7 @@ use crate::{
 pub const STACKED_REDUCTION_S_DEG: usize = 2;
 
 pub struct StackedReductionGpu<D = Digest> {
-    device_ctx: DeviceContext,
+    device_ctx: GpuDeviceCtx,
     sm_count: u32,
 
     l_skip: usize,
@@ -281,7 +281,7 @@ impl<D: Copy + Clone + Send + Sync + 'static> StackedReductionGpu<D> {
         r: &[EF],
         lambda: EF,
         sm_count: u32,
-        device_ctx: DeviceContext,
+        device_ctx: GpuDeviceCtx,
     ) -> Result<Self, StackedReductionError> {
         ensure_device_ntt_twiddles_initialized().map_err(StackedReductionError::InitNttTwiddles)?;
         let mem = MemTracker::start("prover.stacked_reduction_new");

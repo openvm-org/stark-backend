@@ -6,7 +6,7 @@
 use std::ffi::c_void;
 
 use openvm_cuda_common::{
-    copy::cuda_memcpy_on, d_buffer::DeviceBuffer, error::MemCopyError, stream::DeviceContext,
+    copy::cuda_memcpy_on, d_buffer::DeviceBuffer, error::MemCopyError, stream::GpuDeviceCtx,
 };
 use openvm_stark_backend::FiatShamirTranscript;
 use openvm_stark_sdk::config::{
@@ -127,7 +127,7 @@ impl MultiFieldTranscriptGpu {
         Self::default()
     }
 
-    fn ensure_device_allocated(&mut self, device_ctx: &DeviceContext) {
+    fn ensure_device_allocated(&mut self, device_ctx: &GpuDeviceCtx) {
         if self.device.is_empty() {
             self.device = DeviceBuffer::with_capacity_on(1, device_ctx);
         }
@@ -143,7 +143,7 @@ impl MultiFieldTranscriptGpu {
     /// [`Transcript`] still has buffered samples from a prior host-side
     /// `sample()`, device-side sampling after this snapshot can diverge from the
     /// host transcript.
-    pub fn sync_h2d(&mut self, device_ctx: &DeviceContext) -> Result<(), MemCopyError> {
+    pub fn sync_h2d(&mut self, device_ctx: &GpuDeviceCtx) -> Result<(), MemCopyError> {
         self.ensure_device_allocated(device_ctx);
 
         let mut ds = DeviceBn254SpongeState::default();
@@ -197,7 +197,7 @@ impl GpuFiatShamirTranscript<BabyBearBn254Poseidon2Config> for MultiFieldTranscr
     fn grind_gpu(
         &mut self,
         bits: usize,
-        device_ctx: &DeviceContext,
+        device_ctx: &GpuDeviceCtx,
     ) -> Result<BabyBear, GrindError> {
         validate_gpu_grind_bits(bits)?;
         // Trivial case: 0 bits mean no PoW is required and any witness is valid.

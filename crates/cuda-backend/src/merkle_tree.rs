@@ -5,7 +5,7 @@ use openvm_cuda_common::{
     copy::{MemCopyD2H, MemCopyH2D},
     d_buffer::DeviceBuffer,
     memory_manager::MemTracker,
-    stream::DeviceContext,
+    stream::GpuDeviceCtx,
 };
 use openvm_stark_backend::prover::MatrixDimensions;
 use p3_util::log2_strict_usize;
@@ -92,7 +92,7 @@ pub trait MerkleTreeConstructor: GpuMerkleHash {
         matrix: DeviceMatrix<F>,
         rows_per_query: usize,
         cache_backing_matrix: bool,
-        device_ctx: &DeviceContext,
+        device_ctx: &GpuDeviceCtx,
     ) -> Result<MerkleTreeGpu<F, Self::Digest>, MerkleTreeError>;
 }
 
@@ -100,7 +100,7 @@ pub trait MerkleProofQueryDigest: BatchQueryMerkle + Copy + Send + Sync + 'stati
     fn batch_query_merkle_proofs(
         trees: &[&MerkleTreeGpu<F, Self>],
         query_indices: &[usize],
-        device_ctx: &DeviceContext,
+        device_ctx: &GpuDeviceCtx,
     ) -> Result<Vec<Vec<Vec<Self>>>, MerkleTreeError>;
 }
 
@@ -132,7 +132,7 @@ impl<D: Copy + Send + Sync + 'static> MerkleTreeGpu<F, D> {
         matrix: DeviceMatrix<F>,
         rows_per_query: usize,
         cache_backing_matrix: bool,
-        device_ctx: &DeviceContext,
+        device_ctx: &GpuDeviceCtx,
     ) -> Result<Self, MerkleTreeError> {
         MH::new_merkle_tree(matrix, rows_per_query, cache_backing_matrix, device_ctx)
     }
@@ -141,7 +141,7 @@ impl<D: Copy + Send + Sync + 'static> MerkleTreeGpu<F, D> {
         matrix: DeviceMatrix<F>,
         rows_per_query: usize,
         cache_backing_matrix: bool,
-        device_ctx: &DeviceContext,
+        device_ctx: &GpuDeviceCtx,
     ) -> Result<Self, MerkleTreeError> {
         let mem = MemTracker::start("prover.merkle_tree");
         let height = matrix.height();
@@ -202,7 +202,7 @@ impl<D: Copy + Send + Sync + 'static> MerkleTreeGpu<F, D> {
         query_indices: &[usize],
         query_stride: usize,
         rows_per_query: usize,
-        device_ctx: &DeviceContext,
+        device_ctx: &GpuDeviceCtx,
     ) -> Result<
         Vec<
             // per tree
@@ -269,7 +269,7 @@ impl MerkleTreeConstructor for Poseidon2MerkleHash {
         matrix: DeviceMatrix<F>,
         rows_per_query: usize,
         cache_backing_matrix: bool,
-        device_ctx: &DeviceContext,
+        device_ctx: &GpuDeviceCtx,
     ) -> Result<MerkleTreeGpu<F, Self::Digest>, MerkleTreeError> {
         MerkleTreeGpu::<F, Self::Digest>::new_generic_with_hash::<Self>(
             matrix,
@@ -286,7 +286,7 @@ impl MerkleTreeConstructor for crate::hash_scheme::Bn254Poseidon2MerkleHash {
         matrix: DeviceMatrix<F>,
         rows_per_query: usize,
         cache_backing_matrix: bool,
-        device_ctx: &DeviceContext,
+        device_ctx: &GpuDeviceCtx,
     ) -> Result<MerkleTreeGpu<F, Self::Digest>, MerkleTreeError> {
         MerkleTreeGpu::<F, Self::Digest>::new_generic_with_hash::<Self>(
             matrix,
@@ -306,7 +306,7 @@ impl MerkleTreeGpu<F, Digest> {
         matrix: DeviceMatrix<F>,
         rows_per_query: usize,
         cache_backing_matrix: bool,
-        device_ctx: &DeviceContext,
+        device_ctx: &GpuDeviceCtx,
     ) -> Result<Self, MerkleTreeError> {
         Self::new_with_hash::<Poseidon2MerkleHash>(
             matrix,
@@ -322,7 +322,7 @@ impl<D: BatchQueryMerkle + Send + Sync + 'static> MerkleTreeGpu<F, D> {
     fn batch_query_proofs(
         trees: &[&Self],
         query_indices: &[usize],
-        device_ctx: &DeviceContext,
+        device_ctx: &GpuDeviceCtx,
     ) -> Result<Vec<Vec<Vec<D>>>, MerkleTreeError> {
         if trees.is_empty() {
             return Ok(Vec::new());
@@ -420,7 +420,7 @@ impl<D: BatchQueryMerkle + Send + Sync + 'static> MerkleTreeGpu<F, D> {
     pub fn batch_query_merkle_proofs(
         trees: &[&Self],
         query_indices: &[usize],
-        device_ctx: &DeviceContext,
+        device_ctx: &GpuDeviceCtx,
     ) -> Result<
         Vec<
             // per tree
@@ -442,7 +442,7 @@ impl MerkleProofQueryDigest for Digest {
     fn batch_query_merkle_proofs(
         trees: &[&MerkleTreeGpu<F, Self>],
         query_indices: &[usize],
-        device_ctx: &DeviceContext,
+        device_ctx: &GpuDeviceCtx,
     ) -> Result<Vec<Vec<Vec<Self>>>, MerkleTreeError> {
         MerkleTreeGpu::<F, Self>::batch_query_proofs(trees, query_indices, device_ctx)
     }
@@ -453,7 +453,7 @@ impl MerkleProofQueryDigest for Bn254Digest {
     fn batch_query_merkle_proofs(
         trees: &[&MerkleTreeGpu<F, Self>],
         query_indices: &[usize],
-        device_ctx: &DeviceContext,
+        device_ctx: &GpuDeviceCtx,
     ) -> Result<Vec<Vec<Vec<Self>>>, MerkleTreeError> {
         MerkleTreeGpu::<F, Self>::batch_query_proofs(trees, query_indices, device_ctx)
     }
@@ -467,7 +467,7 @@ impl<D: Copy + Send + Sync + 'static> MerkleTreeGpu<EF, D> {
         matrix: DeviceMatrix<EF>,
         rows_per_query: usize,
         cache_backing_matrix: bool,
-        device_ctx: &DeviceContext,
+        device_ctx: &GpuDeviceCtx,
     ) -> Result<Self, MerkleTreeError> {
         let height = matrix.height();
         assert!(height.is_power_of_two());
@@ -531,7 +531,7 @@ impl MerkleTreeGpu<EF, Digest> {
         matrix: DeviceMatrix<EF>,
         rows_per_query: usize,
         cache_backing_matrix: bool,
-        device_ctx: &DeviceContext,
+        device_ctx: &GpuDeviceCtx,
     ) -> Result<Self, MerkleTreeError> {
         Self::new_with_hash::<Poseidon2MerkleHash>(
             matrix,

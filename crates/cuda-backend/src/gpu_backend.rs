@@ -82,6 +82,11 @@ where
     HS::Digest: MerkleProofQueryDigest,
 {
     type Error = ProverError;
+    type DeviceCtx = openvm_cuda_common::stream::GpuDeviceCtx;
+
+    fn device_ctx(&self) -> &openvm_cuda_common::stream::GpuDeviceCtx {
+        &self.device_ctx
+    }
 }
 
 impl<HS: GpuHashScheme, TS: GpuFiatShamirTranscript<HS::SC>>

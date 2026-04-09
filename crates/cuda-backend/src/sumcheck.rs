@@ -2,7 +2,7 @@
 use openvm_cuda_common::{
     copy::{MemCopyD2H, MemCopyH2D},
     d_buffer::DeviceBuffer,
-    stream::DeviceContext,
+    stream::GpuDeviceCtx,
 };
 use openvm_stark_backend::{
     p3_util::log2_strict_usize,
@@ -36,7 +36,7 @@ use crate::{
 pub fn sumcheck_multilinear_gpu<F: Field>(
     transcript: &mut DuplexSpongeGpu,
     evals: &[F],
-    device_ctx: &DeviceContext,
+    device_ctx: &GpuDeviceCtx,
 ) -> Result<(SumcheckCubeProof<EF>, Vec<EF>), SumcheckError>
 where
     EF: ExtensionField<F>,
@@ -170,7 +170,7 @@ pub fn sumcheck_prismalinear_gpu(
     transcript: &mut DuplexSpongeGpu,
     l_skip: usize,
     evals: &[F],
-    device_ctx: &DeviceContext,
+    device_ctx: &GpuDeviceCtx,
 ) -> Result<(SumcheckPrismProof<EF>, Vec<EF>), SumcheckError> {
     let prism_dim = p3_util::log2_strict_usize(evals.len());
     assert!(prism_dim >= l_skip);
