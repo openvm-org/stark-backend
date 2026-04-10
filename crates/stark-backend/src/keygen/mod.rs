@@ -121,7 +121,7 @@ impl<SC: StarkProtocolConfig> MultiStarkKeygenBuilder<SC> {
             }
         }
         if max_constraint_degree != air_max_constraint_degree as usize {
-            tracing::warn!(
+            tracing::info!(
             "Actual max constraint degree across all AIRs ({air_max_constraint_degree}) does not match configured max constraint degree ({max_constraint_degree})",
         );
         }
