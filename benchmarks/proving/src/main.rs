@@ -16,8 +16,7 @@
 //! To also write a metrics.json file:
 //!   METRICS_OUTPUT=metrics.json cargo run -p openvm-benchmark-proving --release -- ...
 
-use std::sync::Arc;
-use std::time::Instant;
+use std::{sync::Arc, time::Instant};
 
 use clap::Parser;
 use openvm_stark_backend::{
@@ -144,8 +143,7 @@ fn prove(
 
     let engine = BabyBearPoseidon2GpuEngine::new(params.clone());
     let device = engine.device();
-    let d_pk =
-        <_ as DeviceDataTransporter<CudaSC, GpuBackend>>::transport_pk_to_device(device, pk);
+    let d_pk = <_ as DeviceDataTransporter<CudaSC, GpuBackend>>::transport_pk_to_device(device, pk);
     let ctx = ProvingContext::new(
         cpu_traces
             .iter()
@@ -204,26 +202,38 @@ fn run(args: &Args) {
     let constraint_instances = total_constraints * trace_height;
     let bus_interaction_messages = total_bus_interactions * trace_height;
 
-    let backend_name = if cfg!(feature = "cuda") {
-        "GPU"
-    } else {
-        "CPU"
-    };
+    let backend_name = if cfg!(feature = "cuda") { "GPU" } else { "CPU" };
 
     println!("=== Synthetic Proving Benchmark ({backend_name}) ===");
     println!("  num_airs:               {}", fmt_num(args.num_airs));
     println!("  cols_per_air:           {}", fmt_num(args.cols_per_air));
     println!("  constraints_per_col:    {}", args.constraints_per_col);
     println!("  interactions_per_col:   {}", args.interactions_per_col);
-    println!("  trace_height:           {} (2^{})", fmt_num(trace_height), args.log_rows_per_air);
+    println!(
+        "  trace_height:           {} (2^{})",
+        fmt_num(trace_height),
+        args.log_rows_per_air
+    );
     println!(
         "  trace_cells:            {} (2^{} rows * {} AIRs * {} columns / AIR)",
-        fmt_num(total_cells), args.log_rows_per_air, args.num_airs, args.cols_per_air
+        fmt_num(total_cells),
+        args.log_rows_per_air,
+        args.num_airs,
+        args.cols_per_air
     );
     println!("  constraints:            {}", fmt_num(total_constraints));
-    println!("  bus_interactions:       {}", fmt_num(total_bus_interactions));
-    println!("  constraint_instances:   {}", fmt_num(constraint_instances));
-    println!("  bus_interaction_msgs:   {}", fmt_num(bus_interaction_messages));
+    println!(
+        "  bus_interactions:       {}",
+        fmt_num(total_bus_interactions)
+    );
+    println!(
+        "  constraint_instances:   {}",
+        fmt_num(constraint_instances)
+    );
+    println!(
+        "  bus_interaction_msgs:   {}",
+        fmt_num(bus_interaction_messages)
+    );
 
     // Create AIRs
     let airs: Vec<AirRef<SC>> = (0..args.num_airs)
