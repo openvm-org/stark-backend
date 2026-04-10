@@ -324,7 +324,7 @@ __global__ void bn254_adjacent_compress_layer_kernel(
 //
 // Matches MultiFieldTranscript<BabyBear, Bn254Scalar, Perm, WIDTH=3, RATE=2>:
 //   num_obs_per_word = SF::bits() / CF::bits() = 254/31 = 8
-//   num_samples_per_word = 7  (base-p decomposition)
+//   num_samples_per_word = 5  (base-p decomposition, ≥100 bits bias slack)
 //
 // The sponge uses overwrite-mode duplex with absorb_idx/sample_idx tracking.
 // Rust DeviceBn254SpongeState must have identical layout (verified by size assert).
