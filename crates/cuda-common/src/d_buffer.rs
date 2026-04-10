@@ -65,20 +65,20 @@ impl<T> DeviceBuffer<T> {
     }
 
     /// Allocate device memory for `len` elements of type `T` on an explicit stream.
-    pub fn with_capacity_on(len: usize, ctx: &GpuDeviceCtx) -> Self {
+    pub fn with_capacity_on(len: usize, device_ctx: &GpuDeviceCtx) -> Self {
         tracing::debug!(
             "Creating device buffer of size {} (sizeof type = {}) on stream {:?}",
             len,
             size_of::<T>(),
-            ctx.stream
+            device_ctx.stream
         );
         assert_ne!(len, 0, "Zero capacity request is wrong");
         let size_bytes = std::mem::size_of::<T>() * len;
-        let raw_ptr = d_malloc_on(size_bytes, &ctx.stream).expect("GPU allocation failed");
+        let raw_ptr = d_malloc_on(size_bytes, &device_ctx.stream).expect("GPU allocation failed");
         #[cfg(feature = "touchemall")]
         {
             unsafe {
-                cudaMemsetAsync(raw_ptr, 0xff, size_bytes, ctx.stream.as_raw());
+                cudaMemsetAsync(raw_ptr, 0xff, size_bytes, device_ctx.stream.as_raw());
             }
         }
         let typed_ptr = raw_ptr as *mut T;
@@ -87,7 +87,7 @@ impl<T> DeviceBuffer<T> {
             ptr: typed_ptr,
             len,
             #[cfg(feature = "debug-cuda-stream")]
-            alloc_stream: ctx.stream.as_raw(),
+            alloc_stream: device_ctx.stream.as_raw(),
         }
     }
 
@@ -95,31 +95,43 @@ impl<T> DeviceBuffer<T> {
     ///
     /// The caller should use the same stream that allocated this buffer.
     /// `fill_zero` is async; same-stream guarantees ordering without explicit sync.
-    pub fn fill_zero_on(&self, ctx: &GpuDeviceCtx) -> Result<(), CudaError> {
-        assert_ne!(self.len, 0, "Empty buffer");
+    pub fn fill_zero_on(&self, device_ctx: &GpuDeviceCtx) -> Result<(), CudaError> {
+        if self.len == 0 {
+            return Ok(());
+        }
         #[cfg(feature = "debug-cuda-stream")]
         debug_assert_eq!(
-            ctx.stream.as_raw(),
+            device_ctx.stream.as_raw(),
             self.alloc_stream,
             "fill_zero_on: stream mismatch"
         );
         let size_bytes = std::mem::size_of::<T>() * self.len;
-        check(unsafe { cudaMemsetAsync(self.as_mut_raw_ptr(), 0, size_bytes, ctx.stream.as_raw()) })
+        check(unsafe {
+            cudaMemsetAsync(
+                self.as_mut_raw_ptr(),
+                0,
+                size_bytes,
+                device_ctx.stream.as_raw(),
+            )
+        })
     }
 
     /// Fills a suffix of the buffer with zeros on an explicit stream.
     pub fn fill_zero_suffix_on(
         &self,
         start_idx: usize,
-        ctx: &GpuDeviceCtx,
+        device_ctx: &GpuDeviceCtx,
     ) -> Result<(), CudaError> {
         assert!(
-            start_idx < self.len,
-            "start index has to be smaller than length"
+            start_idx <= self.len,
+            "start index has to be smaller than or equal to length"
         );
+        if start_idx == self.len {
+            return Ok(());
+        }
         #[cfg(feature = "debug-cuda-stream")]
         debug_assert_eq!(
-            ctx.stream.as_raw(),
+            device_ctx.stream.as_raw(),
             self.alloc_stream,
             "fill_zero_suffix_on: stream mismatch"
         );
@@ -129,7 +141,7 @@ impl<T> DeviceBuffer<T> {
                 self.as_mut_ptr().add(start_idx) as *mut c_void,
                 0,
                 size_bytes,
-                ctx.stream.as_raw(),
+                device_ctx.stream.as_raw(),
             )
         })
     }
@@ -239,9 +251,9 @@ mod tests {
 
     #[test]
     fn test_device_buffer_float() {
-        let ctx = test_ctx();
+        let device_ctx = test_ctx();
         // Create a DeviceBuffer of 10 floats
-        let db = DeviceBuffer::<f32>::with_capacity_on(10, &ctx);
+        let db = DeviceBuffer::<f32>::with_capacity_on(10, &device_ctx);
 
         assert_eq!(db.len(), 10);
         assert!(!db.as_ptr().is_null());
@@ -252,10 +264,10 @@ mod tests {
 
     #[test]
     fn test_device_buffer_fill_zero() {
-        let ctx = test_ctx();
+        let device_ctx = test_ctx();
         let v: Vec<u64> = (0..10).collect();
-        let d_array = v.to_device_on(&ctx).unwrap();
-        d_array.fill_zero_on(&ctx).unwrap();
-        assert_eq!(d_array.to_host_on(&ctx).unwrap(), vec![0; v.len()]);
+        let d_array = v.to_device_on(&device_ctx).unwrap();
+        d_array.fill_zero_on(&device_ctx).unwrap();
+        assert_eq!(d_array.to_host_on(&device_ctx).unwrap(), vec![0; v.len()]);
     }
 }

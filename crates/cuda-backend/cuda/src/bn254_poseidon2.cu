@@ -137,7 +137,7 @@ static const int BN254_NUM_F_ELMS    = 8;
 
 /// Row hash for a base-field (Fp / BabyBear) matrix row.
 static __device__ __forceinline__
-Bn254Fr bn254_row_hash(const Fp* matrix, int width, int height, int row) {
+Bn254Fr bn254_row_hash(const Fp* matrix, size_t width, size_t height, size_t row) {
     Bn254Fr state[3];
     state[0] = bn254_zero_init();
     state[1] = bn254_zero_init();
@@ -146,7 +146,7 @@ Bn254Fr bn254_row_hash(const Fp* matrix, int width, int height, int row) {
     uint32_t buf[BN254_BABY_BEAR_RATE];
     int cnt = 0;
 
-    for (int col = 0; col < width; col++) {
+    for (size_t col = 0; col < width; col++) {
         buf[cnt++] = matrix[col * height + row].asUInt32();
         if (cnt == BN254_BABY_BEAR_RATE) {
             state[0] = bn254_pack_base_2_31(buf, BN254_NUM_F_ELMS);
@@ -167,7 +167,7 @@ Bn254Fr bn254_row_hash(const Fp* matrix, int width, int height, int row) {
 
 /// Row hash for an extension-field (FpExt / BinomialExtensionField<BabyBear,4>) matrix row.
 static __device__ __forceinline__
-Bn254Fr bn254_row_hash_ext(const FpExt* matrix, int width, int height, int row) {
+Bn254Fr bn254_row_hash_ext(const FpExt* matrix, size_t width, size_t height, size_t row) {
     Bn254Fr state[3];
     state[0] = bn254_zero_init();
     state[1] = bn254_zero_init();
@@ -176,7 +176,7 @@ Bn254Fr bn254_row_hash_ext(const FpExt* matrix, int width, int height, int row) 
     uint32_t buf[BN254_BABY_BEAR_RATE];
     int cnt = 0;
 
-    for (int col = 0; col < width; col++) {
+    for (size_t col = 0; col < width; col++) {
         FpExt elem = matrix[col * height + row];
         for (int d = 0; d < 4; d++) {
             buf[cnt++] = elem.elems[d].asUInt32();
@@ -225,12 +225,12 @@ __global__ void bn254_compressing_row_hashes_kernel(
 
     const uint32_t stride_idx = blockDim.x * blockIdx.x + threadIdx.x;
     uint32_t       leaf_idx   = threadIdx.y;
-    const uint32_t row        = leaf_idx * query_stride + stride_idx;
+    const size_t   row        = leaf_idx * query_stride + stride_idx;
 
     Bn254Fr digest = bn254_zero_init();
 
     if (stride_idx < query_stride) {
-        digest = bn254_row_hash(matrix, (int)width, (int)height, (int)row);
+        digest = bn254_row_hash(matrix, width, height, row);
     }
 
     // Tree reduction (same structure as the BabyBear kernel)
@@ -271,12 +271,12 @@ __global__ void bn254_compressing_row_hashes_ext_kernel(
 
     const uint32_t stride_idx = blockDim.x * blockIdx.x + threadIdx.x;
     uint32_t       leaf_idx   = threadIdx.y;
-    const uint32_t row        = leaf_idx * query_stride + stride_idx;
+    const size_t   row        = leaf_idx * query_stride + stride_idx;
 
     Bn254Fr digest = bn254_zero_init();
 
     if (stride_idx < query_stride) {
-        digest = bn254_row_hash_ext(matrix, (int)width, (int)height, (int)row);
+        digest = bn254_row_hash_ext(matrix, width, height, row);
     }
 
     for (int layer = 0; layer < (int)log_rows_per_query; ++layer) {

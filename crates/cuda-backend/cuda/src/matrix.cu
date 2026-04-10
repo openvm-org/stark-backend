@@ -90,8 +90,8 @@ __global__ void split_ext_to_base_col_major_matrix_kernel(
         return;
     }
 
-    uint32_t col_num = (poly_len / matrix_height); // SPLIT_FACTOR = 2
-    for (uint32_t col_idx = 0; col_idx < col_num; col_idx++) {
+    uint64_t col_num = (poly_len / matrix_height); // SPLIT_FACTOR = 2
+    for (uint64_t col_idx = 0; col_idx < col_num; col_idx++) {
         FpExt ext_val = d_poly[col_idx * matrix_height + row_idx];
         d_matrix[(col_idx * 4 + 0) * matrix_height + row_idx] = ext_val.elems[0];
         d_matrix[(col_idx * 4 + 1) * matrix_height + row_idx] = ext_val.elems[1];
@@ -114,6 +114,8 @@ __global__ void batch_rotate_pad_kernel(
 ) {
     auto tidx = threadIdx.x + blockIdx.x * blockDim.x;
     auto pidx = blockIdx.y + blockIdx.z * gridDim.y;
+    const size_t padded_stride = padded_size;
+    const size_t domain_stride = domain_size;
 
     if (pidx >= width * num_x) {
         return;
@@ -129,9 +131,9 @@ __global__ void batch_rotate_pad_kernel(
                 pidx_rot -= num_x;
             }
         }
-        out[padded_size * pidx + tidx] = in[domain_size * pidx_rot + tidx_rot];
+        out[padded_stride * pidx + tidx] = in[domain_stride * pidx_rot + tidx_rot];
     } else if (tidx < padded_size) {
-        out[padded_size * pidx + tidx] = Fp(0);
+        out[padded_stride * pidx + tidx] = Fp(0);
     }
 }
 
@@ -147,11 +149,12 @@ __global__ void lift_padded_matrix_evals_kernel(
 ) {
     auto tidx = threadIdx.x + blockIdx.x * blockDim.x;
     auto col = threadIdx.y + blockIdx.y * blockDim.y;
+    const size_t col_stride = padded_height;
     if (tidx >= lifted_height || col >= width) {
         return;
     }
     // lhs = rhs when tidx < height
-    matrix[col * padded_height + tidx] = matrix[col * padded_height + (tidx % height)];
+    matrix[col * col_stride + tidx] = matrix[col * col_stride + (tidx % height)];
 }
 
 // Required: lifted_height = height * stride
@@ -165,11 +168,14 @@ __global__ void collapse_strided_matrix_kernel(
 ) {
     auto row = threadIdx.x + blockIdx.x * blockDim.x;
     auto col = threadIdx.y + blockIdx.y * blockDim.y;
+    const size_t out_col_stride = height;
+    const size_t in_col_stride = lifted_height;
+    const size_t row_stride = stride;
     if (row >= height || col >= width) {
         return;
     }
 
-    out[col * height + row] = in[col * lifted_height + row * stride];
+    out[col * out_col_stride + row] = in[col * in_col_stride + row * row_stride];
 }
 
 // memory layout of in: column-major
@@ -186,13 +192,15 @@ __global__ void batch_expand_pad_kernel(
     const uint32_t inSize
 ) {
     uint idx = blockIdx.x * blockDim.x + threadIdx.x;
+    const size_t in_stride = inSize;
+    const size_t out_stride = outSize;
     if (idx < outSize) {
         for (uint32_t i = 0; i < polyCount; i++) {
             Fp res = Fp(0);
             if (idx < inSize) {
-                res = in[i * inSize + idx];
+                res = in[i * in_stride + idx];
             }
-            out[i * outSize + idx] = res;
+            out[i * out_stride + idx] = res;
         }
     }
 }
@@ -210,13 +218,15 @@ __global__ void batch_expand_pad_wide_kernel(
 ) {
     uint32_t row = blockIdx.x * blockDim.x + threadIdx.x;
     uint32_t col = blockIdx.y + blockIdx.z * gridDim.y;
+    const size_t padded_stride = padded_height;
+    const size_t in_stride = height;
     if (col >= width) {
         return;
     }
     if (row < height) {
-        out[col * padded_height + row] = in[col * height + row];
+        out[col * padded_stride + row] = in[col * in_stride + row];
     } else if (row < padded_height) {
-        out[col * padded_height + row] = Fp(0);
+        out[col * padded_stride + row] = Fp(0);
     }
 }
 

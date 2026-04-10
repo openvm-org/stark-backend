@@ -37,7 +37,7 @@ pub unsafe fn cuda_memcpy_on<const SRC_DEVICE: bool, const DST_DEVICE: bool>(
     dst: *mut c_void,
     src: *const c_void,
     size_bytes: usize,
-    ctx: &GpuDeviceCtx,
+    device_ctx: &GpuDeviceCtx,
 ) -> Result<(), MemCopyError> {
     check(unsafe {
         cudaMemcpyAsync(
@@ -47,7 +47,7 @@ pub unsafe fn cuda_memcpy_on<const SRC_DEVICE: bool, const DST_DEVICE: bool>(
             std::mem::transmute::<i32, cudaMemcpyKind>(
                 if DST_DEVICE { 1 } else { 0 } + if SRC_DEVICE { 2 } else { 0 },
             ),
-            ctx.stream.as_raw(),
+            device_ctx.stream.as_raw(),
         )
     })
     .map_err(MemCopyError::from)
@@ -56,16 +56,19 @@ pub unsafe fn cuda_memcpy_on<const SRC_DEVICE: bool, const DST_DEVICE: bool>(
 // ---- Host -> Device ----
 
 pub trait MemCopyH2D<T> {
-    fn copy_to_on(&self, dst: &mut DeviceBuffer<T>, ctx: &GpuDeviceCtx)
-        -> Result<(), MemCopyError>;
-    fn to_device_on(&self, ctx: &GpuDeviceCtx) -> Result<DeviceBuffer<T>, MemCopyError>;
+    fn copy_to_on(
+        &self,
+        dst: &mut DeviceBuffer<T>,
+        device_ctx: &GpuDeviceCtx,
+    ) -> Result<(), MemCopyError>;
+    fn to_device_on(&self, device_ctx: &GpuDeviceCtx) -> Result<DeviceBuffer<T>, MemCopyError>;
 }
 
 impl<T> MemCopyH2D<T> for [T] {
     fn copy_to_on(
         &self,
         dst: &mut DeviceBuffer<T>,
-        ctx: &GpuDeviceCtx,
+        device_ctx: &GpuDeviceCtx,
     ) -> Result<(), MemCopyError> {
         if self.len() > dst.len() {
             return Err(MemCopyError::SizeMismatch {
@@ -81,15 +84,15 @@ impl<T> MemCopyH2D<T> for [T] {
                 self.as_ptr() as *const c_void,
                 size_bytes,
                 cudaMemcpyKind::cudaMemcpyHostToDevice,
-                ctx.stream.as_raw(),
+                device_ctx.stream.as_raw(),
             )
         })
         .map_err(MemCopyError::from)
     }
 
-    fn to_device_on(&self, ctx: &GpuDeviceCtx) -> Result<DeviceBuffer<T>, MemCopyError> {
-        let mut dst = DeviceBuffer::with_capacity_on(self.len(), ctx);
-        self.copy_to_on(&mut dst, ctx)?;
+    fn to_device_on(&self, device_ctx: &GpuDeviceCtx) -> Result<DeviceBuffer<T>, MemCopyError> {
+        let mut dst = DeviceBuffer::with_capacity_on(self.len(), device_ctx);
+        self.copy_to_on(&mut dst, device_ctx)?;
         Ok(dst)
     }
 }
@@ -97,11 +100,11 @@ impl<T> MemCopyH2D<T> for [T] {
 // ---- Device -> Host ----
 
 pub trait MemCopyD2H<T> {
-    fn to_host_on(&self, ctx: &GpuDeviceCtx) -> Result<Vec<T>, MemCopyError>;
+    fn to_host_on(&self, device_ctx: &GpuDeviceCtx) -> Result<Vec<T>, MemCopyError>;
 }
 
 impl<T> MemCopyD2H<T> for DeviceBuffer<T> {
-    fn to_host_on(&self, ctx: &GpuDeviceCtx) -> Result<Vec<T>, MemCopyError> {
+    fn to_host_on(&self, device_ctx: &GpuDeviceCtx) -> Result<Vec<T>, MemCopyError> {
         let mut host_vec = Vec::with_capacity(self.len());
         let size_bytes = std::mem::size_of::<T>() * self.len();
 
@@ -111,10 +114,10 @@ impl<T> MemCopyD2H<T> for DeviceBuffer<T> {
                 self.as_raw_ptr(),
                 size_bytes,
                 cudaMemcpyKind::cudaMemcpyDeviceToHost,
-                ctx.stream.as_raw(),
+                device_ctx.stream.as_raw(),
             )
         })?;
-        ctx.stream.to_host_sync()?;
+        device_ctx.stream.to_host_sync()?;
         unsafe {
             host_vec.set_len(self.len());
         }
@@ -126,25 +129,25 @@ impl<T> MemCopyD2H<T> for DeviceBuffer<T> {
 // ---- Device -> Device ----
 
 pub trait MemCopyD2D<T> {
-    fn device_copy_on(&self, ctx: &GpuDeviceCtx) -> Result<DeviceBuffer<T>, MemCopyError>;
+    fn device_copy_on(&self, device_ctx: &GpuDeviceCtx) -> Result<DeviceBuffer<T>, MemCopyError>;
     fn device_copy_to_on(
         &self,
         dst: &mut DeviceBuffer<T>,
-        ctx: &GpuDeviceCtx,
+        device_ctx: &GpuDeviceCtx,
     ) -> Result<(), MemCopyError>;
 }
 
 impl<T> MemCopyD2D<T> for DeviceBuffer<T> {
-    fn device_copy_on(&self, ctx: &GpuDeviceCtx) -> Result<DeviceBuffer<T>, MemCopyError> {
-        let mut dst = DeviceBuffer::<T>::with_capacity_on(self.len(), ctx);
-        self.device_copy_to_on(&mut dst, ctx)?;
+    fn device_copy_on(&self, device_ctx: &GpuDeviceCtx) -> Result<DeviceBuffer<T>, MemCopyError> {
+        let mut dst = DeviceBuffer::<T>::with_capacity_on(self.len(), device_ctx);
+        self.device_copy_to_on(&mut dst, device_ctx)?;
         Ok(dst)
     }
 
     fn device_copy_to_on(
         &self,
         dst: &mut DeviceBuffer<T>,
-        ctx: &GpuDeviceCtx,
+        device_ctx: &GpuDeviceCtx,
     ) -> Result<(), MemCopyError> {
         if self.len() > dst.len() {
             return Err(MemCopyError::SizeMismatch {
@@ -161,7 +164,7 @@ impl<T> MemCopyD2D<T> for DeviceBuffer<T> {
                 self.as_raw_ptr(),
                 size_bytes,
                 cudaMemcpyKind::cudaMemcpyDeviceToDevice,
-                ctx.stream.as_raw(),
+                device_ctx.stream.as_raw(),
             )
         })
         .map_err(MemCopyError::from)
@@ -179,15 +182,15 @@ mod tests {
 
     #[test]
     fn test_mem_copy() {
-        let ctx = test_ctx();
+        let device_ctx = test_ctx();
         let h = vec![1, 2, 3, 4, 5];
 
-        let d1 = h.to_device_on(&ctx).unwrap();
-        let mut d2 = DeviceBuffer::<i32>::with_capacity_on(h.len(), &ctx);
-        h.copy_to_on(&mut d2, &ctx).unwrap();
+        let d1 = h.to_device_on(&device_ctx).unwrap();
+        let mut d2 = DeviceBuffer::<i32>::with_capacity_on(h.len(), &device_ctx);
+        h.copy_to_on(&mut d2, &device_ctx).unwrap();
 
-        let h1 = d1.to_host_on(&ctx).unwrap();
-        let h2 = d2.to_host_on(&ctx).unwrap();
+        let h1 = d1.to_host_on(&device_ctx).unwrap();
+        let h2 = d2.to_host_on(&device_ctx).unwrap();
 
         assert_eq!(h, h1, "First device buffer mismatch");
         assert_eq!(h, h2, "Second device buffer mismatch");

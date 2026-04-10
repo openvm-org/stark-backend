@@ -132,7 +132,7 @@ impl Deref for StreamGuard {
 // ---------------------------------------------------------------------------
 
 /// Thin context for all GPU operations in the explicit-stream path.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct GpuDeviceCtx {
     pub device_id: u32,
     pub stream: StreamGuard,
