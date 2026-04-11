@@ -383,6 +383,7 @@ impl SoundnessCalculator {
                     challenge_field_bits,
                     sub_round,
                     whir.folding_pow_bits,
+                    log2_list_size.unwrap(),
                 );
                 min_sumcheck_bits = min_sumcheck_bits.min(sumcheck_bits);
 
@@ -683,9 +684,10 @@ impl SoundnessCalculator {
         challenge_field_bits: f64,
         sub_round: usize,
         folding_pow_bits: usize,
+        log2_list_size: f64,
     ) -> f64 {
         let sumcheck_degree: f64 = if sub_round == 0 { 2.0 } else { 3.0 };
-        challenge_field_bits - sumcheck_degree.log2() + folding_pow_bits as f64
+        challenge_field_bits - sumcheck_degree.log2() - log2_list_size + folding_pow_bits as f64
     }
 
     /// Computes WHIR out-of-domain (OOD) security bits.
