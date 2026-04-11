@@ -361,7 +361,7 @@ impl SoundnessCalculator {
             // sub-round
             let mut log2_list_size: Option<f64> = None;
 
-            for sub_round in 0..k_whir {
+            for _ in 0..k_whir {
                 current_log_degree -= 1;
 
                 let prox_gaps = Self::whir_proximity_gap_security(
@@ -381,7 +381,6 @@ impl SoundnessCalculator {
 
                 let sumcheck_bits = Self::whir_sumcheck_security(
                     challenge_field_bits,
-                    sub_round,
                     whir.folding_pow_bits,
                     log2_list_size.unwrap(),
                 );
@@ -678,15 +677,15 @@ impl SoundnessCalculator {
 
     /// Computes WHIR sumcheck security bits for a sub-round.
     ///
-    /// Sumcheck error is 2/|F| for sub_round 0 and 3/|F| for sub_round > 0.
-    /// Security bits = |F_ext| - log₂(degree) + folding_pow_bits
+    /// Sumcheck error is d * ℓ / |F|, d^*:= 1 + deg_Z(w0) + max_i deg_{X_i}(w0) and d :=
+    /// max{d^*,3}. Security bits = |F_ext| - log₂(degree) + folding_pow_bits
     fn whir_sumcheck_security(
         challenge_field_bits: f64,
-        sub_round: usize,
         folding_pow_bits: usize,
         log2_list_size: f64,
     ) -> f64 {
-        let sumcheck_degree: f64 = if sub_round == 0 { 2.0 } else { 3.0 };
+        // For our use case, w0 has degree 1 in each variable, so d = 3.
+        let sumcheck_degree: f64 = 3.0;
         challenge_field_bits - sumcheck_degree.log2() - log2_list_size + folding_pow_bits as f64
     }
 
