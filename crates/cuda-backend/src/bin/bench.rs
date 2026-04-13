@@ -5,7 +5,11 @@ use openvm_cuda_backend::{
     prelude::EF,
     sponge::DuplexSpongeGpu,
 };
-use openvm_cuda_common::copy::MemCopyD2D;
+use openvm_cuda_common::{
+    common::get_device,
+    copy::MemCopyD2D,
+    stream::{CudaStream, GpuDeviceCtx, StreamGuard},
+};
 use p3_field::PrimeCharacteristicRing;
 
 fn parse_usize(var: &str, default: usize) -> usize {
@@ -21,21 +25,34 @@ fn bench_fractional_sumcheck() -> Result<(), Box<dyn std::error::Error>> {
     let repeats = parse_usize("SWIRL_BENCH_REPEATS", 3);
     let warmups = parse_usize("SWIRL_BENCH_WARMUPS", 1);
 
-    let template = make_synthetic_leaves(n)?;
+    let device_ctx = GpuDeviceCtx {
+        device_id: get_device()? as u32,
+        stream: StreamGuard::new(CudaStream::new_non_blocking()?),
+    };
+    let template = make_synthetic_leaves(n, &device_ctx)?;
 
     println!("run_idx,is_warmup,elapsed_ms");
 
     for run_idx in 0..(warmups + repeats) {
         let is_warmup = run_idx < warmups;
-        let leaves = template.device_copy().expect("device copy leaves");
+        let leaves = template
+            .device_copy_on(&device_ctx)
+            .expect("device copy leaves");
 
         let mut transcript = DuplexSpongeGpu::default();
         let mut mem = openvm_cuda_common::memory_manager::MemTracker::start("bench.fractional");
 
-        openvm_cuda_common::stream::current_stream_sync().expect("sync before timing");
+        device_ctx.stream.synchronize().expect("sync before timing");
         let t0 = std::time::Instant::now();
-        let _ = fractional_sumcheck_gpu(&mut transcript, leaves, EF::ZERO, false, &mut mem)?;
-        openvm_cuda_common::stream::current_stream_sync().expect("sync after timing");
+        let _ = fractional_sumcheck_gpu(
+            &mut transcript,
+            leaves,
+            EF::ZERO,
+            false,
+            &mut mem,
+            &device_ctx,
+        )?;
+        device_ctx.stream.synchronize().expect("sync after timing");
         let ms = t0.elapsed().as_secs_f64() * 1000.0;
 
         println!("{run_idx},{},{:.4}", is_warmup as u8, ms);

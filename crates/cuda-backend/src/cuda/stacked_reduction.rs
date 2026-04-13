@@ -1,6 +1,7 @@
 use openvm_cuda_common::{
     d_buffer::DeviceBuffer,
     error::{check, CudaError},
+    stream::cudaStream_t,
 };
 
 use crate::{
@@ -17,6 +18,7 @@ extern "C" {
         trace_height: u32,
         trace_width: u32,
         l_skip: u32,
+        stream: cudaStream_t,
     ) -> u32;
 
     // SP_DEG=1: no z_packets needed, outputs [NUM_G * skip_domain] to be ADDed
@@ -30,6 +32,7 @@ extern "C" {
         trace_width: u32,
         l_skip: u32,
         num_x: u32,
+        stream: cudaStream_t,
     ) -> i32;
 
     fn _stacked_reduction_fold_ple(
@@ -40,6 +43,7 @@ extern "C" {
         trace_height: u32,
         trace_width: u32,
         l_skip: u32,
+        stream: cudaStream_t,
     ) -> i32;
 
     fn _initialize_k_rot_from_eq_segments(
@@ -48,6 +52,7 @@ extern "C" {
         k_rot_uni_0: EF,
         k_rot_uni_1: EF,
         max_n: u32,
+        stream: cudaStream_t,
     ) -> i32;
 
     fn _stacked_reduction_sumcheck_mle_round(
@@ -61,6 +66,7 @@ extern "C" {
         window_len: u32,
         num_y: u32,
         sm_count: u32,
+        stream: cudaStream_t,
     ) -> i32;
 
     fn _stacked_reduction_sumcheck_mle_round_degenerate(
@@ -75,6 +81,7 @@ extern "C" {
         window_len: u32,
         l_skip: u32,
         round: u32,
+        stream: cudaStream_t,
     ) -> i32;
 }
 
@@ -108,6 +115,7 @@ pub unsafe fn stacked_reduction_sumcheck_round0(
     height: usize,
     width: usize,
     l_skip: usize,
+    stream: cudaStream_t,
 ) -> Result<(), CudaError> {
     let output_size = NUM_G << l_skip;
     let num_x = (height >> l_skip).max(1) as u32;
@@ -123,6 +131,7 @@ pub unsafe fn stacked_reduction_sumcheck_round0(
         width as u32,
         l_skip as u32,
         num_x,
+        stream,
     ))
 }
 
@@ -147,6 +156,7 @@ pub unsafe fn stacked_reduction_fold_ple(
     trace_height: usize,
     trace_width: usize,
     l_skip: usize,
+    stream: cudaStream_t,
 ) -> Result<(), CudaError> {
     let skip_domain = 1 << l_skip;
     debug_assert!(omega_skip_pows.len() >= skip_domain);
@@ -159,6 +169,7 @@ pub unsafe fn stacked_reduction_fold_ple(
         trace_height as u32,
         trace_width as u32,
         l_skip as u32,
+        stream,
     ))
 }
 
@@ -174,6 +185,7 @@ pub unsafe fn initialize_k_rot_from_eq_segments(
     k_rot_uni_0: EF,
     k_rot_uni_1: EF,
     max_n: u32,
+    stream: cudaStream_t,
 ) -> Result<(), CudaError> {
     debug_assert_eq!(eq_r_ns.buffer.len(), 2 << max_n);
     debug_assert_eq!(k_rot_ns.len(), eq_r_ns.buffer.len());
@@ -184,6 +196,7 @@ pub unsafe fn initialize_k_rot_from_eq_segments(
         k_rot_uni_0,
         k_rot_uni_1,
         max_n,
+        stream,
     ))
 }
 
@@ -217,6 +230,7 @@ pub unsafe fn stacked_reduction_sumcheck_mle_round(
     window_len: usize,
     num_y: usize,
     sm_count: u32,
+    stream: cudaStream_t,
 ) -> Result<(), CudaError> {
     debug_assert!(output.len() >= STACKED_REDUCTION_S_DEG * D_EF);
 
@@ -231,6 +245,7 @@ pub unsafe fn stacked_reduction_sumcheck_mle_round(
         window_len as u32,
         num_y as u32,
         sm_count,
+        stream,
     ))
 }
 
@@ -254,6 +269,7 @@ pub unsafe fn stacked_reduction_sumcheck_mle_round_degenerate(
     window_len: usize,
     l_skip: usize,
     round: usize,
+    stream: cudaStream_t,
 ) -> Result<(), CudaError> {
     debug_assert!(output.len() >= STACKED_REDUCTION_S_DEG * D_EF);
 
@@ -269,5 +285,6 @@ pub unsafe fn stacked_reduction_sumcheck_mle_round_degenerate(
         window_len as u32,
         l_skip as u32,
         round as u32,
+        stream,
     ))
 }

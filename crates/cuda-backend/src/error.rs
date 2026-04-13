@@ -12,8 +12,8 @@ use crate::{
 pub enum ProverError {
     #[error("MemCopy: {0}")]
     MemCopy(#[from] MemCopyError),
-    #[error("current_stream_sync: {0}")]
-    CurrentStreamSync(CudaError),
+    #[error("stream_synchronize: {0}")]
+    StreamSynchronize(CudaError),
     #[error("collapse_strided_matrix: {0}")]
     CollapseStrided(CudaError),
     #[error("Stack traces: {0}")]

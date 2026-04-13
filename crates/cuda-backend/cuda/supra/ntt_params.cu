@@ -5,7 +5,7 @@
  * 
  * LOCAL CHANGES (high level):
  * - 2025-08-13: NTTParameters constructor async on custom stream
- * - 2025-08-26: NTTParameters constructor on cudaStreamPerThread
+ * - 2025-08-26: NTTParameters constructor on caller-provided stream
  * - 2025-09-05: Stop using __constant__ for twiddles[0]
  * - 2025-09-10: Delete NTTParameters & add extern "C" launcher
  * - 2025-10-02: move all twiddles to __constant__
@@ -66,10 +66,8 @@ __global__ void generate_partial_twiddles(fr_t (*roots)[WINDOW_SIZE],
     }
 }
 
-extern "C" int _generate_all_twiddles(fr_t* twiddles, bool inverse) {
+extern "C" int _generate_all_twiddles(fr_t* twiddles, bool inverse, cudaStream_t stream) {
     const fr_t* roots = inverse ? inverse_roots_of_unity : forward_roots_of_unity;
-    cudaStream_t stream = cudaStreamPerThread;
-
     generate_all_twiddles<<<TWIDDLES_SIZE/32, 32, 0, stream>>>(
             twiddles, roots[6], roots[7], roots[8], roots[9], roots[10]);
 
@@ -84,9 +82,8 @@ extern "C" int _generate_all_twiddles(fr_t* twiddles, bool inverse) {
     return CHECK_KERNEL();
 }
 
-extern "C" int _generate_partial_twiddles(fr_t (*partial_twiddles)[WINDOW_SIZE], bool inverse) {
+extern "C" int _generate_partial_twiddles(fr_t (*partial_twiddles)[WINDOW_SIZE], bool inverse, cudaStream_t stream) {
     const fr_t* roots = inverse ? inverse_roots_of_unity : forward_roots_of_unity;
-    cudaStream_t stream = cudaStreamPerThread;
     generate_partial_twiddles<<<WINDOW_SIZE/32, 32, 0, stream>>>(
             partial_twiddles, roots[MAX_LG_DOMAIN_SIZE]);
 

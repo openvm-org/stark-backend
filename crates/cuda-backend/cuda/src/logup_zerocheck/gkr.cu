@@ -625,14 +625,15 @@ inline void launch_precompute_m_build_partial_kernel(
     const FpExt *eq_tail_high,
     uint32_t log_eq_tail_low_cap,
     uint32_t tail_tile,
-    FpExt *partial_out
+    FpExt *partial_out,
+    cudaStream_t stream
 ) {
     constexpr uint32_t m = 1u << W;
     dim3 block(m, m);
     constexpr uint32_t sh_stride = m + 1;  // +1 padding to match kernel
     size_t shmem_bytes =
         (4 * sh_stride * PRECOMPUTE_M_TAIL_BATCH + PRECOMPUTE_M_TAIL_BATCH) * sizeof(FpExt);
-    precompute_m_build_partial_kernel<inline_fold, W><<<grid, block, shmem_bytes>>>(
+    precompute_m_build_partial_kernel<inline_fold, W><<<grid, block, shmem_bytes, stream>>>(
         pq,
         rem_n,
         lambda,
@@ -657,11 +658,12 @@ inline int launch_precompute_m_build_partial_dispatch(
     const FpExt *eq_tail_high,
     uint32_t log_eq_tail_low_cap,
     uint32_t tail_tile,
-    FpExt *partial_out
+    FpExt *partial_out,
+    cudaStream_t stream
 ) {
     using LauncherFn = void (*)(
         dim3, const FracExt *, uint32_t, FpExt, FpExt, const FpExt *, const FpExt *, uint32_t,
-        uint32_t, FpExt *
+        uint32_t, FpExt *, cudaStream_t
     );
     static constexpr LauncherFn launchers[] = {
         &launch_precompute_m_build_partial_kernel<inline_fold, 1>,
@@ -688,7 +690,8 @@ inline int launch_precompute_m_build_partial_dispatch(
         eq_tail_high,
         log_eq_tail_low_cap,
         tail_tile,
-        partial_out
+        partial_out,
+        stream
     );
     return 0;
 }
@@ -883,9 +886,9 @@ __global__ void frac_build_tree_two_layers_kernel(
 // LAUNCHERS
 // ============================================================================
 template <bool revert, bool apply_alpha>
-int launch_frac_build_tree_layer(FracExt *layer, size_t layer_size, FpExt alpha) {
+int launch_frac_build_tree_layer(FracExt *layer, size_t layer_size, FpExt alpha, cudaStream_t stream) {
     auto [grid, block] = kernel_launch_params(layer_size);
-    frac_build_tree_layer_kernel<revert, apply_alpha><<<grid, block>>>(layer, layer_size, alpha);
+    frac_build_tree_layer_kernel<revert, apply_alpha><<<grid, block, 0, stream>>>(layer, layer_size, alpha);
     return CHECK_KERNEL();
 }
 
@@ -894,7 +897,8 @@ extern "C" int _frac_build_tree_layer(
     size_t layer_size,
     bool revert,
     FpExt alpha,
-    bool apply_alpha
+    bool apply_alpha,
+    cudaStream_t stream
 ) {
     if (layer_size == 0) {
         return 0;
@@ -903,20 +907,20 @@ extern "C" int _frac_build_tree_layer(
     layer_size /= 2;
 
     return DISPATCH_BOOL_PAIR(
-        launch_frac_build_tree_layer, revert, apply_alpha, layer, layer_size, alpha
+        launch_frac_build_tree_layer, revert, apply_alpha, layer, layer_size, alpha, stream
     );
 }
 
 // Launcher for fused two-layer tree build.
 // half_i1 = N >> (i+2), where i is the index of the first layer to fuse.
 // Requires half_i1 >= 1 and half_i1 * 4 <= total array size.
-extern "C" int _frac_build_tree_two_layers(FracExt *layer, size_t half_i1) {
+extern "C" int _frac_build_tree_two_layers(FracExt *layer, size_t half_i1, cudaStream_t stream) {
     if (half_i1 == 0) return 0;
     // Use 256 threads/block (not 1024) to give the compiler more register headroom.
     // frac_build_tree_two_layers_kernel does 4 FracExt loads + 3 frac_add ops,
     // which has higher register pressure than the single-layer build kernel.
     auto [grid, block] = kernel_launch_params(half_i1, 256);
-    frac_build_tree_two_layers_kernel<<<grid, block>>>(layer, (uint32_t)half_i1);
+    frac_build_tree_two_layers_kernel<<<grid, block, 0, stream>>>(layer, (uint32_t)half_i1);
     return CHECK_KERNEL();
 }
 
@@ -968,18 +972,18 @@ inline std::pair<dim3, dim3> frac_compute_round_launch_params(uint32_t num_x) {
     return {dim3(blocks_needed), dim3(block_size)};
 }
 
-extern "C" uint32_t _frac_compute_round_temp_buffer_size(uint32_t num_x) {
+extern "C" uint32_t _frac_compute_round_temp_buffer_size(uint32_t num_x, cudaStream_t stream) {
     auto [grid, block] = frac_compute_round_launch_params(num_x);
     return grid.x * GKR_SP_DEG;
 }
 
-inline int final_reduce_block_sums(FpExt *tmp_block_sums, FpExt *out, uint32_t num_blocks) {
+inline int final_reduce_block_sums(FpExt *tmp_block_sums, FpExt *out, uint32_t num_blocks, cudaStream_t stream) {
     auto [unused_grid, reduce_block] = kernel_launch_params(num_blocks);
     (void)unused_grid;
     unsigned int reduce_warps = div_ceil(reduce_block.x, WARP_SIZE);
     size_t reduce_shmem = std::max(1u, reduce_warps) * sizeof(FpExt);
     sumcheck::static_final_reduce_block_sums<GKR_SP_DEG>
-        <<<GKR_SP_DEG, reduce_block, reduce_shmem>>>(tmp_block_sums, out, num_blocks);
+        <<<GKR_SP_DEG, reduce_block, reduce_shmem, stream>>>(tmp_block_sums, out, num_blocks);
     return CHECK_KERNEL();
 }
 
@@ -991,7 +995,8 @@ extern "C" int _frac_compute_round(
     size_t eq_low_cap,
     FpExt lambda,
     FpExt *out,           // Output: [d=2] final results
-    FpExt *tmp_block_sums // Temporary buffer: [gridDim.x * d]
+    FpExt *tmp_block_sums, // Temporary buffer: [gridDim.x * d]
+    cudaStream_t stream
 ) {
     assert(num_x > 1);
 
@@ -999,7 +1004,7 @@ extern "C" int _frac_compute_round(
     size_t shmem_bytes = div_ceil(block.x, WARP_SIZE) * sizeof(FpExt);
 
     // Launch main kernel - writes to tmp_block_sums
-    compute_round_block_sum_kernel<<<grid, block, shmem_bytes>>>(
+    compute_round_block_sum_kernel<<<grid, block, shmem_bytes, stream>>>(
         eq_xi_low,
         eq_xi_high,
         pq_buffer,
@@ -1013,7 +1018,7 @@ extern "C" int _frac_compute_round(
         return err;
 
     // Launch final reduction kernel - reads from tmp_block_sums, writes to output.
-    return final_reduce_block_sums(tmp_block_sums, out, grid.x);
+    return final_reduce_block_sums(tmp_block_sums, out, grid.x, stream);
 }
 
 // Fused compute round + tree layer revert launcher.
@@ -1026,7 +1031,8 @@ extern "C" int _frac_compute_round_and_revert(
     size_t eq_low_cap,
     FpExt lambda,
     FpExt *out,               // Output: [d=2] final results
-    FpExt *tmp_block_sums     // Temporary buffer: [gridDim.x * d]
+    FpExt *tmp_block_sums,     // Temporary buffer: [gridDim.x * d]
+    cudaStream_t stream
 ) {
     assert(num_x > 1);
 
@@ -1034,7 +1040,7 @@ extern "C" int _frac_compute_round_and_revert(
     size_t shmem_bytes = div_ceil(block.x, WARP_SIZE) * sizeof(FpExt);
 
     // Launch fused revert + compute kernel
-    compute_round_and_revert_kernel<<<grid, block, shmem_bytes>>>(
+    compute_round_and_revert_kernel<<<grid, block, shmem_bytes, stream>>>(
         eq_xi_low,
         eq_xi_high,
         layer,
@@ -1048,7 +1054,7 @@ extern "C" int _frac_compute_round_and_revert(
         return err;
 
     // Launch final reduction kernel.
-    return final_reduce_block_sums(tmp_block_sums, out, grid.x);
+    return final_reduce_block_sums(tmp_block_sums, out, grid.x, stream);
 }
 
 // Fused compute round + fold launcher.
@@ -1064,7 +1070,8 @@ extern "C" int _frac_compute_round_and_fold(
     FpExt lambda,
     FpExt r_prev,
     FpExt *out,                   // Output: [d=2] final results
-    FpExt *tmp_block_sums         // Temporary buffer: [gridDim.x * d]
+    FpExt *tmp_block_sums,         // Temporary buffer: [gridDim.x * d]
+    cudaStream_t stream
 ) {
     assert(src_pq_size > 2);
     // Post-fold sizes
@@ -1076,7 +1083,7 @@ extern "C" int _frac_compute_round_and_fold(
     size_t shmem_bytes = div_ceil(block.x, WARP_SIZE) * sizeof(FpExt);
 
     // Launch fused kernel - writes to tmp_block_sums and dst_pq_buffer
-    compute_round_and_fold_kernel<<<grid, block, shmem_bytes>>>(
+    compute_round_and_fold_kernel<<<grid, block, shmem_bytes, stream>>>(
         eq_xi_low,
         eq_xi_high,
         src_pq_buffer,
@@ -1092,7 +1099,7 @@ extern "C" int _frac_compute_round_and_fold(
         return err;
 
     // Launch final reduction kernel - reads from tmp_block_sums, writes to output.
-    return final_reduce_block_sums(tmp_block_sums, out, grid.x);
+    return final_reduce_block_sums(tmp_block_sums, out, grid.x, stream);
 }
 
 // Fused compute round + fold launcher (IN-PLACE version).
@@ -1107,7 +1114,8 @@ extern "C" int _frac_compute_round_and_fold_inplace(
     FpExt lambda,
     FpExt r_prev,
     FpExt *out,                   // Output: [d=2] final results
-    FpExt *tmp_block_sums         // Temporary buffer: [gridDim.x * d]
+    FpExt *tmp_block_sums,         // Temporary buffer: [gridDim.x * d]
+    cudaStream_t stream
 ) {
     assert(src_pq_size > 2);
     // Post-fold sizes
@@ -1119,7 +1127,7 @@ extern "C" int _frac_compute_round_and_fold_inplace(
     size_t shmem_bytes = div_ceil(block.x, WARP_SIZE) * sizeof(FpExt);
 
     // Launch fused in-place kernel - writes to tmp_block_sums and pq_buffer (first half)
-    compute_round_and_fold_inplace_kernel<<<grid, block, shmem_bytes>>>(
+    compute_round_and_fold_inplace_kernel<<<grid, block, shmem_bytes, stream>>>(
         eq_xi_low,
         eq_xi_high,
         pq_buffer,
@@ -1134,7 +1142,7 @@ extern "C" int _frac_compute_round_and_fold_inplace(
         return err;
 
     // Launch final reduction kernel - reads from tmp_block_sums, writes to output.
-    return final_reduce_block_sums(tmp_block_sums, out, grid.x);
+    return final_reduce_block_sums(tmp_block_sums, out, grid.x, stream);
 }
 
 extern "C" int _frac_precompute_m_build(
@@ -1150,7 +1158,8 @@ extern "C" int _frac_precompute_m_build(
     size_t tail_tile,
     FpExt *partial_out,
     size_t partial_len,
-    FpExt *m_total
+    FpExt *m_total,
+    cudaStream_t stream
 ) {
     assert(rem_n > 0);
     assert(w > 0 && w <= rem_n);
@@ -1181,7 +1190,8 @@ extern "C" int _frac_precompute_m_build(
             eq_tail_high,
             log_eq_tail_low_cap,
             tail_tile_u32,
-            partial_out
+            partial_out,
+            stream
         );
     } else {
         launch_err = launch_precompute_m_build_partial_dispatch<false>(
@@ -1195,7 +1205,8 @@ extern "C" int _frac_precompute_m_build(
             eq_tail_high,
             log_eq_tail_low_cap,
             tail_tile_u32,
-            partial_out
+            partial_out,
+            stream
         );
     }
     if (launch_err != 0) {
@@ -1208,7 +1219,7 @@ extern "C" int _frac_precompute_m_build(
 
     dim3 reduce_block(128);
     dim3 reduce_grid(div_ceil((uint32_t)total_entries, reduce_block.x));
-    precompute_m_reduce_partials_kernel<<<reduce_grid, reduce_block>>>(
+    precompute_m_reduce_partials_kernel<<<reduce_grid, reduce_block, 0, stream>>>(
         partial_out,
         num_blocks,
         (uint32_t)total_entries,
@@ -1223,14 +1234,15 @@ extern "C" int _frac_precompute_m_eval_round(
     size_t t,
     const FpExt *eq_r_prefix,
     const FpExt *eq_suffix,
-    FpExt *out
+    FpExt *out,
+    cudaStream_t stream
 ) {
     assert(w > 0);
     assert(t < w);
 
     dim3 block(256);
     size_t shmem_bytes = div_ceil(block.x, WARP_SIZE) * sizeof(FpExt);
-    precompute_m_eval_round_kernel<<<1, block, shmem_bytes>>>(
+    precompute_m_eval_round_kernel<<<1, block, shmem_bytes, stream>>>(
         m_total,
         (uint32_t)w,
         (uint32_t)t,
@@ -1246,7 +1258,8 @@ extern "C" int _frac_multifold(
     FracExt *dst,
     size_t rem_n,
     size_t w,
-    const FpExt *eq_r_window
+    const FpExt *eq_r_window,
+    cudaStream_t stream
 ) {
     assert(rem_n > 0);
     assert(w > 0 && w <= rem_n);
@@ -1255,7 +1268,7 @@ extern "C" int _frac_multifold(
     auto [grid, block] = kernel_launch_params(out_len, 256);
 
 #define DISPATCH_MULTIFOLD(W) \
-    multifold_kernel<W><<<grid, block>>>(src, dst, (uint32_t)out_len, eq_r_window); \
+    multifold_kernel<W><<<grid, block, 0, stream>>>(src, dst, (uint32_t)out_len, eq_r_window); \
     return CHECK_KERNEL();
 
     switch (w) {
@@ -1268,7 +1281,7 @@ extern "C" int _frac_multifold(
 #undef DISPATCH_MULTIFOLD
 }
 
-extern "C" int _frac_fold_fpext_columns(const FracExt *src, FracExt *dst, size_t size, FpExt r) {
+extern "C" int _frac_fold_fpext_columns(const FracExt *src, FracExt *dst, size_t size, FpExt r, cudaStream_t stream) {
     if (size <= 2) {
         return 0;
     }
@@ -1277,22 +1290,22 @@ extern "C" int _frac_fold_fpext_columns(const FracExt *src, FracExt *dst, size_t
     // quarter_fpext = (size / 4) * 2 = size / 2
     uint32_t quarter_fpext = size >> 1;
     auto [grid, block] = kernel_launch_params(quarter_fpext);
-    fold_ef_columns_kernel<<<grid, block>>>(
+    fold_ef_columns_kernel<<<grid, block, 0, stream>>>(
         reinterpret_cast<const FpExt *>(src), reinterpret_cast<FpExt *>(dst), quarter_fpext, r
     );
     return CHECK_KERNEL();
 }
 
-extern "C" int _frac_add_alpha(FracExt *data, size_t len, FpExt alpha) {
+extern "C" int _frac_add_alpha(FracExt *data, size_t len, FpExt alpha, cudaStream_t stream) {
     auto [grid, block] = kernel_launch_params(len);
-    add_alpha_kernel<<<grid, block>>>(data, len, alpha);
+    add_alpha_kernel<<<grid, block, 0, stream>>>(data, len, alpha);
     return CHECK_KERNEL();
 }
 
-extern "C" int _frac_vector_scalar_multiply_ext_fp(FracExt *frac_vec, Fp scalar, uint32_t length) {
+extern "C" int _frac_vector_scalar_multiply_ext_fp(FracExt *frac_vec, Fp scalar, uint32_t length, cudaStream_t stream) {
     auto [grid, block] = kernel_launch_params(length);
     frac_vector_scalar_multiply_kernel<Fp, FpExt>
-        <<<grid, block>>>(reinterpret_cast<std::pair<FpExt, FpExt> *>(frac_vec), scalar, length);
+        <<<grid, block, 0, stream>>>(reinterpret_cast<std::pair<FpExt, FpExt> *>(frac_vec), scalar, length);
     return CHECK_KERNEL();
 }
 
@@ -1429,7 +1442,7 @@ void bit_rev_frac_build_k2_kernel(
 // Requires domain_size >= 256 (uses Z-tile shmem kernel).
 // Applies alpha to denominators and fuses tree layers 0 and 1 in shmem.
 extern "C" int _bit_rev_frac_ext_build_k2(
-    FracExt* inout, uint32_t lg_domain_size, FpExt alpha)
+    FracExt* inout, uint32_t lg_domain_size, FpExt alpha, cudaStream_t stream)
 {
     constexpr uint32_t Z_COUNT = 8;
     constexpr uint32_t bsize = 256;
@@ -1444,7 +1457,7 @@ extern "C" int _bit_rev_frac_ext_build_k2(
     if (domain_size < (size_t)(bsize * Z_COUNT))
         return cudaErrorInvalidValue;
     uint32_t grid_x = (uint32_t)(domain_size / Z_COUNT / bsize);
-    bit_rev_frac_build_k2_kernel<<<dim3(grid_x), bsize, shmem_bytes>>>(
+    bit_rev_frac_build_k2_kernel<<<dim3(grid_x), bsize, shmem_bytes, stream>>>(
         inout, lg_domain_size, alpha);
     return CHECK_KERNEL();
 }

@@ -62,13 +62,15 @@ where
         &self,
         traces: &[&DeviceMatrix<F>],
     ) -> Result<(HS::Digest, StackedPcsDataGpu<F, HS::Digest>), Self::Error> {
+        let cfg = self.params();
         stacked_commit::<HS::MerkleHash>(
-            self.config.l_skip,
-            self.config.n_stack,
-            self.config.log_blowup,
-            self.config.k_whir(),
+            cfg.l_skip,
+            cfg.n_stack,
+            cfg.log_blowup,
+            cfg.k_whir(),
             traces,
-            self.prover_config,
+            *self.prover_config(),
+            &self.device_ctx,
         )
     }
 }
@@ -80,6 +82,11 @@ where
     HS::Digest: MerkleProofQueryDigest,
 {
     type Error = ProverError;
+    type DeviceCtx = openvm_cuda_common::stream::GpuDeviceCtx;
+
+    fn device_ctx(&self) -> &openvm_cuda_common::stream::GpuDeviceCtx {
+        &self.device_ctx
+    }
 }
 
 impl<HS: GpuHashScheme, TS: GpuFiatShamirTranscript<HS::SC>>
@@ -101,18 +108,23 @@ impl<HS: GpuHashScheme, TS: GpuFiatShamirTranscript<HS::SC>>
         _common_main_pcs_data: &StackedPcsDataGpu<F, HS::Digest>,
     ) -> Result<((GkrProof<HS::SC>, BatchConstraintProof<HS::SC>), Vec<EF>), Self::Error> {
         let mem = MemTracker::start_and_reset_peak("prover.rap_constraints");
-        let save_memory = self.prover_config.zerocheck_save_memory;
+        let save_memory = self.prover_config().zerocheck_save_memory;
         // Threshold for monomial evaluation path based on proof type:
         // - App proofs (log_blowup=1): higher threshold (512)
         // - Recursion proofs: lower threshold (64)
-        let monomial_num_y_threshold = if self.config.log_blowup == 1 { 512 } else { 64 };
+        let monomial_num_y_threshold = if self.params().log_blowup == 1 {
+            512
+        } else {
+            64
+        };
         let (gkr_proof, batch_constraint_proof, r) = prove_zerocheck_and_logup_gpu::<HS, TS>(
             transcript,
             mpk,
             ctx,
             save_memory,
             monomial_num_y_threshold,
-            self.sm_count,
+            self.sm_count(),
+            &self.device_ctx,
         )?;
         mem.emit_metrics();
         Ok(((gkr_proof, batch_constraint_proof), r))
@@ -140,7 +152,7 @@ where
         r: Vec<EF>,
     ) -> Result<Self::OpeningProof, Self::Error> {
         let mut mem = MemTracker::start_and_reset_peak("prover.openings");
-        let params = self.config();
+        let params = self.params();
         #[cfg(debug_assertions)]
         {
             let total_stacked_width: usize = std::iter::once(common_main_pcs_data.layout().width())
@@ -180,8 +192,13 @@ where
             .chain(u_rest.iter().copied())
             .collect_vec();
 
-        let whir_proof =
-            prove_whir_opening_gpu::<HS, TS>(params, transcript, stacked_per_commit, &u_cube)?;
+        let whir_proof = prove_whir_opening_gpu::<HS, TS>(
+            params,
+            transcript,
+            stacked_per_commit,
+            &u_cube,
+            &self.device_ctx,
+        )?;
         mem.emit_metrics();
         mem.reset_peak();
         Ok((stacking_proof, whir_proof))

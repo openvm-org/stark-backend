@@ -1,5 +1,5 @@
 use getset::{CopyGetters, Getters, MutGetters};
-use openvm_cuda_common::common::get_device;
+use openvm_cuda_common::{common::get_device, stream::GpuDeviceCtx};
 use openvm_stark_backend::SystemParams;
 
 use crate::cuda::{
@@ -7,10 +7,12 @@ use crate::cuda::{
     device_info::get_sm_count,
 };
 
+/// Pure device configuration — no stream, no CUDA runtime state.
+/// Renamed from the old `GpuDevice`.
 #[derive(Clone, Getters, CopyGetters, MutGetters)]
-pub struct GpuDevice {
+pub struct GpuDeviceConfig {
     #[getset(get = "pub")]
-    pub(crate) config: SystemParams,
+    pub(crate) params: SystemParams,
     #[getset(get = "pub", get_mut = "pub")]
     pub(crate) prover_config: GpuProverConfig,
     pub id: u32,
@@ -25,34 +27,67 @@ pub struct GpuProverConfig {
     pub zerocheck_save_memory: bool,
 }
 
+/// Stream-owning device handle. Wraps [`GpuDeviceConfig`] with a
+/// [`GpuDeviceCtx`] that carries the explicit CUDA stream.
+#[derive(Clone)]
+pub struct GpuDevice {
+    pub config: GpuDeviceConfig,
+    pub device_ctx: GpuDeviceCtx,
+}
+
 impl GpuDevice {
-    pub fn new(config: SystemParams) -> Self {
-        validate_gpu_l_skip(config.l_skip)
+    pub fn new(params: SystemParams) -> Result<Self, openvm_cuda_common::error::CudaError> {
+        validate_gpu_l_skip(params.l_skip)
             .expect("GPU backend requires l_skip <= 10 for current CUDA kernels");
         ensure_device_ntt_twiddles_initialized()
             .expect("failed to initialize small-NTT twiddles for current CUDA device");
 
         let prover_config = GpuProverConfig {
-            zerocheck_save_memory: config.log_blowup == 1,
+            zerocheck_save_memory: params.log_blowup == 1,
             ..Default::default()
         };
         let id = get_device().unwrap() as u32;
-        let sm_count = get_sm_count(id).expect("failed to get SM count");
-        Self {
-            config,
+        let device_ctx = GpuDeviceCtx::for_device(id)?;
+        let sm_count =
+            get_sm_count(id, device_ctx.stream.as_raw()).expect("failed to get SM count");
+        let config = GpuDeviceConfig {
+            params,
             prover_config,
             id,
             sm_count,
-        }
+        };
+
+        Ok(Self { config, device_ctx })
+    }
+
+    // Delegate accessors to inner config
+    pub fn params(&self) -> &SystemParams {
+        &self.config.params
+    }
+
+    pub fn prover_config(&self) -> &GpuProverConfig {
+        &self.config.prover_config
+    }
+
+    pub fn prover_config_mut(&mut self) -> &mut GpuProverConfig {
+        &mut self.config.prover_config
+    }
+
+    pub fn sm_count(&self) -> u32 {
+        self.config.sm_count
+    }
+
+    pub fn id(&self) -> u32 {
+        self.config.id
     }
 
     pub fn with_cache_rs_code_matrix(mut self, cache_rs_code_matrix: bool) -> Self {
-        self.prover_config.cache_rs_code_matrix = cache_rs_code_matrix;
+        self.config.prover_config.cache_rs_code_matrix = cache_rs_code_matrix;
         self
     }
 
     pub fn set_cache_rs_code_matrix(&mut self, cache_rs_code_matrix: bool) {
-        self.prover_config.cache_rs_code_matrix = cache_rs_code_matrix;
+        self.config.prover_config.cache_rs_code_matrix = cache_rs_code_matrix;
     }
 }
 

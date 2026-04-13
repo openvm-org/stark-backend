@@ -83,14 +83,13 @@ extern "C" int _precompute_lambda_combinations(
     const MonomialHeader *headers,
     const LambdaTerm *lambda_terms,
     const FpExt *lambda_pows,
-    uint32_t num_monomials
-) {
+    uint32_t num_monomials, cudaStream_t stream) {
     if (num_monomials == 0)
         return 0;
 
     constexpr uint32_t threads = 256;
     uint32_t blocks = div_ceil(num_monomials, threads);
-    precompute_lambda_combinations_kernel<<<blocks, threads>>>(
+    precompute_lambda_combinations_kernel<<<blocks, threads, 0, stream>>>(
         out, headers, lambda_terms, lambda_pows, num_monomials
     );
     return CHECK_KERNEL();
@@ -160,8 +159,7 @@ extern "C" int _zerocheck_monomial_batched(
     uint32_t num_blocks,
     uint32_t num_x,
     uint32_t num_airs,
-    uint32_t threads_per_block
-) {
+    uint32_t threads_per_block, cudaStream_t stream) {
     if (num_blocks == 0) {
         return 0;
     }
@@ -174,7 +172,7 @@ extern "C" int _zerocheck_monomial_batched(
     size_t shmem = div_ceil(block.x, WARP_SIZE) * sizeof(FpExt);
 
     // Phase 1: Main monomial evaluation kernel
-    zerocheck_monomial_kernel<<<grid, block, shmem>>>(
+    zerocheck_monomial_kernel<<<grid, block, shmem, stream>>>(
         tmp_sums, block_ctxs, air_ctxs, threads_per_block
     );
     int err = CHECK_KERNEL();
@@ -188,7 +186,7 @@ extern "C" int _zerocheck_monomial_batched(
     size_t reduce_shmem = std::max(1u, reduce_warps) * sizeof(FpExt);
 
     dim3 reduce_grid(num_airs, num_x);
-    sumcheck::batched_final_reduce_block_sums<<<reduce_grid, reduce_block, reduce_shmem>>>(
+    sumcheck::batched_final_reduce_block_sums<<<reduce_grid, reduce_block, reduce_shmem, stream>>>(
         tmp_sums, output, air_block_offsets, num_x
     );
 
@@ -269,8 +267,7 @@ extern "C" int _zerocheck_monomial_par_y_batched(
     uint32_t num_x,
     uint32_t num_airs,
     uint32_t chunk_size,
-    uint32_t threads_per_block
-) {
+    uint32_t threads_per_block, cudaStream_t stream) {
     if (num_blocks == 0) {
         return 0;
     }
@@ -283,7 +280,7 @@ extern "C" int _zerocheck_monomial_par_y_batched(
     size_t shmem = div_ceil(block.x, WARP_SIZE) * sizeof(FpExt);
 
     // Phase 1: Main par-y kernel
-    zerocheck_monomial_par_y_kernel<<<grid, block, shmem>>>(
+    zerocheck_monomial_par_y_kernel<<<grid, block, shmem, stream>>>(
         tmp_sums, block_ctxs, air_ctxs, threads_per_block, chunk_size
     );
     int err = CHECK_KERNEL();
@@ -296,7 +293,7 @@ extern "C" int _zerocheck_monomial_par_y_batched(
     size_t reduce_shmem = std::max(1u, reduce_warps) * sizeof(FpExt);
 
     dim3 reduce_grid(num_airs, num_x);
-    sumcheck::batched_final_reduce_block_sums<<<reduce_grid, reduce_block, reduce_shmem>>>(
+    sumcheck::batched_final_reduce_block_sums<<<reduce_grid, reduce_block, reduce_shmem, stream>>>(
         tmp_sums, output, air_block_offsets, num_x
     );
 
@@ -338,14 +335,13 @@ extern "C" int _precompute_logup_numer_combinations(
     const MonomialHeader *headers,
     const InteractionMonomialTerm *terms,
     const FpExt *eq_3bs,
-    uint32_t num_monomials
-) {
+    uint32_t num_monomials, cudaStream_t stream) {
     if (num_monomials == 0)
         return 0;
 
     constexpr uint32_t threads = 256;
     uint32_t blocks = div_ceil(num_monomials, threads);
-    precompute_logup_combinations_kernel<false><<<blocks, threads>>>(
+    precompute_logup_combinations_kernel<false><<<blocks, threads, 0, stream>>>(
         out, headers, terms, nullptr, eq_3bs, num_monomials
     );
     return CHECK_KERNEL();
@@ -357,14 +353,13 @@ extern "C" int _precompute_logup_denom_combinations(
     const InteractionMonomialTerm *terms,
     const FpExt *beta_pows,
     const FpExt *eq_3bs,
-    uint32_t num_monomials
-) {
+    uint32_t num_monomials, cudaStream_t stream) {
     if (num_monomials == 0)
         return 0;
 
     constexpr uint32_t threads = 256;
     uint32_t blocks = div_ceil(num_monomials, threads);
-    precompute_logup_combinations_kernel<true><<<blocks, threads>>>(
+    precompute_logup_combinations_kernel<true><<<blocks, threads, 0, stream>>>(
         out, headers, terms, beta_pows, eq_3bs, num_monomials
     );
     return CHECK_KERNEL();
@@ -459,8 +454,7 @@ extern "C" int _logup_monomial_batched(
     uint32_t num_blocks,
     uint32_t num_x,
     uint32_t num_airs,
-    uint32_t threads_per_block
-) {
+    uint32_t threads_per_block, cudaStream_t stream) {
     if (num_blocks == 0)
         return 0;
     if (!valid_frac_grid_y_dim(num_x)) {
@@ -472,7 +466,7 @@ extern "C" int _logup_monomial_batched(
     size_t shmem = div_ceil(threads_per_block, WARP_SIZE) * sizeof(FpExt);
 
     // Phase 1: Evaluate numerator monomials
-    logup_monomial_kernel<false><<<grid, block, shmem>>>(
+    logup_monomial_kernel<false><<<grid, block, shmem, stream>>>(
         tmp_sums, block_ctxs, common_ctxs, numer_ctxs
     );
     int err = CHECK_KERNEL();
@@ -480,7 +474,7 @@ extern "C" int _logup_monomial_batched(
         return err;
 
     // Phase 1b: Evaluate denominator monomials
-    logup_monomial_kernel<true><<<grid, block, shmem>>>(
+    logup_monomial_kernel<true><<<grid, block, shmem, stream>>>(
         tmp_sums, block_ctxs, common_ctxs, denom_ctxs
     );
     err = CHECK_KERNEL();
@@ -494,7 +488,7 @@ extern "C" int _logup_monomial_batched(
     size_t reduce_shmem = std::max(1u, reduce_warps) * sizeof(FpExt);
 
     dim3 reduce_grid(num_airs, 2 * num_x);
-    sumcheck::batched_final_reduce_block_sums<<<reduce_grid, reduce_block, reduce_shmem>>>(
+    sumcheck::batched_final_reduce_block_sums<<<reduce_grid, reduce_block, reduce_shmem, stream>>>(
         reinterpret_cast<FpExt *>(tmp_sums),
         reinterpret_cast<FpExt *>(output),
         air_block_offsets,

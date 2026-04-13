@@ -1,4 +1,4 @@
-use openvm_cuda_common::{d_buffer::DeviceBuffer, error::CudaError};
+use openvm_cuda_common::{d_buffer::DeviceBuffer, error::CudaError, stream::cudaStream_t};
 
 use crate::prelude::{EF, F};
 
@@ -10,6 +10,7 @@ extern "C" {
         input: *const F,
         col_size: usize,
         row_size: usize,
+        stream: cudaStream_t,
     ) -> i32;
 
     fn _matrix_transpose_fpext(
@@ -17,6 +18,7 @@ extern "C" {
         input: *const EF,
         col_size: usize,
         row_size: usize,
+        stream: cudaStream_t,
     ) -> i32;
 
     fn _matrix_get_rows_fp(
@@ -26,6 +28,7 @@ extern "C" {
         matrix_width: u64,
         matrix_height: u64,
         row_indices_len: u32,
+        stream: cudaStream_t,
     ) -> i32;
 
     fn _split_ext_to_base_col_major_matrix(
@@ -33,6 +36,7 @@ extern "C" {
         d_poly: *const EF,
         poly_len: u64,
         matrix_height: u32,
+        stream: cudaStream_t,
     ) -> i32;
 
     fn _batch_rotate_pad(
@@ -42,6 +46,7 @@ extern "C" {
         num_x: u32,
         domain_size: u32,
         padded_size: u32,
+        stream: cudaStream_t,
     ) -> i32;
 
     fn _lift_padded_matrix_evals(
@@ -50,6 +55,7 @@ extern "C" {
         height: u32,
         lifted_height: u32,
         padded_height: u32,
+        stream: cudaStream_t,
     ) -> i32;
 
     fn _collapse_strided_matrix(
@@ -58,6 +64,7 @@ extern "C" {
         width: u32,
         height: u32,
         stride: u32,
+        stream: cudaStream_t,
     ) -> i32;
 
     fn _batch_expand_pad(
@@ -66,6 +73,7 @@ extern "C" {
         poly_count: u32,
         out_size: u32,
         in_size: u32,
+        stream: cudaStream_t,
     ) -> i32;
 
     fn _batch_expand_pad_wide(
@@ -74,6 +82,7 @@ extern "C" {
         width: u32,
         padded_height: u32,
         height: u32,
+        stream: cudaStream_t,
     ) -> i32;
 }
 
@@ -85,12 +94,14 @@ pub unsafe fn matrix_transpose_fp(
     input: &DeviceBuffer<F>,
     width: usize,
     height: usize,
+    stream: cudaStream_t,
 ) -> Result<(), CudaError> {
     CudaError::from_result(_matrix_transpose_fp(
         output.as_mut_ptr(),
         input.as_ptr(),
         width,
         height,
+        stream,
     ))
 }
 
@@ -102,12 +113,14 @@ pub unsafe fn matrix_transpose_fpext(
     input: &DeviceBuffer<EF>,
     width: usize,
     height: usize,
+    stream: cudaStream_t,
 ) -> Result<(), CudaError> {
     CudaError::from_result(_matrix_transpose_fpext(
         output.as_mut_ptr(),
         input.as_ptr(),
         width,
         height,
+        stream,
     ))
 }
 
@@ -118,6 +131,7 @@ pub unsafe fn matrix_get_rows_fp_kernel(
     matrix_width: u64,
     matrix_height: u64,
     row_indices_len: usize,
+    stream: cudaStream_t,
 ) -> Result<(), CudaError> {
     if matrix_width == 0 || row_indices_len == 0 {
         return Ok(());
@@ -132,6 +146,7 @@ pub unsafe fn matrix_get_rows_fp_kernel(
         matrix_width,
         matrix_height,
         row_indices_len as u32,
+        stream,
     ))
 }
 
@@ -140,12 +155,14 @@ pub unsafe fn split_ext_to_base_col_major_matrix(
     d_poly: &DeviceBuffer<EF>,
     poly_len: u64,
     matrix_height: u32,
+    stream: cudaStream_t,
 ) -> Result<(), CudaError> {
     CudaError::from_result(_split_ext_to_base_col_major_matrix(
         d_matrix.as_mut_ptr(),
         d_poly.as_ptr(),
         poly_len,
         matrix_height,
+        stream,
     ))
 }
 
@@ -167,6 +184,7 @@ pub unsafe fn batch_rotate_pad(
     num_x: u32,
     domain_size: u32,
     padded_size: u32,
+    stream: cudaStream_t,
 ) -> Result<(), CudaError> {
     debug_assert!(domain_size <= padded_size);
     debug_assert!(width.checked_mul(num_x).unwrap() < u16::MAX as u32 * u16::MAX as u32);
@@ -177,6 +195,7 @@ pub unsafe fn batch_rotate_pad(
         num_x,
         domain_size,
         padded_size,
+        stream,
     ))
 }
 
@@ -195,6 +214,7 @@ pub unsafe fn lift_padded_matrix_evals(
     height: u32,
     lifted_height: u32,
     padded_height: u32,
+    stream: cudaStream_t,
 ) -> Result<(), CudaError> {
     debug_assert!(height <= lifted_height && lifted_height <= padded_height);
     CudaError::from_result(_lift_padded_matrix_evals(
@@ -203,6 +223,7 @@ pub unsafe fn lift_padded_matrix_evals(
         height,
         lifted_height,
         padded_height,
+        stream,
     ))
 }
 
@@ -218,9 +239,10 @@ pub unsafe fn collapse_strided_matrix(
     width: u32,
     height: u32,
     stride: u32,
+    stream: cudaStream_t,
 ) -> Result<(), CudaError> {
     CudaError::from_result(_collapse_strided_matrix(
-        output, input, width, height, stride,
+        output, input, width, height, stride, stream,
     ))
 }
 
@@ -230,9 +252,10 @@ pub unsafe fn batch_expand_pad(
     poly_count: u32,
     out_size: u32,
     in_size: u32,
+    stream: cudaStream_t,
 ) -> Result<(), CudaError> {
     CudaError::from_result(_batch_expand_pad(
-        output, input, poly_count, out_size, in_size,
+        output, input, poly_count, out_size, in_size, stream,
     ))
 }
 
@@ -249,6 +272,7 @@ pub unsafe fn batch_expand_pad_wide(
     width: u32,
     padded_height: u32,
     height: u32,
+    stream: cudaStream_t,
 ) -> Result<(), CudaError> {
     debug_assert!(padded_height > height);
     CudaError::from_result(_batch_expand_pad_wide(
@@ -257,5 +281,6 @@ pub unsafe fn batch_expand_pad_wide(
         width,
         padded_height,
         height,
+        stream,
     ))
 }

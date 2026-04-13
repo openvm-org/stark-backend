@@ -222,10 +222,10 @@ __global__ void mle_interpolate_shared_2d_kernel(
 // ============================================================================
 
 template <typename Field, bool EvalToCoeff>
-int launch_mle_interpolate_stage(Field *buffer, size_t buffer_len, uint32_t step) {
+int launch_mle_interpolate_stage(Field *buffer, size_t buffer_len, uint32_t step, cudaStream_t stream) {
     size_t total_pairs = buffer_len >> 1;
     auto [grid, block] = kernel_launch_params(total_pairs);
-    mle_interpolate_stage_kernel<Field, EvalToCoeff><<<grid, block>>>(buffer, total_pairs, step);
+    mle_interpolate_stage_kernel<Field, EvalToCoeff><<<grid, block, 0, stream>>>(buffer, total_pairs, step);
     return CHECK_KERNEL();
 }
 
@@ -233,16 +233,17 @@ extern "C" int _mle_interpolate_stage(
     Fp *buffer,
     size_t buffer_len,
     uint32_t step,
-    bool is_eval_to_coeff
+    bool is_eval_to_coeff,
+    cudaStream_t stream
 ) {
     if (buffer_len < 2 || step == 0) {
         return 0;
     }
 
     if (is_eval_to_coeff) {
-        return launch_mle_interpolate_stage<Fp, true>(buffer, buffer_len, step);
+        return launch_mle_interpolate_stage<Fp, true>(buffer, buffer_len, step, stream);
     } else {
-        return launch_mle_interpolate_stage<Fp, false>(buffer, buffer_len, step);
+        return launch_mle_interpolate_stage<Fp, false>(buffer, buffer_len, step, stream);
     }
 }
 
@@ -250,16 +251,17 @@ extern "C" int _mle_interpolate_stage_ext(
     FpExt *buffer,
     size_t buffer_len,
     uint32_t step,
-    bool is_eval_to_coeff
+    bool is_eval_to_coeff,
+    cudaStream_t stream
 ) {
     if (buffer_len < 2 || step == 0) {
         return 0;
     }
 
     if (is_eval_to_coeff) {
-        return launch_mle_interpolate_stage<FpExt, true>(buffer, buffer_len, step);
+        return launch_mle_interpolate_stage<FpExt, true>(buffer, buffer_len, step, stream);
     } else {
-        return launch_mle_interpolate_stage<FpExt, false>(buffer, buffer_len, step);
+        return launch_mle_interpolate_stage<FpExt, false>(buffer, buffer_len, step, stream);
     }
 }
 
@@ -269,13 +271,14 @@ int launch_mle_interpolate_stage_2d(
     uint16_t width,
     uint32_t height,
     uint32_t padded_height,
-    uint32_t step
+    uint32_t step,
+    cudaStream_t stream
 ) {
     auto span = step * 2;
     auto [grid, block] = kernel_launch_params(height >> 1);
     grid.y = width;
     mle_interpolate_stage_2d_kernel<Field, EvalToCoeff>
-        <<<grid, block>>>(buffer, padded_height, span, step);
+        <<<grid, block, 0, stream>>>(buffer, padded_height, span, step);
     return CHECK_KERNEL();
 }
 
@@ -285,18 +288,19 @@ extern "C" int _mle_interpolate_stage_2d(
     uint32_t height,
     uint32_t padded_height,
     uint32_t step,
-    bool is_eval_to_coeff
+    bool is_eval_to_coeff,
+    cudaStream_t stream
 ) {
     if (width == 0) {
         return cudaErrorInvalidValue;
     }
     if (is_eval_to_coeff) {
         return launch_mle_interpolate_stage_2d<Fp, true>(
-            buffer, width, height, padded_height, step
+            buffer, width, height, padded_height, step, stream
         );
     } else {
         return launch_mle_interpolate_stage_2d<Fp, false>(
-            buffer, width, height, padded_height, step
+            buffer, width, height, padded_height, step, stream
         );
     }
 }
@@ -312,13 +316,14 @@ int launch_mle_interpolate_fused_2d(
     uint16_t width,
     uint32_t padded_height,
     uint32_t log_stride,
-    uint32_t start_step
+    uint32_t start_step,
+    cudaStream_t stream
 ) {
     uint32_t meaningful_count = padded_height >> log_stride;
     auto [grid, block] = kernel_launch_params(meaningful_count);
     grid.y = width;
     mle_interpolate_fused_2d_kernel<EvalToCoeff, NumStages, RightPad>
-        <<<grid, block>>>(buffer, padded_height, log_stride, start_step);
+        <<<grid, block, 0, stream>>>(buffer, padded_height, log_stride, start_step);
     return CHECK_KERNEL();
 }
 
@@ -330,18 +335,19 @@ int dispatch_mle_interpolate_fused_2d(
     uint32_t padded_height,
     uint32_t log_stride,
     uint32_t start_step,
-    uint32_t num_stages
+    uint32_t num_stages,
+    cudaStream_t stream
 ) {
     if constexpr (N == 0) {
         return cudaErrorInvalidValue;
     } else {
         if (num_stages == N) {
             return launch_mle_interpolate_fused_2d<EvalToCoeff, N, RightPad>(
-                buffer, width, padded_height, log_stride, start_step
+                buffer, width, padded_height, log_stride, start_step, stream
             );
         }
         return dispatch_mle_interpolate_fused_2d<EvalToCoeff, RightPad, N - 1>(
-            buffer, width, padded_height, log_stride, start_step, num_stages
+            buffer, width, padded_height, log_stride, start_step, num_stages, stream
         );
     }
 }
@@ -354,7 +360,8 @@ extern "C" int _mle_interpolate_fused_2d(
     uint32_t start_step,
     uint32_t num_stages,
     bool is_eval_to_coeff,
-    bool right_pad
+    bool right_pad,
+    cudaStream_t stream
 ) {
     if (width == 0) {
         return cudaErrorInvalidValue;
@@ -368,7 +375,8 @@ extern "C" int _mle_interpolate_fused_2d(
         padded_height,
         log_stride,
         start_step,
-        num_stages
+        num_stages,
+        stream
     );
 }
 
@@ -385,7 +393,8 @@ int launch_mle_interpolate_shared_2d(
     uint32_t padded_height,
     uint32_t log_stride,
     uint32_t start_log_step,
-    uint32_t end_log_step
+    uint32_t end_log_step,
+    cudaStream_t stream
 ) {
     constexpr uint32_t tile_size = 1 << MLE_SHARED_TILE_LOG_SIZE;
     constexpr uint32_t block_size = 256;
@@ -397,7 +406,7 @@ int launch_mle_interpolate_shared_2d(
     dim3 grid(num_tiles, width);
 
     mle_interpolate_shared_2d_kernel<EvalToCoeff, MLE_SHARED_TILE_LOG_SIZE, RightPad>
-        <<<grid, block_size, smem_size>>>(
+        <<<grid, block_size, smem_size, stream>>>(
             buffer, padded_height, log_stride, start_log_step, end_log_step
         );
     return CHECK_KERNEL();
@@ -411,7 +420,8 @@ extern "C" int _mle_interpolate_shared_2d(
     uint32_t start_log_step,
     uint32_t end_log_step,
     bool is_eval_to_coeff,
-    bool right_pad
+    bool right_pad,
+    cudaStream_t stream
 ) {
     if (width == 0) {
         return cudaErrorInvalidValue;
@@ -429,6 +439,7 @@ extern "C" int _mle_interpolate_shared_2d(
         padded_height,
         log_stride,
         start_log_step,
-        end_log_step
+        end_log_step,
+        stream
     );
 }

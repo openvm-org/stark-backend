@@ -1,10 +1,9 @@
 use std::{ffi::c_void, fmt::Debug, ptr};
 
 use crate::{
-    copy::MemCopyD2H,
     error::{check, CudaError},
-    memory_manager::{d_free, d_malloc},
-    stream::{cudaStreamPerThread, cudaStream_t},
+    memory_manager::{d_free, d_malloc_on},
+    stream::{cudaStream_t, GpuDeviceCtx},
 };
 
 #[link(name = "cudart")]
@@ -19,6 +18,8 @@ extern "C" {
 pub struct DeviceBuffer<T> {
     ptr: *mut T,
     len: usize,
+    #[cfg(feature = "debug-cuda-stream")]
+    alloc_stream: cudaStream_t,
 }
 
 /// A struct that packs a pointer with a size in bytes to pass on CUDA.
@@ -43,6 +44,8 @@ impl<T> DeviceBuffer<T> {
         DeviceBuffer {
             ptr: ptr::null_mut(),
             len: 0,
+            #[cfg(feature = "debug-cuda-stream")]
+            alloc_stream: std::ptr::null_mut(),
         }
     }
 
@@ -53,24 +56,29 @@ impl<T> DeviceBuffer<T> {
     ///   either have been allocated by the internal memory manager (VPMM) or the caller must use
     ///   `ManuallyDrop` to prevent double-free.
     pub unsafe fn from_raw_parts(ptr: *mut T, len: usize) -> Self {
-        DeviceBuffer { ptr, len }
+        DeviceBuffer {
+            ptr,
+            len,
+            #[cfg(feature = "debug-cuda-stream")]
+            alloc_stream: std::ptr::null_mut(),
+        }
     }
 
-    /// Allocate device memory for `len` elements of type `T`.
-    pub fn with_capacity(len: usize) -> Self {
+    /// Allocate device memory for `len` elements of type `T` on an explicit stream.
+    pub fn with_capacity_on(len: usize, device_ctx: &GpuDeviceCtx) -> Self {
         tracing::debug!(
-            "Creating device buffer of size {} (sizeof type = {})",
+            "Creating device buffer of size {} (sizeof type = {}) on stream {:?}",
             len,
-            size_of::<T>()
+            size_of::<T>(),
+            device_ctx.stream
         );
         assert_ne!(len, 0, "Zero capacity request is wrong");
         let size_bytes = std::mem::size_of::<T>() * len;
-        let raw_ptr = d_malloc(size_bytes).expect("GPU allocation failed");
+        let raw_ptr = d_malloc_on(size_bytes, &device_ctx.stream).expect("GPU allocation failed");
         #[cfg(feature = "touchemall")]
         {
-            // 0xffffffff is `Fp::invalid()` and shouldn't occur in a trace
             unsafe {
-                cudaMemsetAsync(raw_ptr, 0xff, size_bytes, cudaStreamPerThread);
+                cudaMemsetAsync(raw_ptr, 0xff, size_bytes, device_ctx.stream.as_raw());
             }
         }
         let typed_ptr = raw_ptr as *mut T;
@@ -78,22 +86,54 @@ impl<T> DeviceBuffer<T> {
         DeviceBuffer {
             ptr: typed_ptr,
             len,
+            #[cfg(feature = "debug-cuda-stream")]
+            alloc_stream: device_ctx.stream.as_raw(),
         }
     }
 
-    /// Fills the buffer with zeros.
-    pub fn fill_zero(&self) -> Result<(), CudaError> {
-        assert_ne!(self.len, 0, "Empty buffer");
+    /// Fills the buffer with zeros on an explicit stream.
+    ///
+    /// The caller should use the same stream that allocated this buffer.
+    /// `fill_zero` is async; same-stream guarantees ordering without explicit sync.
+    pub fn fill_zero_on(&self, device_ctx: &GpuDeviceCtx) -> Result<(), CudaError> {
+        if self.len == 0 {
+            return Ok(());
+        }
+        #[cfg(feature = "debug-cuda-stream")]
+        debug_assert_eq!(
+            device_ctx.stream.as_raw(),
+            self.alloc_stream,
+            "fill_zero_on: stream mismatch"
+        );
         let size_bytes = std::mem::size_of::<T>() * self.len;
-        check(unsafe { cudaMemsetAsync(self.as_mut_raw_ptr(), 0, size_bytes, cudaStreamPerThread) })
+        check(unsafe {
+            cudaMemsetAsync(
+                self.as_mut_raw_ptr(),
+                0,
+                size_bytes,
+                device_ctx.stream.as_raw(),
+            )
+        })
     }
 
-    /// Fills a suffix of the buffer with zeros.
-    /// The `start_idx` is the index in the buffer, in `T` elements.
-    pub fn fill_zero_suffix(&self, start_idx: usize) -> Result<(), CudaError> {
+    /// Fills a suffix of the buffer with zeros on an explicit stream.
+    pub fn fill_zero_suffix_on(
+        &self,
+        start_idx: usize,
+        device_ctx: &GpuDeviceCtx,
+    ) -> Result<(), CudaError> {
         assert!(
-            start_idx < self.len,
-            "start index has to be smaller than length"
+            start_idx <= self.len,
+            "start index has to be smaller than or equal to length"
+        );
+        if start_idx == self.len {
+            return Ok(());
+        }
+        #[cfg(feature = "debug-cuda-stream")]
+        debug_assert_eq!(
+            device_ctx.stream.as_raw(),
+            self.alloc_stream,
+            "fill_zero_suffix_on: stream mismatch"
         );
         let size_bytes = std::mem::size_of::<T>() * (self.len - start_idx);
         check(unsafe {
@@ -101,7 +141,7 @@ impl<T> DeviceBuffer<T> {
                 self.as_mut_ptr().add(start_idx) as *mut c_void,
                 0,
                 size_bytes,
-                cudaStreamPerThread,
+                device_ctx.stream.as_raw(),
             )
         })
     }
@@ -152,6 +192,8 @@ impl<T> DeviceBuffer<T> {
         let res = DeviceBuffer {
             ptr: self.ptr as *mut U,
             len: self.len * (size_of::<T>() / size_of::<U>()),
+            #[cfg(feature = "debug-cuda-stream")]
+            alloc_stream: self.alloc_stream,
         };
         self.ptr = ptr::null_mut(); // for safe drop
         self.len = 0;
@@ -174,6 +216,10 @@ impl<T> Drop for DeviceBuffer<T> {
                 self.len,
                 size_of::<T>()
             );
+            // d_free enqueues cudaFreeAsync on the stream that originally
+            // allocated this buffer (stored in the memory manager's record).
+            // This is correct even when Drop runs on a different thread —
+            // CUDA handles cross-thread stream operations safely.
             unsafe {
                 d_free(self.ptr as *mut c_void).expect("GPU free failed");
             }
@@ -185,20 +231,29 @@ impl<T> Drop for DeviceBuffer<T> {
 
 impl<T: Debug> Debug for DeviceBuffer<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let host_vec = self.to_host().unwrap();
-        write!(f, "DeviceBuffer (len = {}): {:?}", self.len(), host_vec)
+        write!(
+            f,
+            "DeviceBuffer(len = {}, ptr = {:?})",
+            self.len(),
+            self.ptr
+        )
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::copy::MemCopyH2D;
+    use crate::copy::{MemCopyD2H, MemCopyH2D};
+
+    fn test_ctx() -> GpuDeviceCtx {
+        GpuDeviceCtx::for_current_device().unwrap()
+    }
 
     #[test]
     fn test_device_buffer_float() {
+        let device_ctx = test_ctx();
         // Create a DeviceBuffer of 10 floats
-        let db = DeviceBuffer::<f32>::with_capacity(10);
+        let db = DeviceBuffer::<f32>::with_capacity_on(10, &device_ctx);
 
         assert_eq!(db.len(), 10);
         assert!(!db.as_ptr().is_null());
@@ -209,9 +264,10 @@ mod tests {
 
     #[test]
     fn test_device_buffer_fill_zero() {
+        let device_ctx = test_ctx();
         let v: Vec<u64> = (0..10).collect();
-        let d_array = v.to_device().unwrap();
-        d_array.fill_zero().unwrap();
-        assert_eq!(d_array.to_host().unwrap(), vec![0; v.len()]);
+        let d_array = v.to_device_on(&device_ctx).unwrap();
+        d_array.fill_zero_on(&device_ctx).unwrap();
+        assert_eq!(d_array.to_host_on(&device_ctx).unwrap(), vec![0; v.len()]);
     }
 }

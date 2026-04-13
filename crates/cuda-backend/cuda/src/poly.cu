@@ -223,24 +223,25 @@ extern "C" int _algebraic_batch_matrices(
     const uint32_t *mu_idxs, // Starting index in `mu_powers` for each matrix. Length = num_mats
     const uint32_t *widths,  // Width of each matrix
     size_t height,
-    size_t num_mats
+    size_t num_mats,
+    cudaStream_t stream
 ) {
     auto [grid, block] = kernel_launch_params(height);
-    algebraic_batch_matrices_kernel<<<grid, block>>>(
+    algebraic_batch_matrices_kernel<<<grid, block, 0, stream>>>(
         output, mats, mu_powers, mu_idxs, widths, height, num_mats
     );
     return CHECK_KERNEL();
 }
 
-extern "C" int _eq_hypercube_stage_ext(FpExt *out, FpExt x_i, uint32_t step) {
+extern "C" int _eq_hypercube_stage_ext(FpExt *out, FpExt x_i, uint32_t step, cudaStream_t stream) {
     auto [grid, block] = kernel_launch_params(step);
-    eq_hypercube_stage_ext_kernel<<<grid, block>>>(out, x_i, step);
+    eq_hypercube_stage_ext_kernel<<<grid, block, 0, stream>>>(out, x_i, step);
     return CHECK_KERNEL();
 }
 
-extern "C" int _mobius_eq_hypercube_stage_ext(FpExt *out, FpExt omega_i, uint32_t step) {
+extern "C" int _mobius_eq_hypercube_stage_ext(FpExt *out, FpExt omega_i, uint32_t step, cudaStream_t stream) {
     auto [grid, block] = kernel_launch_params(step);
-    mobius_eq_hypercube_stage_ext_kernel<<<grid, block>>>(out, omega_i, step);
+    mobius_eq_hypercube_stage_ext_kernel<<<grid, block, 0, stream>>>(out, omega_i, step);
     return CHECK_KERNEL();
 }
 
@@ -248,10 +249,11 @@ extern "C" int _eq_hypercube_nonoverlapping_stage_ext(
     FpExt *out,
     const FpExt *in,
     FpExt x_i,
-    uint32_t step
+    uint32_t step,
+    cudaStream_t stream
 ) {
     auto [grid, block] = kernel_launch_params(step);
-    eq_hypercube_nonoverlapping_stage_ext_kernel<<<grid, block>>>(out, in, x_i, step);
+    eq_hypercube_nonoverlapping_stage_ext_kernel<<<grid, block, 0, stream>>>(out, in, x_i, step);
     return CHECK_KERNEL();
 }
 
@@ -259,10 +261,11 @@ extern "C" int _eq_hypercube_interleaved_stage_ext(
     FpExt *out,
     const FpExt *in,
     FpExt x_i,
-    uint32_t step
+    uint32_t step,
+    cudaStream_t stream
 ) {
     auto [grid, block] = kernel_launch_params(step);
-    eq_hypercube_interleaved_stage_ext_kernel<<<grid, block>>>(out, in, x_i, step);
+    eq_hypercube_interleaved_stage_ext_kernel<<<grid, block, 0, stream>>>(out, in, x_i, step);
     return CHECK_KERNEL();
 }
 
@@ -271,49 +274,49 @@ extern "C" int _batch_eq_hypercube_stage(
     Fp *x,
     uint32_t step,
     uint32_t width,
-    uint32_t height
+    uint32_t height,
+    cudaStream_t stream
 ) {
-
     auto [grid, block] = kernel_launch_params(step);
     grid.y = width;
-    batch_eq_hypercube_stage_kernel<<<grid, block>>>(out, x, step, width, height);
+    batch_eq_hypercube_stage_kernel<<<grid, block, 0, stream>>>(out, x, step, width, height);
     return CHECK_KERNEL();
 }
 
 // Helper to dispatch templated kernel based on runtime block size
 template <int BlockSize>
-int launch_eval_poly_ext_at_point(const Fp *coeffs, size_t len, FpExt x, FpExt *out) {
+int launch_eval_poly_ext_at_point(const Fp *coeffs, size_t len, FpExt x, FpExt *out, cudaStream_t stream) {
     // Shared memory size: num_warps elements for warp reduction results
     // (also reused for x^chunk_size storage in smem[0])
     // This eliminates bank conflicts by using warp shuffle for intra-warp reduction
     constexpr unsigned int num_warps = (BlockSize + WARP_SIZE - 1) / WARP_SIZE;
     size_t smem_size = num_warps * sizeof(FpExt);
-    eval_poly_ext_at_point_kernel<BlockSize><<<1, BlockSize, smem_size>>>(coeffs, len, x, out);
+    eval_poly_ext_at_point_kernel<BlockSize><<<1, BlockSize, smem_size, stream>>>(coeffs, len, x, out);
     return CHECK_KERNEL();
 }
 
-extern "C" int _eval_poly_ext_at_point(const Fp *coeffs, size_t len, FpExt x, FpExt *out) {
+extern "C" int _eval_poly_ext_at_point(const Fp *coeffs, size_t len, FpExt x, FpExt *out, cudaStream_t stream) {
     // Choose block size based on polynomial length for optimal performance
     // Larger polynomials benefit from more parallelism
     if (len <= 256) {
-        return launch_eval_poly_ext_at_point<64>(coeffs, len, x, out);
+        return launch_eval_poly_ext_at_point<64>(coeffs, len, x, out, stream);
     } else if (len <= 4096) {
-        return launch_eval_poly_ext_at_point<128>(coeffs, len, x, out);
+        return launch_eval_poly_ext_at_point<128>(coeffs, len, x, out, stream);
     } else if (len <= 65536) {
-        return launch_eval_poly_ext_at_point<256>(coeffs, len, x, out);
+        return launch_eval_poly_ext_at_point<256>(coeffs, len, x, out, stream);
     } else {
-        return launch_eval_poly_ext_at_point<512>(coeffs, len, x, out);
+        return launch_eval_poly_ext_at_point<512>(coeffs, len, x, out, stream);
     }
 }
 
-extern "C" int _vector_scalar_multiply_ext(FpExt *vec, FpExt scalar, uint32_t length) {
+extern "C" int _vector_scalar_multiply_ext(FpExt *vec, FpExt scalar, uint32_t length, cudaStream_t stream) {
     auto [grid, block] = kernel_launch_params(length);
-    vector_scalar_multiply_kernel<FpExt><<<grid, block>>>(vec, scalar, length);
+    vector_scalar_multiply_kernel<FpExt><<<grid, block, 0, stream>>>(vec, scalar, length);
     return CHECK_KERNEL();
 }
 
-extern "C" int _transpose_fp_to_fpext_vec(FpExt *output, const Fp *input, uint32_t height) {
+extern "C" int _transpose_fp_to_fpext_vec(FpExt *output, const Fp *input, uint32_t height, cudaStream_t stream) {
     auto [grid, block] = kernel_launch_params(height);
-    transpose_fp_to_fpext_vec_kernel<<<grid, block>>>(output, input, height);
+    transpose_fp_to_fpext_vec_kernel<<<grid, block, 0, stream>>>(output, input, height);
     return CHECK_KERNEL();
 }

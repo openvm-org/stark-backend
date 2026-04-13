@@ -60,6 +60,11 @@ pub trait ProverDevice<PB: ProverBackend, TS>:
         + From<<Self as TraceCommitter<PB>>::Error>
         + From<<Self as MultiRapProver<PB, TS>>::Error>
         + From<<Self as OpeningProver<PB, TS>>::Error>;
+
+    /// Device-specific context (e.g., CUDA stream). Unit `()` for CPU devices.
+    type DeviceCtx: Clone + Send + Sync;
+
+    fn device_ctx(&self) -> &Self::DeviceCtx;
 }
 
 /// Provides functionality for committing to a batch of trace matrices, possibly of different

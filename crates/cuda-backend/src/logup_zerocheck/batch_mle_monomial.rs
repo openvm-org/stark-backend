@@ -7,6 +7,7 @@ use openvm_cuda_common::{
     copy::MemCopyH2D,
     d_buffer::DeviceBuffer,
     error::{CudaError, MemCopyError},
+    stream::GpuDeviceCtx,
 };
 use openvm_stark_backend::prover::{fractional_sumcheck_gkr::Frac, DeviceMultiStarkProvingKey};
 use p3_field::PrimeCharacteristicRing;
@@ -80,13 +81,15 @@ pub(crate) fn compute_lambda_combinations<HS: GpuHashScheme>(
     pk: &DeviceMultiStarkProvingKey<GenericGpuBackend<HS>>,
     air_idx: usize,
     lambda_pows: &DeviceBuffer<EF>,
+    device_ctx: &GpuDeviceCtx,
 ) -> Result<DeviceBuffer<EF>, CudaError> {
     let monomials = pk.per_air[air_idx]
         .other_data
         .zerocheck_monomials
         .as_ref()
         .expect("AIR must have monomials");
-    let mut buf = DeviceBuffer::<EF>::with_capacity(monomials.num_monomials as usize);
+    let mut buf =
+        DeviceBuffer::<EF>::with_capacity_on(monomials.num_monomials as usize, device_ctx);
     unsafe {
         precompute_lambda_combinations(
             &mut buf,
@@ -94,6 +97,7 @@ pub(crate) fn compute_lambda_combinations<HS: GpuHashScheme>(
             monomials.d_lambda_terms.as_ptr(),
             lambda_pows,
             monomials.num_monomials,
+            device_ctx.stream.as_raw(),
         )?;
     }
     Ok(buf)
@@ -113,6 +117,8 @@ pub(crate) struct ZerocheckMonomialBatch<'a> {
     block_ctxs: DeviceBuffer<BlockCtx>,
     air_ctxs: DeviceBuffer<MonomialAirCtx>,
     air_offsets: DeviceBuffer<u32>,
+    /// Cheap clone: just `(device_id, Arc<CudaStream>)`.
+    device_ctx: GpuDeviceCtx,
 }
 
 impl<'a> ZerocheckMonomialBatch<'a> {
@@ -128,6 +134,7 @@ impl<'a> ZerocheckMonomialBatch<'a> {
         traces: impl IntoIterator<Item = &'a TraceCtx>,
         pk: &DeviceMultiStarkProvingKey<GenericGpuBackend<HS>>,
         lambda_combinations: &[&DeviceBuffer<EF>],
+        device_ctx: &GpuDeviceCtx,
     ) -> Result<Self, MemCopyError> {
         let traces: Vec<_> = traces.into_iter().collect();
         assert!(
@@ -198,9 +205,9 @@ impl<'a> ZerocheckMonomialBatch<'a> {
             .collect();
 
         // Upload to device
-        let block_ctxs = block_ctxs_h.to_device()?;
-        let air_ctxs = air_ctxs_h.to_device()?;
-        let air_offsets = air_offsets.to_device()?;
+        let block_ctxs = block_ctxs_h.to_device_on(device_ctx)?;
+        let air_ctxs = air_ctxs_h.to_device_on(device_ctx)?;
+        let air_offsets = air_offsets.to_device_on(device_ctx)?;
 
         debug!(
             num_airs = traces.len(),
@@ -213,6 +220,7 @@ impl<'a> ZerocheckMonomialBatch<'a> {
             block_ctxs,
             air_ctxs,
             air_offsets,
+            device_ctx: device_ctx.clone(),
         })
     }
 
@@ -237,8 +245,10 @@ impl<'a> ZerocheckMonomialBatch<'a> {
             "zerocheck_monomial_batched"
         );
 
-        let mut tmp_sums = DeviceBuffer::<EF>::with_capacity(num_blocks * num_x as usize);
-        let mut output = DeviceBuffer::<EF>::with_capacity(num_airs * num_x as usize);
+        let mut tmp_sums =
+            DeviceBuffer::<EF>::with_capacity_on(num_blocks * num_x as usize, &self.device_ctx);
+        let mut output =
+            DeviceBuffer::<EF>::with_capacity_on(num_airs * num_x as usize, &self.device_ctx);
 
         debug_assert_eq!(
             self.air_offsets.len(),
@@ -259,6 +269,7 @@ impl<'a> ZerocheckMonomialBatch<'a> {
                 num_x,
                 num_airs as u32,
                 THREADS_PER_BLOCK,
+                self.device_ctx.stream.as_raw(),
             )?;
         }
 
@@ -285,6 +296,8 @@ pub(crate) struct ZerocheckMonomialParYBatch<'a> {
     air_offsets: DeviceBuffer<u32>,
     num_blocks: u32,
     chunk_size: u32,
+    /// Cheap clone: just `(device_id, Arc<CudaStream>)`.
+    device_ctx: GpuDeviceCtx,
 }
 
 impl<'a> ZerocheckMonomialParYBatch<'a> {
@@ -307,6 +320,7 @@ impl<'a> ZerocheckMonomialParYBatch<'a> {
         sm_count: u32,
         num_x: u32,
         max_monomials_per_thread: Option<u32>,
+        device_ctx: &GpuDeviceCtx,
     ) -> Result<Self, MemCopyError> {
         let traces: Vec<_> = traces.into_iter().collect();
         assert!(
@@ -421,9 +435,9 @@ impl<'a> ZerocheckMonomialParYBatch<'a> {
             .collect();
 
         // Upload to device
-        let block_ctxs = block_ctxs_h.to_device()?;
-        let air_ctxs = air_ctxs_h.to_device()?;
-        let air_offsets = air_offsets.to_device()?;
+        let block_ctxs = block_ctxs_h.to_device_on(device_ctx)?;
+        let air_ctxs = air_ctxs_h.to_device_on(device_ctx)?;
+        let air_offsets = air_offsets.to_device_on(device_ctx)?;
 
         debug!(
             num_airs = traces.len(),
@@ -437,6 +451,7 @@ impl<'a> ZerocheckMonomialParYBatch<'a> {
             air_offsets,
             num_blocks,
             chunk_size,
+            device_ctx: device_ctx.clone(),
         })
     }
 
@@ -461,9 +476,12 @@ impl<'a> ZerocheckMonomialParYBatch<'a> {
             "zerocheck_monomial_par_y_batched"
         );
 
-        let mut tmp_sums =
-            DeviceBuffer::<EF>::with_capacity(self.num_blocks as usize * num_x as usize);
-        let mut output = DeviceBuffer::<EF>::with_capacity(num_airs * num_x as usize);
+        let mut tmp_sums = DeviceBuffer::<EF>::with_capacity_on(
+            self.num_blocks as usize * num_x as usize,
+            &self.device_ctx,
+        );
+        let mut output =
+            DeviceBuffer::<EF>::with_capacity_on(num_airs * num_x as usize, &self.device_ctx);
 
         debug_assert_eq!(
             self.air_offsets.len(),
@@ -485,6 +503,7 @@ impl<'a> ZerocheckMonomialParYBatch<'a> {
                 num_airs as u32,
                 self.chunk_size,
                 THREADS_PER_BLOCK_PAR_Y,
+                self.device_ctx.stream.as_raw(),
             )?;
         }
 
@@ -506,6 +525,7 @@ pub struct LogupCombinations {
 /// Precompute logup combinations for a single AIR's interaction monomials.
 ///
 /// The AIR must have nonempty interaction monomials.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn compute_logup_combinations<HS: GpuHashScheme>(
     pk: &DeviceMultiStarkProvingKey<GenericGpuBackend<HS>>,
     air_idx: usize,
@@ -513,6 +533,7 @@ pub(crate) fn compute_logup_combinations<HS: GpuHashScheme>(
     d_eq_3bs: &DeviceBuffer<EF>,
     eq_3bs_host: &[EF],
     beta_pows_host: &[EF],
+    device_ctx: &GpuDeviceCtx,
 ) -> Result<LogupCombinations, CudaError> {
     let monomials = pk.per_air[air_idx]
         .other_data
@@ -520,9 +541,10 @@ pub(crate) fn compute_logup_combinations<HS: GpuHashScheme>(
         .as_ref()
         .expect("AIR must have interaction monomials");
 
+    let stream = device_ctx.stream.as_raw();
     // Precompute numerator combinations: sum_i(coeff_i * eq_3bs[interaction_idx_i])
     let mut d_numer_combinations = if monomials.num_numer_monomials > 0 {
-        DeviceBuffer::<EF>::with_capacity(monomials.num_numer_monomials as usize)
+        DeviceBuffer::<EF>::with_capacity_on(monomials.num_numer_monomials as usize, device_ctx)
     } else {
         DeviceBuffer::new()
     };
@@ -534,6 +556,7 @@ pub(crate) fn compute_logup_combinations<HS: GpuHashScheme>(
                 monomials.d_numer_terms.as_ptr(),
                 d_eq_3bs,
                 monomials.num_numer_monomials,
+                stream,
             )?;
         }
     }
@@ -541,7 +564,7 @@ pub(crate) fn compute_logup_combinations<HS: GpuHashScheme>(
     // Precompute denominator combinations: sum_i(coeff_i * beta_pows[field_idx_i] *
     // eq_3bs[interaction_idx_i])
     let mut d_denom_combinations = if monomials.num_denom_monomials > 0 {
-        DeviceBuffer::<EF>::with_capacity(monomials.num_denom_monomials as usize)
+        DeviceBuffer::<EF>::with_capacity_on(monomials.num_denom_monomials as usize, device_ctx)
     } else {
         DeviceBuffer::new()
     };
@@ -554,6 +577,7 @@ pub(crate) fn compute_logup_combinations<HS: GpuHashScheme>(
                 d_beta_pows,
                 d_eq_3bs,
                 monomials.num_denom_monomials,
+                stream,
             )?;
         }
     }
@@ -593,6 +617,7 @@ pub(crate) struct LogupMonomialBatch<'a> {
     denom_ctxs: DeviceBuffer<LogupMonomialCtx>,
     air_offsets: DeviceBuffer<u32>,
     num_blocks: u32,
+    device_ctx: GpuDeviceCtx,
 }
 
 impl<'a> LogupMonomialBatch<'a> {
@@ -608,6 +633,7 @@ impl<'a> LogupMonomialBatch<'a> {
         traces: impl IntoIterator<Item = &'a TraceCtx>,
         pk: &DeviceMultiStarkProvingKey<GenericGpuBackend<HS>>,
         logup_combinations: &[&LogupCombinations],
+        device_ctx: &GpuDeviceCtx,
     ) -> Result<Self, MemCopyError> {
         let traces: Vec<_> = traces.into_iter().collect();
         assert!(
@@ -718,11 +744,11 @@ impl<'a> LogupMonomialBatch<'a> {
             .collect();
 
         // Upload to device
-        let block_ctxs = block_ctxs_h.to_device()?;
-        let common_ctxs = common_ctxs_h.to_device()?;
-        let numer_ctxs = numer_ctxs_h.to_device()?;
-        let denom_ctxs = denom_ctxs_h.to_device()?;
-        let air_offsets = air_offsets.to_device()?;
+        let block_ctxs = block_ctxs_h.to_device_on(device_ctx)?;
+        let common_ctxs = common_ctxs_h.to_device_on(device_ctx)?;
+        let numer_ctxs = numer_ctxs_h.to_device_on(device_ctx)?;
+        let denom_ctxs = denom_ctxs_h.to_device_on(device_ctx)?;
+        let air_offsets = air_offsets.to_device_on(device_ctx)?;
 
         debug!(
             num_airs = traces.len(),
@@ -737,6 +763,7 @@ impl<'a> LogupMonomialBatch<'a> {
             denom_ctxs,
             air_offsets,
             num_blocks,
+            device_ctx: device_ctx.clone(),
         })
     }
 
@@ -760,9 +787,12 @@ impl<'a> LogupMonomialBatch<'a> {
             "logup_monomial_batched"
         );
 
-        let mut tmp_sums =
-            DeviceBuffer::<Frac<EF>>::with_capacity(self.num_blocks as usize * num_x as usize);
-        let mut output = DeviceBuffer::<Frac<EF>>::with_capacity(num_airs * num_x as usize);
+        let mut tmp_sums = DeviceBuffer::<Frac<EF>>::with_capacity_on(
+            self.num_blocks as usize * num_x as usize,
+            &self.device_ctx,
+        );
+        let mut output =
+            DeviceBuffer::<Frac<EF>>::with_capacity_on(num_airs * num_x as usize, &self.device_ctx);
 
         debug_assert_eq!(
             self.air_offsets.len(),
@@ -785,6 +815,7 @@ impl<'a> LogupMonomialBatch<'a> {
                 num_x,
                 num_airs as u32,
                 THREADS_PER_BLOCK_LOGUP,
+                self.device_ctx.stream.as_raw(),
             )?;
         }
 

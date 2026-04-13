@@ -1,6 +1,7 @@
 use openvm_cuda_common::{
     d_buffer::DeviceBuffer,
     error::{check, CudaError},
+    stream::cudaStream_t,
 };
 
 use crate::{
@@ -14,6 +15,7 @@ extern "C" {
         total_len: usize,
         step: u32,
         is_eval_to_coeff: bool,
+        stream: cudaStream_t,
     ) -> i32;
 
     fn _mle_interpolate_stage_ext(
@@ -21,6 +23,7 @@ extern "C" {
         total_len: usize,
         step: u32,
         is_eval_to_coeff: bool,
+        stream: cudaStream_t,
     ) -> i32;
 
     fn _mle_interpolate_stage_2d(
@@ -30,6 +33,7 @@ extern "C" {
         padded_height: u32,
         step: u32,
         is_eval_to_coeff: bool,
+        stream: cudaStream_t,
     ) -> i32;
 
     fn _mle_interpolate_fused_2d(
@@ -41,6 +45,7 @@ extern "C" {
         num_stages: u32,
         is_eval_to_coeff: bool,
         right_pad: bool,
+        stream: cudaStream_t,
     ) -> i32;
 
     fn _mle_interpolate_shared_2d(
@@ -52,6 +57,7 @@ extern "C" {
         end_log_step: u32,
         is_eval_to_coeff: bool,
         right_pad: bool,
+        stream: cudaStream_t,
     ) -> i32;
 }
 
@@ -78,12 +84,14 @@ pub unsafe fn mle_interpolate_stage(
     buffer: &mut DeviceBuffer<F>,
     step: u32,
     is_eval_to_coeff: bool,
+    stream: cudaStream_t,
 ) -> Result<(), CudaError> {
     check(_mle_interpolate_stage(
         buffer.as_mut_ptr(),
         buffer.len(),
         step,
         is_eval_to_coeff,
+        stream,
     ))
 }
 
@@ -92,12 +100,14 @@ pub unsafe fn mle_interpolate_stage_ext(
     buffer: &mut DeviceBuffer<EF>,
     step: u32,
     is_eval_to_coeff: bool,
+    stream: cudaStream_t,
 ) -> Result<(), CudaError> {
     check(_mle_interpolate_stage_ext(
         buffer.as_mut_ptr(),
         buffer.len(),
         step,
         is_eval_to_coeff,
+        stream,
     ))
 }
 
@@ -115,6 +125,7 @@ pub unsafe fn mle_interpolate_stage_2d(
     padded_height: u32,
     step: u32,
     is_eval_to_coeff: bool,
+    stream: cudaStream_t,
 ) -> Result<(), CudaError> {
     let width = narrow_mle_width(width)?;
     debug_assert!(height <= padded_height);
@@ -126,6 +137,7 @@ pub unsafe fn mle_interpolate_stage_2d(
         padded_height,
         step,
         is_eval_to_coeff,
+        stream,
     ))
 }
 
@@ -156,6 +168,7 @@ pub unsafe fn mle_interpolate_fused_2d(
     num_stages: u32,
     is_eval_to_coeff: bool,
     right_pad: bool,
+    stream: cudaStream_t,
 ) -> Result<(), CudaError> {
     let width = narrow_mle_width(width)?;
     debug_assert!((1..=LOG_WARP_SIZE as u32).contains(&num_stages));
@@ -169,6 +182,7 @@ pub unsafe fn mle_interpolate_fused_2d(
         num_stages,
         is_eval_to_coeff,
         right_pad,
+        stream,
     ))
 }
 
@@ -197,6 +211,7 @@ pub unsafe fn mle_interpolate_shared_2d(
     end_log_step: u32,
     is_eval_to_coeff: bool,
     right_pad: bool,
+    stream: cudaStream_t,
 ) -> Result<(), CudaError> {
     let width = narrow_mle_width(width)?;
     debug_assert!(end_log_step < MLE_SHARED_TILE_LOG_SIZE);
@@ -209,5 +224,6 @@ pub unsafe fn mle_interpolate_shared_2d(
         end_log_step,
         is_eval_to_coeff,
         right_pad,
+        stream,
     ))
 }

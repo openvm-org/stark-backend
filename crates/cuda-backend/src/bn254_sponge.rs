@@ -5,7 +5,9 @@
 
 use std::ffi::c_void;
 
-use openvm_cuda_common::{copy::cuda_memcpy, d_buffer::DeviceBuffer, error::MemCopyError};
+use openvm_cuda_common::{
+    copy::cuda_memcpy_on, d_buffer::DeviceBuffer, error::MemCopyError, stream::GpuDeviceCtx,
+};
 use openvm_stark_backend::FiatShamirTranscript;
 use openvm_stark_sdk::config::{
     baby_bear_bn254_poseidon2::{BabyBearBn254Poseidon2Config, Bn254Scalar, Transcript},
@@ -125,9 +127,9 @@ impl MultiFieldTranscriptGpu {
         Self::default()
     }
 
-    fn ensure_device_allocated(&mut self) {
+    fn ensure_device_allocated(&mut self, device_ctx: &GpuDeviceCtx) {
         if self.device.is_empty() {
-            self.device = DeviceBuffer::with_capacity(1);
+            self.device = DeviceBuffer::with_capacity_on(1, device_ctx);
         }
     }
 
@@ -141,8 +143,8 @@ impl MultiFieldTranscriptGpu {
     /// [`Transcript`] still has buffered samples from a prior host-side
     /// `sample()`, device-side sampling after this snapshot can diverge from the
     /// host transcript.
-    pub fn sync_h2d(&mut self) -> Result<(), MemCopyError> {
-        self.ensure_device_allocated();
+    pub fn sync_h2d(&mut self, device_ctx: &GpuDeviceCtx) -> Result<(), MemCopyError> {
+        self.ensure_device_allocated(device_ctx);
 
         let mut ds = DeviceBn254SpongeState::default();
 
@@ -160,10 +162,11 @@ impl MultiFieldTranscriptGpu {
         ds.observe_buf_len = self.inner.observe_buf().len() as u32;
 
         unsafe {
-            cuda_memcpy::<false, true>(
+            cuda_memcpy_on::<false, true>(
                 self.device.as_mut_ptr() as *mut c_void,
                 &ds as *const DeviceBn254SpongeState as *const c_void,
                 std::mem::size_of::<DeviceBn254SpongeState>(),
+                device_ctx,
             )
         }
     }
@@ -191,7 +194,11 @@ impl FiatShamirTranscript<BabyBearBn254Poseidon2Config> for MultiFieldTranscript
 }
 
 impl GpuFiatShamirTranscript<BabyBearBn254Poseidon2Config> for MultiFieldTranscriptGpu {
-    fn grind_gpu(&mut self, bits: usize) -> Result<BabyBear, GrindError> {
+    fn grind_gpu(
+        &mut self,
+        bits: usize,
+        device_ctx: &GpuDeviceCtx,
+    ) -> Result<BabyBear, GrindError> {
         validate_gpu_grind_bits(bits)?;
         // Trivial case: 0 bits mean no PoW is required and any witness is valid.
         if bits == 0 {
@@ -199,7 +206,7 @@ impl GpuFiatShamirTranscript<BabyBearBn254Poseidon2Config> for MultiFieldTranscr
         }
 
         // 1. Sync host state to device.
-        self.sync_h2d()?;
+        self.sync_h2d(device_ctx)?;
 
         // 2. Run the BN254 grinding kernel.
         let witness_u32 = unsafe {
@@ -207,6 +214,7 @@ impl GpuFiatShamirTranscript<BabyBearBn254Poseidon2Config> for MultiFieldTranscr
                 self.device.as_ptr(),
                 bits as u32,
                 BabyBear::ORDER_U32 - 1,
+                device_ctx,
             )?
         };
 

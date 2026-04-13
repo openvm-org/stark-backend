@@ -93,14 +93,14 @@ extern "C" int _sponge_grind(
     uint32_t bits,
     uint32_t min_witness,
     uint32_t max_witness,
-    uint32_t* result  // Output: device pointer where the found witness value will be written.
-    // Must be set to `UINT32_MAX` before this function call
-) {
+    uint32_t* result,  // Output: device pointer where the found witness value will be written.
+    // Must be set to `UINT32_MAX` before this function call.
+    cudaStream_t stream) {
     if (bits >= 32 || (uint64_t{1} << bits) >= Fp::P) {
         return cudaErrorInvalidValue;
     }
     auto const [grid, block] = kernel_launch_params(1 << bits);
-    grind_kernel<<<grid, block>>>(init_state, bits, min_witness, max_witness, result);
+    grind_kernel<<<grid, block, 0, stream>>>(init_state, bits, min_witness, max_witness, result);
 
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
@@ -108,7 +108,7 @@ extern "C" int _sponge_grind(
     }
 
     // Synchronize and copy result back
-    err = cudaDeviceSynchronize();
+    err = cudaStreamSynchronize(stream);
     if (err != cudaSuccess) {
         return err;
     }

@@ -8,6 +8,7 @@ use openvm_cuda_common::{
     common::{device_reset_epoch, get_device},
     d_buffer::DeviceBuffer,
     error::{check, CudaError},
+    stream::{cudaStream_t, GpuDeviceCtx},
 };
 
 use crate::prelude::F;
@@ -35,9 +36,10 @@ extern "C" {
         l_skip: usize,
         cnt_blocks: usize,
         is_intt: bool,
+        stream: cudaStream_t,
     ) -> i32;
 
-    fn _generate_device_ntt_twiddles(d_twiddles: *mut c_void) -> i32;
+    fn _generate_device_ntt_twiddles(d_twiddles: *mut c_void, stream: cudaStream_t) -> i32;
 }
 
 static INIT_DEVICE_NTT_TWIDDLES: OnceLock<Mutex<BTreeSet<(i32, u64)>>> = OnceLock::new();
@@ -57,9 +59,10 @@ pub fn ensure_device_ntt_twiddles_initialized() -> Result<(), CudaError> {
         // Temporary staging buffer for the generated twiddles. The CUDA side copies from this
         // buffer into constant memory and synchronizes before returning, so it is safe to free
         // the buffer once `generate_device_ntt_twiddles` completes.
-        let twiddles = DeviceBuffer::<F>::with_capacity(DEVICE_NTT_TWIDDLES_SIZE);
+        let device_ctx = GpuDeviceCtx::for_device(device_key.0 as u32)?;
+        let twiddles = DeviceBuffer::<F>::with_capacity_on(DEVICE_NTT_TWIDDLES_SIZE, &device_ctx);
         unsafe {
-            generate_device_ntt_twiddles(&twiddles)?;
+            generate_device_ntt_twiddles(&twiddles, device_ctx.stream.as_raw())?;
         }
     }
     initialized.insert(device_key);
@@ -68,8 +71,14 @@ pub fn ensure_device_ntt_twiddles_initialized() -> Result<(), CudaError> {
 
 /// Generate device NTT twiddles and copy to constant memory.
 /// `d_twiddles` must have capacity for `DEVICE_NTT_TWIDDLES_SIZE` elements.
-unsafe fn generate_device_ntt_twiddles(d_twiddles: &DeviceBuffer<F>) -> Result<(), CudaError> {
-    CudaError::from_result(_generate_device_ntt_twiddles(d_twiddles.as_mut_raw_ptr()))
+unsafe fn generate_device_ntt_twiddles(
+    d_twiddles: &DeviceBuffer<F>,
+    stream: cudaStream_t,
+) -> Result<(), CudaError> {
+    CudaError::from_result(_generate_device_ntt_twiddles(
+        d_twiddles.as_mut_raw_ptr(),
+        stream,
+    ))
 }
 
 pub unsafe fn batch_ntt_small(
@@ -77,6 +86,7 @@ pub unsafe fn batch_ntt_small(
     l_skip: usize,
     cnt_blocks: usize,
     is_intt: bool,
+    stream: cudaStream_t,
 ) -> Result<(), CudaError> {
     if l_skip == 0 || cnt_blocks == 0 {
         return Ok(());
@@ -89,5 +99,6 @@ pub unsafe fn batch_ntt_small(
         l_skip,
         cnt_blocks,
         is_intt,
+        stream,
     ))
 }

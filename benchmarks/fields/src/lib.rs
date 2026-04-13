@@ -5,104 +5,623 @@
 //!
 //! Throughput is reported in Gops/s (Giga-operations per second = billion ops/sec).
 
-use std::{ffi::c_void, time::Instant};
+use std::{ffi::c_void, sync::OnceLock, time::Instant};
 
-use openvm_cuda_common::{copy::MemCopyH2D, d_buffer::DeviceBuffer, stream::current_stream_sync};
+use openvm_cuda_common::{
+    copy::MemCopyH2D,
+    d_buffer::DeviceBuffer,
+    stream::{cudaStream_t, GpuDeviceCtx},
+};
+
+pub fn bench_ctx() -> &'static GpuDeviceCtx {
+    static CTX: OnceLock<GpuDeviceCtx> = OnceLock::new();
+    CTX.get_or_init(|| GpuDeviceCtx::for_current_device().expect("benchmark CUDA context"))
+}
 
 // ============================================================================
 // FFI Bindings
 // ============================================================================
 
 // Benchmark kernels
-#[link(name = "ext_field_bench")]
-extern "C" {
-    fn init_fp(out: *mut c_void, raw_data: *const u32, n: usize) -> i32;
-    fn add_fp(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
-    fn mul_fp(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
-    fn inv_fp(out: *mut c_void, a: *const c_void, n: usize, reps: i32) -> i32;
+mod ffi {
+    use super::*;
 
-    // BabyBear quartic extension (simple implementation)
-    pub fn init_fp4(out: *mut c_void, raw_data: *const u32, n: usize) -> i32;
-    fn add_fp4(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
-    fn mul_fp4(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
-    fn inv_fp4(out: *mut c_void, a: *const c_void, n: usize, reps: i32) -> i32;
+    #[link(name = "ext_field_bench")]
+    extern "C" {
+        pub(crate) fn init_fp(
+            out: *mut c_void,
+            raw_data: *const u32,
+            n: usize,
+            stream: cudaStream_t,
+        ) -> i32;
+        pub(crate) fn add_fp(
+            out: *mut c_void,
+            a: *const c_void,
+            b: *const c_void,
+            n: usize,
+            reps: i32,
+            stream: cudaStream_t,
+        ) -> i32;
+        pub(crate) fn mul_fp(
+            out: *mut c_void,
+            a: *const c_void,
+            b: *const c_void,
+            n: usize,
+            reps: i32,
+            stream: cudaStream_t,
+        ) -> i32;
+        pub(crate) fn inv_fp(
+            out: *mut c_void,
+            a: *const c_void,
+            n: usize,
+            reps: i32,
+            stream: cudaStream_t,
+        ) -> i32;
 
-    // BabyBear quartic extension (optimized bb31_4_t)
-    fn init_fpext(out: *mut c_void, raw_data: *const u32, n: usize) -> i32;
-    fn add_fpext(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
-    fn mul_fpext(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
-    fn inv_fpext(out: *mut c_void, a: *const c_void, n: usize, reps: i32) -> i32;
+        // BabyBear quartic extension (simple implementation)
+        pub fn init_fp4(
+            out: *mut c_void,
+            raw_data: *const u32,
+            n: usize,
+            stream: cudaStream_t,
+        ) -> i32;
+        pub(crate) fn add_fp4(
+            out: *mut c_void,
+            a: *const c_void,
+            b: *const c_void,
+            n: usize,
+            reps: i32,
+            stream: cudaStream_t,
+        ) -> i32;
+        pub(crate) fn mul_fp4(
+            out: *mut c_void,
+            a: *const c_void,
+            b: *const c_void,
+            n: usize,
+            reps: i32,
+            stream: cudaStream_t,
+        ) -> i32;
+        pub(crate) fn inv_fp4(
+            out: *mut c_void,
+            a: *const c_void,
+            n: usize,
+            reps: i32,
+            stream: cudaStream_t,
+        ) -> i32;
 
-    pub fn init_fp5(out: *mut c_void, raw_data: *const u32, n: usize) -> i32;
-    fn add_fp5(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
-    fn mul_fp5(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
-    fn inv_fp5(out: *mut c_void, a: *const c_void, n: usize, reps: i32) -> i32;
+        // BabyBear quartic extension (optimized bb31_4_t)
+        pub(crate) fn init_fpext(
+            out: *mut c_void,
+            raw_data: *const u32,
+            n: usize,
+            stream: cudaStream_t,
+        ) -> i32;
+        pub(crate) fn add_fpext(
+            out: *mut c_void,
+            a: *const c_void,
+            b: *const c_void,
+            n: usize,
+            reps: i32,
+            stream: cudaStream_t,
+        ) -> i32;
+        pub(crate) fn mul_fpext(
+            out: *mut c_void,
+            a: *const c_void,
+            b: *const c_void,
+            n: usize,
+            reps: i32,
+            stream: cudaStream_t,
+        ) -> i32;
+        pub(crate) fn inv_fpext(
+            out: *mut c_void,
+            a: *const c_void,
+            n: usize,
+            reps: i32,
+            stream: cudaStream_t,
+        ) -> i32;
 
-    pub fn init_fp6(out: *mut c_void, raw_data: *const u32, n: usize) -> i32;
-    fn add_fp6(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
-    fn mul_fp6(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
-    fn inv_fp6(out: *mut c_void, a: *const c_void, n: usize, reps: i32) -> i32;
+        pub fn init_fp5(
+            out: *mut c_void,
+            raw_data: *const u32,
+            n: usize,
+            stream: cudaStream_t,
+        ) -> i32;
+        pub(crate) fn add_fp5(
+            out: *mut c_void,
+            a: *const c_void,
+            b: *const c_void,
+            n: usize,
+            reps: i32,
+            stream: cudaStream_t,
+        ) -> i32;
+        pub(crate) fn mul_fp5(
+            out: *mut c_void,
+            a: *const c_void,
+            b: *const c_void,
+            n: usize,
+            reps: i32,
+            stream: cudaStream_t,
+        ) -> i32;
+        pub(crate) fn inv_fp5(
+            out: *mut c_void,
+            a: *const c_void,
+            n: usize,
+            reps: i32,
+            stream: cudaStream_t,
+        ) -> i32;
 
-    pub fn init_fp2x3(out: *mut c_void, raw_data: *const u32, n: usize) -> i32;
-    fn add_fp2x3(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
-    fn mul_fp2x3(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
-    fn inv_fp2x3(out: *mut c_void, a: *const c_void, n: usize, reps: i32) -> i32;
+        pub fn init_fp6(
+            out: *mut c_void,
+            raw_data: *const u32,
+            n: usize,
+            stream: cudaStream_t,
+        ) -> i32;
+        pub(crate) fn add_fp6(
+            out: *mut c_void,
+            a: *const c_void,
+            b: *const c_void,
+            n: usize,
+            reps: i32,
+            stream: cudaStream_t,
+        ) -> i32;
+        pub(crate) fn mul_fp6(
+            out: *mut c_void,
+            a: *const c_void,
+            b: *const c_void,
+            n: usize,
+            reps: i32,
+            stream: cudaStream_t,
+        ) -> i32;
+        pub(crate) fn inv_fp6(
+            out: *mut c_void,
+            a: *const c_void,
+            n: usize,
+            reps: i32,
+            stream: cudaStream_t,
+        ) -> i32;
 
-    pub fn init_fp3x2(out: *mut c_void, raw_data: *const u32, n: usize) -> i32;
-    fn add_fp3x2(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
-    fn mul_fp3x2(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
-    fn inv_fp3x2(out: *mut c_void, a: *const c_void, n: usize, reps: i32) -> i32;
+        pub fn init_fp2x3(
+            out: *mut c_void,
+            raw_data: *const u32,
+            n: usize,
+            stream: cudaStream_t,
+        ) -> i32;
+        pub(crate) fn add_fp2x3(
+            out: *mut c_void,
+            a: *const c_void,
+            b: *const c_void,
+            n: usize,
+            reps: i32,
+            stream: cudaStream_t,
+        ) -> i32;
+        pub(crate) fn mul_fp2x3(
+            out: *mut c_void,
+            a: *const c_void,
+            b: *const c_void,
+            n: usize,
+            reps: i32,
+            stream: cudaStream_t,
+        ) -> i32;
+        pub(crate) fn inv_fp2x3(
+            out: *mut c_void,
+            a: *const c_void,
+            n: usize,
+            reps: i32,
+            stream: cudaStream_t,
+        ) -> i32;
 
-    // KoalaBear base field
-    pub fn init_kb(out: *mut c_void, raw_data: *const u32, n: usize) -> i32;
-    fn add_kb(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
-    fn mul_kb(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
-    fn inv_kb(out: *mut c_void, a: *const c_void, n: usize, reps: i32) -> i32;
+        pub fn init_fp3x2(
+            out: *mut c_void,
+            raw_data: *const u32,
+            n: usize,
+            stream: cudaStream_t,
+        ) -> i32;
+        pub(crate) fn add_fp3x2(
+            out: *mut c_void,
+            a: *const c_void,
+            b: *const c_void,
+            n: usize,
+            reps: i32,
+            stream: cudaStream_t,
+        ) -> i32;
+        pub(crate) fn mul_fp3x2(
+            out: *mut c_void,
+            a: *const c_void,
+            b: *const c_void,
+            n: usize,
+            reps: i32,
+            stream: cudaStream_t,
+        ) -> i32;
+        pub(crate) fn inv_fp3x2(
+            out: *mut c_void,
+            a: *const c_void,
+            n: usize,
+            reps: i32,
+            stream: cudaStream_t,
+        ) -> i32;
 
-    // KoalaBear quintic extension (x^5 + x + 4)
-    pub fn init_kb5(out: *mut c_void, raw_data: *const u32, n: usize) -> i32;
-    fn add_kb5(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
-    fn mul_kb5(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
-    fn inv_kb5(out: *mut c_void, a: *const c_void, n: usize, reps: i32) -> i32;
+        // KoalaBear base field
+        pub fn init_kb(
+            out: *mut c_void,
+            raw_data: *const u32,
+            n: usize,
+            stream: cudaStream_t,
+        ) -> i32;
+        pub(crate) fn add_kb(
+            out: *mut c_void,
+            a: *const c_void,
+            b: *const c_void,
+            n: usize,
+            reps: i32,
+            stream: cudaStream_t,
+        ) -> i32;
+        pub(crate) fn mul_kb(
+            out: *mut c_void,
+            a: *const c_void,
+            b: *const c_void,
+            n: usize,
+            reps: i32,
+            stream: cudaStream_t,
+        ) -> i32;
+        pub(crate) fn inv_kb(
+            out: *mut c_void,
+            a: *const c_void,
+            n: usize,
+            reps: i32,
+            stream: cudaStream_t,
+        ) -> i32;
 
-    // KoalaBear sextic extension (x^6 + x^3 + 1)
-    pub fn init_kb6(out: *mut c_void, raw_data: *const u32, n: usize) -> i32;
-    fn add_kb6(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
-    fn mul_kb6(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
-    fn inv_kb6(out: *mut c_void, a: *const c_void, n: usize, reps: i32) -> i32;
+        // KoalaBear quintic extension (x^5 + x + 4)
+        pub fn init_kb5(
+            out: *mut c_void,
+            raw_data: *const u32,
+            n: usize,
+            stream: cudaStream_t,
+        ) -> i32;
+        pub(crate) fn add_kb5(
+            out: *mut c_void,
+            a: *const c_void,
+            b: *const c_void,
+            n: usize,
+            reps: i32,
+            stream: cudaStream_t,
+        ) -> i32;
+        pub(crate) fn mul_kb5(
+            out: *mut c_void,
+            a: *const c_void,
+            b: *const c_void,
+            n: usize,
+            reps: i32,
+            stream: cudaStream_t,
+        ) -> i32;
+        pub(crate) fn inv_kb5(
+            out: *mut c_void,
+            a: *const c_void,
+            n: usize,
+            reps: i32,
+            stream: cudaStream_t,
+        ) -> i32;
 
-    // KoalaBear 2×3 tower (u²=3, v³=1+u)
-    pub fn init_kb2x3(out: *mut c_void, raw_data: *const u32, n: usize) -> i32;
-    fn add_kb2x3(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
-    fn mul_kb2x3(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
-    fn inv_kb2x3(out: *mut c_void, a: *const c_void, n: usize, reps: i32) -> i32;
+        // KoalaBear sextic extension (x^6 + x^3 + 1)
+        pub fn init_kb6(
+            out: *mut c_void,
+            raw_data: *const u32,
+            n: usize,
+            stream: cudaStream_t,
+        ) -> i32;
+        pub(crate) fn add_kb6(
+            out: *mut c_void,
+            a: *const c_void,
+            b: *const c_void,
+            n: usize,
+            reps: i32,
+            stream: cudaStream_t,
+        ) -> i32;
+        pub(crate) fn mul_kb6(
+            out: *mut c_void,
+            a: *const c_void,
+            b: *const c_void,
+            n: usize,
+            reps: i32,
+            stream: cudaStream_t,
+        ) -> i32;
+        pub(crate) fn inv_kb6(
+            out: *mut c_void,
+            a: *const c_void,
+            n: usize,
+            reps: i32,
+            stream: cudaStream_t,
+        ) -> i32;
 
-    // KoalaBear 3×2 tower (w³=-w-4, z²=3)
-    pub fn init_kb3x2(out: *mut c_void, raw_data: *const u32, n: usize) -> i32;
-    fn add_kb3x2(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
-    fn mul_kb3x2(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
-    fn inv_kb3x2(out: *mut c_void, a: *const c_void, n: usize, reps: i32) -> i32;
+        // KoalaBear 2×3 tower (u²=3, v³=1+u)
+        pub fn init_kb2x3(
+            out: *mut c_void,
+            raw_data: *const u32,
+            n: usize,
+            stream: cudaStream_t,
+        ) -> i32;
+        pub(crate) fn add_kb2x3(
+            out: *mut c_void,
+            a: *const c_void,
+            b: *const c_void,
+            n: usize,
+            reps: i32,
+            stream: cudaStream_t,
+        ) -> i32;
+        pub(crate) fn mul_kb2x3(
+            out: *mut c_void,
+            a: *const c_void,
+            b: *const c_void,
+            n: usize,
+            reps: i32,
+            stream: cudaStream_t,
+        ) -> i32;
+        pub(crate) fn inv_kb2x3(
+            out: *mut c_void,
+            a: *const c_void,
+            n: usize,
+            reps: i32,
+            stream: cudaStream_t,
+        ) -> i32;
 
-    // Goldilocks base field (64-bit prime: 2^64 - 2^32 + 1)
-    fn init_gl(out: *mut c_void, raw_data: *const u64, n: usize) -> i32;
-    fn add_gl(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
-    fn mul_gl(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
-    fn inv_gl(out: *mut c_void, a: *const c_void, n: usize, reps: i32) -> i32;
+        // KoalaBear 3×2 tower (w³=-w-4, z²=3)
+        pub fn init_kb3x2(
+            out: *mut c_void,
+            raw_data: *const u32,
+            n: usize,
+            stream: cudaStream_t,
+        ) -> i32;
+        pub(crate) fn add_kb3x2(
+            out: *mut c_void,
+            a: *const c_void,
+            b: *const c_void,
+            n: usize,
+            reps: i32,
+            stream: cudaStream_t,
+        ) -> i32;
+        pub(crate) fn mul_kb3x2(
+            out: *mut c_void,
+            a: *const c_void,
+            b: *const c_void,
+            n: usize,
+            reps: i32,
+            stream: cudaStream_t,
+        ) -> i32;
+        pub(crate) fn inv_kb3x2(
+            out: *mut c_void,
+            a: *const c_void,
+            n: usize,
+            reps: i32,
+            stream: cudaStream_t,
+        ) -> i32;
 
-    // Goldilocks cubic extension (X³ - X - 1)
-    fn init_gl3(out: *mut c_void, raw_data: *const u64, n: usize) -> i32;
-    fn add_gl3(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
-    fn mul_gl3(out: *mut c_void, a: *const c_void, b: *const c_void, n: usize, reps: i32) -> i32;
-    fn inv_gl3(out: *mut c_void, a: *const c_void, n: usize, reps: i32) -> i32;
+        // Goldilocks base field (64-bit prime: 2^64 - 2^32 + 1)
+        pub(crate) fn init_gl(
+            out: *mut c_void,
+            raw_data: *const u64,
+            n: usize,
+            stream: cudaStream_t,
+        ) -> i32;
+        pub(crate) fn add_gl(
+            out: *mut c_void,
+            a: *const c_void,
+            b: *const c_void,
+            n: usize,
+            reps: i32,
+            stream: cudaStream_t,
+        ) -> i32;
+        pub(crate) fn mul_gl(
+            out: *mut c_void,
+            a: *const c_void,
+            b: *const c_void,
+            n: usize,
+            reps: i32,
+            stream: cudaStream_t,
+        ) -> i32;
+        pub(crate) fn inv_gl(
+            out: *mut c_void,
+            a: *const c_void,
+            n: usize,
+            reps: i32,
+            stream: cudaStream_t,
+        ) -> i32;
+
+        // Goldilocks cubic extension (X³ - X - 1)
+        pub(crate) fn init_gl3(
+            out: *mut c_void,
+            raw_data: *const u64,
+            n: usize,
+            stream: cudaStream_t,
+        ) -> i32;
+        pub(crate) fn add_gl3(
+            out: *mut c_void,
+            a: *const c_void,
+            b: *const c_void,
+            n: usize,
+            reps: i32,
+            stream: cudaStream_t,
+        ) -> i32;
+        pub(crate) fn mul_gl3(
+            out: *mut c_void,
+            a: *const c_void,
+            b: *const c_void,
+            n: usize,
+            reps: i32,
+            stream: cudaStream_t,
+        ) -> i32;
+        pub(crate) fn inv_gl3(
+            out: *mut c_void,
+            a: *const c_void,
+            n: usize,
+            reps: i32,
+            stream: cudaStream_t,
+        ) -> i32;
+    }
+
+    // Poseidon2 benchmark kernels
+    #[link(name = "ext_field_bench")]
+    extern "C" {
+        pub(crate) fn init_poseidon2_bb(
+            out: *mut c_void,
+            raw_data: *const u32,
+            n: usize,
+            stream: cudaStream_t,
+        ) -> i32;
+        pub(crate) fn run_poseidon2_bb(
+            states: *mut c_void,
+            n: usize,
+            reps: i32,
+            stream: cudaStream_t,
+        ) -> i32;
+        pub(crate) fn init_poseidon2_kb(
+            out: *mut c_void,
+            raw_data: *const u32,
+            n: usize,
+            stream: cudaStream_t,
+        ) -> i32;
+        pub(crate) fn run_poseidon2_kb(
+            states: *mut c_void,
+            n: usize,
+            reps: i32,
+            stream: cudaStream_t,
+        ) -> i32;
+    }
 }
 
-// Poseidon2 benchmark kernels
-#[link(name = "ext_field_bench")]
-extern "C" {
-    fn init_poseidon2_bb(out: *mut c_void, raw_data: *const u32, n: usize) -> i32;
-    fn run_poseidon2_bb(states: *mut c_void, n: usize, reps: i32) -> i32;
-    fn init_poseidon2_kb(out: *mut c_void, raw_data: *const u32, n: usize) -> i32;
-    fn run_poseidon2_kb(states: *mut c_void, n: usize, reps: i32) -> i32;
+macro_rules! wrap_init_u32 {
+    ($vis:vis $name:ident) => {
+        /// Launches the benchmark init kernel on the benchmark stream.
+        ///
+        /// # Safety
+        /// The caller must provide valid device pointers for `out` and `raw_data`,
+        /// and `out` must have capacity for `n` field elements of the target type.
+        #[inline]
+        $vis unsafe extern "C" fn $name(out: *mut c_void, raw_data: *const u32, n: usize) -> i32 {
+            ffi::$name(out, raw_data, n, bench_ctx().stream.as_raw())
+        }
+    };
+}
+
+macro_rules! wrap_init_u64 {
+    ($vis:vis $name:ident) => {
+        /// Launches the benchmark init kernel on the benchmark stream.
+        ///
+        /// # Safety
+        /// The caller must provide valid device pointers for `out` and `raw_data`,
+        /// and `out` must have capacity for `n` field elements of the target type.
+        #[inline]
+        $vis unsafe extern "C" fn $name(out: *mut c_void, raw_data: *const u64, n: usize) -> i32 {
+            ffi::$name(out, raw_data, n, bench_ctx().stream.as_raw())
+        }
+    };
+}
+
+macro_rules! wrap_binary {
+    ($name:ident) => {
+        #[inline]
+        unsafe extern "C" fn $name(
+            out: *mut c_void,
+            a: *const c_void,
+            b: *const c_void,
+            n: usize,
+            reps: i32,
+        ) -> i32 {
+            ffi::$name(out, a, b, n, reps, bench_ctx().stream.as_raw())
+        }
+    };
+}
+
+macro_rules! wrap_unary {
+    ($name:ident) => {
+        #[inline]
+        unsafe extern "C" fn $name(out: *mut c_void, a: *const c_void, n: usize, reps: i32) -> i32 {
+            ffi::$name(out, a, n, reps, bench_ctx().stream.as_raw())
+        }
+    };
+}
+
+wrap_init_u32!(pub init_fp);
+wrap_binary!(add_fp);
+wrap_binary!(mul_fp);
+wrap_unary!(inv_fp);
+
+wrap_init_u32!(pub init_fp4);
+wrap_binary!(add_fp4);
+wrap_binary!(mul_fp4);
+wrap_unary!(inv_fp4);
+
+wrap_init_u32!(init_fpext);
+wrap_binary!(add_fpext);
+wrap_binary!(mul_fpext);
+wrap_unary!(inv_fpext);
+
+wrap_init_u32!(pub init_fp5);
+wrap_binary!(add_fp5);
+wrap_binary!(mul_fp5);
+wrap_unary!(inv_fp5);
+
+wrap_init_u32!(pub init_fp6);
+wrap_binary!(add_fp6);
+wrap_binary!(mul_fp6);
+wrap_unary!(inv_fp6);
+
+wrap_init_u32!(pub init_fp2x3);
+wrap_binary!(add_fp2x3);
+wrap_binary!(mul_fp2x3);
+wrap_unary!(inv_fp2x3);
+
+wrap_init_u32!(pub init_fp3x2);
+wrap_binary!(add_fp3x2);
+wrap_binary!(mul_fp3x2);
+wrap_unary!(inv_fp3x2);
+
+wrap_init_u32!(pub init_kb);
+wrap_binary!(add_kb);
+wrap_binary!(mul_kb);
+wrap_unary!(inv_kb);
+
+wrap_init_u32!(pub init_kb5);
+wrap_binary!(add_kb5);
+wrap_binary!(mul_kb5);
+wrap_unary!(inv_kb5);
+
+wrap_init_u32!(pub init_kb6);
+wrap_binary!(add_kb6);
+wrap_binary!(mul_kb6);
+wrap_unary!(inv_kb6);
+
+wrap_init_u32!(pub init_kb2x3);
+wrap_binary!(add_kb2x3);
+wrap_binary!(mul_kb2x3);
+wrap_unary!(inv_kb2x3);
+
+wrap_init_u32!(pub init_kb3x2);
+wrap_binary!(add_kb3x2);
+wrap_binary!(mul_kb3x2);
+wrap_unary!(inv_kb3x2);
+
+wrap_init_u64!(init_gl);
+wrap_binary!(add_gl);
+wrap_binary!(mul_gl);
+wrap_unary!(inv_gl);
+
+wrap_init_u64!(init_gl3);
+wrap_binary!(add_gl3);
+wrap_binary!(mul_gl3);
+wrap_unary!(inv_gl3);
+
+wrap_init_u32!(init_poseidon2_bb);
+
+#[inline]
+unsafe extern "C" fn run_poseidon2_bb(states: *mut c_void, n: usize, reps: i32) -> i32 {
+    ffi::run_poseidon2_bb(states, n, reps, bench_ctx().stream.as_raw())
+}
+
+wrap_init_u32!(init_poseidon2_kb);
+
+#[inline]
+unsafe extern "C" fn run_poseidon2_kb(states: *mut c_void, n: usize, reps: i32) -> i32 {
+    ffi::run_poseidon2_kb(states, n, reps, bench_ctx().stream.as_raw())
 }
 
 /// Check CUDA return code, panic on error
@@ -112,7 +631,7 @@ pub fn cuda_check(code: i32) {
 
 /// Sync and check
 pub fn sync() {
-    current_stream_sync().expect("sync failed");
+    bench_ctx().stream.synchronize().expect("sync failed");
 }
 
 // ============================================================================
@@ -293,9 +812,9 @@ pub fn bench_fp(config: &BenchConfig) -> FieldBenchResult {
     let reps = config.ops_per_element;
 
     // Only 3 device buffers: a, b, out (init works in-place)
-    let d_a = random_u32s(n, 12345).to_device().unwrap();
-    let d_b = random_u32s(n, 67890).to_device().unwrap();
-    let d_out = DeviceBuffer::<u32>::with_capacity(n);
+    let d_a = random_u32s(n, 12345).to_device_on(bench_ctx()).unwrap();
+    let d_b = random_u32s(n, 67890).to_device_on(bench_ctx()).unwrap();
+    let d_out = DeviceBuffer::<u32>::with_capacity_on(n, bench_ctx());
 
     // Benchmark init (in-place: raw u32 -> Fp) - also initializes d_a
     let init = measure(config, n as u64, || {
@@ -349,9 +868,9 @@ pub fn bench_fp4(config: &BenchConfig) -> FieldBenchResult {
     let n = config.num_elements;
     let reps = config.ops_per_element;
 
-    let d_a = random_u32s(n * 4, 11111).to_device().unwrap();
-    let d_b = random_u32s(n * 4, 22222).to_device().unwrap();
-    let d_out = DeviceBuffer::<u32>::with_capacity(n * 4);
+    let d_a = random_u32s(n * 4, 11111).to_device_on(bench_ctx()).unwrap();
+    let d_b = random_u32s(n * 4, 22222).to_device_on(bench_ctx()).unwrap();
+    let d_out = DeviceBuffer::<u32>::with_capacity_on(n * 4, bench_ctx());
 
     let init = measure(config, n as u64, || {
         cuda_check(unsafe { init_fp4(d_a.as_mut_raw_ptr(), d_a.as_ptr(), n) });
@@ -405,9 +924,9 @@ pub fn bench_fpext(config: &BenchConfig) -> FieldBenchResult {
     let reps = config.ops_per_element;
 
     // Only 3 device buffers: a, b, out (init works in-place)
-    let d_a = random_u32s(n * 4, 12345).to_device().unwrap();
-    let d_b = random_u32s(n * 4, 67890).to_device().unwrap();
-    let d_out = DeviceBuffer::<u32>::with_capacity(n * 4);
+    let d_a = random_u32s(n * 4, 12345).to_device_on(bench_ctx()).unwrap();
+    let d_b = random_u32s(n * 4, 67890).to_device_on(bench_ctx()).unwrap();
+    let d_out = DeviceBuffer::<u32>::with_capacity_on(n * 4, bench_ctx());
 
     // Benchmark init (in-place: raw u32s -> FpExt) - also initializes d_a
     let init = measure(config, n as u64, || {
@@ -462,9 +981,9 @@ pub fn bench_fp5(config: &BenchConfig) -> FieldBenchResult {
     let reps = config.ops_per_element;
 
     // Only 3 device buffers: a, b, out (init works in-place)
-    let d_a = random_u32s(n * 5, 12345).to_device().unwrap();
-    let d_b = random_u32s(n * 5, 67890).to_device().unwrap();
-    let d_out = DeviceBuffer::<u32>::with_capacity(n * 5);
+    let d_a = random_u32s(n * 5, 12345).to_device_on(bench_ctx()).unwrap();
+    let d_b = random_u32s(n * 5, 67890).to_device_on(bench_ctx()).unwrap();
+    let d_out = DeviceBuffer::<u32>::with_capacity_on(n * 5, bench_ctx());
 
     // Benchmark init (in-place: raw u32s -> Fp5) - also initializes d_a
     let init = measure(config, n as u64, || {
@@ -519,9 +1038,9 @@ pub fn bench_fp6(config: &BenchConfig) -> FieldBenchResult {
     let reps = config.ops_per_element;
 
     // Only 3 device buffers: a, b, out (init works in-place)
-    let d_a = random_u32s(n * 6, 12345).to_device().unwrap();
-    let d_b = random_u32s(n * 6, 67890).to_device().unwrap();
-    let d_out = DeviceBuffer::<u32>::with_capacity(n * 6);
+    let d_a = random_u32s(n * 6, 12345).to_device_on(bench_ctx()).unwrap();
+    let d_b = random_u32s(n * 6, 67890).to_device_on(bench_ctx()).unwrap();
+    let d_out = DeviceBuffer::<u32>::with_capacity_on(n * 6, bench_ctx());
 
     // Benchmark init (in-place: raw u32s -> Fp6) - also initializes d_a
     let init = measure(config, n as u64, || {
@@ -575,9 +1094,9 @@ pub fn bench_fp2x3(config: &BenchConfig) -> FieldBenchResult {
     let n = config.num_elements;
     let reps = config.ops_per_element;
 
-    let d_a = random_u32s(n * 6, 12345).to_device().unwrap();
-    let d_b = random_u32s(n * 6, 67890).to_device().unwrap();
-    let d_out = DeviceBuffer::<u32>::with_capacity(n * 6);
+    let d_a = random_u32s(n * 6, 12345).to_device_on(bench_ctx()).unwrap();
+    let d_b = random_u32s(n * 6, 67890).to_device_on(bench_ctx()).unwrap();
+    let d_out = DeviceBuffer::<u32>::with_capacity_on(n * 6, bench_ctx());
 
     let init = measure(config, n as u64, || {
         cuda_check(unsafe { init_fp2x3(d_a.as_mut_raw_ptr(), d_a.as_ptr(), n) });
@@ -630,9 +1149,9 @@ pub fn bench_fp3x2(config: &BenchConfig) -> FieldBenchResult {
     let n = config.num_elements;
     let reps = config.ops_per_element;
 
-    let d_a = random_u32s(n * 6, 12345).to_device().unwrap();
-    let d_b = random_u32s(n * 6, 67890).to_device().unwrap();
-    let d_out = DeviceBuffer::<u32>::with_capacity(n * 6);
+    let d_a = random_u32s(n * 6, 12345).to_device_on(bench_ctx()).unwrap();
+    let d_b = random_u32s(n * 6, 67890).to_device_on(bench_ctx()).unwrap();
+    let d_out = DeviceBuffer::<u32>::with_capacity_on(n * 6, bench_ctx());
 
     let init = measure(config, n as u64, || {
         cuda_check(unsafe { init_fp3x2(d_a.as_mut_raw_ptr(), d_a.as_ptr(), n) });
@@ -686,9 +1205,9 @@ pub fn bench_kb(config: &BenchConfig) -> FieldBenchResult {
     let reps = config.ops_per_element;
 
     // Only 3 device buffers: a, b, out (init works in-place)
-    let d_a = random_u32s(n, 12345).to_device().unwrap();
-    let d_b = random_u32s(n, 67890).to_device().unwrap();
-    let d_out = DeviceBuffer::<u32>::with_capacity(n);
+    let d_a = random_u32s(n, 12345).to_device_on(bench_ctx()).unwrap();
+    let d_b = random_u32s(n, 67890).to_device_on(bench_ctx()).unwrap();
+    let d_out = DeviceBuffer::<u32>::with_capacity_on(n, bench_ctx());
 
     // Benchmark init (in-place: raw u32 -> Kb) - also initializes d_a
     let init = measure(config, n as u64, || {
@@ -743,9 +1262,9 @@ pub fn bench_kb5(config: &BenchConfig) -> FieldBenchResult {
     let reps = config.ops_per_element;
 
     // Kb5 has 5 u32s per element
-    let d_a = random_u32s(n * 5, 11111).to_device().unwrap();
-    let d_b = random_u32s(n * 5, 22222).to_device().unwrap();
-    let d_out = DeviceBuffer::<u32>::with_capacity(n * 5);
+    let d_a = random_u32s(n * 5, 11111).to_device_on(bench_ctx()).unwrap();
+    let d_b = random_u32s(n * 5, 22222).to_device_on(bench_ctx()).unwrap();
+    let d_out = DeviceBuffer::<u32>::with_capacity_on(n * 5, bench_ctx());
 
     let init = measure(config, n as u64, || {
         cuda_check(unsafe { init_kb5(d_a.as_mut_raw_ptr(), d_a.as_ptr(), n) });
@@ -799,9 +1318,9 @@ pub fn bench_kb6(config: &BenchConfig) -> FieldBenchResult {
     let reps = config.ops_per_element;
 
     // Kb6 has 6 u32s per element
-    let d_a = random_u32s(n * 6, 33333).to_device().unwrap();
-    let d_b = random_u32s(n * 6, 44444).to_device().unwrap();
-    let d_out = DeviceBuffer::<u32>::with_capacity(n * 6);
+    let d_a = random_u32s(n * 6, 33333).to_device_on(bench_ctx()).unwrap();
+    let d_b = random_u32s(n * 6, 44444).to_device_on(bench_ctx()).unwrap();
+    let d_out = DeviceBuffer::<u32>::with_capacity_on(n * 6, bench_ctx());
 
     let init = measure(config, n as u64, || {
         cuda_check(unsafe { init_kb6(d_a.as_mut_raw_ptr(), d_a.as_ptr(), n) });
@@ -855,9 +1374,9 @@ pub fn bench_kb2x3(config: &BenchConfig) -> FieldBenchResult {
     let reps = config.ops_per_element;
 
     // Kb2x3 has 6 u32s per element
-    let d_a = random_u32s(n * 6, 55555).to_device().unwrap();
-    let d_b = random_u32s(n * 6, 66666).to_device().unwrap();
-    let d_out = DeviceBuffer::<u32>::with_capacity(n * 6);
+    let d_a = random_u32s(n * 6, 55555).to_device_on(bench_ctx()).unwrap();
+    let d_b = random_u32s(n * 6, 66666).to_device_on(bench_ctx()).unwrap();
+    let d_out = DeviceBuffer::<u32>::with_capacity_on(n * 6, bench_ctx());
 
     let init = measure(config, n as u64, || {
         cuda_check(unsafe { init_kb2x3(d_a.as_mut_raw_ptr(), d_a.as_ptr(), n) });
@@ -911,9 +1430,9 @@ pub fn bench_kb3x2(config: &BenchConfig) -> FieldBenchResult {
     let reps = config.ops_per_element;
 
     // Kb3x2 has 6 u32s per element
-    let d_a = random_u32s(n * 6, 77777).to_device().unwrap();
-    let d_b = random_u32s(n * 6, 88888).to_device().unwrap();
-    let d_out = DeviceBuffer::<u32>::with_capacity(n * 6);
+    let d_a = random_u32s(n * 6, 77777).to_device_on(bench_ctx()).unwrap();
+    let d_b = random_u32s(n * 6, 88888).to_device_on(bench_ctx()).unwrap();
+    let d_out = DeviceBuffer::<u32>::with_capacity_on(n * 6, bench_ctx());
 
     let init = measure(config, n as u64, || {
         cuda_check(unsafe { init_kb3x2(d_a.as_mut_raw_ptr(), d_a.as_ptr(), n) });
@@ -970,9 +1489,9 @@ pub fn bench_gl(config: &BenchConfig) -> FieldBenchResult {
     let h_a = random_u64s(n, 99999);
     let h_b = random_u64s(n, 88888);
 
-    let d_a = h_a.to_device().unwrap();
-    let d_b = h_b.to_device().unwrap();
-    let d_out = DeviceBuffer::<u64>::with_capacity(n);
+    let d_a = h_a.to_device_on(bench_ctx()).unwrap();
+    let d_b = h_b.to_device_on(bench_ctx()).unwrap();
+    let d_out = DeviceBuffer::<u64>::with_capacity_on(n, bench_ctx());
 
     let init = measure(config, n as u64, || {
         cuda_check(unsafe { init_gl(d_a.as_mut_raw_ptr(), d_a.as_ptr(), n) });
@@ -1030,9 +1549,9 @@ pub fn bench_gl3(config: &BenchConfig) -> FieldBenchResult {
     let h_a = random_u64s(n * 3, 77777);
     let h_b = random_u64s(n * 3, 66666);
 
-    let d_a = h_a.to_device().unwrap();
-    let d_b = h_b.to_device().unwrap();
-    let d_out = DeviceBuffer::<u64>::with_capacity(n * 3);
+    let d_a = h_a.to_device_on(bench_ctx()).unwrap();
+    let d_b = h_b.to_device_on(bench_ctx()).unwrap();
+    let d_out = DeviceBuffer::<u64>::with_capacity_on(n * 3, bench_ctx());
 
     let init = measure(config, n as u64, || {
         cuda_check(unsafe { init_gl3(d_a.as_mut_raw_ptr(), d_a.as_ptr(), n) });
@@ -1098,7 +1617,9 @@ pub fn bench_poseidon2_bb(config: &BenchConfig) -> Poseidon2BenchResult {
     let reps = config.ops_per_element;
 
     // 16 u32s per poseidon2 state
-    let d_states = random_u32s(n * 16, 55555).to_device().unwrap();
+    let d_states = random_u32s(n * 16, 55555)
+        .to_device_on(bench_ctx())
+        .unwrap();
 
     // Initialize: raw u32 -> Fp field elements
     cuda_check(unsafe { init_poseidon2_bb(d_states.as_mut_raw_ptr(), d_states.as_ptr(), n) });
@@ -1121,7 +1642,9 @@ pub fn bench_poseidon2_kb(config: &BenchConfig) -> Poseidon2BenchResult {
     let reps = config.ops_per_element;
 
     // 16 u32s per poseidon2 state
-    let d_states = random_u32s(n * 16, 66666).to_device().unwrap();
+    let d_states = random_u32s(n * 16, 66666)
+        .to_device_on(bench_ctx())
+        .unwrap();
 
     // Initialize: raw u32 -> Kb field elements
     cuda_check(unsafe { init_poseidon2_kb(d_states.as_mut_raw_ptr(), d_states.as_ptr(), n) });

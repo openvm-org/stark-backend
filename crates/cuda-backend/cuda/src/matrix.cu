@@ -90,8 +90,8 @@ __global__ void split_ext_to_base_col_major_matrix_kernel(
         return;
     }
 
-    uint32_t col_num = (poly_len / matrix_height); // SPLIT_FACTOR = 2
-    for (uint32_t col_idx = 0; col_idx < col_num; col_idx++) {
+    uint64_t col_num = (poly_len / matrix_height); // SPLIT_FACTOR = 2
+    for (uint64_t col_idx = 0; col_idx < col_num; col_idx++) {
         FpExt ext_val = d_poly[col_idx * matrix_height + row_idx];
         d_matrix[(col_idx * 4 + 0) * matrix_height + row_idx] = ext_val.elems[0];
         d_matrix[(col_idx * 4 + 1) * matrix_height + row_idx] = ext_val.elems[1];
@@ -114,6 +114,8 @@ __global__ void batch_rotate_pad_kernel(
 ) {
     auto tidx = threadIdx.x + blockIdx.x * blockDim.x;
     auto pidx = blockIdx.y + blockIdx.z * gridDim.y;
+    const size_t padded_stride = padded_size;
+    const size_t domain_stride = domain_size;
 
     if (pidx >= width * num_x) {
         return;
@@ -129,9 +131,9 @@ __global__ void batch_rotate_pad_kernel(
                 pidx_rot -= num_x;
             }
         }
-        out[padded_size * pidx + tidx] = in[domain_size * pidx_rot + tidx_rot];
+        out[padded_stride * pidx + tidx] = in[domain_stride * pidx_rot + tidx_rot];
     } else if (tidx < padded_size) {
-        out[padded_size * pidx + tidx] = Fp(0);
+        out[padded_stride * pidx + tidx] = Fp(0);
     }
 }
 
@@ -147,11 +149,12 @@ __global__ void lift_padded_matrix_evals_kernel(
 ) {
     auto tidx = threadIdx.x + blockIdx.x * blockDim.x;
     auto col = threadIdx.y + blockIdx.y * blockDim.y;
+    const size_t col_stride = padded_height;
     if (tidx >= lifted_height || col >= width) {
         return;
     }
     // lhs = rhs when tidx < height
-    matrix[col * padded_height + tidx] = matrix[col * padded_height + (tidx % height)];
+    matrix[col * col_stride + tidx] = matrix[col * col_stride + (tidx % height)];
 }
 
 // Required: lifted_height = height * stride
@@ -165,11 +168,14 @@ __global__ void collapse_strided_matrix_kernel(
 ) {
     auto row = threadIdx.x + blockIdx.x * blockDim.x;
     auto col = threadIdx.y + blockIdx.y * blockDim.y;
+    const size_t out_col_stride = height;
+    const size_t in_col_stride = lifted_height;
+    const size_t row_stride = stride;
     if (row >= height || col >= width) {
         return;
     }
 
-    out[col * height + row] = in[col * lifted_height + row * stride];
+    out[col * out_col_stride + row] = in[col * in_col_stride + row * row_stride];
 }
 
 // memory layout of in: column-major
@@ -186,13 +192,15 @@ __global__ void batch_expand_pad_kernel(
     const uint32_t inSize
 ) {
     uint idx = blockIdx.x * blockDim.x + threadIdx.x;
+    const size_t in_stride = inSize;
+    const size_t out_stride = outSize;
     if (idx < outSize) {
         for (uint32_t i = 0; i < polyCount; i++) {
             Fp res = Fp(0);
             if (idx < inSize) {
-                res = in[i * inSize + idx];
+                res = in[i * in_stride + idx];
             }
-            out[i * outSize + idx] = res;
+            out[i * out_stride + idx] = res;
         }
     }
 }
@@ -210,13 +218,15 @@ __global__ void batch_expand_pad_wide_kernel(
 ) {
     uint32_t row = blockIdx.x * blockDim.x + threadIdx.x;
     uint32_t col = blockIdx.y + blockIdx.z * gridDim.y;
+    const size_t padded_stride = padded_height;
+    const size_t in_stride = height;
     if (col >= width) {
         return;
     }
     if (row < height) {
-        out[col * padded_height + row] = in[col * height + row];
+        out[col * padded_stride + row] = in[col * in_stride + row];
     } else if (row < padded_height) {
-        out[col * padded_height + row] = Fp(0);
+        out[col * padded_stride + row] = Fp(0);
     }
 }
 
@@ -227,29 +237,30 @@ __global__ void batch_expand_pad_wide_kernel(
 constexpr uint32_t MAX_GRID_DIM = 65535u;
 
 template <typename T>
-int matrix_transpose_impl(T *output, const T *input, size_t col_size, size_t row_size) {
+int matrix_transpose_impl(T *output, const T *input, size_t col_size, size_t row_size, cudaStream_t stream) {
     uint32_t grid_x = (col_size + TILE_SIZE - 1) / TILE_SIZE;
     uint32_t grid_y = (row_size + TILE_SIZE - 1) / TILE_SIZE;
 
     dim3 grid(grid_x * grid_y);
     dim3 block(TILE_SIZE);
 
-    matrix_transpose_kernel<T><<<grid, block>>>(output, input, col_size, row_size);
+    matrix_transpose_kernel<T><<<grid, block, 0, stream>>>(output, input, col_size, row_size);
 
     return CHECK_KERNEL();
 }
 
-extern "C" int _matrix_transpose_fp(Fp *output, const Fp *input, size_t col_size, size_t row_size) {
-    return matrix_transpose_impl(output, input, col_size, row_size);
+extern "C" int _matrix_transpose_fp(Fp *output, const Fp *input, size_t col_size, size_t row_size, cudaStream_t stream) {
+    return matrix_transpose_impl(output, input, col_size, row_size, stream);
 }
 
 extern "C" int _matrix_transpose_fpext(
     FpExt *output,
     const FpExt *input,
     size_t col_size,
-    size_t row_size
+    size_t row_size,
+    cudaStream_t stream
 ) {
-    return matrix_transpose_impl(output, input, col_size, row_size);
+    return matrix_transpose_impl(output, input, col_size, row_size, stream);
 }
 
 extern "C" int _matrix_get_rows_fp(
@@ -258,7 +269,8 @@ extern "C" int _matrix_get_rows_fp(
     uint32_t *row_indices,
     uint64_t matrix_width,
     uint64_t matrix_height,
-    uint32_t row_indices_len
+    uint32_t row_indices_len,
+    cudaStream_t stream
 ) {
     if (matrix_width == 0 || row_indices_len == 0) {
         return cudaSuccess;
@@ -268,7 +280,7 @@ extern "C" int _matrix_get_rows_fp(
     }
     auto block = WARP_SIZE;
     dim3 grid = dim3(div_ceil(matrix_width, WARP_SIZE), row_indices_len);
-    matrix_get_rows_fp_kernel<<<grid, block>>>(
+    matrix_get_rows_fp_kernel<<<grid, block, 0, stream>>>(
         output, input, row_indices, matrix_width, matrix_height
     );
     return CHECK_KERNEL();
@@ -278,10 +290,11 @@ extern "C" int _split_ext_to_base_col_major_matrix(
     Fp *d_matrix,
     FpExt *d_poly,
     uint64_t poly_len,
-    uint32_t matrix_height
+    uint32_t matrix_height,
+    cudaStream_t stream
 ) {
     auto [grid, block] = kernel_launch_params(matrix_height);
-    split_ext_to_base_col_major_matrix_kernel<<<grid, block>>>(
+    split_ext_to_base_col_major_matrix_kernel<<<grid, block, 0, stream>>>(
         d_matrix, d_poly, poly_len, matrix_height
     );
     return CHECK_KERNEL();
@@ -293,13 +306,14 @@ extern "C" int _batch_rotate_pad(
     uint32_t width,
     uint32_t num_x, // = (in.height() / domain_size)
     uint32_t domain_size,
-    uint32_t padded_size
+    uint32_t padded_size,
+    cudaStream_t stream
 ) {
     auto [grid, block] = kernel_launch_params(padded_size);
     auto num_poly = width * num_x;
     grid.y = std::min(num_poly, MAX_GRID_DIM);
     grid.z = (num_poly + grid.y - 1) / grid.y;
-    batch_rotate_pad_kernel<<<grid, block>>>(out, in, width, num_x, domain_size, padded_size);
+    batch_rotate_pad_kernel<<<grid, block, 0, stream>>>(out, in, width, num_x, domain_size, padded_size);
     return CHECK_KERNEL();
 }
 
@@ -308,10 +322,11 @@ extern "C" int _lift_padded_matrix_evals(
     uint32_t width,
     uint32_t height,
     uint32_t lifted_height,
-    uint32_t padded_height
+    uint32_t padded_height,
+    cudaStream_t stream
 ) {
     auto [grid, block] = kernel_launch_2d_params(lifted_height, width);
-    lift_padded_matrix_evals_kernel<<<grid, block>>>(
+    lift_padded_matrix_evals_kernel<<<grid, block, 0, stream>>>(
         matrix, width, height, lifted_height, padded_height
     );
     return CHECK_KERNEL();
@@ -322,11 +337,12 @@ extern "C" int _collapse_strided_matrix(
     const Fp *in,
     uint32_t width,
     uint32_t height,
-    uint32_t stride
+    uint32_t stride,
+    cudaStream_t stream
 ) {
     auto lifted_height = height * stride;
     auto [grid, block] = kernel_launch_2d_params(height, width);
-    collapse_strided_matrix_kernel<<<grid, block>>>(out, in, width, lifted_height, height, stride);
+    collapse_strided_matrix_kernel<<<grid, block, 0, stream>>>(out, in, width, lifted_height, height, stride);
     return CHECK_KERNEL();
 }
 
@@ -335,10 +351,11 @@ extern "C" int _batch_expand_pad(
     const Fp *in,
     const uint32_t polyCount,
     const uint32_t outSize,
-    const uint32_t inSize
+    const uint32_t inSize,
+    cudaStream_t stream
 ) {
     auto [grid, block] = kernel_launch_params(outSize);
-    batch_expand_pad_kernel<<<grid, block>>>(out, in, polyCount, outSize, inSize);
+    batch_expand_pad_kernel<<<grid, block, 0, stream>>>(out, in, polyCount, outSize, inSize);
     return CHECK_KERNEL();
 }
 
@@ -347,12 +364,13 @@ extern "C" int _batch_expand_pad_wide(
     const Fp *in,
     const uint32_t width,
     const uint32_t padded_height,
-    const uint32_t height
+    const uint32_t height,
+    cudaStream_t stream
 ) {
     auto [grid, block] = kernel_launch_params(padded_height);
     grid.y = std::min(width, MAX_GRID_DIM);
     grid.z = (width + grid.y - 1) / grid.y;
     assert(grid.z <= MAX_GRID_DIM);
-    batch_expand_pad_wide_kernel<<<grid, block>>>(out, in, width, padded_height, height);
+    batch_expand_pad_wide_kernel<<<grid, block, 0, stream>>>(out, in, width, padded_height, height);
     return CHECK_KERNEL();
 }

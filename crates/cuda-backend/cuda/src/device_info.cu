@@ -3,7 +3,7 @@
 #include <cuda_runtime_api.h>
 #include <driver_types.h>
 
-extern "C" int _cuda_get_sm_count(uint32_t device_id, uint32_t *out_sm_count) {
+extern "C" int _cuda_get_sm_count(uint32_t device_id, uint32_t *out_sm_count, cudaStream_t stream) {
     int sm_count = 0;
     cudaError_t err = cudaDeviceGetAttribute(
         &sm_count, cudaDevAttrMultiProcessorCount, static_cast<int>(device_id)
