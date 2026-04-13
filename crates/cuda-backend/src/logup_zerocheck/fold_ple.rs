@@ -1,6 +1,6 @@
 use std::{cmp::max, sync::Arc};
 
-use openvm_cuda_common::d_buffer::DeviceBuffer;
+use openvm_cuda_common::{d_buffer::DeviceBuffer, stream::GpuDeviceCtx};
 use openvm_stark_backend::prover::MatrixDimensions;
 
 use super::errors::FoldPleError;
@@ -19,13 +19,14 @@ pub fn fold_ple_evals_rotate(
     trace_evals: &DeviceMatrix<F>,
     d_inv_lagrange_denoms_r0: &DeviceBuffer<EF>,
     need_rot: bool,
+    device_ctx: &GpuDeviceCtx,
 ) -> Result<DeviceMatrix<EF>, FoldPleError> {
     validate_gpu_l_skip(l_skip)?;
     let width = trace_evals.width();
     let height = trace_evals.height();
     let num_x = max(height >> l_skip, 1);
     let out_width = width * if need_rot { 2 } else { 1 };
-    let folded_buf = DeviceBuffer::<EF>::with_capacity(num_x * out_width);
+    let folded_buf = DeviceBuffer::<EF>::with_capacity_on(num_x * out_width, device_ctx);
     // SAFETY:
     // - We allocated `folded_buf` for `num_x * width * (1 or 2)` elements.
     // - `trace_evals` is `height x width` unlighted matrix
@@ -37,6 +38,7 @@ pub fn fold_ple_evals_rotate(
             folded_buf.as_mut_ptr(),
             d_inv_lagrange_denoms_r0,
             false,
+            device_ctx,
         )?;
 
         if need_rot {
@@ -48,6 +50,7 @@ pub fn fold_ple_evals_rotate(
                 folded_buf.as_mut_ptr().add(num_x * width),
                 d_inv_lagrange_denoms_r0,
                 true,
+                device_ctx,
             )?;
         }
     }
@@ -72,6 +75,7 @@ pub unsafe fn fold_ple_evals_gpu(
     output: *mut EF,
     d_inv_lagrange_denoms_r0: &DeviceBuffer<EF>,
     rotate: bool,
+    device_ctx: &GpuDeviceCtx,
 ) -> Result<(), FoldPleError> {
     validate_gpu_l_skip(l_skip)?;
     let height = mat.height();
@@ -98,6 +102,7 @@ pub unsafe fn fold_ple_evals_gpu(
             l_skip as u32,
             num_x as u32,
             rotate,
+            device_ctx.stream.as_raw(),
         )?;
     }
     Ok(())

@@ -5,6 +5,7 @@ use openvm_cuda_common::{
     copy::{MemCopyD2H, MemCopyH2D},
     d_buffer::DeviceBuffer,
     memory_manager::MemTracker,
+    stream::GpuDeviceCtx,
 };
 use openvm_stark_backend::prover::MatrixDimensions;
 use p3_util::log2_strict_usize;
@@ -91,6 +92,7 @@ pub trait MerkleTreeConstructor: GpuMerkleHash {
         matrix: DeviceMatrix<F>,
         rows_per_query: usize,
         cache_backing_matrix: bool,
+        device_ctx: &GpuDeviceCtx,
     ) -> Result<MerkleTreeGpu<F, Self::Digest>, MerkleTreeError>;
 }
 
@@ -98,6 +100,7 @@ pub trait MerkleProofQueryDigest: BatchQueryMerkle + Copy + Send + Sync + 'stati
     fn batch_query_merkle_proofs(
         trees: &[&MerkleTreeGpu<F, Self>],
         query_indices: &[usize],
+        device_ctx: &GpuDeviceCtx,
     ) -> Result<Vec<Vec<Vec<Self>>>, MerkleTreeError>;
 }
 
@@ -129,21 +132,23 @@ impl<D: Copy + Send + Sync + 'static> MerkleTreeGpu<F, D> {
         matrix: DeviceMatrix<F>,
         rows_per_query: usize,
         cache_backing_matrix: bool,
+        device_ctx: &GpuDeviceCtx,
     ) -> Result<Self, MerkleTreeError> {
-        MH::new_merkle_tree(matrix, rows_per_query, cache_backing_matrix)
+        MH::new_merkle_tree(matrix, rows_per_query, cache_backing_matrix, device_ctx)
     }
 
     fn new_generic_with_hash<MH: GpuMerkleHash<Digest = D>>(
         matrix: DeviceMatrix<F>,
         rows_per_query: usize,
         cache_backing_matrix: bool,
+        device_ctx: &GpuDeviceCtx,
     ) -> Result<Self, MerkleTreeError> {
         let mem = MemTracker::start("prover.merkle_tree");
         let height = matrix.height();
         assert!(height.is_power_of_two());
         let k = validate_merkle_rows_per_query(rows_per_query, height)?;
         let query_stride = height / rows_per_query;
-        let mut query_digest_layer = DeviceBuffer::<D>::with_capacity(query_stride);
+        let mut query_digest_layer = DeviceBuffer::<D>::with_capacity_on(query_stride, device_ctx);
         // SAFETY: query_digest_layer properly allocated
         unsafe {
             MH::compress_rows(
@@ -152,6 +157,7 @@ impl<D: Copy + Send + Sync + 'static> MerkleTreeGpu<F, D> {
                 matrix.width(),
                 query_stride,
                 k,
+                device_ctx,
             )
             .map_err(MerkleTreeError::CompressingRowHashes)?;
         }
@@ -161,25 +167,25 @@ impl<D: Copy + Send + Sync + 'static> MerkleTreeGpu<F, D> {
         let mut digest_layers = vec![query_digest_layer];
         while digest_layers.last().unwrap().len() > 1 {
             let prev_layer = digest_layers.last().unwrap();
-            let mut layer = DeviceBuffer::<D>::with_capacity(prev_layer.len() / 2);
+            let mut layer = DeviceBuffer::<D>::with_capacity_on(prev_layer.len() / 2, device_ctx);
             let layer_len = layer.len();
             let layer_idx = digest_layers.len();
             // SAFETY:
             // - `layer` is properly allocated with half the size of `prev_layer` and does not
             //   overlap with it.
             unsafe {
-                MH::compress_layer(&mut layer, prev_layer, layer_len).map_err(|error| {
-                    MerkleTreeError::AdjacentCompressLayer {
+                MH::compress_layer(&mut layer, prev_layer, layer_len, device_ctx).map_err(
+                    |error| MerkleTreeError::AdjacentCompressLayer {
                         error,
                         layer: layer_idx,
-                    }
-                })?;
+                    },
+                )?;
             }
             digest_layers.push(layer);
         }
         let d_root = digest_layers.last().unwrap();
         assert_eq!(d_root.len(), 1, "Only one root is supported");
-        let root = d_root.to_host()?.pop().unwrap();
+        let root = d_root.to_host_on(device_ctx)?.pop().unwrap();
 
         mem.emit_metrics();
         Ok(Self {
@@ -196,6 +202,7 @@ impl<D: Copy + Send + Sync + 'static> MerkleTreeGpu<F, D> {
         query_indices: &[usize],
         query_stride: usize,
         rows_per_query: usize,
+        device_ctx: &GpuDeviceCtx,
     ) -> Result<
         Vec<
             // per tree
@@ -217,7 +224,7 @@ impl<D: Copy + Send + Sync + 'static> MerkleTreeGpu<F, D> {
                     .map(move |row_offset| (row_offset * query_stride + query_idx) as u32)
             })
             .collect_vec();
-        let d_row_idxs = row_idxs.to_device()?;
+        let d_row_idxs = row_idxs.to_device_on(device_ctx)?;
         // PERF[jpw]: I did not batch across trees into a single kernel call because widths are
         // different so it was inconvenient. Make a new kernel if slow.
         // NOTE: par_iter requires cross-stream waits, not worth the effort
@@ -225,7 +232,10 @@ impl<D: Copy + Send + Sync + 'static> MerkleTreeGpu<F, D> {
             .iter()
             .enumerate()
             .map(|(matrix_idx, matrix)| {
-                let d_out = DeviceBuffer::<F>::with_capacity(row_idxs.len() * matrix.width());
+                let d_out = DeviceBuffer::<F>::with_capacity_on(
+                    row_idxs.len() * matrix.width(),
+                    device_ctx,
+                );
                 // SAFETY:
                 // - `output_rows` is allocated with row_idxs.len() * width
                 // - row indices are within bounds
@@ -237,11 +247,13 @@ impl<D: Copy + Send + Sync + 'static> MerkleTreeGpu<F, D> {
                         matrix.width() as u64,
                         matrix.height() as u64,
                         d_row_idxs.len(),
+                        device_ctx.stream.as_raw(),
                     )
                     .map_err(|error| MerkleTreeError::MatrixGetRows { error, matrix_idx })?;
                 }
                 let width = matrix.width();
-                let out = info_span!("opened_rows_d2h").in_scope(|| d_out.to_host())?;
+                let out =
+                    info_span!("opened_rows_d2h").in_scope(|| d_out.to_host_on(device_ctx))?;
                 let opened_rows_per_query = out
                     .chunks_exact(rows_per_query * width)
                     .map(|rows| rows.to_vec())
@@ -257,11 +269,13 @@ impl MerkleTreeConstructor for Poseidon2MerkleHash {
         matrix: DeviceMatrix<F>,
         rows_per_query: usize,
         cache_backing_matrix: bool,
+        device_ctx: &GpuDeviceCtx,
     ) -> Result<MerkleTreeGpu<F, Self::Digest>, MerkleTreeError> {
         MerkleTreeGpu::<F, Self::Digest>::new_generic_with_hash::<Self>(
             matrix,
             rows_per_query,
             cache_backing_matrix,
+            device_ctx,
         )
     }
 }
@@ -272,11 +286,13 @@ impl MerkleTreeConstructor for crate::hash_scheme::Bn254Poseidon2MerkleHash {
         matrix: DeviceMatrix<F>,
         rows_per_query: usize,
         cache_backing_matrix: bool,
+        device_ctx: &GpuDeviceCtx,
     ) -> Result<MerkleTreeGpu<F, Self::Digest>, MerkleTreeError> {
         MerkleTreeGpu::<F, Self::Digest>::new_generic_with_hash::<Self>(
             matrix,
             rows_per_query,
             cache_backing_matrix,
+            device_ctx,
         )
     }
 }
@@ -290,8 +306,14 @@ impl MerkleTreeGpu<F, Digest> {
         matrix: DeviceMatrix<F>,
         rows_per_query: usize,
         cache_backing_matrix: bool,
+        device_ctx: &GpuDeviceCtx,
     ) -> Result<Self, MerkleTreeError> {
-        Self::new_with_hash::<Poseidon2MerkleHash>(matrix, rows_per_query, cache_backing_matrix)
+        Self::new_with_hash::<Poseidon2MerkleHash>(
+            matrix,
+            rows_per_query,
+            cache_backing_matrix,
+            device_ctx,
+        )
     }
 }
 
@@ -300,6 +322,7 @@ impl<D: BatchQueryMerkle + Send + Sync + 'static> MerkleTreeGpu<F, D> {
     fn batch_query_proofs(
         trees: &[&Self],
         query_indices: &[usize],
+        device_ctx: &GpuDeviceCtx,
     ) -> Result<Vec<Vec<Vec<D>>>, MerkleTreeError> {
         if trees.is_empty() {
             return Ok(Vec::new());
@@ -329,7 +352,7 @@ impl<D: BatchQueryMerkle + Send + Sync + 'static> MerkleTreeGpu<F, D> {
                     .map(|layer| layer.as_ptr() as u64)
             })
             .collect_vec();
-        let d_layers_ptr = layers_ptr.to_device()?;
+        let d_layers_ptr = layers_ptr.to_device_on(device_ctx)?;
         debug_assert_eq!(d_layers_ptr.len(), num_trees * depth);
 
         // [query_idx] is the top level grouping
@@ -344,11 +367,13 @@ impl<D: BatchQueryMerkle + Send + Sync + 'static> MerkleTreeGpu<F, D> {
                 })
             })
             .collect_vec();
-        let d_indices = indices.to_device()?;
+        let d_indices = indices.to_device_on(device_ctx)?;
         debug_assert_eq!(d_indices.len(), d_layers_ptr.len() * num_queries);
 
-        let mut d_out =
-            DeviceBuffer::<F>::with_capacity(d_layers_ptr.len() * num_queries * DIGEST_SIZE);
+        let mut d_out = DeviceBuffer::<F>::with_capacity_on(
+            d_layers_ptr.len() * num_queries * DIGEST_SIZE,
+            device_ctx,
+        );
         // SAFETY:
         // - d_out has size num_trees * depth * num_queries * DIGEST_SIZE in `F` elements
         // - d_layers_ptr is size `num_trees * depth` device pointers
@@ -363,10 +388,11 @@ impl<D: BatchQueryMerkle + Send + Sync + 'static> MerkleTreeGpu<F, D> {
                 &d_indices,
                 num_queries,
                 d_layers_ptr.len(),
+                device_ctx.stream.as_raw(),
             )
             .map_err(MerkleTreeError::QueryDigestLayers)?;
         }
-        let out = d_out.to_host()?;
+        let out = d_out.to_host_on(device_ctx)?;
         // Chunk up the array using D::reconstruct_from_f
         let res = (0..num_trees)
             .map(|tree_idx| {
@@ -394,6 +420,7 @@ impl<D: BatchQueryMerkle + Send + Sync + 'static> MerkleTreeGpu<F, D> {
     pub fn batch_query_merkle_proofs(
         trees: &[&Self],
         query_indices: &[usize],
+        device_ctx: &GpuDeviceCtx,
     ) -> Result<
         Vec<
             // per tree
@@ -407,7 +434,7 @@ impl<D: BatchQueryMerkle + Send + Sync + 'static> MerkleTreeGpu<F, D> {
     where
         D: MerkleProofQueryDigest,
     {
-        D::batch_query_merkle_proofs(trees, query_indices)
+        D::batch_query_merkle_proofs(trees, query_indices, device_ctx)
     }
 }
 
@@ -415,8 +442,9 @@ impl MerkleProofQueryDigest for Digest {
     fn batch_query_merkle_proofs(
         trees: &[&MerkleTreeGpu<F, Self>],
         query_indices: &[usize],
+        device_ctx: &GpuDeviceCtx,
     ) -> Result<Vec<Vec<Vec<Self>>>, MerkleTreeError> {
-        MerkleTreeGpu::<F, Self>::batch_query_proofs(trees, query_indices)
+        MerkleTreeGpu::<F, Self>::batch_query_proofs(trees, query_indices, device_ctx)
     }
 }
 
@@ -425,8 +453,9 @@ impl MerkleProofQueryDigest for Bn254Digest {
     fn batch_query_merkle_proofs(
         trees: &[&MerkleTreeGpu<F, Self>],
         query_indices: &[usize],
+        device_ctx: &GpuDeviceCtx,
     ) -> Result<Vec<Vec<Vec<Self>>>, MerkleTreeError> {
-        MerkleTreeGpu::<F, Self>::batch_query_proofs(trees, query_indices)
+        MerkleTreeGpu::<F, Self>::batch_query_proofs(trees, query_indices, device_ctx)
     }
 }
 
@@ -438,12 +467,13 @@ impl<D: Copy + Send + Sync + 'static> MerkleTreeGpu<EF, D> {
         matrix: DeviceMatrix<EF>,
         rows_per_query: usize,
         cache_backing_matrix: bool,
+        device_ctx: &GpuDeviceCtx,
     ) -> Result<Self, MerkleTreeError> {
         let height = matrix.height();
         assert!(height.is_power_of_two());
         let k = validate_merkle_rows_per_query(rows_per_query, height)?;
         let query_stride = height / rows_per_query;
-        let mut query_digest_layer = DeviceBuffer::<D>::with_capacity(query_stride);
+        let mut query_digest_layer = DeviceBuffer::<D>::with_capacity_on(query_stride, device_ctx);
         // SAFETY: query_digest_layer properly allocated
         unsafe {
             MH::compress_rows_ext(
@@ -452,6 +482,7 @@ impl<D: Copy + Send + Sync + 'static> MerkleTreeGpu<EF, D> {
                 matrix.width(),
                 query_stride,
                 k,
+                device_ctx,
             )
             .map_err(MerkleTreeError::CompressingRowHashesExt)?;
         }
@@ -461,25 +492,25 @@ impl<D: Copy + Send + Sync + 'static> MerkleTreeGpu<EF, D> {
         let mut digest_layers = vec![query_digest_layer];
         while digest_layers.last().unwrap().len() > 1 {
             let prev_layer = digest_layers.last().unwrap();
-            let mut layer = DeviceBuffer::<D>::with_capacity(prev_layer.len() / 2);
+            let mut layer = DeviceBuffer::<D>::with_capacity_on(prev_layer.len() / 2, device_ctx);
             let layer_len = layer.len();
             let layer_idx = digest_layers.len();
             // SAFETY:
             // - `layer` is properly allocated with half the size of `prev_layer` and does not
             //   overlap with it.
             unsafe {
-                MH::compress_layer(&mut layer, prev_layer, layer_len).map_err(|error| {
-                    MerkleTreeError::AdjacentCompressLayer {
+                MH::compress_layer(&mut layer, prev_layer, layer_len, device_ctx).map_err(
+                    |error| MerkleTreeError::AdjacentCompressLayer {
                         error,
                         layer: layer_idx,
-                    }
-                })?;
+                    },
+                )?;
             }
             digest_layers.push(layer);
         }
         let d_root = digest_layers.last().unwrap();
         assert_eq!(d_root.len(), 1, "Only one root is supported");
-        let root = d_root.to_host()?.pop().unwrap();
+        let root = d_root.to_host_on(device_ctx)?.pop().unwrap();
 
         Ok(Self {
             backing_matrix,
@@ -500,7 +531,13 @@ impl MerkleTreeGpu<EF, Digest> {
         matrix: DeviceMatrix<EF>,
         rows_per_query: usize,
         cache_backing_matrix: bool,
+        device_ctx: &GpuDeviceCtx,
     ) -> Result<Self, MerkleTreeError> {
-        Self::new_with_hash::<Poseidon2MerkleHash>(matrix, rows_per_query, cache_backing_matrix)
+        Self::new_with_hash::<Poseidon2MerkleHash>(
+            matrix,
+            rows_per_query,
+            cache_backing_matrix,
+            device_ctx,
+        )
     }
 }

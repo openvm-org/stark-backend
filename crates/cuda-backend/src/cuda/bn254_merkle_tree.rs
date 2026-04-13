@@ -9,6 +9,7 @@ use openvm_cuda_common::{
     common::{device_reset_epoch, get_device},
     d_buffer::DeviceBuffer,
     error::CudaError,
+    stream::{cudaStream_t, GpuDeviceCtx},
 };
 use openvm_stark_sdk::config::baby_bear_bn254_poseidon2::Bn254Scalar;
 
@@ -63,12 +64,14 @@ extern "C" {
         initial_rc: *const u64,  // [4*3*4] = 48 u64s
         partial_rc: *const u64,  // [56*4]  = 224 u64s
         terminal_rc: *const u64, // [4*3*4] = 48 u64s
+        stream: cudaStream_t,
     ) -> i32;
 
     fn _init_bn254_poseidon2_rc_w2(
         initial_rc: *const u64,  // [3*2*4] = 24 u64s
         partial_rc: *const u64,  // [50*4]  = 200 u64s
         terminal_rc: *const u64, // [3*2*4] = 24 u64s
+        stream: cudaStream_t,
     ) -> i32;
 
     fn _bn254_poseidon2_compressing_row_hashes(
@@ -77,6 +80,7 @@ extern "C" {
         width: usize,
         query_stride: usize,
         log_rows_per_query: usize,
+        stream: cudaStream_t,
     ) -> i32;
 
     fn _bn254_poseidon2_compressing_row_hashes_ext(
@@ -85,12 +89,14 @@ extern "C" {
         width: usize,
         query_stride: usize,
         log_rows_per_query: usize,
+        stream: cudaStream_t,
     ) -> i32;
 
     fn _bn254_poseidon2_adjacent_compress_layer(
         output: *mut Bn254FrRaw,
         prev_layer: *const Bn254FrRaw,
         output_size: usize,
+        stream: cudaStream_t,
     ) -> i32;
 
     fn _bn254_sponge_grind(
@@ -99,6 +105,7 @@ extern "C" {
         min_witness: u32,
         max_witness: u32,
         result: *mut u32,
+        stream: cudaStream_t,
     ) -> i32;
 }
 
@@ -265,10 +272,18 @@ pub fn init_bn254_poseidon2_rc() -> Result<(), CudaError> {
         return Ok(());
     }
 
+    let device_ctx = GpuDeviceCtx::for_device(device_key.0 as u32)?;
+
     // Width-3 constants (leaf hashing)
     let (initial, partial, terminal) = RC_W3_CONSTANTS.get_or_init(compute_bn254_rc_w3_constants);
-    let code =
-        unsafe { _init_bn254_poseidon2_rc(initial.as_ptr(), partial.as_ptr(), terminal.as_ptr()) };
+    let code = unsafe {
+        _init_bn254_poseidon2_rc(
+            initial.as_ptr(),
+            partial.as_ptr(),
+            terminal.as_ptr(),
+            device_ctx.stream.as_raw(),
+        )
+    };
     CudaError::from_result(code)?;
 
     // Width-2 constants (compression)
@@ -279,6 +294,7 @@ pub fn init_bn254_poseidon2_rc() -> Result<(), CudaError> {
             initial_w2.as_ptr(),
             partial_w2.as_ptr(),
             terminal_w2.as_ptr(),
+            device_ctx.stream.as_raw(),
         )
     };
     CudaError::from_result(code)?;
@@ -302,6 +318,7 @@ pub unsafe fn bn254_poseidon2_compressing_row_hashes(
     width: usize,
     query_stride: usize,
     log_rows_per_query: usize,
+    stream: cudaStream_t,
 ) -> Result<(), CudaError> {
     init_bn254_poseidon2_rc()?;
     super::merkle_tree::validate_merkle_log_rows_per_query(log_rows_per_query)?;
@@ -311,6 +328,7 @@ pub unsafe fn bn254_poseidon2_compressing_row_hashes(
         width,
         query_stride,
         log_rows_per_query,
+        stream,
     ))
 }
 
@@ -325,6 +343,7 @@ pub unsafe fn bn254_poseidon2_compressing_row_hashes_ext(
     width: usize,
     query_stride: usize,
     log_rows_per_query: usize,
+    stream: cudaStream_t,
 ) -> Result<(), CudaError> {
     init_bn254_poseidon2_rc()?;
     super::merkle_tree::validate_merkle_log_rows_per_query(log_rows_per_query)?;
@@ -334,6 +353,7 @@ pub unsafe fn bn254_poseidon2_compressing_row_hashes_ext(
         width,
         query_stride,
         log_rows_per_query,
+        stream,
     ))
 }
 
@@ -346,12 +366,14 @@ pub unsafe fn bn254_poseidon2_adjacent_compress_layer(
     output: &mut DeviceBuffer<Bn254Digest>,
     prev_layer: &DeviceBuffer<Bn254Digest>,
     output_size: usize,
+    stream: cudaStream_t,
 ) -> Result<(), CudaError> {
     init_bn254_poseidon2_rc()?;
     CudaError::from_result(_bn254_poseidon2_adjacent_compress_layer(
         output.as_mut_ptr().cast::<Bn254FrRaw>(),
         prev_layer.as_ptr().cast::<Bn254FrRaw>(),
         output_size,
+        stream,
     ))
 }
 
@@ -363,13 +385,14 @@ pub unsafe fn bn254_sponge_grind(
     init_state: *const DeviceBn254SpongeState,
     bits: u32,
     max_witness: u32,
+    device_ctx: &GpuDeviceCtx,
 ) -> Result<u32, crate::sponge::GrindError> {
     use openvm_cuda_common::copy::{MemCopyD2H, MemCopyH2D};
 
     init_bn254_poseidon2_rc()?;
     validate_gpu_grind_bits(bits as usize)?;
-    let mut d_result: DeviceBuffer<u32> = DeviceBuffer::with_capacity(1);
-    [u32::MAX].copy_to(&mut d_result)?;
+    let mut d_result: DeviceBuffer<u32> = DeviceBuffer::with_capacity_on(1, device_ctx);
+    [u32::MAX].copy_to_on(&mut d_result, device_ctx)?;
 
     for start in (0..=max_witness).step_by(1 << bits) {
         CudaError::from_result(_bn254_sponge_grind(
@@ -378,9 +401,10 @@ pub unsafe fn bn254_sponge_grind(
             start,
             max_witness,
             d_result.as_mut_ptr(),
+            device_ctx.stream.as_raw(),
         ))?;
 
-        let result = d_result.to_host()?[0];
+        let result = d_result.to_host_on(device_ctx)?[0];
         if result < u32::MAX {
             return Ok(result);
         }

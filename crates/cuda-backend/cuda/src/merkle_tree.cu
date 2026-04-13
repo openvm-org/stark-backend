@@ -216,8 +216,7 @@ extern "C" int _poseidon2_compressing_row_hashes(
     const Fp *matrix,
     size_t width,
     size_t query_stride,
-    size_t log_rows_per_query
-) {
+    size_t log_rows_per_query, cudaStream_t stream) {
     if (log_rows_per_query > 10) {
         return cudaErrorInvalidValue;
     }
@@ -229,7 +228,7 @@ extern "C" int _poseidon2_compressing_row_hashes(
     size_t shmem_bytes = CELLS_OUT * shared_stride * sizeof(Fp);
     auto height = query_stride << log_rows_per_query;
 
-    poseidon2_compressing_row_hashes_kernel<<<grid, block, shmem_bytes>>>(
+    poseidon2_compressing_row_hashes_kernel<<<grid, block, shmem_bytes, stream>>>(
         out, matrix, width, height, query_stride, log_rows_per_query
     );
     return CHECK_KERNEL();
@@ -240,8 +239,7 @@ extern "C" int _poseidon2_compressing_row_hashes_ext(
     const FpExt *matrix,
     size_t width,
     size_t query_stride,
-    size_t log_rows_per_query
-) {
+    size_t log_rows_per_query, cudaStream_t stream) {
     if (log_rows_per_query > 10) {
         return cudaErrorInvalidValue;
     }
@@ -253,7 +251,7 @@ extern "C" int _poseidon2_compressing_row_hashes_ext(
     size_t shmem_bytes = CELLS_OUT * shared_stride * sizeof(Fp);
     auto height = query_stride << log_rows_per_query;
 
-    poseidon2_compressing_row_hashes_ext_kernel<<<grid, block, shmem_bytes>>>(
+    poseidon2_compressing_row_hashes_ext_kernel<<<grid, block, shmem_bytes, stream>>>(
         out, matrix, width, height, query_stride, log_rows_per_query
     );
     return CHECK_KERNEL();
@@ -263,10 +261,9 @@ extern "C" int _poseidon2_strided_compress_layer(
     digest_t *output,
     const digest_t *prev_layer,
     size_t output_size,
-    size_t stride
-) {
+    size_t stride, cudaStream_t stream) {
     auto [grid, block] = kernel_launch_params(output_size);
-    poseidon2_strided_compress_layer_kernel<<<grid, block>>>(
+    poseidon2_strided_compress_layer_kernel<<<grid, block, 0, stream>>>(
         output, prev_layer, output_size, stride
     );
     return CHECK_KERNEL();
@@ -277,10 +274,9 @@ extern "C" int _poseidon2_strided_compress_layer(
 extern "C" int _poseidon2_adjacent_compress_layer(
     digest_t *output,
     const digest_t *prev_layer,
-    size_t output_size
-) {
+    size_t output_size, cudaStream_t stream) {
     auto [grid, block] = kernel_launch_params(output_size);
-    poseidon2_strided_compress_layer_kernel<<<grid, block>>>(output, prev_layer, output_size, 1);
+    poseidon2_strided_compress_layer_kernel<<<grid, block, 0, stream>>>(output, prev_layer, output_size, 1);
     return CHECK_KERNEL();
 }
 
@@ -289,8 +285,7 @@ extern "C" int _query_digest_layers(
     const uint64_t *d_layers_ptr,
     uint64_t *d_indices,
     uint64_t num_query,
-    uint64_t num_layer
-) {
+    uint64_t num_layer, cudaStream_t stream) {
     if (num_query == 0 || num_layer == 0) {
         return cudaSuccess;
     }
@@ -302,7 +297,7 @@ extern "C" int _query_digest_layers(
 
     auto block = QUERY_DIGEST_THREADS;
     dim3 grid = dim3(div_ceil(num_layer * DIGEST_WIDTH, block), num_query);
-    query_digest_layers<<<grid, block>>>(
+    query_digest_layers<<<grid, block, 0, stream>>>(
         d_digest_matrix, d_layers_ptr, d_indices, num_query, num_layer
     );
     return CHECK_KERNEL();

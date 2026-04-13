@@ -28,15 +28,19 @@ pub fn device_reset_epoch() -> u64 {
     DEVICE_RESET_EPOCH.load(Ordering::Acquire)
 }
 
-pub fn set_device() -> Result<i32, CudaError> {
-    let mut device = 0;
+pub fn set_device_by_id(device: i32) -> Result<(), CudaError> {
+    assert!(device >= 0);
     unsafe {
-        // 1. Create a context
-        check(cudaFree(std::ptr::null_mut()))?;
-        // 2. Set the device
-        check(cudaGetDevice(&mut device))?;
         check(cudaSetDevice(device))?;
+        // Force primary-context initialization on the selected device.
+        check(cudaFree(std::ptr::null_mut()))?;
     }
+    Ok(())
+}
+
+pub fn set_device() -> Result<i32, CudaError> {
+    let device = get_device()?;
+    set_device_by_id(device)?;
     Ok(device)
 }
 

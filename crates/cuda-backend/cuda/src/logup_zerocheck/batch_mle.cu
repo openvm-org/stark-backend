@@ -358,7 +358,8 @@ __global__ void logup_batch_mle_kernel(
 extern "C" size_t _zerocheck_batch_mle_intermediates_buffer_size(
     uint32_t buffer_size,
     uint32_t num_x,
-    uint32_t num_y
+    uint32_t num_y,
+    cudaStream_t stream
 ) {
     size_t height = static_cast<size_t>(num_x) * num_y;
     return height * buffer_size;
@@ -368,7 +369,8 @@ extern "C" size_t _zerocheck_batch_mle_intermediates_buffer_size(
 extern "C" size_t _logup_batch_mle_intermediates_buffer_size(
     uint32_t buffer_size,
     uint32_t num_x,
-    uint32_t num_y
+    uint32_t num_y,
+    cudaStream_t stream
 ) {
     size_t height = static_cast<size_t>(num_x) * num_y;
     return height * buffer_size;
@@ -385,7 +387,8 @@ extern "C" int _zerocheck_batch_eval_mle(
     uint32_t num_blocks,
     uint32_t num_x,
     uint32_t num_airs,
-    uint32_t threads_per_block
+    uint32_t threads_per_block,
+    cudaStream_t stream
 ) {
     if (!valid_grid_y_dim(num_x)) {
         return cudaErrorInvalidValue;
@@ -394,7 +397,7 @@ extern "C" int _zerocheck_batch_eval_mle(
     dim3 block(threads_per_block);
     size_t shmem_bytes = div_ceil(block.x, WARP_SIZE) * sizeof(FpExt);
 
-    zerocheck_batch_mle_kernel<<<grid, block, shmem_bytes>>>(
+    zerocheck_batch_mle_kernel<<<grid, block, shmem_bytes, stream>>>(
         tmp_sums_buffer, block_ctxs, zc_ctxs, lambda_pows, lambda_len
     );
     int err = CHECK_KERNEL();
@@ -407,7 +410,7 @@ extern "C" int _zerocheck_batch_eval_mle(
     size_t reduce_shmem = std::max(1u, reduce_warps) * sizeof(FpExt);
 
     dim3 reduce_grid(num_airs, num_x);
-    sumcheck::batched_final_reduce_block_sums<<<reduce_grid, reduce_block, reduce_shmem>>>(
+    sumcheck::batched_final_reduce_block_sums<<<reduce_grid, reduce_block, reduce_shmem, stream>>>(
         tmp_sums_buffer, output, air_block_offsets, num_x
     );
 
@@ -423,7 +426,8 @@ extern "C" int _logup_batch_eval_mle(
     uint32_t num_blocks,
     uint32_t num_x,
     uint32_t num_airs,
-    uint32_t threads_per_block
+    uint32_t threads_per_block,
+    cudaStream_t stream
 ) {
     if (!valid_frac_grid_y_dim(num_x)) {
         return cudaErrorInvalidValue;
@@ -432,7 +436,7 @@ extern "C" int _logup_batch_eval_mle(
     dim3 block(threads_per_block);
     size_t shmem_bytes = div_ceil(block.x, WARP_SIZE) * sizeof(FpExt);
 
-    logup_batch_mle_kernel<<<grid, block, shmem_bytes>>>(tmp_sums_buffer, block_ctxs, logup_ctxs);
+    logup_batch_mle_kernel<<<grid, block, shmem_bytes, stream>>>(tmp_sums_buffer, block_ctxs, logup_ctxs);
     int err = CHECK_KERNEL();
     if (err != 0)
         return err;
@@ -444,7 +448,7 @@ extern "C" int _logup_batch_eval_mle(
     size_t reduce_shmem = std::max(1u, reduce_warps) * sizeof(FpExt);
 
     dim3 reduce_grid(num_airs, 2 * num_x);
-    sumcheck::batched_final_reduce_block_sums<<<reduce_grid, reduce_block, reduce_shmem>>>(
+    sumcheck::batched_final_reduce_block_sums<<<reduce_grid, reduce_block, reduce_shmem, stream>>>(
         reinterpret_cast<FpExt *>(tmp_sums_buffer),
         reinterpret_cast<FpExt *>(output),
         air_block_offsets,

@@ -68,7 +68,7 @@ inline std::pair<dim3, dim3> eval_constraints_launch_params(
 }
 
 template <bool COSET_PARALLEL>
-inline uint32_t temp_sums_buffer_size(
+inline size_t temp_sums_buffer_size(
     uint32_t buffer_size,
     uint32_t skip_domain,
     uint32_t num_x,
@@ -87,11 +87,11 @@ inline uint32_t temp_sums_buffer_size(
         threads_per_block
     );
     // Output layout: [num_blocks][num_cosets * skip_domain]
-    return grid.x * num_cosets * skip_domain;
+    return static_cast<size_t>(grid.x) * num_cosets * skip_domain;
 }
 
 template <bool COSET_PARALLEL>
-inline uint32_t intermediates_buffer_size(
+inline size_t intermediates_buffer_size(
     uint32_t buffer_size,
     uint32_t skip_domain,
     uint32_t num_x,
@@ -113,7 +113,7 @@ inline uint32_t intermediates_buffer_size(
         threads_per_block
     );
     // Layout: [buffer_size][num_threads][num_cosets]
-    return grid.x * block.x * buffer_size * num_cosets;
+    return static_cast<size_t>(grid.x) * block.x * buffer_size * num_cosets;
 }
 
 } // namespace round0_config_impl

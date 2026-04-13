@@ -63,30 +63,30 @@ __global__ void poseidon2_bench_kernel(T* states, size_t n, int reps) {
 // Extern "C" Wrappers
 // ============================================================================
 
-extern "C" int init_poseidon2_bb(void* out, const uint32_t* raw_data, size_t n) {
+extern "C" int init_poseidon2_bb(void* out, const uint32_t* raw_data, size_t n, cudaStream_t stream) {
     int grid_size;
     dim3 block = get_p2_launch_config(n, grid_size);
-    poseidon2_init_kernel<Fp><<<grid_size, block>>>(static_cast<Fp*>(out), raw_data, n);
+    poseidon2_init_kernel<Fp><<<grid_size, block, 0, stream>>>(static_cast<Fp*>(out), raw_data, n);
     return cudaGetLastError();
 }
 
-extern "C" int run_poseidon2_bb(void* states, size_t n, int reps) {
+extern "C" int run_poseidon2_bb(void* states, size_t n, int reps, cudaStream_t stream) {
     int grid_size;
     dim3 block = get_p2_launch_config(n, grid_size);
-    poseidon2_bench_kernel<Fp, poseidon2::poseidon2_mix><<<grid_size, block>>>(static_cast<Fp*>(states), n, reps);
+    poseidon2_bench_kernel<Fp, poseidon2::poseidon2_mix><<<grid_size, block, 0, stream>>>(static_cast<Fp*>(states), n, reps);
     return cudaGetLastError();
 }
 
-extern "C" int init_poseidon2_kb(void* out, const uint32_t* raw_data, size_t n) {
+extern "C" int init_poseidon2_kb(void* out, const uint32_t* raw_data, size_t n, cudaStream_t stream) {
     int grid_size;
     dim3 block = get_p2_launch_config(n, grid_size);
-    poseidon2_init_kernel<Kb><<<grid_size, block>>>(static_cast<Kb*>(out), raw_data, n);
+    poseidon2_init_kernel<Kb><<<grid_size, block, 0, stream>>>(static_cast<Kb*>(out), raw_data, n);
     return cudaGetLastError();
 }
 
-extern "C" int run_poseidon2_kb(void* states, size_t n, int reps) {
+extern "C" int run_poseidon2_kb(void* states, size_t n, int reps, cudaStream_t stream) {
     int grid_size;
     dim3 block = get_p2_launch_config(n, grid_size);
-    poseidon2_bench_kernel<Kb, kb_poseidon2::poseidon2_mix><<<grid_size, block>>>(static_cast<Kb*>(states), n, reps);
+    poseidon2_bench_kernel<Kb, kb_poseidon2::poseidon2_mix><<<grid_size, block, 0, stream>>>(static_cast<Kb*>(states), n, reps);
     return cudaGetLastError();
 }

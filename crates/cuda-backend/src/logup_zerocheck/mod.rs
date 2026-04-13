@@ -5,7 +5,7 @@
 //! new allocations happen before the current stream is synchronized, physical peak memory can
 //! temporarily include both the old and new buffers even though MemTracker only sees the logical
 //! max. Callers that care about physical peak should ensure a current-stream sync after use (e.g.
-//! by calling `to_host()` on outputs or `current_stream_sync()`).
+//! by calling `to_host_on()` on outputs or synchronizing the owning stream).
 
 use std::{
     cmp::max,
@@ -20,6 +20,7 @@ use openvm_cuda_common::{
     d_buffer::DeviceBuffer,
     error::MemCopyError,
     memory_manager::MemTracker,
+    stream::GpuDeviceCtx,
 };
 use openvm_stark_backend::{
     air_builders::symbolic::SymbolicConstraints,
@@ -107,10 +108,11 @@ pub(crate) fn air_width_for_mat(need_rot: bool, mat_width: usize) -> u32 {
 pub fn prove_zerocheck_and_logup_gpu<HS, TS>(
     transcript: &mut TS,
     mpk: &DeviceMultiStarkProvingKey<GenericGpuBackend<HS>>,
-    ctx: &ProvingContext<GenericGpuBackend<HS>>,
+    proving_ctx: &ProvingContext<GenericGpuBackend<HS>>,
     save_memory: bool,
     monomial_num_y_threshold: u32,
     sm_count: u32,
+    device_ctx: &GpuDeviceCtx,
 ) -> Result<(GkrProof<HS::SC>, BatchConstraintProof<HS::SC>, Vec<EF>), LogupZerocheckError>
 where
     HS: GpuHashScheme,
@@ -119,14 +121,15 @@ where
     let logup_gkr_span = info_span!("prover.rap_constraints.logup_gkr", phase = "prover").entered();
     let l_skip = mpk.params.l_skip;
     let constraint_degree = mpk.max_constraint_degree;
-    let num_traces = ctx.per_trace.len();
+    let num_traces = proving_ctx.per_trace.len();
 
     // Traces are sorted
-    let n_max = log2_strict_usize(ctx.per_trace[0].1.common_main.height()).saturating_sub(l_skip);
+    let n_max =
+        log2_strict_usize(proving_ctx.per_trace[0].1.common_main.height()).saturating_sub(l_skip);
     // Gather interactions metadata, including interactions stacked layout which depends on trace
     // heights
     let mut total_interactions = 0u64;
-    let interactions_meta: Vec<_> = ctx
+    let interactions_meta: Vec<_> = proving_ctx
         .per_trace
         .iter()
         .map(|(air_idx, air_ctx)| {
@@ -148,7 +151,7 @@ where
 
     // Grind to increase soundness of random sampling for LogUp
     let logup_pow_witness = transcript
-        .grind_gpu(mpk.params.logup.pow_bits)
+        .grind_gpu(mpk.params.logup.pow_bits, device_ctx)
         .map_err(LogupZerocheckError::Grind)?;
     let alpha_logup = transcript.sample_ext();
     let beta_logup = transcript.sample_ext();
@@ -157,7 +160,7 @@ where
     let has_interactions = !interactions_layout.sorted_cols.is_empty();
     let mut prover = LogupZerocheckGpu::new(
         mpk,
-        ctx,
+        proving_ctx,
         n_logup,
         interactions_layout,
         alpha_logup,
@@ -165,6 +168,7 @@ where
         save_memory,
         monomial_num_y_threshold,
         sm_count,
+        device_ctx,
     )?;
     let n_global = prover.n_global;
 
@@ -177,11 +181,12 @@ where
         log_gkr_input_evals(
             &prover.trace_interactions,
             mpk,
-            ctx,
+            proving_ctx,
             l_skip,
             alpha_logup,
             &prover.d_challenges,
             total_leaves,
+            device_ctx,
         )?
     } else {
         (DeviceBuffer::new(), EF::ZERO)
@@ -202,7 +207,7 @@ where
     prover.mem.emit_metrics_with_label("prover.gkr_input_evals");
 
     let (frac_sum_proof, mut xi) =
-        fractional_sumcheck_gpu(transcript, inputs, alpha, true, &mut prover.mem)?;
+        fractional_sumcheck_gpu(transcript, inputs, alpha, true, &mut prover.mem, device_ctx)?;
     while xi.len() != l_skip + n_global {
         xi.push(transcript.sample_ext());
     }
@@ -221,7 +226,7 @@ where
     let lambda = transcript.sample_ext();
     debug!(%lambda);
 
-    let sp_0_polys = prover.sumcheck_uni_round0_polys(ctx, lambda)?;
+    let sp_0_polys = prover.sumcheck_uni_round0_polys(proving_ctx, lambda)?;
     let s_0_cpu_span = info_span!("s'_0 -> s_0 cpu interpolations").entered();
     let sp_0_deg = sumcheck_round0_deg(l_skip, constraint_degree);
     let s_deg = constraint_degree + 1;
@@ -330,7 +335,7 @@ where
     prover.prev_s_eval = s_0_poly.eval_at_point(r_0);
     debug!("s_0(r_0) = {}", prover.prev_s_eval);
 
-    prover.fold_ple_evals(ctx, r_0)?;
+    prover.fold_ple_evals(proving_ctx, r_0)?;
     drop(round0_span);
 
     // Sumcheck rounds:
@@ -366,7 +371,7 @@ where
 
     let column_openings = prover.into_column_openings()?;
 
-    let need_rot_per_trace = ctx
+    let need_rot_per_trace = proving_ctx
         .per_trace
         .iter()
         .map(|(air_idx, _)| mpk.per_air[*air_idx].vk.params.need_rot)
@@ -465,13 +470,14 @@ pub struct LogupZerocheckGpu<'a, HS: GpuHashScheme> {
     gkr_mem_contribution: usize,
     /// Memory limit for batch MLE intermediate buffers (set after GKR input eval)
     memory_limit_bytes: usize,
+    device_ctx: GpuDeviceCtx,
 }
 
 impl<'a, HS: GpuHashScheme> LogupZerocheckGpu<'a, HS> {
     #[allow(clippy::too_many_arguments)]
     fn new(
         pk: &'a DeviceMultiStarkProvingKey<GenericGpuBackend<HS>>,
-        ctx: &ProvingContext<GenericGpuBackend<HS>>,
+        proving_ctx: &ProvingContext<GenericGpuBackend<HS>>,
         n_logup: usize,
         interactions_layout: StackedLayout,
         alpha_logup: EF,
@@ -479,13 +485,14 @@ impl<'a, HS: GpuHashScheme> LogupZerocheckGpu<'a, HS> {
         save_memory: bool,
         monomial_num_y_threshold: u32,
         sm_count: u32,
+        device_ctx: &GpuDeviceCtx,
     ) -> Result<Self, LogupZerocheckError> {
         let mem = MemTracker::start("prover.logup_zerocheck_prover");
         let l_skip = pk.params.l_skip;
         let omega_skip = F::two_adic_generator(l_skip);
         let omega_skip_pows = omega_skip.powers().take(1 << l_skip).collect_vec();
-        let d_omega_skip_pows = omega_skip_pows.to_device()?;
-        let num_airs_present = ctx.per_trace.len();
+        let d_omega_skip_pows = omega_skip_pows.to_device_on(device_ctx)?;
+        let num_airs_present = proving_ctx.per_trace.len();
 
         let constraint_degree = pk.max_constraint_degree;
 
@@ -500,10 +507,10 @@ impl<'a, HS: GpuHashScheme> LogupZerocheckGpu<'a, HS> {
             .take(max_interaction_length + 1)
             .collect_vec();
         let challenges = [&[alpha_logup], &beta_pows[..]].concat();
-        let d_challenges = challenges.to_device()?;
-        let d_beta_pows = beta_pows.to_device()?;
+        let d_challenges = challenges.to_device_on(device_ctx)?;
+        let d_beta_pows = beta_pows.to_device_on(device_ctx)?;
 
-        let n_per_trace: Vec<isize> = ctx
+        let n_per_trace: Vec<isize> = proving_ctx
             .common_main_traces()
             .map(|(_, t)| log2_strict_usize(t.height()) as isize - l_skip as isize)
             .collect();
@@ -526,9 +533,9 @@ impl<'a, HS: GpuHashScheme> LogupZerocheckGpu<'a, HS> {
             .unwrap_or(0);
 
         // Collect interaction metadata for GPU execution (evaluations still run on CPU for now).
-        let trace_interactions = collect_trace_interactions(pk, ctx, &interactions_layout);
+        let trace_interactions = collect_trace_interactions(pk, proving_ctx, &interactions_layout);
 
-        let needs_next_per_trace = ctx
+        let needs_next_per_trace = proving_ctx
             .per_trace
             .iter()
             .map(|(air_idx, _)| pk.per_air[*air_idx].vk.params.need_rot)
@@ -560,18 +567,18 @@ impl<'a, HS: GpuHashScheme> LogupZerocheckGpu<'a, HS> {
             sels_per_trace_base: vec![],
             mat_evals_per_trace: vec![],
             sels_per_trace: vec![],
-            public_values_per_trace: ctx
+            public_values_per_trace: proving_ctx
                 .per_trace
                 .iter()
                 .map(|(_, air_ctx)| {
                     if air_ctx.public_values.is_empty() {
                         Ok(DeviceBuffer::new())
                     } else {
-                        air_ctx.public_values.to_device()
+                        air_ctx.public_values.to_device_on(device_ctx)
                     }
                 })
                 .collect::<Result<Vec<_>, _>>()?,
-            air_indices_per_trace: ctx
+            air_indices_per_trace: proving_ctx
                 .per_trace
                 .iter()
                 .map(|(air_idx, _)| *air_idx)
@@ -589,6 +596,7 @@ impl<'a, HS: GpuHashScheme> LogupZerocheckGpu<'a, HS> {
             gkr_mem_contribution: 0,
             memory_limit_bytes: 0, // Set after GKR input eval
             monomial_num_y_threshold,
+            device_ctx: device_ctx.clone(),
         })
     }
 
@@ -608,7 +616,7 @@ impl<'a, HS: GpuHashScheme> LogupZerocheckGpu<'a, HS> {
         let xi = &self.xi;
         let h_lambda_pows = lambda.powers().take(self.max_num_constraints).collect_vec();
         self.lambda_pows = Some(if !h_lambda_pows.is_empty() {
-            h_lambda_pows.to_device()?
+            h_lambda_pows.to_device_on(&self.device_ctx)?
         } else {
             DeviceBuffer::new()
         });
@@ -617,8 +625,13 @@ impl<'a, HS: GpuHashScheme> LogupZerocheckGpu<'a, HS> {
         for (air_idx, air_pk) in self.pk.per_air.iter().enumerate() {
             if air_pk.other_data.zerocheck_monomials.is_some() {
                 self.lambda_combinations[air_idx] = Some(
-                    compute_lambda_combinations(self.pk, air_idx, lambda_pows_ref)
-                        .map_err(LogupZerocheckError::LambdaCombinations)?,
+                    compute_lambda_combinations(
+                        self.pk,
+                        air_idx,
+                        lambda_pows_ref,
+                        &self.device_ctx,
+                    )
+                    .map_err(LogupZerocheckError::LambdaCombinations)?,
                 );
             }
         }
@@ -665,7 +678,7 @@ impl<'a, HS: GpuHashScheme> LogupZerocheckGpu<'a, HS> {
                 if eq_3bs.is_empty() {
                     Ok(DeviceBuffer::new())
                 } else {
-                    eq_3bs.to_device()
+                    eq_3bs.to_device_on(&self.device_ctx)
                 }
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -684,6 +697,7 @@ impl<'a, HS: GpuHashScheme> LogupZerocheckGpu<'a, HS> {
                         &self.d_eq_3b_per_trace[trace_idx],
                         &self.eq_3b_per_trace[trace_idx],
                         &self.beta_pows,
+                        &self.device_ctx,
                     )
                     .map_err(LogupZerocheckError::LogupCombinations)?,
                 );
@@ -695,9 +709,12 @@ impl<'a, HS: GpuHashScheme> LogupZerocheckGpu<'a, HS> {
         for &n in &self.n_per_trace {
             let n_lift = n.max(0) as usize;
             if let Entry::Vacant(entry) = self.eq_xis.entry(n_lift) {
-                let layers =
-                    EqEvalLayers::new_rev(n_lift, xi[l_skip..l_skip + n_lift].iter().rev())
-                        .map_err(LogupZerocheckError::EqEvalLayers)?;
+                let layers = EqEvalLayers::new_rev(
+                    n_lift,
+                    xi[l_skip..l_skip + n_lift].iter().rev(),
+                    &self.device_ctx,
+                )
+                .map_err(LogupZerocheckError::EqEvalLayers)?;
                 entry.insert(layers);
             }
         }
@@ -712,7 +729,7 @@ impl<'a, HS: GpuHashScheme> LogupZerocheckGpu<'a, HS> {
                 cols[height..2 * height - 1].fill(F::ONE); // is_transition
                 cols[0] = F::ONE; // is_first
                 cols[2 * height + height - 1] = F::ONE; // is_last
-                let d_cols = cols.to_device()?;
+                let d_cols = cols.to_device_on(&self.device_ctx)?;
                 Ok(DeviceMatrix::new(Arc::new(d_cols), height, 3))
             })
             .collect::<Result<Vec<_>, MemCopyError>>()?;
@@ -765,7 +782,7 @@ impl<'a, HS: GpuHashScheme> LogupZerocheckGpu<'a, HS> {
                 main_parts.push(committed.trace.buffer().as_ptr());
             }
             main_parts.push(air_ctx.common_main.buffer().as_ptr());
-            let d_main_parts = main_parts.to_device()?;
+            let d_main_parts = main_parts.to_device_on(&self.device_ctx)?;
 
             let n_lift = n.max(0) as usize;
             let eq_xi_tree = &self.eq_xis[&n_lift];
@@ -787,9 +804,10 @@ impl<'a, HS: GpuHashScheme> LogupZerocheckGpu<'a, HS> {
                 num_cosets_zc as u32,
                 omega_root,
                 max_temp_bytes,
+                &self.device_ctx,
             )?;
             if !sum_buffer.is_empty() {
-                let q_evals = sum_buffer.to_host()?;
+                let q_evals = sum_buffer.to_host_on(&self.device_ctx)?;
                 let q = {
                     // Make q_evals row-major, with columns <> cosets
                     let mut values = EF::zero_vec(num_cosets_zc << l_skip);
@@ -843,9 +861,10 @@ impl<'a, HS: GpuHashScheme> LogupZerocheckGpu<'a, HS> {
                 num_cosets_logup as u32,
                 omega_root,
                 max_temp_bytes,
+                &self.device_ctx,
             )?;
             if !sum.is_empty() {
-                let evals = sum.to_host()?;
+                let evals = sum.to_host_on(&self.device_ctx)?;
                 let (mut numer, denom): (Vec<EF>, Vec<EF>) =
                     evals.into_iter().map(|frac| (frac.p, frac.q)).unzip();
                 if n.is_negative() {
@@ -893,7 +912,7 @@ impl<'a, HS: GpuHashScheme> LogupZerocheckGpu<'a, HS> {
         let l_skip = self.l_skip;
         let inv_lagrange_denoms_r0 =
             compute_barycentric_inv_lagrange_denoms(l_skip, &self.omega_skip_pows, r_0);
-        let d_inv_lagrange_denoms_r0 = inv_lagrange_denoms_r0.to_device()?;
+        let d_inv_lagrange_denoms_r0 = inv_lagrange_denoms_r0.to_device_on(&self.device_ctx)?;
 
         let mut mem_limit = self.gkr_mem_contribution;
         // GPU folding for mat_evals_per_trace
@@ -914,6 +933,7 @@ impl<'a, HS: GpuHashScheme> LogupZerocheckGpu<'a, HS> {
                         trace,
                         &d_inv_lagrange_denoms_r0,
                         need_rot,
+                        &self.device_ctx,
                     )?;
                     results.push(folded);
                 }
@@ -927,6 +947,7 @@ impl<'a, HS: GpuHashScheme> LogupZerocheckGpu<'a, HS> {
                         trace,
                         &d_inv_lagrange_denoms_r0,
                         need_rot,
+                        &self.device_ctx,
                     )?;
                     results.push(folded);
                 }
@@ -939,6 +960,7 @@ impl<'a, HS: GpuHashScheme> LogupZerocheckGpu<'a, HS> {
                     trace,
                     &d_inv_lagrange_denoms_r0,
                     need_rot,
+                    &self.device_ctx,
                 )?;
                 mem_limit = mem_limit.saturating_sub(folded.buffer().len() * size_of::<EF>());
                 results.push(folded);
@@ -970,7 +992,7 @@ impl<'a, HS: GpuHashScheme> LogupZerocheckGpu<'a, HS> {
                 let omega = F::two_adic_generator(l);
                 let is_first = eval_eq_uni_at_one(l, r);
                 let is_last = eval_eq_uni_at_one(l, r * omega);
-                let folded_buf = DeviceBuffer::<EF>::with_capacity(num_x * 3);
+                let folded_buf = DeviceBuffer::<EF>::with_capacity_on(num_x * 3, &self.device_ctx);
                 unsafe {
                     fold_selectors_round0(
                         folded_buf.as_mut_ptr(),
@@ -978,6 +1000,7 @@ impl<'a, HS: GpuHashScheme> LogupZerocheckGpu<'a, HS> {
                         is_first,
                         is_last,
                         num_x,
+                        self.device_ctx.stream.as_raw(),
                     )
                     .map_err(LogupZerocheckError::FoldSelectorsRound0)?;
                 }
@@ -1076,7 +1099,7 @@ impl<'a, HS: GpuHashScheme> LogupZerocheckGpu<'a, HS> {
                             air_width: air_width_for_mat(need_rot, m.width()),
                         })
                         .collect_vec();
-                    let main_ptrs_dev = main_ptrs.to_device()?;
+                    let main_ptrs_dev = main_ptrs.to_device_on(&self.device_ctx)?;
 
                     late_eval.push(TraceCtx {
                         trace_idx,
@@ -1127,11 +1150,21 @@ impl<'a, HS: GpuHashScheme> LogupZerocheckGpu<'a, HS> {
                         })
                         .collect_vec(),
                 );
-                let interpolated = DeviceMatrix::<EF>::with_capacity(sp_deg * num_y, columns.len());
-                let d_columns = columns.to_device()?;
+                let interpolated = DeviceMatrix::<EF>::with_capacity_on(
+                    sp_deg * num_y,
+                    columns.len(),
+                    &self.device_ctx,
+                );
+                let d_columns = columns.to_device_on(&self.device_ctx)?;
                 unsafe {
-                    interpolate_columns_gpu(interpolated.buffer(), &d_columns, sp_deg, num_y)
-                        .map_err(|e| LogupZerocheckError::InterpolateColumns(e.into()))?;
+                    interpolate_columns_gpu(
+                        interpolated.buffer(),
+                        &d_columns,
+                        sp_deg,
+                        num_y,
+                        self.device_ctx.stream.as_raw(),
+                    )
+                    .map_err(|e| LogupZerocheckError::InterpolateColumns(e.into()))?;
                 }
 
                 let interpolated_height = interpolated.height();
@@ -1173,7 +1206,7 @@ impl<'a, HS: GpuHashScheme> LogupZerocheckGpu<'a, HS> {
                     })
                     .collect_vec();
                 debug_assert_eq!(widths_so_far, interpolated.width());
-                let main_ptrs_dev = main_ptrs.to_device()?;
+                let main_ptrs_dev = main_ptrs.to_device_on(&self.device_ctx)?;
 
                 _keepalive_interpolated.push(interpolated);
                 let eq_xi_ptr = eq_xi_tree.get_ptr(log_num_y);
@@ -1209,12 +1242,16 @@ impl<'a, HS: GpuHashScheme> LogupZerocheckGpu<'a, HS> {
                         .expect("missing logup monomial combinations for late trace")
                 })
                 .collect();
-            let batch =
-                LogupMonomialBatch::new(late_logup_traces.iter().copied(), self.pk, &logup_combs)?;
+            let batch = LogupMonomialBatch::new(
+                late_logup_traces.iter().copied(),
+                self.pk,
+                &logup_combs,
+                &self.device_ctx,
+            )?;
             let out = batch
                 .evaluate(1)
                 .map_err(LogupZerocheckError::MleInteractionEval)?;
-            let host = out.to_host()?;
+            let host = out.to_host_on(&self.device_ctx)?;
             for (i, trace_idx) in batch.trace_indices().enumerate() {
                 self.logup_tilde_evals[trace_idx][0] = host[i].p * late_logup_traces[i].norm_factor;
                 self.logup_tilde_evals[trace_idx][1] = host[i].q;
@@ -1229,11 +1266,16 @@ impl<'a, HS: GpuHashScheme> LogupZerocheckGpu<'a, HS> {
                 .iter()
                 .map(|t| self.lambda_combinations[t.air_idx].as_ref().unwrap())
                 .collect();
-            let batch = ZerocheckMonomialBatch::new(late_mono_traces, self.pk, &lambda_combs)?;
+            let batch = ZerocheckMonomialBatch::new(
+                late_mono_traces,
+                self.pk,
+                &lambda_combs,
+                &self.device_ctx,
+            )?;
             let out = batch
                 .evaluate(1)
                 .map_err(LogupZerocheckError::MleConstraintEval)?;
-            let host = out.to_host()?;
+            let host = out.to_host_on(&self.device_ctx)?;
             for (i, trace_idx) in batch.trace_indices().enumerate() {
                 self.zerocheck_tilde_evals[trace_idx] = host[i];
                 // zc_out not set for num_x=1, handled from tilde_eval in compute_batch_s
@@ -1252,6 +1294,7 @@ impl<'a, HS: GpuHashScheme> LogupZerocheckGpu<'a, HS> {
                 &mut logup_out,
                 &mut self.logup_tilde_evals,
                 self.memory_limit_bytes,
+                &self.device_ctx,
             )
             .map_err(LogupZerocheckError::MleInteractionEval)?;
         }
@@ -1282,6 +1325,7 @@ impl<'a, HS: GpuHashScheme> LogupZerocheckGpu<'a, HS> {
                 sp_deg as u32,
                 &mut zc_out,
                 self.memory_limit_bytes,
+                &self.device_ctx,
             )
             .map_err(LogupZerocheckError::MleConstraintEval)?;
         }
@@ -1299,11 +1343,12 @@ impl<'a, HS: GpuHashScheme> LogupZerocheckGpu<'a, HS> {
                 self.sm_count,
                 sp_deg as u32,
                 None,
+                &self.device_ctx,
             )?;
             let out = batch
                 .evaluate(sp_deg as u32)
                 .map_err(LogupZerocheckError::MleConstraintEval)?;
-            let host = out.to_host()?;
+            let host = out.to_host_on(&self.device_ctx)?;
             for (i, trace_idx) in batch.trace_indices().enumerate() {
                 zc_out[trace_idx].copy_from_slice(&host[(i * sp_deg)..((i + 1) * sp_deg)]);
             }
@@ -1316,11 +1361,16 @@ impl<'a, HS: GpuHashScheme> LogupZerocheckGpu<'a, HS> {
                 .iter()
                 .map(|t| self.lambda_combinations[t.air_idx].as_ref().unwrap())
                 .collect();
-            let batch = ZerocheckMonomialBatch::new(low_mono_traces, self.pk, &lambda_combs)?;
+            let batch = ZerocheckMonomialBatch::new(
+                low_mono_traces,
+                self.pk,
+                &lambda_combs,
+                &self.device_ctx,
+            )?;
             let out = batch
                 .evaluate(sp_deg as u32)
                 .map_err(LogupZerocheckError::MleConstraintEval)?;
-            let host = out.to_host()?;
+            let host = out.to_host_on(&self.device_ctx)?;
             for (i, trace_idx) in batch.trace_indices().enumerate() {
                 zc_out[trace_idx].copy_from_slice(&host[(i * sp_deg)..((i + 1) * sp_deg)]);
             }
@@ -1419,7 +1469,8 @@ impl<'a, HS: GpuHashScheme> LogupZerocheckGpu<'a, HS> {
                         let width = mat.width();
                         let output_height = height >> 1;
                         max_output_cells = max(max_output_cells, output_height * width);
-                        let output_mat = DeviceMatrix::<EF>::with_capacity(output_height, width);
+                        let output_mat =
+                            DeviceMatrix::<EF>::with_capacity_on(output_height, width, &self.device_ctx);
                         (output_height.ilog2() as u8, width as u32, output_mat)
                     })
                     .multiunzip();
@@ -1434,10 +1485,10 @@ impl<'a, HS: GpuHashScheme> LogupZerocheckGpu<'a, HS> {
                 .map(|mat| mat.buffer().as_mut_ptr())
                 .collect_vec();
 
-            let d_input_ptrs = input_ptrs.to_device()?;
-            let d_output_ptrs = output_ptrs.to_device()?;
-            let d_log_output_heights = log_output_heights.to_device()?;
-            let d_widths = widths.to_device()?;
+            let d_input_ptrs = input_ptrs.to_device_on(&self.device_ctx)?;
+            let d_output_ptrs = output_ptrs.to_device_on(&self.device_ctx)?;
+            let d_log_output_heights = log_output_heights.to_device_on(&self.device_ctx)?;
+            let d_widths = widths.to_device_on(&self.device_ctx)?;
 
             unsafe {
                 batch_fold_mle(
@@ -1448,6 +1499,7 @@ impl<'a, HS: GpuHashScheme> LogupZerocheckGpu<'a, HS> {
                     &d_log_output_heights,
                     max_output_cells.try_into().unwrap(),
                     r_round,
+                    self.device_ctx.stream.as_raw(),
                 )
                 .map_err(LogupZerocheckError::BatchFoldMle)?;
             }
@@ -1519,7 +1571,7 @@ impl<'a, HS: GpuHashScheme> LogupZerocheckGpu<'a, HS> {
             let mut split_mats: Vec<Option<ColMajorMatrix<EF>>> = mat_evals
                 .into_iter()
                 .map(|mat| {
-                    let mat_host = transport_matrix_d2h_col_major(&mat)?;
+                    let mat_host = transport_matrix_d2h_col_major(&mat, &self.device_ctx)?;
                     let width = mat_host.width();
                     let height = mat_host.height();
                     debug_assert_eq!(height, 1, "Matrices should have height=1 after folding");

@@ -485,7 +485,8 @@ extern "C" size_t _zerocheck_r0_temp_sums_buffer_size(
     uint32_t skip_domain,
     uint32_t num_x,
     uint32_t num_cosets,
-    size_t max_temp_bytes
+    size_t max_temp_bytes,
+    cudaStream_t stream
 ) {
     // Both modes use the same buffer size formula
     return DISPATCH_BOOL(
@@ -506,7 +507,8 @@ extern "C" size_t _zerocheck_r0_intermediates_buffer_size(
     uint32_t skip_domain,
     uint32_t num_x,
     uint32_t num_cosets,
-    size_t max_temp_bytes
+    size_t max_temp_bytes,
+    cudaStream_t stream
 ) {
     // Both modes use the same buffer size formula
     return DISPATCH_BOOL(
@@ -543,7 +545,8 @@ int launch_zerocheck_ntt_evaluate_constraints(
     uint32_t num_x,
     uint32_t height,
     Fp g_shift,
-    size_t max_temp_bytes
+    size_t max_temp_bytes,
+    cudaStream_t stream
 ) {
     auto [grid, block] = coset_round0_config::eval_constraints_launch_params(
         buffer_size, skip_domain, num_x, NUM_COSETS, max_temp_bytes, BUFFER_THRESHOLD, MAX_THREADS
@@ -555,7 +558,7 @@ int launch_zerocheck_ntt_evaluate_constraints(
     size_t shmem_bytes = shared_sum_size + ntt_buffers_size;
 
     zerocheck_ntt_evaluate_constraints_kernel<NUM_COSETS, GLOBAL, NEEDS_SHMEM>
-        <<<grid, block, shmem_bytes>>>(
+        <<<grid, block, shmem_bytes, stream>>>(
             tmp_sums_buffer,
             selectors_cube,
             preprocessed,
@@ -585,7 +588,7 @@ int launch_zerocheck_ntt_evaluate_constraints(
     auto [reduce_grid, reduce_block] = kernel_launch_params(num_blocks);
     unsigned int reduce_warps = div_ceil(reduce_block.x, WARP_SIZE);
     size_t reduce_shmem = std::max(1u, reduce_warps) * sizeof(FpExt);
-    sumcheck::final_reduce_block_sums<<<NUM_COSETS * skip_domain, reduce_block, reduce_shmem>>>(
+    sumcheck::final_reduce_block_sums<<<NUM_COSETS * skip_domain, reduce_block, reduce_shmem, stream>>>(
         tmp_sums_buffer, output, num_blocks
     );
 
@@ -618,7 +621,8 @@ int launch_zerocheck_coset_parallel(
     uint32_t height,
     uint32_t num_cosets,
     Fp g_shift,
-    size_t max_temp_bytes
+    size_t max_temp_bytes,
+    cudaStream_t stream
 ) {
     auto [grid, block] = coset_parallel_round0_config::eval_constraints_launch_params(
         buffer_size, skip_domain, num_x, num_cosets, max_temp_bytes, BUFFER_THRESHOLD, MAX_THREADS
@@ -629,7 +633,7 @@ int launch_zerocheck_coset_parallel(
     size_t shmem_bytes = shared_sum_size + ntt_buffers_size;
 
     zerocheck_ntt_evaluate_constraints_coset_parallel_kernel<GLOBAL, NEEDS_SHMEM>
-        <<<grid, block, shmem_bytes>>>(
+        <<<grid, block, shmem_bytes, stream>>>(
             tmp_sums_buffer,
             selectors_cube,
             preprocessed,
@@ -659,7 +663,7 @@ int launch_zerocheck_coset_parallel(
     auto [reduce_grid, reduce_block] = kernel_launch_params(num_blocks);
     unsigned int reduce_warps = div_ceil(reduce_block.x, WARP_SIZE);
     size_t reduce_shmem = std::max(1u, reduce_warps) * sizeof(FpExt);
-    sumcheck::final_reduce_block_sums<<<num_cosets * skip_domain, reduce_block, reduce_shmem>>>(
+    sumcheck::final_reduce_block_sums<<<num_cosets * skip_domain, reduce_block, reduce_shmem, stream>>>(
         tmp_sums_buffer, output, num_blocks
     );
 
@@ -687,7 +691,8 @@ extern "C" int _zerocheck_ntt_eval_constraints(
     uint32_t height,
     uint32_t num_cosets,
     Fp g_shift,
-    size_t max_temp_bytes
+    size_t max_temp_bytes,
+    cudaStream_t stream
 ) {
     bool is_global = buffer_size > BUFFER_THRESHOLD;
     bool use_coset_parallel = use_coset_parallel_mode(num_x, skip_domain);
@@ -703,14 +708,14 @@ extern "C" int _zerocheck_ntt_eval_constraints(
     if (skip_domain == 1) {
         if (use_coset_parallel) {
             return is_global ? launch_zerocheck_coset_parallel<true, false>(
-                                   KERNEL_ARGS, num_cosets, g_shift, max_temp_bytes
+                                   KERNEL_ARGS, num_cosets, g_shift, max_temp_bytes, stream
                                )
                              : launch_zerocheck_coset_parallel<false, false>(
-                                   KERNEL_ARGS, num_cosets, g_shift, max_temp_bytes
+                                   KERNEL_ARGS, num_cosets, g_shift, max_temp_bytes, stream
                                );
         }
         return dispatch_zerocheck(
-            num_cosets, is_global, false, KERNEL_ARGS, g_shift, max_temp_bytes
+            num_cosets, is_global, false, KERNEL_ARGS, g_shift, max_temp_bytes, stream
         );
     }
 
@@ -726,12 +731,13 @@ extern "C" int _zerocheck_ntt_eval_constraints(
             KERNEL_ARGS,
             num_cosets,
             g_shift,
-            max_temp_bytes
+            max_temp_bytes,
+            stream
         );
     } else {
         // Lockstep mode: single thread handles all cosets
         return dispatch_zerocheck(
-            num_cosets, is_global, needs_shmem, KERNEL_ARGS, g_shift, max_temp_bytes
+            num_cosets, is_global, needs_shmem, KERNEL_ARGS, g_shift, max_temp_bytes, stream
         );
     }
 #undef KERNEL_ARGS
@@ -742,10 +748,11 @@ extern "C" int _fold_selectors_round0(
     const Fp *in,
     FpExt is_first,
     FpExt is_last,
-    uint32_t num_x
+    uint32_t num_x,
+    cudaStream_t stream
 ) {
     auto [grid, block] = kernel_launch_params(num_x);
-    fold_selectors_round0_kernel<<<grid, block>>>(out, in, is_first, is_last, num_x);
+    fold_selectors_round0_kernel<<<grid, block, 0, stream>>>(out, in, is_first, is_last, num_x);
     return CHECK_KERNEL();
 }
 

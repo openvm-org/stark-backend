@@ -1,7 +1,7 @@
 #![allow(clippy::missing_safety_doc)]
 #![allow(clippy::too_many_arguments)]
 
-use openvm_cuda_common::{d_buffer::DeviceBuffer, error::CudaError};
+use openvm_cuda_common::{d_buffer::DeviceBuffer, error::CudaError, stream::cudaStream_t};
 
 use crate::prelude::{EF, F};
 
@@ -9,24 +9,39 @@ pub const MAX_CUDA_NTT_LOG_DOMAIN_SIZE: u32 = 27;
 
 // relate to supra/ntt_params.cu
 extern "C" {
-    fn _generate_all_twiddles(twiddles: *mut std::ffi::c_void, inverse: bool) -> i32;
-    fn _generate_partial_twiddles(partial_twiddles: *mut std::ffi::c_void, inverse: bool) -> i32;
+    fn _generate_all_twiddles(
+        twiddles: *mut std::ffi::c_void,
+        inverse: bool,
+        stream: cudaStream_t,
+    ) -> i32;
+    fn _generate_partial_twiddles(
+        partial_twiddles: *mut std::ffi::c_void,
+        inverse: bool,
+        stream: cudaStream_t,
+    ) -> i32;
 }
 
 pub unsafe fn generate_all_twiddles<F>(
     twiddles: &DeviceBuffer<F>,
     inverse: bool,
+    stream: cudaStream_t,
 ) -> Result<(), CudaError> {
-    CudaError::from_result(_generate_all_twiddles(twiddles.as_mut_raw_ptr(), inverse))
+    CudaError::from_result(_generate_all_twiddles(
+        twiddles.as_mut_raw_ptr(),
+        inverse,
+        stream,
+    ))
 }
 
 pub unsafe fn generate_partial_twiddles<F>(
     partial_twiddles: &DeviceBuffer<F>,
     inverse: bool,
+    stream: cudaStream_t,
 ) -> Result<(), CudaError> {
     CudaError::from_result(_generate_partial_twiddles(
         partial_twiddles.as_mut_raw_ptr(),
         inverse,
+        stream,
     ))
 }
 
@@ -38,6 +53,7 @@ extern "C" {
         lg_domain_size: u32,
         padded_poly_size: u32,
         poly_count: u32,
+        stream: cudaStream_t,
     ) -> i32;
 
     fn _bit_rev_ext(
@@ -46,6 +62,7 @@ extern "C" {
         lg_domain_size: u32,
         padded_poly_size: u32,
         poly_count: u32,
+        stream: cudaStream_t,
     ) -> i32;
 
     fn _bit_rev_frac_ext(
@@ -54,6 +71,7 @@ extern "C" {
         lg_domain_size: u32,
         padded_poly_size: u32,
         poly_count: u32,
+        stream: cudaStream_t,
     ) -> i32;
 
     /// Fused bitrev + K=2 tree build for a single frac_fpext_t buffer.
@@ -63,6 +81,7 @@ extern "C" {
         inout: *mut std::ffi::c_void,
         lg_domain_size: u32,
         alpha: EF,
+        stream: cudaStream_t,
     ) -> i32;
 }
 
@@ -72,6 +91,7 @@ pub unsafe fn bit_rev(
     lg_domain_size: u32,
     padded_poly_size: u32,
     poly_count: u32,
+    stream: cudaStream_t,
 ) -> Result<(), CudaError> {
     CudaError::from_result(_bit_rev(
         d_out.as_mut_raw_ptr(),
@@ -79,6 +99,7 @@ pub unsafe fn bit_rev(
         lg_domain_size,
         padded_poly_size,
         poly_count,
+        stream,
     ))
 }
 
@@ -88,6 +109,7 @@ pub unsafe fn bit_rev_ext(
     lg_domain_size: u32,
     padded_poly_size: u32,
     poly_count: u32,
+    stream: cudaStream_t,
 ) -> Result<(), CudaError> {
     CudaError::from_result(_bit_rev_ext(
         d_out.as_mut_raw_ptr(),
@@ -95,6 +117,7 @@ pub unsafe fn bit_rev_ext(
         lg_domain_size,
         padded_poly_size,
         poly_count,
+        stream,
     ))
 }
 
@@ -104,6 +127,7 @@ pub unsafe fn bit_rev_frac_ext(
     lg_domain_size: u32,
     padded_poly_size: u32,
     poly_count: u32,
+    stream: cudaStream_t,
 ) -> Result<(), CudaError> {
     CudaError::from_result(_bit_rev_frac_ext(
         d_out.as_mut_raw_ptr(),
@@ -111,6 +135,7 @@ pub unsafe fn bit_rev_frac_ext(
         lg_domain_size,
         padded_poly_size,
         poly_count,
+        stream,
     ))
 }
 
@@ -118,11 +143,13 @@ pub unsafe fn bit_rev_frac_ext_build_k2(
     inout: &DeviceBuffer<(EF, EF)>,
     lg_domain_size: u32,
     alpha: EF,
+    stream: cudaStream_t,
 ) -> Result<(), CudaError> {
     CudaError::from_result(_bit_rev_frac_ext_build_k2(
         inout.as_mut_raw_ptr(),
         lg_domain_size,
         alpha,
+        stream,
     ))
 }
 
@@ -137,6 +164,7 @@ extern "C" {
         padded_poly_size: u32,
         poly_count: u32,
         is_intt: bool,
+        stream: cudaStream_t,
     ) -> i32;
 }
 
@@ -149,6 +177,7 @@ pub unsafe fn ct_mixed_radix_narrow(
     padded_poly_size: u32,
     poly_count: u32,
     is_intt: bool,
+    stream: cudaStream_t,
 ) -> Result<(), CudaError> {
     if lg_domain_size > MAX_CUDA_NTT_LOG_DOMAIN_SIZE {
         return Err(CudaError::new(1));
@@ -162,5 +191,6 @@ pub unsafe fn ct_mixed_radix_narrow(
         padded_poly_size,
         poly_count,
         is_intt,
+        stream,
     ))
 }

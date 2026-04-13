@@ -4,7 +4,6 @@
 use std::sync::Arc;
 
 use openvm_cuda_backend::{prelude::SC, BabyBearPoseidon2GpuEngine, GpuBackend};
-use openvm_cuda_common::stream::current_stream_id;
 use openvm_stark_backend::{
     p3_air::{Air, AirBuilder, BaseAir},
     p3_field::Field,
@@ -120,8 +119,8 @@ fn main() {
                 let proof = engine.prove(&d_pk, ctx).expect("proving failed");
                 engine.verify(&vk, &proof).expect("verification failed");
                 println!(
-                    "[task {t} - stream {}] Proof verified",
-                    current_stream_id().unwrap()
+                    "[task {t} - stream {:?}] Proof verified",
+                    engine.device().device_ctx.stream.as_raw()
                 );
             }
         }));

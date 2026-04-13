@@ -138,33 +138,33 @@ __global__ void bench_inv_kernel(T* out, const T* a, size_t n, int reps) {
 // Extern "C" Wrappers for Fp (base field)
 // ============================================================================
 
-extern "C" int init_fp(void* out, const uint32_t* raw_data, size_t n) {
+extern "C" int init_fp(void* out, const uint32_t* raw_data, size_t n, cudaStream_t stream) {
     int grid_size;
     dim3 block = get_launch_config(n, grid_size);
-    bench_init_kernel<Fp, Fp, 1><<<grid_size, block>>>(static_cast<Fp*>(out), raw_data, n);
+    bench_init_kernel<Fp, Fp, 1><<<grid_size, block, 0, stream>>>(static_cast<Fp*>(out), raw_data, n);
     return cudaGetLastError();
 }
 
-extern "C" int add_fp(void* out, const void* a, const void* b, size_t n, int reps) {
+extern "C" int add_fp(void* out, const void* a, const void* b, size_t n, int reps, cudaStream_t stream) {
     int grid_size;
     dim3 block = get_launch_config(n, grid_size);
-    bench_add_kernel<Fp><<<grid_size, block>>>(
+    bench_add_kernel<Fp><<<grid_size, block, 0, stream>>>(
         static_cast<Fp*>(out), static_cast<const Fp*>(a), static_cast<const Fp*>(b), n, reps);
     return cudaGetLastError();
 }
 
-extern "C" int mul_fp(void* out, const void* a, const void* b, size_t n, int reps) {
+extern "C" int mul_fp(void* out, const void* a, const void* b, size_t n, int reps, cudaStream_t stream) {
     int grid_size;
     dim3 block = get_launch_config(n, grid_size);
-    bench_mul_kernel<Fp><<<grid_size, block>>>(
+    bench_mul_kernel<Fp><<<grid_size, block, 0, stream>>>(
         static_cast<Fp*>(out), static_cast<const Fp*>(a), static_cast<const Fp*>(b), n, reps);
     return cudaGetLastError();
 }
 
-extern "C" int inv_fp(void* out, const void* a, size_t n, int reps) {
+extern "C" int inv_fp(void* out, const void* a, size_t n, int reps, cudaStream_t stream) {
     int grid_size;
     dim3 block = get_launch_config(n, grid_size);
-    bench_inv_kernel<Fp><<<grid_size, block>>>(static_cast<Fp*>(out), static_cast<const Fp*>(a), n, reps);
+    bench_inv_kernel<Fp><<<grid_size, block, 0, stream>>>(static_cast<Fp*>(out), static_cast<const Fp*>(a), n, reps);
     return cudaGetLastError();
 }
 
@@ -172,33 +172,33 @@ extern "C" int inv_fp(void* out, const void* a, size_t n, int reps) {
 // Extern "C" Wrappers for Fp4 (quartic extension - simple implementation)
 // ============================================================================
 
-extern "C" int init_fp4(void* out, const uint32_t* raw_data, size_t n) {
+extern "C" int init_fp4(void* out, const uint32_t* raw_data, size_t n, cudaStream_t stream) {
     int grid_size;
     dim3 block = get_launch_config(n, grid_size);
-    bench_init_kernel<Fp4, Fp, 4><<<grid_size, block>>>(static_cast<Fp4*>(out), raw_data, n);
+    bench_init_kernel<Fp4, Fp, 4><<<grid_size, block, 0, stream>>>(static_cast<Fp4*>(out), raw_data, n);
     return cudaGetLastError();
 }
 
-extern "C" int add_fp4(void* out, const void* a, const void* b, size_t n, int reps) {
+extern "C" int add_fp4(void* out, const void* a, const void* b, size_t n, int reps, cudaStream_t stream) {
     int grid_size;
     dim3 block = get_launch_config(n, grid_size);
-    bench_add_kernel<Fp4><<<grid_size, block>>>(
+    bench_add_kernel<Fp4><<<grid_size, block, 0, stream>>>(
         static_cast<Fp4*>(out), static_cast<const Fp4*>(a), static_cast<const Fp4*>(b), n, reps);
     return cudaGetLastError();
 }
 
-extern "C" int mul_fp4(void* out, const void* a, const void* b, size_t n, int reps) {
+extern "C" int mul_fp4(void* out, const void* a, const void* b, size_t n, int reps, cudaStream_t stream) {
     int grid_size;
     dim3 block = get_launch_config(n, grid_size);
-    bench_mul_kernel<Fp4><<<grid_size, block>>>(
+    bench_mul_kernel<Fp4><<<grid_size, block, 0, stream>>>(
         static_cast<Fp4*>(out), static_cast<const Fp4*>(a), static_cast<const Fp4*>(b), n, reps);
     return cudaGetLastError();
 }
 
-extern "C" int inv_fp4(void* out, const void* a, size_t n, int reps) {
+extern "C" int inv_fp4(void* out, const void* a, size_t n, int reps, cudaStream_t stream) {
     int grid_size;
     dim3 block = get_launch_config(n, grid_size);
-    bench_inv_kernel<Fp4><<<grid_size, block>>>(static_cast<Fp4*>(out), static_cast<const Fp4*>(a), n, reps);
+    bench_inv_kernel<Fp4><<<grid_size, block, 0, stream>>>(static_cast<Fp4*>(out), static_cast<const Fp4*>(a), n, reps);
     return cudaGetLastError();
 }
 
@@ -206,33 +206,33 @@ extern "C" int inv_fp4(void* out, const void* a, size_t n, int reps) {
 // Extern "C" Wrappers for FpExt (quartic extension - optimized bb31_4_t)
 // ============================================================================
 
-extern "C" int init_fpext(void* out, const uint32_t* raw_data, size_t n) {
+extern "C" int init_fpext(void* out, const uint32_t* raw_data, size_t n, cudaStream_t stream) {
     int grid_size;
     dim3 block = get_launch_config(n, grid_size);
-    bench_init_kernel<FpExt, Fp, 4><<<grid_size, block>>>(static_cast<FpExt*>(out), raw_data, n);
+    bench_init_kernel<FpExt, Fp, 4><<<grid_size, block, 0, stream>>>(static_cast<FpExt*>(out), raw_data, n);
     return cudaGetLastError();
 }
 
-extern "C" int add_fpext(void* out, const void* a, const void* b, size_t n, int reps) {
+extern "C" int add_fpext(void* out, const void* a, const void* b, size_t n, int reps, cudaStream_t stream) {
     int grid_size;
     dim3 block = get_launch_config(n, grid_size);
-    bench_add_kernel<FpExt><<<grid_size, block>>>(
+    bench_add_kernel<FpExt><<<grid_size, block, 0, stream>>>(
         static_cast<FpExt*>(out), static_cast<const FpExt*>(a), static_cast<const FpExt*>(b), n, reps);
     return cudaGetLastError();
 }
 
-extern "C" int mul_fpext(void* out, const void* a, const void* b, size_t n, int reps) {
+extern "C" int mul_fpext(void* out, const void* a, const void* b, size_t n, int reps, cudaStream_t stream) {
     int grid_size;
     dim3 block = get_launch_config(n, grid_size);
-    bench_mul_kernel<FpExt><<<grid_size, block>>>(
+    bench_mul_kernel<FpExt><<<grid_size, block, 0, stream>>>(
         static_cast<FpExt*>(out), static_cast<const FpExt*>(a), static_cast<const FpExt*>(b), n, reps);
     return cudaGetLastError();
 }
 
-extern "C" int inv_fpext(void* out, const void* a, size_t n, int reps) {
+extern "C" int inv_fpext(void* out, const void* a, size_t n, int reps, cudaStream_t stream) {
     int grid_size;
     dim3 block = get_launch_config(n, grid_size);
-    bench_inv_kernel<FpExt><<<grid_size, block>>>(static_cast<FpExt*>(out), static_cast<const FpExt*>(a), n, reps);
+    bench_inv_kernel<FpExt><<<grid_size, block, 0, stream>>>(static_cast<FpExt*>(out), static_cast<const FpExt*>(a), n, reps);
     return cudaGetLastError();
 }
 
@@ -240,33 +240,33 @@ extern "C" int inv_fpext(void* out, const void* a, size_t n, int reps) {
 // Extern "C" Wrappers for Fp5 (quintic extension)
 // ============================================================================
 
-extern "C" int init_fp5(void* out, const uint32_t* raw_data, size_t n) {
+extern "C" int init_fp5(void* out, const uint32_t* raw_data, size_t n, cudaStream_t stream) {
     int grid_size;
     dim3 block = get_launch_config(n, grid_size);
-    bench_init_kernel<Fp5, Fp, 5><<<grid_size, block>>>(static_cast<Fp5*>(out), raw_data, n);
+    bench_init_kernel<Fp5, Fp, 5><<<grid_size, block, 0, stream>>>(static_cast<Fp5*>(out), raw_data, n);
     return cudaGetLastError();
 }
 
-extern "C" int add_fp5(void* out, const void* a, const void* b, size_t n, int reps) {
+extern "C" int add_fp5(void* out, const void* a, const void* b, size_t n, int reps, cudaStream_t stream) {
     int grid_size;
     dim3 block = get_launch_config(n, grid_size);
-    bench_add_kernel<Fp5><<<grid_size, block>>>(
+    bench_add_kernel<Fp5><<<grid_size, block, 0, stream>>>(
         static_cast<Fp5*>(out), static_cast<const Fp5*>(a), static_cast<const Fp5*>(b), n, reps);
     return cudaGetLastError();
 }
 
-extern "C" int mul_fp5(void* out, const void* a, const void* b, size_t n, int reps) {
+extern "C" int mul_fp5(void* out, const void* a, const void* b, size_t n, int reps, cudaStream_t stream) {
     int grid_size;
     dim3 block = get_launch_config(n, grid_size);
-    bench_mul_kernel<Fp5><<<grid_size, block>>>(
+    bench_mul_kernel<Fp5><<<grid_size, block, 0, stream>>>(
         static_cast<Fp5*>(out), static_cast<const Fp5*>(a), static_cast<const Fp5*>(b), n, reps);
     return cudaGetLastError();
 }
 
-extern "C" int inv_fp5(void* out, const void* a, size_t n, int reps) {
+extern "C" int inv_fp5(void* out, const void* a, size_t n, int reps, cudaStream_t stream) {
     int grid_size;
     dim3 block = get_launch_config(n, grid_size);
-    bench_inv_kernel<Fp5><<<grid_size, block>>>(static_cast<Fp5*>(out), static_cast<const Fp5*>(a), n, reps);
+    bench_inv_kernel<Fp5><<<grid_size, block, 0, stream>>>(static_cast<Fp5*>(out), static_cast<const Fp5*>(a), n, reps);
     return cudaGetLastError();
 }
 
@@ -275,33 +275,33 @@ extern "C" int inv_fp5(void* out, const void* a, size_t n, int reps) {
 // Extern "C" Wrappers for Fp6 (sextic extension)
 // ============================================================================
 
-extern "C" int init_fp6(void* out, const uint32_t* raw_data, size_t n) {
+extern "C" int init_fp6(void* out, const uint32_t* raw_data, size_t n, cudaStream_t stream) {
     int grid_size;
     dim3 block = get_launch_config(n, grid_size);
-    bench_init_kernel<Fp6, Fp, 6><<<grid_size, block>>>(static_cast<Fp6*>(out), raw_data, n);
+    bench_init_kernel<Fp6, Fp, 6><<<grid_size, block, 0, stream>>>(static_cast<Fp6*>(out), raw_data, n);
     return cudaGetLastError();
 }
 
-extern "C" int add_fp6(void* out, const void* a, const void* b, size_t n, int reps) {
+extern "C" int add_fp6(void* out, const void* a, const void* b, size_t n, int reps, cudaStream_t stream) {
     int grid_size;
     dim3 block = get_launch_config(n, grid_size);
-    bench_add_kernel<Fp6><<<grid_size, block>>>(
+    bench_add_kernel<Fp6><<<grid_size, block, 0, stream>>>(
         static_cast<Fp6*>(out), static_cast<const Fp6*>(a), static_cast<const Fp6*>(b), n, reps);
     return cudaGetLastError();
 }
 
-extern "C" int mul_fp6(void* out, const void* a, const void* b, size_t n, int reps) {
+extern "C" int mul_fp6(void* out, const void* a, const void* b, size_t n, int reps, cudaStream_t stream) {
     int grid_size;
     dim3 block = get_launch_config(n, grid_size);
-    bench_mul_kernel<Fp6><<<grid_size, block>>>(
+    bench_mul_kernel<Fp6><<<grid_size, block, 0, stream>>>(
         static_cast<Fp6*>(out), static_cast<const Fp6*>(a), static_cast<const Fp6*>(b), n, reps);
     return cudaGetLastError();
 }
 
-extern "C" int inv_fp6(void* out, const void* a, size_t n, int reps) {
+extern "C" int inv_fp6(void* out, const void* a, size_t n, int reps, cudaStream_t stream) {
     int grid_size;
     dim3 block = get_launch_config(n, grid_size);
-    bench_inv_kernel<Fp6><<<grid_size, block>>>(static_cast<Fp6*>(out), static_cast<const Fp6*>(a), n, reps);
+    bench_inv_kernel<Fp6><<<grid_size, block, 0, stream>>>(static_cast<Fp6*>(out), static_cast<const Fp6*>(a), n, reps);
     return cudaGetLastError();
 }
 
@@ -309,33 +309,33 @@ extern "C" int inv_fp6(void* out, const void* a, size_t n, int reps) {
 // Extern "C" Wrappers for Fp2x3 (2×3 tower: Fp → Fp2 → Fp6)
 // ============================================================================
 
-extern "C" int init_fp2x3(void* out, const uint32_t* raw_data, size_t n) {
+extern "C" int init_fp2x3(void* out, const uint32_t* raw_data, size_t n, cudaStream_t stream) {
     int grid_size;
     dim3 block = get_launch_config(n, grid_size);
-    bench_init_kernel<Fp2x3, Fp, 6><<<grid_size, block>>>(static_cast<Fp2x3*>(out), raw_data, n);
+    bench_init_kernel<Fp2x3, Fp, 6><<<grid_size, block, 0, stream>>>(static_cast<Fp2x3*>(out), raw_data, n);
     return cudaGetLastError();
 }
 
-extern "C" int add_fp2x3(void* out, const void* a, const void* b, size_t n, int reps) {
+extern "C" int add_fp2x3(void* out, const void* a, const void* b, size_t n, int reps, cudaStream_t stream) {
     int grid_size;
     dim3 block = get_launch_config(n, grid_size);
-    bench_add_kernel<Fp2x3><<<grid_size, block>>>(
+    bench_add_kernel<Fp2x3><<<grid_size, block, 0, stream>>>(
         static_cast<Fp2x3*>(out), static_cast<const Fp2x3*>(a), static_cast<const Fp2x3*>(b), n, reps);
     return cudaGetLastError();
 }
 
-extern "C" int mul_fp2x3(void* out, const void* a, const void* b, size_t n, int reps) {
+extern "C" int mul_fp2x3(void* out, const void* a, const void* b, size_t n, int reps, cudaStream_t stream) {
     int grid_size;
     dim3 block = get_launch_config(n, grid_size);
-    bench_mul_kernel<Fp2x3><<<grid_size, block>>>(
+    bench_mul_kernel<Fp2x3><<<grid_size, block, 0, stream>>>(
         static_cast<Fp2x3*>(out), static_cast<const Fp2x3*>(a), static_cast<const Fp2x3*>(b), n, reps);
     return cudaGetLastError();
 }
 
-extern "C" int inv_fp2x3(void* out, const void* a, size_t n, int reps) {
+extern "C" int inv_fp2x3(void* out, const void* a, size_t n, int reps, cudaStream_t stream) {
     int grid_size;
     dim3 block = get_launch_config(n, grid_size);
-    bench_inv_kernel<Fp2x3><<<grid_size, block>>>(static_cast<Fp2x3*>(out), static_cast<const Fp2x3*>(a), n, reps);
+    bench_inv_kernel<Fp2x3><<<grid_size, block, 0, stream>>>(static_cast<Fp2x3*>(out), static_cast<const Fp2x3*>(a), n, reps);
     return cudaGetLastError();
 }
 
@@ -343,33 +343,33 @@ extern "C" int inv_fp2x3(void* out, const void* a, size_t n, int reps) {
 // Extern "C" Wrappers for Fp3x2 (3×2 tower: Fp → Fp3 → Fp6)
 // ============================================================================
 
-extern "C" int init_fp3x2(void* out, const uint32_t* raw_data, size_t n) {
+extern "C" int init_fp3x2(void* out, const uint32_t* raw_data, size_t n, cudaStream_t stream) {
     int grid_size;
     dim3 block = get_launch_config(n, grid_size);
-    bench_init_kernel<Fp3x2, Fp, 6><<<grid_size, block>>>(static_cast<Fp3x2*>(out), raw_data, n);
+    bench_init_kernel<Fp3x2, Fp, 6><<<grid_size, block, 0, stream>>>(static_cast<Fp3x2*>(out), raw_data, n);
     return cudaGetLastError();
 }
 
-extern "C" int add_fp3x2(void* out, const void* a, const void* b, size_t n, int reps) {
+extern "C" int add_fp3x2(void* out, const void* a, const void* b, size_t n, int reps, cudaStream_t stream) {
     int grid_size;
     dim3 block = get_launch_config(n, grid_size);
-    bench_add_kernel<Fp3x2><<<grid_size, block>>>(
+    bench_add_kernel<Fp3x2><<<grid_size, block, 0, stream>>>(
         static_cast<Fp3x2*>(out), static_cast<const Fp3x2*>(a), static_cast<const Fp3x2*>(b), n, reps);
     return cudaGetLastError();
 }
 
-extern "C" int mul_fp3x2(void* out, const void* a, const void* b, size_t n, int reps) {
+extern "C" int mul_fp3x2(void* out, const void* a, const void* b, size_t n, int reps, cudaStream_t stream) {
     int grid_size;
     dim3 block = get_launch_config(n, grid_size);
-    bench_mul_kernel<Fp3x2><<<grid_size, block>>>(
+    bench_mul_kernel<Fp3x2><<<grid_size, block, 0, stream>>>(
         static_cast<Fp3x2*>(out), static_cast<const Fp3x2*>(a), static_cast<const Fp3x2*>(b), n, reps);
     return cudaGetLastError();
 }
 
-extern "C" int inv_fp3x2(void* out, const void* a, size_t n, int reps) {
+extern "C" int inv_fp3x2(void* out, const void* a, size_t n, int reps, cudaStream_t stream) {
     int grid_size;
     dim3 block = get_launch_config(n, grid_size);
-    bench_inv_kernel<Fp3x2><<<grid_size, block>>>(static_cast<Fp3x2*>(out), static_cast<const Fp3x2*>(a), n, reps);
+    bench_inv_kernel<Fp3x2><<<grid_size, block, 0, stream>>>(static_cast<Fp3x2*>(out), static_cast<const Fp3x2*>(a), n, reps);
     return cudaGetLastError();
 }
 
@@ -377,33 +377,33 @@ extern "C" int inv_fp3x2(void* out, const void* a, size_t n, int reps) {
 // Extern "C" Wrappers for Kb (KoalaBear base field)
 // ============================================================================
 
-extern "C" int init_kb(void* out, const uint32_t* raw_data, size_t n) {
+extern "C" int init_kb(void* out, const uint32_t* raw_data, size_t n, cudaStream_t stream) {
     int grid_size;
     dim3 block = get_launch_config(n, grid_size);
-    bench_init_kernel<Kb, Kb, 1><<<grid_size, block>>>(static_cast<Kb*>(out), raw_data, n);
+    bench_init_kernel<Kb, Kb, 1><<<grid_size, block, 0, stream>>>(static_cast<Kb*>(out), raw_data, n);
     return cudaGetLastError();
 }
 
-extern "C" int add_kb(void* out, const void* a, const void* b, size_t n, int reps) {
+extern "C" int add_kb(void* out, const void* a, const void* b, size_t n, int reps, cudaStream_t stream) {
     int grid_size;
     dim3 block = get_launch_config(n, grid_size);
-    bench_add_kernel<Kb><<<grid_size, block>>>(
+    bench_add_kernel<Kb><<<grid_size, block, 0, stream>>>(
         static_cast<Kb*>(out), static_cast<const Kb*>(a), static_cast<const Kb*>(b), n, reps);
     return cudaGetLastError();
 }
 
-extern "C" int mul_kb(void* out, const void* a, const void* b, size_t n, int reps) {
+extern "C" int mul_kb(void* out, const void* a, const void* b, size_t n, int reps, cudaStream_t stream) {
     int grid_size;
     dim3 block = get_launch_config(n, grid_size);
-    bench_mul_kernel<Kb><<<grid_size, block>>>(
+    bench_mul_kernel<Kb><<<grid_size, block, 0, stream>>>(
         static_cast<Kb*>(out), static_cast<const Kb*>(a), static_cast<const Kb*>(b), n, reps);
     return cudaGetLastError();
 }
 
-extern "C" int inv_kb(void* out, const void* a, size_t n, int reps) {
+extern "C" int inv_kb(void* out, const void* a, size_t n, int reps, cudaStream_t stream) {
     int grid_size;
     dim3 block = get_launch_config(n, grid_size);
-    bench_inv_kernel<Kb><<<grid_size, block>>>(static_cast<Kb*>(out), static_cast<const Kb*>(a), n, reps);
+    bench_inv_kernel<Kb><<<grid_size, block, 0, stream>>>(static_cast<Kb*>(out), static_cast<const Kb*>(a), n, reps);
     return cudaGetLastError();
 }
 
@@ -411,33 +411,33 @@ extern "C" int inv_kb(void* out, const void* a, size_t n, int reps) {
 // Extern "C" Wrappers for Kb5 (KoalaBear quintic extension)
 // ============================================================================
 
-extern "C" int init_kb5(void* out, const uint32_t* raw_data, size_t n) {
+extern "C" int init_kb5(void* out, const uint32_t* raw_data, size_t n, cudaStream_t stream) {
     int grid_size;
     dim3 block = get_launch_config(n, grid_size);
-    bench_init_kernel<Kb5, Kb, 5><<<grid_size, block>>>(static_cast<Kb5*>(out), raw_data, n);
+    bench_init_kernel<Kb5, Kb, 5><<<grid_size, block, 0, stream>>>(static_cast<Kb5*>(out), raw_data, n);
     return cudaGetLastError();
 }
 
-extern "C" int add_kb5(void* out, const void* a, const void* b, size_t n, int reps) {
+extern "C" int add_kb5(void* out, const void* a, const void* b, size_t n, int reps, cudaStream_t stream) {
     int grid_size;
     dim3 block = get_launch_config(n, grid_size);
-    bench_add_kernel<Kb5><<<grid_size, block>>>(
+    bench_add_kernel<Kb5><<<grid_size, block, 0, stream>>>(
         static_cast<Kb5*>(out), static_cast<const Kb5*>(a), static_cast<const Kb5*>(b), n, reps);
     return cudaGetLastError();
 }
 
-extern "C" int mul_kb5(void* out, const void* a, const void* b, size_t n, int reps) {
+extern "C" int mul_kb5(void* out, const void* a, const void* b, size_t n, int reps, cudaStream_t stream) {
     int grid_size;
     dim3 block = get_launch_config(n, grid_size);
-    bench_mul_kernel<Kb5><<<grid_size, block>>>(
+    bench_mul_kernel<Kb5><<<grid_size, block, 0, stream>>>(
         static_cast<Kb5*>(out), static_cast<const Kb5*>(a), static_cast<const Kb5*>(b), n, reps);
     return cudaGetLastError();
 }
 
-extern "C" int inv_kb5(void* out, const void* a, size_t n, int reps) {
+extern "C" int inv_kb5(void* out, const void* a, size_t n, int reps, cudaStream_t stream) {
     int grid_size;
     dim3 block = get_launch_config(n, grid_size);
-    bench_inv_kernel<Kb5><<<grid_size, block>>>(static_cast<Kb5*>(out), static_cast<const Kb5*>(a), n, reps);
+    bench_inv_kernel<Kb5><<<grid_size, block, 0, stream>>>(static_cast<Kb5*>(out), static_cast<const Kb5*>(a), n, reps);
     return cudaGetLastError();
 }
 
@@ -445,33 +445,33 @@ extern "C" int inv_kb5(void* out, const void* a, size_t n, int reps) {
 // Extern "C" Wrappers for Kb6 (KoalaBear sextic extension)
 // ============================================================================
 
-extern "C" int init_kb6(void* out, const uint32_t* raw_data, size_t n) {
+extern "C" int init_kb6(void* out, const uint32_t* raw_data, size_t n, cudaStream_t stream) {
     int grid_size;
     dim3 block = get_launch_config(n, grid_size);
-    bench_init_kernel<Kb6, Kb, 6><<<grid_size, block>>>(static_cast<Kb6*>(out), raw_data, n);
+    bench_init_kernel<Kb6, Kb, 6><<<grid_size, block, 0, stream>>>(static_cast<Kb6*>(out), raw_data, n);
     return cudaGetLastError();
 }
 
-extern "C" int add_kb6(void* out, const void* a, const void* b, size_t n, int reps) {
+extern "C" int add_kb6(void* out, const void* a, const void* b, size_t n, int reps, cudaStream_t stream) {
     int grid_size;
     dim3 block = get_launch_config(n, grid_size);
-    bench_add_kernel<Kb6><<<grid_size, block>>>(
+    bench_add_kernel<Kb6><<<grid_size, block, 0, stream>>>(
         static_cast<Kb6*>(out), static_cast<const Kb6*>(a), static_cast<const Kb6*>(b), n, reps);
     return cudaGetLastError();
 }
 
-extern "C" int mul_kb6(void* out, const void* a, const void* b, size_t n, int reps) {
+extern "C" int mul_kb6(void* out, const void* a, const void* b, size_t n, int reps, cudaStream_t stream) {
     int grid_size;
     dim3 block = get_launch_config(n, grid_size);
-    bench_mul_kernel<Kb6><<<grid_size, block>>>(
+    bench_mul_kernel<Kb6><<<grid_size, block, 0, stream>>>(
         static_cast<Kb6*>(out), static_cast<const Kb6*>(a), static_cast<const Kb6*>(b), n, reps);
     return cudaGetLastError();
 }
 
-extern "C" int inv_kb6(void* out, const void* a, size_t n, int reps) {
+extern "C" int inv_kb6(void* out, const void* a, size_t n, int reps, cudaStream_t stream) {
     int grid_size;
     dim3 block = get_launch_config(n, grid_size);
-    bench_inv_kernel<Kb6><<<grid_size, block>>>(static_cast<Kb6*>(out), static_cast<const Kb6*>(a), n, reps);
+    bench_inv_kernel<Kb6><<<grid_size, block, 0, stream>>>(static_cast<Kb6*>(out), static_cast<const Kb6*>(a), n, reps);
     return cudaGetLastError();
 }
 
@@ -479,33 +479,33 @@ extern "C" int inv_kb6(void* out, const void* a, size_t n, int reps) {
 // Extern "C" Wrappers for Kb2x3 (KoalaBear 2×3 tower)
 // ============================================================================
 
-extern "C" int init_kb2x3(void* out, const uint32_t* raw_data, size_t n) {
+extern "C" int init_kb2x3(void* out, const uint32_t* raw_data, size_t n, cudaStream_t stream) {
     int grid_size;
     dim3 block = get_launch_config(n, grid_size);
-    bench_init_kernel<Kb2x3, Kb, 6><<<grid_size, block>>>(static_cast<Kb2x3*>(out), raw_data, n);
+    bench_init_kernel<Kb2x3, Kb, 6><<<grid_size, block, 0, stream>>>(static_cast<Kb2x3*>(out), raw_data, n);
     return cudaGetLastError();
 }
 
-extern "C" int add_kb2x3(void* out, const void* a, const void* b, size_t n, int reps) {
+extern "C" int add_kb2x3(void* out, const void* a, const void* b, size_t n, int reps, cudaStream_t stream) {
     int grid_size;
     dim3 block = get_launch_config(n, grid_size);
-    bench_add_kernel<Kb2x3><<<grid_size, block>>>(
+    bench_add_kernel<Kb2x3><<<grid_size, block, 0, stream>>>(
         static_cast<Kb2x3*>(out), static_cast<const Kb2x3*>(a), static_cast<const Kb2x3*>(b), n, reps);
     return cudaGetLastError();
 }
 
-extern "C" int mul_kb2x3(void* out, const void* a, const void* b, size_t n, int reps) {
+extern "C" int mul_kb2x3(void* out, const void* a, const void* b, size_t n, int reps, cudaStream_t stream) {
     int grid_size;
     dim3 block = get_launch_config(n, grid_size);
-    bench_mul_kernel<Kb2x3><<<grid_size, block>>>(
+    bench_mul_kernel<Kb2x3><<<grid_size, block, 0, stream>>>(
         static_cast<Kb2x3*>(out), static_cast<const Kb2x3*>(a), static_cast<const Kb2x3*>(b), n, reps);
     return cudaGetLastError();
 }
 
-extern "C" int inv_kb2x3(void* out, const void* a, size_t n, int reps) {
+extern "C" int inv_kb2x3(void* out, const void* a, size_t n, int reps, cudaStream_t stream) {
     int grid_size;
     dim3 block = get_launch_config(n, grid_size);
-    bench_inv_kernel<Kb2x3><<<grid_size, block>>>(static_cast<Kb2x3*>(out), static_cast<const Kb2x3*>(a), n, reps);
+    bench_inv_kernel<Kb2x3><<<grid_size, block, 0, stream>>>(static_cast<Kb2x3*>(out), static_cast<const Kb2x3*>(a), n, reps);
     return cudaGetLastError();
 }
 
@@ -513,33 +513,33 @@ extern "C" int inv_kb2x3(void* out, const void* a, size_t n, int reps) {
 // Extern "C" Wrappers for Kb3x2 (KoalaBear 3×2 tower)
 // ============================================================================
 
-extern "C" int init_kb3x2(void* out, const uint32_t* raw_data, size_t n) {
+extern "C" int init_kb3x2(void* out, const uint32_t* raw_data, size_t n, cudaStream_t stream) {
     int grid_size;
     dim3 block = get_launch_config(n, grid_size);
-    bench_init_kernel<Kb3x2, Kb, 6><<<grid_size, block>>>(static_cast<Kb3x2*>(out), raw_data, n);
+    bench_init_kernel<Kb3x2, Kb, 6><<<grid_size, block, 0, stream>>>(static_cast<Kb3x2*>(out), raw_data, n);
     return cudaGetLastError();
 }
 
-extern "C" int add_kb3x2(void* out, const void* a, const void* b, size_t n, int reps) {
+extern "C" int add_kb3x2(void* out, const void* a, const void* b, size_t n, int reps, cudaStream_t stream) {
     int grid_size;
     dim3 block = get_launch_config(n, grid_size);
-    bench_add_kernel<Kb3x2><<<grid_size, block>>>(
+    bench_add_kernel<Kb3x2><<<grid_size, block, 0, stream>>>(
         static_cast<Kb3x2*>(out), static_cast<const Kb3x2*>(a), static_cast<const Kb3x2*>(b), n, reps);
     return cudaGetLastError();
 }
 
-extern "C" int mul_kb3x2(void* out, const void* a, const void* b, size_t n, int reps) {
+extern "C" int mul_kb3x2(void* out, const void* a, const void* b, size_t n, int reps, cudaStream_t stream) {
     int grid_size;
     dim3 block = get_launch_config(n, grid_size);
-    bench_mul_kernel<Kb3x2><<<grid_size, block>>>(
+    bench_mul_kernel<Kb3x2><<<grid_size, block, 0, stream>>>(
         static_cast<Kb3x2*>(out), static_cast<const Kb3x2*>(a), static_cast<const Kb3x2*>(b), n, reps);
     return cudaGetLastError();
 }
 
-extern "C" int inv_kb3x2(void* out, const void* a, size_t n, int reps) {
+extern "C" int inv_kb3x2(void* out, const void* a, size_t n, int reps, cudaStream_t stream) {
     int grid_size;
     dim3 block = get_launch_config(n, grid_size);
-    bench_inv_kernel<Kb3x2><<<grid_size, block>>>(static_cast<Kb3x2*>(out), static_cast<const Kb3x2*>(a), n, reps);
+    bench_inv_kernel<Kb3x2><<<grid_size, block, 0, stream>>>(static_cast<Kb3x2*>(out), static_cast<const Kb3x2*>(a), n, reps);
     return cudaGetLastError();
 }
 
@@ -547,33 +547,33 @@ extern "C" int inv_kb3x2(void* out, const void* a, size_t n, int reps) {
 // Extern "C" Wrappers for Gl (Goldilocks base field)
 // ============================================================================
 
-extern "C" int init_gl(void* out, const uint64_t* raw_data, size_t n) {
+extern "C" int init_gl(void* out, const uint64_t* raw_data, size_t n, cudaStream_t stream) {
     int grid_size;
     dim3 block = get_launch_config(n, grid_size);
-    bench_init_gl_kernel<<<grid_size, block>>>(static_cast<Gl*>(out), raw_data, n);
+    bench_init_gl_kernel<<<grid_size, block, 0, stream>>>(static_cast<Gl*>(out), raw_data, n);
     return cudaGetLastError();
 }
 
-extern "C" int add_gl(void* out, const void* a, const void* b, size_t n, int reps) {
+extern "C" int add_gl(void* out, const void* a, const void* b, size_t n, int reps, cudaStream_t stream) {
     int grid_size;
     dim3 block = get_launch_config(n, grid_size);
-    bench_add_kernel<Gl><<<grid_size, block>>>(
+    bench_add_kernel<Gl><<<grid_size, block, 0, stream>>>(
         static_cast<Gl*>(out), static_cast<const Gl*>(a), static_cast<const Gl*>(b), n, reps);
     return cudaGetLastError();
 }
 
-extern "C" int mul_gl(void* out, const void* a, const void* b, size_t n, int reps) {
+extern "C" int mul_gl(void* out, const void* a, const void* b, size_t n, int reps, cudaStream_t stream) {
     int grid_size;
     dim3 block = get_launch_config(n, grid_size);
-    bench_mul_kernel<Gl><<<grid_size, block>>>(
+    bench_mul_kernel<Gl><<<grid_size, block, 0, stream>>>(
         static_cast<Gl*>(out), static_cast<const Gl*>(a), static_cast<const Gl*>(b), n, reps);
     return cudaGetLastError();
 }
 
-extern "C" int inv_gl(void* out, const void* a, size_t n, int reps) {
+extern "C" int inv_gl(void* out, const void* a, size_t n, int reps, cudaStream_t stream) {
     int grid_size;
     dim3 block = get_launch_config(n, grid_size);
-    bench_inv_kernel<Gl><<<grid_size, block>>>(static_cast<Gl*>(out), static_cast<const Gl*>(a), n, reps);
+    bench_inv_kernel<Gl><<<grid_size, block, 0, stream>>>(static_cast<Gl*>(out), static_cast<const Gl*>(a), n, reps);
     return cudaGetLastError();
 }
 
@@ -581,32 +581,32 @@ extern "C" int inv_gl(void* out, const void* a, size_t n, int reps) {
 // Extern "C" Wrappers for Gl3 (Goldilocks cubic extension)
 // ============================================================================
 
-extern "C" int init_gl3(void* out, const uint64_t* raw_data, size_t n) {
+extern "C" int init_gl3(void* out, const uint64_t* raw_data, size_t n, cudaStream_t stream) {
     int grid_size;
     dim3 block = get_launch_config(n, grid_size);
-    bench_init_gl3_kernel<<<grid_size, block>>>(static_cast<Gl3*>(out), raw_data, n);
+    bench_init_gl3_kernel<<<grid_size, block, 0, stream>>>(static_cast<Gl3*>(out), raw_data, n);
     return cudaGetLastError();
 }
 
-extern "C" int add_gl3(void* out, const void* a, const void* b, size_t n, int reps) {
+extern "C" int add_gl3(void* out, const void* a, const void* b, size_t n, int reps, cudaStream_t stream) {
     int grid_size;
     dim3 block = get_launch_config(n, grid_size);
-    bench_add_kernel<Gl3><<<grid_size, block>>>(
+    bench_add_kernel<Gl3><<<grid_size, block, 0, stream>>>(
         static_cast<Gl3*>(out), static_cast<const Gl3*>(a), static_cast<const Gl3*>(b), n, reps);
     return cudaGetLastError();
 }
 
-extern "C" int mul_gl3(void* out, const void* a, const void* b, size_t n, int reps) {
+extern "C" int mul_gl3(void* out, const void* a, const void* b, size_t n, int reps, cudaStream_t stream) {
     int grid_size;
     dim3 block = get_launch_config(n, grid_size);
-    bench_mul_kernel<Gl3><<<grid_size, block>>>(
+    bench_mul_kernel<Gl3><<<grid_size, block, 0, stream>>>(
         static_cast<Gl3*>(out), static_cast<const Gl3*>(a), static_cast<const Gl3*>(b), n, reps);
     return cudaGetLastError();
 }
 
-extern "C" int inv_gl3(void* out, const void* a, size_t n, int reps) {
+extern "C" int inv_gl3(void* out, const void* a, size_t n, int reps, cudaStream_t stream) {
     int grid_size;
     dim3 block = get_launch_config(n, grid_size);
-    bench_inv_kernel<Gl3><<<grid_size, block>>>(static_cast<Gl3*>(out), static_cast<const Gl3*>(a), n, reps);
+    bench_inv_kernel<Gl3><<<grid_size, block, 0, stream>>>(static_cast<Gl3*>(out), static_cast<const Gl3*>(a), n, reps);
     return cudaGetLastError();
 }

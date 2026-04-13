@@ -1,12 +1,16 @@
-use std::{borrow::Cow, cell::Cell, ffi::c_void};
+use std::{
+    borrow::Cow,
+    ffi::c_void,
+    ops::Deref,
+    sync::{Arc, Mutex},
+};
 
 use crate::error::{check, CudaError};
 
 #[link(name = "cudart")]
 extern "C" {
     fn cudaDeviceSynchronize() -> i32;
-    fn cudaStreamGetId(stream: cudaStream_t, id: *mut CudaStreamId) -> i32;
-    fn cudaStreamCreate(stream: *mut cudaStream_t) -> i32;
+    fn cudaStreamCreateWithFlags(stream: *mut cudaStream_t, flags: u32) -> i32;
     fn cudaStreamDestroy(stream: cudaStream_t) -> i32;
     fn cudaStreamSynchronize(stream: cudaStream_t) -> i32;
     fn cudaStreamWaitEvent(stream: cudaStream_t, event: cudaEvent_t, flags: u32) -> i32;
@@ -27,17 +31,33 @@ pub type cudaStream_t = *mut c_void;
 
 pub struct CudaStream {
     stream: cudaStream_t,
+    host_event: Mutex<CudaEvent>,
+}
+
+impl std::fmt::Debug for CudaStream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CudaStream")
+            .field("stream", &self.stream)
+            .finish()
+    }
 }
 
 unsafe impl Send for CudaStream {}
 unsafe impl Sync for CudaStream {}
 
+/// `cudaStreamNonBlocking` flag: no implicit synchronization with the legacy
+/// default stream (stream 0).
+const CUDA_STREAM_NON_BLOCKING: u32 = 0x1;
+
 impl CudaStream {
-    /// Creates a new non-blocking CUDA stream.
-    pub fn new() -> Result<Self, CudaError> {
+    /// Creates a new non-blocking CUDA stream using `cudaStreamCreateWithFlags`
+    /// with `cudaStreamNonBlocking`. Non-blocking streams have no implicit
+    /// synchronization with the legacy default stream (stream 0).
+    pub fn new_non_blocking() -> Result<Self, CudaError> {
         let mut stream: cudaStream_t = std::ptr::null_mut();
-        check(unsafe { cudaStreamCreate(&mut stream) })?;
-        Ok(Self { stream })
+        check(unsafe { cudaStreamCreateWithFlags(&mut stream, CUDA_STREAM_NON_BLOCKING) })?;
+        let host_event = Mutex::new(CudaEvent::new()?);
+        Ok(Self { stream, host_event })
     }
 
     /// Get the raw CUDA stream handle.
@@ -55,66 +75,100 @@ impl CudaStream {
     pub fn wait(&self, event: &CudaEvent) -> Result<(), CudaError> {
         check(unsafe { cudaStreamWaitEvent(self.stream, event.event, 0) })
     }
+
+    /// Record a per-stream event and synchronize to complete all pending D2H copies.
+    /// Uses event-based sync rather than cudaStreamSynchronize because this waits
+    /// only for work up to the event point, allowing future selective sync patterns
+    /// (e.g., wait for a specific copy without draining the entire stream).
+    pub fn to_host_sync(&self) -> Result<(), CudaError> {
+        let event = self.host_event.lock().unwrap();
+        unsafe { event.record(self.stream) }?;
+        event.synchronize()
+    }
 }
 
 impl Drop for CudaStream {
     fn drop(&mut self) {
         if !self.stream.is_null() {
-            self.synchronize().unwrap();
-            let _ = unsafe { cudaStreamDestroy(self.stream) };
+            // Non-blocking: CUDA defers destruction until the stream is idle
+            let err = unsafe { cudaStreamDestroy(self.stream) };
+            debug_assert_eq!(err, 0, "cudaStreamDestroy failed with error code: {err}");
             self.stream = std::ptr::null_mut();
         }
     }
 }
 
-#[allow(non_upper_case_globals)]
-pub const cudaStreamPerThread: cudaStream_t = 0x02 as cudaStream_t;
+// ---------------------------------------------------------------------------
+// StreamGuard — keeps a CudaStream alive for allocation records
+// ---------------------------------------------------------------------------
 
-pub type CudaStreamId = u64;
+/// Keeps a `CudaStream` alive for the lifetime of an allocation record.
+#[derive(Clone, Debug)]
+pub struct StreamGuard(Arc<CudaStream>);
 
-pub fn current_stream_id() -> Result<CudaStreamId, CudaError> {
-    let mut id = 0;
-    check(unsafe { cudaStreamGetId(cudaStreamPerThread, &mut id) })?;
-    Ok(id)
-}
-
-pub fn current_stream_sync() -> Result<(), CudaError> {
-    check(unsafe { cudaStreamSynchronize(cudaStreamPerThread) })
-}
-
-struct CudaThreadCleanup {
-    touched_cuda: Cell<bool>,
-}
-
-impl CudaThreadCleanup {
-    const fn new() -> Self {
-        Self {
-            touched_cuda: Cell::new(false),
-        }
-    }
-
-    fn mark_used(&self) {
-        self.touched_cuda.set(true);
+impl StreamGuard {
+    pub fn new(stream: CudaStream) -> Self {
+        Self(Arc::new(stream))
     }
 }
 
-impl Drop for CudaThreadCleanup {
-    fn drop(&mut self) {
-        if self.touched_cuda.get() {
-            // Best-effort drain of this thread's default stream before CUDA TLS teardown.
-            // Avoid calling `check` here to prevent re-entering TLS tracking during drop.
-            let _ = unsafe { cudaStreamSynchronize(cudaStreamPerThread) };
-        }
+impl PartialEq for StreamGuard {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
     }
 }
 
-thread_local! {
-    static CUDA_THREAD_CLEANUP: CudaThreadCleanup = const { CudaThreadCleanup::new() };
+impl Eq for StreamGuard {}
+
+impl Deref for StreamGuard {
+    type Target = CudaStream;
+    fn deref(&self) -> &CudaStream {
+        &self.0
+    }
 }
 
-pub(crate) fn mark_cuda_thread_used() {
-    CUDA_THREAD_CLEANUP.with(|cleanup| cleanup.mark_used());
+// ---------------------------------------------------------------------------
+// GpuDeviceCtx — bundles device ID with a stream
+// ---------------------------------------------------------------------------
+
+/// Thin context for all GPU operations in the explicit-stream path.
+#[derive(Clone, Debug)]
+pub struct GpuDeviceCtx {
+    pub device_id: u32,
+    pub stream: StreamGuard,
 }
+
+impl GpuDeviceCtx {
+    /// Creates a new `GpuDeviceCtx` for the given device.
+    ///
+    /// NOTE: This calls `set_device_by_id` as a side effect, changing the
+    /// current CUDA device for the calling thread.
+    pub fn for_device(device_id: u32) -> Result<Self, CudaError> {
+        crate::common::set_device_by_id(device_id as i32)?;
+        Ok(Self {
+            device_id,
+            stream: StreamGuard::new(CudaStream::new_non_blocking()?),
+        })
+    }
+
+    pub fn for_current_device() -> Result<Self, CudaError> {
+        let device_id = crate::common::get_device()? as u32;
+        Self::for_device(device_id)
+    }
+}
+
+/// Synchronize the given explicit CUDA stream, blocking until all previously
+/// enqueued work on `stream` has completed.
+///
+/// # Safety
+/// The caller must ensure that `stream` is a valid CUDA stream handle.
+pub unsafe fn sync_stream(stream: cudaStream_t) -> Result<(), CudaError> {
+    check(cudaStreamSynchronize(stream))
+}
+
+// ---------------------------------------------------------------------------
+// CudaEvent
+// ---------------------------------------------------------------------------
 
 #[allow(non_camel_case_types)]
 pub type cudaEvent_t = *mut c_void;
@@ -165,10 +219,6 @@ pub struct CudaEvent {
     event: cudaEvent_t,
 }
 
-pub fn default_stream_wait(event: &CudaEvent) -> Result<(), CudaError> {
-    check(unsafe { cudaStreamWaitEvent(cudaStreamPerThread, event.event, 0) })
-}
-
 unsafe impl Send for CudaEvent {}
 unsafe impl Sync for CudaEvent {}
 
@@ -185,8 +235,9 @@ impl CudaEvent {
         check(cudaEventRecord(self.event, stream))
     }
 
-    pub fn record_on_this(&self) -> Result<(), CudaError> {
-        check(unsafe { cudaEventRecord(self.event, cudaStreamPerThread) })
+    /// Record this event on the given `CudaStream` (safe wrapper).
+    pub fn record_on(&self, stream: &CudaStream) -> Result<(), CudaError> {
+        check(unsafe { cudaEventRecord(self.event, stream.as_raw()) })
     }
 
     pub fn synchronize(&self) -> Result<(), CudaError> {
@@ -216,22 +267,27 @@ impl CudaEvent {
 
 impl Drop for CudaEvent {
     fn drop(&mut self) {
-        unsafe { cudaEventDestroy(self.event) };
+        let err = unsafe { cudaEventDestroy(self.event) };
+        debug_assert_eq!(err, 0, "cudaEventDestroy failed with error code: {err}");
     }
 }
 
-/// A GPU-aware span that collects a gauge metric using CUDA events.
-pub fn gpu_metrics_span<R, F: FnOnce() -> R>(
+// ---------------------------------------------------------------------------
+// GPU metrics spans
+// ---------------------------------------------------------------------------
+
+/// A GPU-aware span that collects a gauge metric using CUDA events on an explicit stream.
+pub fn gpu_metrics_span_on<R, F: FnOnce() -> R>(
     name: impl Into<Cow<'static, str>>,
+    stream: &CudaStream,
     f: F,
 ) -> Result<R, CudaError> {
     let start = CudaEvent::new()?;
     let stop = CudaEvent::new()?;
-    unsafe {
-        check(cudaEventRecord(start.event, cudaStreamPerThread))?;
-    }
+    start.record_on(stream)?;
     let res = f();
-    unsafe { stop.record_and_wait(cudaStreamPerThread)? };
+    stop.record_on(stream)?;
+    stop.synchronize()?;
 
     let mut elapsed_ms = 0f32;
     unsafe {
