@@ -140,12 +140,12 @@ pub fn root_params_with_100_bits_security() -> SystemParams {
     SystemParams::new(
         DEFAULT_ROOT_LOG_BLOWUP,
         2,  // l_skip
-        19, // n_stack
-        9,  // w_stack
+        18, // n_stack
+        18, // w_stack
         WHIR_MAX_LOG_FINAL_POLY_LEN,
         20, // folding pow
         20, // mu pow
-        WhirProximityStrategy::ListDecoding { m: 2 },
+        WhirProximityStrategy::ListDecoding { m: 1 },
         SECURITY_BITS_TARGET,
         log_up_security_params_baby_bear_100_bits(),
     )
