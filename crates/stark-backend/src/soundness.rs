@@ -401,7 +401,7 @@ impl SoundnessCalculator {
             // ε_shift and ε_out reference m_i, ℓ_{i,0} where `i = round + 1` refers to the *next*
             // round.
             let next_log2_list_size = Self::whir_proximity_gap_security(
-                proximity_regime,
+                proximity.in_round(round + 1),
                 challenge_field_bits,
                 current_log_degree,
                 next_rate,

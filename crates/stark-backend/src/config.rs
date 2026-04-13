@@ -247,16 +247,18 @@ impl ProximityRegime {
     /// This treats the per-query error as an upper bound on the maximum agreement.
     ///
     /// - `UniqueDecoding`: max agreement is `(1 + ρ) / 2`.
-    /// - `ListDecoding { m }`: finite-multiplicity Guruswami-Sudan threshold, `sqrt(ρ(1 + 1/m)) +
-    ///   ε` for a tiny `ε`, to keep the proximity threshold strict.
+    /// - `ListDecoding { m }`: finite-multiplicity Guruswami-Sudan threshold, `sqrt(ρ) (1 +
+    ///   1/(2m)).
     pub fn whir_query_security_bits(&self, num_queries: usize, log_inv_rate: usize) -> f64 {
         let rho = 2.0_f64.powf(-(log_inv_rate as f64));
         let max_agreement = match *self {
             ProximityRegime::UniqueDecoding => (1.0 + rho) / 2.0,
             ProximityRegime::ListDecoding { m } => {
                 let m = m.max(1) as f64;
-                // Johnson bound with a tiny epsilon to ensure strict proximity.
-                (rho * (1.0 + 1.0 / m)).sqrt() + 1e-6
+                // The stronger bound of sqrt(ρ(1 + 1/m)) could be used for the Guruswami-Sudan
+                // threshold, but to match the explicit statement in the WHIR paper, we use the
+                // weaker Taylor series expansion to sqrt(ρ) * (1 + 1/(2m))
+                rho.sqrt() * (1.0 + 1.0 / (2.0 * m))
             }
         };
 
