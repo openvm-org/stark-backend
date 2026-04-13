@@ -690,7 +690,7 @@ impl SoundnessCalculator {
     /// Sumcheck error is d * ℓ_{i,s-1} / |F|, d^*:= 1 + deg_Z(w0) + max_i deg_{X_i}(w0) and d :=
     /// max{d^*,3}.
     ///
-    /// Security bits = |F_ext| - log₂(3) - log2(ℓ) + folding_pow_bits
+    /// Security bits = |F_ext| - log₂(d) - log2(ℓ_{i,s-1}) + folding_pow_bits
     fn whir_sumcheck_security(
         challenge_field_bits: f64,
         folding_pow_bits: usize,
@@ -706,7 +706,7 @@ impl SoundnessCalculator {
     /// OOD error is 2^{m_i - 1} ℓ_{i,0}^2 / |F| where m_i is the log_degree at the start of WHIR
     /// round `i`.
     ///
-    /// Security bits = |F_ext| - log_degree + 1 - 2 * log2(ℓ_{i,0})
+    /// Security bits = |F_ext| - m_i + 1 - 2 * log2(ℓ_{i,0})
     fn whir_ood_security(
         log2_list_size: f64,
         challenge_field_bits: f64,
