@@ -361,7 +361,7 @@ impl SoundnessCalculator {
             // sub-round
             let mut log2_list_size: Option<f64> = None;
 
-            for sub_round in 0..k_whir {
+            for _ in 0..k_whir {
                 current_log_degree -= 1;
 
                 let prox_gaps = Self::whir_proximity_gap_security(
@@ -381,12 +381,12 @@ impl SoundnessCalculator {
 
                 let sumcheck_bits = Self::whir_sumcheck_security(
                     challenge_field_bits,
-                    sub_round,
                     whir.folding_pow_bits,
+                    log2_list_size.unwrap(),
                 );
                 min_sumcheck_bits = min_sumcheck_bits.min(sumcheck_bits);
 
-                // Theorem 5.2: ε_fold = d * ℓ / |F| + err*.
+                // Theorem 5.2: ε_fold = d * ℓ_{i,s-1} / |F| + err*.
                 let fold_rbr_bits = Self::combine_security_bits(sumcheck_bits, prox_gaps_bits);
                 min_fold_rbr_bits = min_fold_rbr_bits.min(fold_rbr_bits);
                 min_rbr_bits = min_rbr_bits.min(fold_rbr_bits);
@@ -398,6 +398,16 @@ impl SoundnessCalculator {
                 + whir.query_phase_pow_bits as f64;
             min_query_bits = min_query_bits.min(query_bits);
 
+            // ε_shift and ε_out reference m_i, ℓ_{i,0} where `i = round + 1` refers to the *next*
+            // round.
+            let next_log2_list_size = Self::whir_proximity_gap_security(
+                proximity.in_round(round + 1),
+                challenge_field_bits,
+                current_log_degree,
+                next_rate,
+                2,
+            )
+            .log2_list_size;
             // In-domain γ batching (not protected by PoW; Merkle proofs are observed before γ).
             // NOTE[jpw] For now we use the original paper where this is fixed to 1. <https://github.com/WizardOfMenlo/whir/blob/cf1599b56ff50e09142ebe6d2e2fbd86875c9986/src/whir/parameters.rs#L373> now varies this to increase security in LDR.
             const NUM_OOD_SAMPLES: usize = 1;
@@ -406,13 +416,13 @@ impl SoundnessCalculator {
             let gamma_batching_bits = Self::whir_gamma_batching_security(
                 challenge_field_bits,
                 batch_size,
-                log2_list_size.unwrap(),
+                next_log2_list_size,
             );
             min_gamma_batching_bits = min_gamma_batching_bits.min(gamma_batching_bits);
 
-            // Theorem 5.2 / Claim 5.4: ε_shift = (1 - δ)^t + ℓ * (t + 1) / |F|. The implementation
-            // keeps the same additive structure, with the final round batching only the query
-            // claims.
+            // Theorem 5.2 / Claim 5.4: ε_shift = (1 - δ)^t + ℓ_{i,0} * (t + 1) / |F|. The
+            // implementation keeps the same additive structure, with the final round
+            // batching only the query claims.
             let shift_rbr_bits = Self::combine_security_bits(query_bits, gamma_batching_bits);
             min_shift_rbr_bits = min_shift_rbr_bits.min(shift_rbr_bits);
             min_rbr_bits = min_rbr_bits.min(shift_rbr_bits);
@@ -422,7 +432,7 @@ impl SoundnessCalculator {
                 // This is OOD sample on f_i for the *next* round `i = round + 1` after folding. So
                 // `m_i = current_log_degree` (with the present round `round`'s foldings)
                 let ood_bits = Self::whir_ood_security(
-                    log2_list_size.unwrap(),
+                    next_log2_list_size,
                     challenge_field_bits,
                     current_log_degree,
                 );
@@ -677,21 +687,26 @@ impl SoundnessCalculator {
 
     /// Computes WHIR sumcheck security bits for a sub-round.
     ///
-    /// Sumcheck error is 2/|F| for sub_round 0 and 3/|F| for sub_round > 0.
-    /// Security bits = |F_ext| - log₂(degree) + folding_pow_bits
+    /// Sumcheck error is d * ℓ_{i,s-1} / |F|, d^*:= 1 + deg_Z(w0) + max_i deg_{X_i}(w0) and d :=
+    /// max{d^*,3}.
+    ///
+    /// Security bits = |F_ext| - log₂(d) - log2(ℓ_{i,s-1}) + folding_pow_bits
     fn whir_sumcheck_security(
         challenge_field_bits: f64,
-        sub_round: usize,
         folding_pow_bits: usize,
+        log2_list_size: f64,
     ) -> f64 {
-        let sumcheck_degree: f64 = if sub_round == 0 { 2.0 } else { 3.0 };
-        challenge_field_bits - sumcheck_degree.log2() + folding_pow_bits as f64
+        // For our use case, w0 has degree 1 in each variable, so d = 3.
+        let sumcheck_degree: f64 = 3.0;
+        challenge_field_bits - sumcheck_degree.log2() - log2_list_size + folding_pow_bits as f64
     }
 
     /// Computes WHIR out-of-domain (OOD) security bits.
     ///
-    /// OOD error is 2^{m_i - 1} ℓ^2 / |F| where m_i is the log_degree at the start of WHIR round
-    /// `i`. Security bits = |F_ext| - log_degree + 1
+    /// OOD error is 2^{m_i - 1} ℓ_{i,0}^2 / |F| where m_i is the log_degree at the start of WHIR
+    /// round `i`.
+    ///
+    /// Security bits = |F_ext| - m_i + 1 - 2 * log2(ℓ_{i,0})
     fn whir_ood_security(
         log2_list_size: f64,
         challenge_field_bits: f64,
