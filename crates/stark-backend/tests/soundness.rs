@@ -298,7 +298,7 @@ fn test_all_production_configs() {
             &root,
             RECURSION_MAX_CONSTRAINTS,
             RECURSION_NUM_AIRS,
-            21,
+            20,
             RECURSION_NUM_COLUMNS,
             RECURSION_MAX_INTERACTIONS_PER_AIR,
         ),
