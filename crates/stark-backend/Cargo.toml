@@ -61,5 +61,5 @@ jemalloc-prof = ["jemalloc", "tikv-jemallocator?/profiling"]
 metrics = ["dep:metrics"]
 multi-field-transcript = ["dep:num-bigint"]
 test-utils = []
-lean = [] # feature for Lean constraint codegen
+lean = ["openvm-codec-derive/lean"] # feature for Lean constraint codegen
 soundness-bchks25-optimized = [] # use brute force optimized parameters for [BCHKS25] proximity gaps security

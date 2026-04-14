@@ -26,8 +26,6 @@ use crate::{
     AirRef, AnyAir, StarkProtocolConfig, SystemParams,
 };
 
-#[cfg(feature = "lean")]
-pub mod lean;
 pub mod types;
 
 struct AirKeygenBuilder<SC: StarkProtocolConfig> {
