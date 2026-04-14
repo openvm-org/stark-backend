@@ -35,6 +35,9 @@ pub mod soundness;
 pub mod utils;
 pub mod verifier;
 
+#[cfg(feature = "lean")]
+pub mod lean;
+
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_utils;
 // #[cfg(test)]
