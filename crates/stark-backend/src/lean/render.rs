@@ -537,6 +537,7 @@ fn maybe_lift_intermediate<F: Field>(
     }
 }
 
+#[allow(clippy::useless_format)]
 fn symbolic_expression_leaf_to_string<F: Field>(
     x: &SymbolicExpression<F>,
     scoping: &str,

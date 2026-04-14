@@ -1,4 +1,3 @@
-#![allow(clippy::useless_format)]
 //! Extraction of AIR constraints (with interactions) from symbolic DAGs to Lean4 code.
 //! This extraction can be used for standalone Lean4 code generation from serialized circuit
 //! verifying keys.
@@ -113,17 +112,16 @@ pub fn extract_constraints_to_lean_writer<F: Field, W: Write>(
     }
     let mut interactions_by_bus: HashMap<u16, Vec<Interaction<_>>> = HashMap::new();
     for interaction in symbolic_constraints.interactions.iter() {
-        if let Some(list) = interactions_by_bus.get_mut(&interaction.bus_index) {
-            list.push(interaction.clone());
-        } else {
-            interactions_by_bus.insert(interaction.bus_index, vec![interaction.clone()]);
-        }
+        interactions_by_bus
+            .entry(interaction.bus_index)
+            .or_default()
+            .push(interaction.clone());
     }
 
     let mut interaction_branches = vec![];
     for (idx, (bus_idx, interactions)) in interactions_by_bus
         .iter()
-        .sorted_by(|(a, _), (c, _)| (**a).cmp(*c))
+        .sorted_by(|(a, _), (c, _)| a.cmp(c))
         .enumerate()
     {
         let (new_helper_defs, expr) =

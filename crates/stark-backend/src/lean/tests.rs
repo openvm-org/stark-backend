@@ -19,7 +19,7 @@ fn symbolic_constraint_avoids_inter_defs_for_low_use_subexpressions() {
     let expr = SymbolicExpression::IsFirstRow * inner;
 
     let mut context = LeanRenderContext {
-        use_counts: expression_direct_use_counts(&[expr.clone()]),
+        use_counts: expression_direct_use_counts(std::slice::from_ref(&expr)),
         ..Default::default()
     };
     let (helper_defs, rendered) =
@@ -68,7 +68,7 @@ fn symbolic_constraint_dedupes_reused_local_let_bindings() {
     let expr = delta.clone() + (SymbolicExpression::from(BabyBear::new(3)) * delta);
 
     let mut context = LeanRenderContext {
-        use_counts: expression_direct_use_counts(&[expr.clone()]),
+        use_counts: expression_direct_use_counts(std::slice::from_ref(&expr)),
         ..Default::default()
     };
     let (helper_defs, rendered) =
