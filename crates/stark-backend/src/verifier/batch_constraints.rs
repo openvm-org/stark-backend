@@ -97,6 +97,11 @@ pub fn verify_zerocheck_and_logup<SC: StarkProtocolConfig, TS: FiatShamirTranscr
         (p_xi_claim, q_xi_claim, xi) =
             verify_gkr::<SC, TS>(gkr_proof, transcript, l_skip + n_logup)?;
         debug_assert_eq!(xi.len(), l_skip + n_logup);
+    } else if gkr_proof.q0_claim != SC::EF::ONE {
+        return Err(GkrVerificationError::InvalidZeroRoundValue {
+            actual: gkr_proof.q0_claim,
+        }
+        .into());
     }
 
     let n_max = n_per_trace.iter().copied().max().unwrap().max(0) as usize;

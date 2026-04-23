@@ -49,17 +49,7 @@ pub fn verify_gkr<SC: StarkProtocolConfig, TS: FiatShamirTranscript<SC>>(
     transcript: &mut TS,
     total_rounds: usize,
 ) -> Result<(SC::EF, SC::EF, Vec<SC::EF>), GkrVerificationError<SC::EF>> {
-    if total_rounds == 0 {
-        // Proof shape asserts that `proof.claims_per_layer` and `proof.sumcheck_polys` are empty.
-        debug_assert!(proof.claims_per_layer.is_empty());
-        debug_assert!(proof.sumcheck_polys.is_empty());
-        if proof.q0_claim != SC::EF::ONE {
-            return Err(GkrVerificationError::InvalidZeroRoundValue {
-                actual: proof.q0_claim,
-            });
-        }
-        return Ok((SC::EF::ZERO, SC::EF::ONE, vec![]));
-    }
+    assert!(total_rounds > 0);
 
     // Note: this is already asserted by proof shape
     if proof.claims_per_layer.len() != total_rounds {
