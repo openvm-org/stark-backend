@@ -552,7 +552,7 @@ public:
         return !this->is_odd();
     }
 
-    inline mont_t& inverse()
+    inline mont_t inverse()
     {
         const mont_t p = mont_t::modulus();
         mont_t v, b, c;
