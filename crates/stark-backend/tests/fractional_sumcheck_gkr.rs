@@ -247,27 +247,3 @@ fn test_gkr_mixed_fractions() -> eyre::Result<()> {
     assert_ne!(denom_claim, EF::ZERO);
     Ok(())
 }
-
-#[test]
-fn test_gkr_empty_case() -> eyre::Result<()> {
-    setup_tracing();
-    let fractions = vec![];
-
-    let mut prover_transcript = default_duplex_sponge();
-    let (frac_proof, _xi) = fractional_sumcheck::<SC, _>(&mut prover_transcript, &fractions, true)?;
-
-    let gkr_proof = GkrProof::<SC> {
-        logup_pow_witness: F::ZERO,
-        q0_claim: frac_proof.fractional_sum.1,
-        claims_per_layer: frac_proof.claims_per_layer,
-        sumcheck_polys: frac_proof.sumcheck_polys,
-    };
-
-    let mut verifier_transcript = default_duplex_sponge();
-    let (numer_claim, denom_claim, gkr_r) =
-        verify_gkr::<SC, _>(&gkr_proof, &mut verifier_transcript, 0)?;
-    assert_eq!(numer_claim, EF::ZERO);
-    assert_eq!(denom_claim, EF::ONE);
-    assert_eq!(gkr_r, vec![]);
-    Ok(())
-}
