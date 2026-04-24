@@ -216,7 +216,7 @@ public:
     friend inline mont_t operator+(mont_t a, const mont_t& b)
     {   return a += b;   }
 
-    inline uint32_t add_with_carry(const mont_t& b)
+    inline void add_with_carry(const mont_t& b)
     {
         uint32_t i;
         asm("{");
