@@ -56,7 +56,7 @@ use openvm_stark_backend::{
     utils::disable_debug_builder,
     verifier::{
         batch_constraints::verify_zerocheck_and_logup,
-        fractional_sumcheck_gkr::verify_gkr,
+        fractional_sumcheck_gkr::{verify_gkr, GkrVerificationError},
         proof_shape::verify_proof_shape,
         verify,
         whir::{binary_k_fold, verify_whir, VerifyWhirError},
@@ -419,6 +419,63 @@ pub fn batch_sumcheck_zero_interactions<E: StarkEngine<SC = SC>>(
         &omega_skip_pows,
     )?;
     assert_eq!(r.len(), log_trace_degree.saturating_sub(params.l_skip) + 1);
+    Ok(())
+}
+
+/// Negative test: with zero interactions, a `gkr_proof.q0_claim != EF::ONE` must cause
+/// `verify_zerocheck_and_logup` to reject with `InvalidZeroRoundValue`.
+pub fn batch_sumcheck_zero_interactions_malleable_q0<E: StarkEngine<SC = SC>>() -> eyre::Result<()>
+{
+    setup_tracing_with_log_level(Level::DEBUG);
+
+    let engine = E::new(default_test_params_small());
+    let params = engine.params();
+    let log_trace_degree = 4;
+    let fib = FibFixture::new(0, 1, 1 << log_trace_degree);
+    let (pk, vk) = fib.keygen(&engine);
+    let device = engine.device();
+    let d_pk = device.transport_pk_to_device(&pk);
+    let cpu_ctx = fib.generate_proving_ctx();
+    let ctx = device.transport_proving_ctx_to_device(&cpu_ctx);
+
+    let mut n_per_air: Vec<isize> = Vec::with_capacity(ctx.per_trace.len());
+    for (_, trace) in ctx.common_main_traces() {
+        let trace_height = trace.height();
+        let log_height = log2_strict_usize(trace_height);
+        let n = log_height as isize - params.l_skip as isize;
+        n_per_air.push(n);
+    }
+
+    let mut prover_transcript = engine.initial_transcript();
+    let omega_skip = F::two_adic_generator(params.l_skip);
+    let omega_skip_pows = omega_skip.powers().take(1 << params.l_skip).collect_vec();
+
+    let pvs = vec![ctx.per_trace[0].1.public_values.clone()];
+    let (partial_proof, _) =
+        prove_up_to_batch_constraints(&engine, &mut prover_transcript, &d_pk, ctx);
+    let (mut gkr_proof, batch_proof) = partial_proof.into();
+
+    // Sanity: honest prover produces q0_claim = 1 when there are no interactions.
+    assert_eq!(gkr_proof.q0_claim, EF::ONE);
+    let tampered = EF::from_u64(2);
+    gkr_proof.q0_claim = tampered;
+
+    let mut verifier_sponge = default_duplex_sponge();
+    let err = verify_zerocheck_and_logup::<SC, _>(
+        &mut verifier_sponge,
+        &vk.inner,
+        &pvs,
+        &gkr_proof,
+        &batch_proof,
+        &[0],
+        &n_per_air,
+        &omega_skip_pows,
+    )
+    .expect_err("verifier must reject a tampered q0_claim when there are no interactions");
+    assert_eq!(
+        err,
+        GkrVerificationError::InvalidZeroRoundValue { actual: tampered }.into(),
+    );
     Ok(())
 }
 
@@ -1535,6 +1592,10 @@ macro_rules! backend_test_suite {
             test_batch_sumcheck_zero_interactions_log_height_eq_l_skip(2),
             test_batch_sumcheck_zero_interactions_log_height_lt_l_skip(1),
             test_batch_sumcheck_zero_interactions_log_height_zero(0),
+        });
+
+        $crate::__test_cases!($engine, batch_sumcheck_zero_interactions_malleable_q0, unwrap, {
+            test_batch_sumcheck_zero_interactions_malleable_q0(),
         });
 
         $crate::__test_cases!($engine, gkr_verify_zero_interactions, unwrap, {
