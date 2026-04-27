@@ -105,13 +105,13 @@ __global__ void poseidon2_compressing_row_hashes_ext_kernel(
         // compute row hash
         for (int col = 0; col < width; col++) {
 #pragma unroll
-            // Extension field degree is 4
-            for (int i = 0; i < 4; i++) {
+            // Extension field degree is 5
+            for (int i = 0; i < D_EF; i++) {
                 cells[used++] = matrix[col * height + row].elems[i];
-            }
-            if (used == CELLS_RATE) {
-                poseidon2::poseidon2_mix(cells);
-                used = 0;
+                if (used == CELLS_RATE) {
+                    poseidon2::poseidon2_mix(cells);
+                    used = 0;
+                }
             }
         }
         if (used != 0) {
@@ -147,7 +147,7 @@ __global__ void poseidon2_compressing_row_hashes_ext_kernel(
         }
     }
 }
-static_assert(CELLS_RATE % 4 == 0, "CELLS_RATE must be multiple of FpExt degree (4)");
+// Note: CELLS_RATE need not be a multiple of 5 since we flush inside the per-element loop.
 
 // Striding keeps memory coalesced with two cache lines within a warp
 __global__ void poseidon2_strided_compress_layer_kernel(

@@ -63,8 +63,8 @@ type SC = BabyBearBn254Poseidon2Config;
 
 // Convenience type aliases
 pub type F = BabyBear;
-pub type EF = BinomialExtensionField<BabyBear, 4>;
-pub const D_EF: usize = 4;
+pub type EF = BinomialExtensionField<BabyBear, 5>;
+pub const D_EF: usize = 5;
 pub type Digest = [Bn254Scalar; DIGEST_WIDTH];
 
 #[derive(Clone, Debug, derive_new::new)]

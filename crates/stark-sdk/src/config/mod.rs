@@ -2,11 +2,11 @@ use openvm_stark_backend::{SystemParams, WhirProximityStrategy};
 
 use crate::config::log_up_params::log_up_security_params_baby_bear_100_bits;
 
-/// STARK config where the base field is BabyBear, extension field is BabyBear^4, and the hasher is
+/// STARK config where the base field is BabyBear, extension field is BabyBear^5, and the hasher is
 /// `Poseidon2<Bn254>`.
 #[cfg(feature = "baby-bear-bn254-poseidon2")]
 pub mod baby_bear_bn254_poseidon2;
-/// STARK config where the base field is BabyBear, extension field is BabyBear^4, and the hasher is
+/// STARK config where the base field is BabyBear, extension field is BabyBear^5, and the hasher is
 /// `Poseidon2<BabyBear>`.
 pub mod baby_bear_poseidon2;
 /// BN254 Poseidon2 permutations used by the BabyBear + BN254 configuration.
@@ -18,7 +18,7 @@ pub mod log_up_params;
 // Production configurations
 // ==========================================================================
 // These configurations target 100-bits of proven round-by-round (RBR) security with BabyBear as the
-// base field and BabyBear^4 as the extension field.
+// base field and BabyBear^5 as the extension field.
 
 const WHIR_MAX_LOG_FINAL_POLY_LEN: usize = 10;
 const SECURITY_BITS_TARGET: usize = 100;

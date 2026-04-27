@@ -93,10 +93,11 @@ __global__ void split_ext_to_base_col_major_matrix_kernel(
     uint64_t col_num = (poly_len / matrix_height); // SPLIT_FACTOR = 2
     for (uint64_t col_idx = 0; col_idx < col_num; col_idx++) {
         FpExt ext_val = d_poly[col_idx * matrix_height + row_idx];
-        d_matrix[(col_idx * 4 + 0) * matrix_height + row_idx] = ext_val.elems[0];
-        d_matrix[(col_idx * 4 + 1) * matrix_height + row_idx] = ext_val.elems[1];
-        d_matrix[(col_idx * 4 + 2) * matrix_height + row_idx] = ext_val.elems[2];
-        d_matrix[(col_idx * 4 + 3) * matrix_height + row_idx] = ext_val.elems[3];
+        d_matrix[(col_idx * D_EF + 0) * matrix_height + row_idx] = ext_val.elems[0];
+        d_matrix[(col_idx * D_EF + 1) * matrix_height + row_idx] = ext_val.elems[1];
+        d_matrix[(col_idx * D_EF + 2) * matrix_height + row_idx] = ext_val.elems[2];
+        d_matrix[(col_idx * D_EF + 3) * matrix_height + row_idx] = ext_val.elems[3];
+        d_matrix[(col_idx * D_EF + 4) * matrix_height + row_idx] = ext_val.elems[4];
     }
 }
 

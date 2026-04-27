@@ -1,20 +1,14 @@
-#include "device_ntt.cuh"
 #include "fp.h"
 #include "fpext.h"
-#include "frac_ext.cuh"
 #include "launcher.cuh"
 #include "sumcheck.cuh"
-#include "utils.cuh"
 #include <algorithm>
 #include <cassert>
-#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cuda_runtime.h>
 #include <utility>
 #include <vector_types.h>
-
-using namespace device_ntt;
 
 namespace {
 
@@ -232,7 +226,7 @@ __global__ void stacked_reduction_sumcheck_mle_round_kernel(
     const FpExt *__restrict__ k_rot_ns, // pointer to `k_rot` segments
     const UnstackedSlice *__restrict__ unstacked_cols, // pointer to unstacked_cols at window start
     const FpExt *__restrict__ lambda_pows,             // pointer to lambda_pows at window start
-    uint64_t *__restrict__ output, // [S_DEG * 4] - atomic accumulator, reduced on CPU
+    uint64_t *__restrict__ output, // [S_DEG * 5] - atomic accumulator, reduced on CPU
     uint32_t q_height,             // height of each matrix in q_evals
     uint32_t window_len,
     uint32_t num_y
@@ -295,7 +289,7 @@ __global__ void stacked_reduction_sumcheck_mle_round_kernel(
     for (int idx = 0; idx < S_DEG; idx++) {
         FpExt reduced = sumcheck::block_reduce_sum(local_sums[idx], shared);
         if (threadIdx.x == 0) {
-            sumcheck::atomic_add_fpext_to_u64(output + idx * 4, reduced);
+            sumcheck::atomic_add_fpext_to_u64(output + idx * D_EF, reduced);
         }
         __syncthreads();
     }
@@ -311,7 +305,7 @@ __global__ void stacked_reduction_sumcheck_mle_round_degenerate_kernel(
     FpExt k_rot_r,                       // pointer to `k_rot` segments
     const UnstackedSlice *__restrict__ unstacked_cols, // pointer to unstacked_cols at window start
     const FpExt *__restrict__ lambda_pows,             // pointer to lambda_pows at window start
-    uint64_t *__restrict__ output, // [S_DEG * 4] - atomic accumulator, reduced on CPU
+    uint64_t *__restrict__ output, // [S_DEG * 5] - atomic accumulator, reduced on CPU
     uint32_t q_height,             // height of each matrix in q_evals
     uint32_t window_len,
     uint32_t shift_factor // = l_skip + round
@@ -361,7 +355,7 @@ __global__ void stacked_reduction_sumcheck_mle_round_degenerate_kernel(
     for (int idx = 0; idx < S_DEG; idx++) {
         FpExt reduced = sumcheck::block_reduce_sum(local_sums[idx], shared);
         if (threadIdx.x == 0) {
-            sumcheck::atomic_add_fpext_to_u64(output + idx * 4, reduced);
+            sumcheck::atomic_add_fpext_to_u64(output + idx * D_EF, reduced);
         }
         __syncthreads();
     }
@@ -538,7 +532,7 @@ extern "C" int _stacked_reduction_sumcheck_mle_round_degenerate(
     FpExt k_rot_r,
     const UnstackedSlice *unstacked_cols,
     const FpExt *lambda_pows,
-    uint64_t *output, // [S_DEG * 4] - atomic accumulator, reduced on CPU
+    uint64_t *output, // [S_DEG * 5] - atomic accumulator, reduced on CPU
     uint32_t q_height,
     uint32_t window_len,
     uint32_t l_skip,

@@ -6,18 +6,19 @@
  * LOCAL CHANGES (high level):
  * - 2025-08-13: Support multiple rows in bit_rev_permutation & bit_rev_permutation_z
  * - 2025-09-10: Add extern "C" launcher from sppark/ntt/ntt.cuh
- * - 2025-12-24: Template field type to support fr_t and bb31_4_t
+ * - 2025-12-24: Template field type to support fr_t and FpExt
  */
 
 #include <cstdint>
 
 #include "launcher.cuh"
 #include "ntt/ntt.cuh"
+#include "fpext.h"
 
 // [DIFF]: Add new type for bit reversal kernel
 struct frac_fpext_t {
-    bb31_4_t num;
-    bb31_4_t denom;
+    FpExt num;
+    FpExt denom;
 };
 
 template<unsigned int Z_COUNT>
@@ -164,8 +165,14 @@ static int bit_rev_impl(T* d_out, const T* d_inp,
     uint32_t lg_domain_size, uint32_t padded_poly_size, uint32_t poly_count, cudaStream_t stream)
 {
     size_t domain_size = (size_t)1 << lg_domain_size;
-    // aim to read 4 cache lines of consecutive data per read
-    const uint32_t Z_COUNT = 256 / sizeof(T);
+    // aim to read 4 cache lines of consecutive data per read, rounded down to power-of-2
+    constexpr uint32_t Z_COUNT_RAW = 256 / sizeof(T);
+    constexpr uint32_t Z_COUNT = Z_COUNT_RAW >= 64 ? 64 :
+                                  Z_COUNT_RAW >= 32 ? 32 :
+                                  Z_COUNT_RAW >= 16 ? 16 :
+                                  Z_COUNT_RAW >= 8  ? 8  :
+                                  Z_COUNT_RAW >= 4  ? 4  :
+                                  Z_COUNT_RAW >= 2  ? 2  : 1;
     const uint32_t bsize = Z_COUNT > WARP_SIZE ? Z_COUNT : WARP_SIZE;
 
     if (poly_count == 0)
@@ -209,7 +216,7 @@ extern "C" int _bit_rev(fr_t* d_out, const fr_t* d_inp,
     return bit_rev_impl(d_out, d_inp, lg_domain_size, padded_poly_size, poly_count, stream);
 }
 
-extern "C" int _bit_rev_ext(bb31_4_t* d_out, const bb31_4_t* d_inp,
+extern "C" int _bit_rev_ext(FpExt* d_out, const FpExt* d_inp,
     uint32_t lg_domain_size, uint32_t padded_poly_size, uint32_t poly_count, cudaStream_t stream)
 {
     return bit_rev_impl(d_out, d_inp, lg_domain_size, padded_poly_size, poly_count, stream);

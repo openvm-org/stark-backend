@@ -167,8 +167,8 @@ static __device__ Bn254Fr32 bn254_row_hash_b32(
 }
 
 /// b32 mirror of bn254_row_hash_ext. Same shared-buf strided layout as
-/// bn254_row_hash_b32; each matrix entry contributes 4 BabyBear u32 limbs
-/// (the FpExt's 4 base-field components) to the sponge buffer.
+/// bn254_row_hash_b32; each matrix entry contributes D_EF BabyBear u32 limbs
+/// (the FpExt's base-field components) to the sponge buffer.
 template <int BLOCK_SIZE>
 static __device__ Bn254Fr32 bn254_row_hash_ext_b32(
     const FpExt *matrix,
@@ -207,7 +207,7 @@ static __device__ Bn254Fr32 bn254_row_hash_ext_b32(
     int cnt = 0;
     for (size_t col = 0; col < width; col++) {
         FpExt elem = matrix[col * height + row];
-        for (int d = 0; d < 4; d++) {
+        for (int d = 0; d < D_EF; d++) {
             buf_set(cnt, elem.elems[d].asUInt32());
             cnt++;
             if (cnt == BN254_BABY_BEAR_RATE) {

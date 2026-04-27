@@ -10,6 +10,6 @@ pub fn log_up_security_params_baby_bear_100_bits() -> LogUpSecurityParameters {
         log_max_message_length: 7,
         pow_bits: 18,
     };
-    assert!(params.bits_of_security::<BinomialExtensionField<BabyBear, 4>>() >= 100);
+    assert!(params.bits_of_security::<BinomialExtensionField<BabyBear, 5>>() >= 100);
     params
 }
