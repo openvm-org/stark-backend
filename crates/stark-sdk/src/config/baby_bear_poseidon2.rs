@@ -34,8 +34,8 @@ type SC = BabyBearPoseidon2Config;
 
 // Convenience type aliases
 pub type F = BabyBear;
-pub type EF = BinomialExtensionField<BabyBear, 4>;
-pub const D_EF: usize = 4;
+pub type EF = BinomialExtensionField<BabyBear, 5>;
+pub const D_EF: usize = 5;
 pub type Digest = [F; DIGEST_SIZE];
 pub type DuplexSponge = duplex_sponge::DuplexSponge<F, Perm, WIDTH, RATE>;
 pub type DuplexSpongeRecorder = duplex_sponge::DuplexSpongeRecorder<F, Perm, WIDTH, RATE>;

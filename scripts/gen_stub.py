@@ -46,7 +46,7 @@ The output is compiled with:
   the stub always compiles.  These must stay in sync with the constants in
   crates/stark-sdk/src/config/baby_bear_poseidon2.rs:
     - F          = BabyBear
-    - EF         = BinomialExtensionField<BabyBear, 4>   (D_EF = 4)
+    - EF         = BinomialExtensionField<BabyBear, 5>   (D_EF = 5)
     - DIGEST_SIZE = 8  (== CHUNK)
     - Digest     = F[DIGEST_SIZE]
 
@@ -133,7 +133,7 @@ out.append('};')
 # See "Type aliases" in the docstring above for why this is needed.
 out.append('#ifndef BABY_BEAR_BN254_POSEIDON2')
 out.append('using F = BabyBear;')
-out.append('using EF = BinomialExtensionField<BabyBear, 4>;')
+out.append('using EF = BinomialExtensionField<BabyBear, 5>;')
 out.append('#define DIGEST_SIZE 8')
 out.append('using Digest = F[DIGEST_SIZE];')
 out.append('#endif')
