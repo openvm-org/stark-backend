@@ -26,7 +26,7 @@ use crate::{
             frac_compute_round_and_revert, frac_multifold_raw, frac_precompute_m_build_raw,
             frac_precompute_m_eval_round_raw,
         },
-        ntt::{bit_rev_frac_ext, bit_rev_frac_ext_build_k2},
+        ntt::{bit_rev_frac_ext, bit_rev_frac_ext_build_k2, set_bit_rev_frac_ext_build_k2_shmem},
     },
     poly::SqrtEqLayers,
     prelude::EF,
@@ -544,7 +544,18 @@ where
     // We store it in bit-reversal order for coalesced memory accesses.
     // For large N (> 1024), fuse bitrev + tree layers 0 and 1 into a single kernel pass,
     // eliminating ~1.5N global memory reads. For small N, fall back to separate operations.
-    let start_layer_i = if total_leaves > 1024 {
+
+    // On some older CUDA machines setting shmem bytes for the bit_rev_frac_ext_build_k2 may
+    // fail. In this case, we also fall back to separate operations.
+    let config_k2_res = unsafe { set_bit_rev_frac_ext_build_k2_shmem() };
+    if config_k2_res.is_err() {
+        tracing::warn!(
+            "Fused bit-reversal shmem configuration failed, falling back to separate operations: {:?}",
+            config_k2_res
+        )
+    }
+
+    let start_layer_i = if total_leaves > 1024 && config_k2_res.is_ok() {
         unsafe {
             // SAFETY: Frac<EF> has exact same memory layout and alignment as (EF, EF).
             let buf = transmute::<&DeviceBuffer<Frac<EF>>, &DeviceBuffer<(EF, EF)>>(&layer);

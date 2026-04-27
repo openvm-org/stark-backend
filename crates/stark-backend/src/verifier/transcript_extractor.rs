@@ -1020,7 +1020,7 @@ mod tests {
     const CHUNK: usize = 8;
 
     type F = BabyBear;
-    type EF = BinomialExtensionField<BabyBear, 4>;
+    type EF = BinomialExtensionField<BabyBear, 5>;
     type Digest = [F; CHUNK];
     type Perm = Poseidon2BabyBear<WIDTH>;
     type Hash = PaddingFreeSponge<Perm, WIDTH, RATE, CHUNK>;
