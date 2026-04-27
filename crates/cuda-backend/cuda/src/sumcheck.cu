@@ -66,12 +66,12 @@ __global__ void sumcheck_mle_round_kernel(
     int half_height = height >> 1;
 
     // Local accumulators for all (d, WD) pairs
-    constexpr int MAX_D = 5; // [TODO] Mark this in doc that it's max degree 4 + 1
+    constexpr int MAX_D = 5; // max degree of sumcheck polynomial + 1
     FpExt local_sums[WD * MAX_D];
 
     // Initialize accumulators
     for (int i = 0; i < d * WD; i++) {
-        local_sums[i] = {0, 0, 0, 0};
+        local_sums[i] = FpExt(0);
     }
 
     // Map phase: each thread processes multiple y values
@@ -141,7 +141,7 @@ __global__ void reduce_blocks_sumcheck(
     if (out_idx >= d * WD)
         return;
 
-    FpExt sum = {0, 0, 0, 0};
+    FpExt sum = FpExt(0);
 
     // Each thread accumulates subset of blocks
     for (int block_id = tid; block_id < num_blocks; block_id += blockDim.x) {

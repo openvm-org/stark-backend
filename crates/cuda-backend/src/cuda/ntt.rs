@@ -74,6 +74,11 @@ extern "C" {
         stream: cudaStream_t,
     ) -> i32;
 
+    // Sets the shmem attribute of bit_rev_frac_build_k2_kernel to shmem_bytes. This may
+    // fail on older machines (ex. g4dn), so we provide this check so the caller knows to
+    // run the fallback.
+    fn _set_bit_rev_frac_ext_build_k2_shmem() -> i32;
+
     /// Fused bitrev + K=2 tree build for a single frac_fpext_t buffer.
     /// Applies alpha to denominators and fuses tree layers 0 and 1 in shmem.
     /// Requires domain_size >= 256.
@@ -138,6 +143,10 @@ pub unsafe fn bit_rev_frac_ext(
         poly_count,
         stream,
     ))
+}
+
+pub unsafe fn set_bit_rev_frac_ext_build_k2_shmem() -> Result<(), CudaError> {
+    CudaError::from_result(_set_bit_rev_frac_ext_build_k2_shmem())
 }
 
 pub unsafe fn bit_rev_frac_ext_build_k2(

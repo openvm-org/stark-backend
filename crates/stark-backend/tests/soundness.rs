@@ -59,8 +59,8 @@ const RECURSION_MAX_INTERACTIONS_PER_AIR: usize = 100; // estimate, needs verifi
 
 const TARGET_SECURITY_BITS: usize = 100;
 
-fn babybear_quartic_extension_bits() -> f64 {
-    4.0 * (BabyBear::ORDER_U64 as f64).log2()
+fn babybear_quintic_extension_bits() -> f64 {
+    5.0 * (BabyBear::ORDER_U64 as f64).log2()
 }
 
 fn app_params() -> SystemParams {
@@ -78,7 +78,7 @@ fn check_soundness(
 ) -> SoundnessCalculator {
     let soundness = SoundnessCalculator::calculate(
         params,
-        babybear_quartic_extension_bits(),
+        babybear_quintic_extension_bits(),
         max_constraints,
         num_airs,
         params.max_constraint_degree,

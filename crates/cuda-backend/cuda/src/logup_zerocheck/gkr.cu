@@ -1889,21 +1889,30 @@ void bit_rev_frac_build_k2_kernel(
     // to prevent register spills when Z_COUNT > WARP_SIZE. Z_COUNT=8 is always <= 32.
 }
 
+constexpr uint32_t Z_COUNT = 8;
+constexpr uint32_t bsize = 256;
+constexpr size_t shmem_bytes = (size_t)bsize * Z_COUNT * sizeof(FracExt);  // 80 KB
+
+// Sets the shmem attribute of bit_rev_frac_build_k2_kernel to shmem_bytes. This may
+// fail on older machines (ex. g4dn), so we provide this check so the caller knows to
+// run the fallback.
+extern "C" int _set_bit_rev_frac_ext_build_k2_shmem() {
+    // Raise the per-block dynamic shmem limit once (static → paid on first call only).
+    static const cudaError_t shmem_err = cudaFuncSetAttribute(
+        bit_rev_frac_build_k2_kernel,
+        cudaFuncAttributeMaxDynamicSharedMemorySize,
+        (int)shmem_bytes);
+    if (shmem_err != cudaSuccess)
+        cudaGetLastError();  // clear the sticky error so CHECK_KERNEL() doesn't pick it up
+    return shmem_err;
+}
+
 // Fused bitrev + K=2 tree build for a single FracExt buffer.
 // Requires domain_size >= 256 (uses Z-tile shmem kernel).
 // Applies alpha to denominators and fuses tree layers 0 and 1 in shmem.
 extern "C" int _bit_rev_frac_ext_build_k2(
     FracExt* inout, size_t real_len, uint32_t lg_domain_size, FpExt alpha, cudaStream_t stream)
 {
-    constexpr uint32_t Z_COUNT = 8;
-    constexpr uint32_t bsize = 256;
-    constexpr size_t shmem_bytes = (size_t)bsize * Z_COUNT * sizeof(FracExt);  // 64 KB
-    // Raise the per-block dynamic shmem limit once (static → paid on first call only).
-    static const cudaError_t shmem_err = cudaFuncSetAttribute(
-        bit_rev_frac_build_k2_kernel,
-        cudaFuncAttributeMaxDynamicSharedMemorySize,
-        (int)shmem_bytes);
-    if (shmem_err != cudaSuccess) return shmem_err;
     size_t domain_size = (size_t)1 << lg_domain_size;
     if (domain_size < (size_t)(bsize * Z_COUNT))
         return cudaErrorInvalidValue;
