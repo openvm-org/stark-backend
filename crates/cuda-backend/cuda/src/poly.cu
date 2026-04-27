@@ -23,7 +23,7 @@ __device__ __forceinline__ Field horner_eval(const Field *coeffs, size_t len, Fi
 // ============================================================================
 
 // Parallel polynomial evaluation using chunk-based Horner with warp-shuffle reduction.
-// Coefficients are FpExt stored in F-column major form (4 x len layout).
+// Coefficients are FpExt stored in F-column major form (5 x len layout).
 // BlockSize must be a power of 2. Uses dynamic shared memory.
 // Kernel uses a single block.
 //
@@ -62,7 +62,7 @@ __global__ void eval_poly_ext_at_point_kernel(const Fp *coeffs, size_t len, FpEx
         for (size_t idx = end; idx > start; idx--) {
             FpExt coeff;
 #pragma unroll
-            for (int i = 0; i < 4; i++) {
+            for (int i = 0; i < D_EF; i++) {
                 coeff.elems[i] = coeffs[i * len + idx - 1];
             }
             acc = acc * x + coeff;
@@ -207,7 +207,7 @@ __global__ void transpose_fp_to_fpext_vec_kernel(
         return;
 
 #pragma unroll
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < D_EF; i++) {
         output[idx].elems[i] = input[i * height + idx];
     }
 }

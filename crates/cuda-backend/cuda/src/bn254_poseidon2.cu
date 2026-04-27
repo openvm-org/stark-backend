@@ -165,7 +165,7 @@ Bn254Fr bn254_row_hash(const Fp* matrix, size_t width, size_t height, size_t row
     return state[0];
 }
 
-/// Row hash for an extension-field (FpExt / BinomialExtensionField<BabyBear,4>) matrix row.
+/// Row hash for an extension-field (FpExt / BinomialExtensionField<BabyBear,5>) matrix row.
 static __device__ __forceinline__
 Bn254Fr bn254_row_hash_ext(const FpExt* matrix, size_t width, size_t height, size_t row) {
     Bn254Fr state[3];
@@ -178,7 +178,7 @@ Bn254Fr bn254_row_hash_ext(const FpExt* matrix, size_t width, size_t height, siz
 
     for (size_t col = 0; col < width; col++) {
         FpExt elem = matrix[col * height + row];
-        for (int d = 0; d < 4; d++) {
+        for (int d = 0; d < D_EF; d++) {
             buf[cnt++] = elem.elems[d].asUInt32();
             if (cnt == BN254_BABY_BEAR_RATE) {
                 state[0] = bn254_pack_base_2_31(buf, BN254_NUM_F_ELMS);
@@ -255,7 +255,7 @@ __global__ void bn254_compressing_row_hashes_kernel(
 }
 
 // ---------------------------------------------------------------------------
-// Merkle row-hash kernel (EF / BinomialExtensionField<BabyBear,4> matrix)
+// Merkle row-hash kernel (EF / BinomialExtensionField<BabyBear,5> matrix)
 // ---------------------------------------------------------------------------
 
 __global__ void bn254_compressing_row_hashes_ext_kernel(
@@ -299,8 +299,7 @@ __global__ void bn254_compressing_row_hashes_ext_kernel(
     }
 }
 
-static_assert(BN254_BABY_BEAR_RATE % 4 == 0,
-              "BN254_BABY_BEAR_RATE must be a multiple of FpExt degree (4)");
+// Note: BN254_BABY_BEAR_RATE need not be a multiple of 5 since we flush inside the per-element loop.
 
 // ---------------------------------------------------------------------------
 // Adjacent compress layer kernel

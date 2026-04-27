@@ -70,7 +70,8 @@ impl SoundnessCalculator {
     ///
     /// # Arguments
     /// * `params` - System parameters including WHIR config and LogUp parameters.
-    /// * `challenge_field_bits` - Bits in the challenge field. For BabyBear4: ~124 bits.
+    /// * `challenge_field_bits` - Bits in the challenge field. For the BabyBear quintic extension:
+    ///   ~155 bits.
     /// * `max_num_constraints_per_air` - Maximum constraints in any single AIR.
     /// * `num_airs` - Number of AIRs being batched.
     /// * `max_constraint_degree` - Maximum degree of any constraint polynomial.
@@ -878,8 +879,8 @@ mod tests {
     use super::*;
     use crate::{config::WhirRoundConfig, interaction::LogUpSecurityParameters};
 
-    fn babybear_quartic_extension_bits() -> f64 {
-        4.0 * (BabyBear::ORDER_U64 as f64).log2()
+    fn babybear_quintic_extension_bits() -> f64 {
+        5.0 * (BabyBear::ORDER_U64 as f64).log2()
     }
     // ==========================================================================
     // Test fixtures
@@ -921,7 +922,7 @@ mod tests {
         let params = test_params();
         let soundness = SoundnessCalculator::calculate(
             &params,
-            babybear_quartic_extension_bits(),
+            babybear_quintic_extension_bits(),
             1000,
             50,
             4,
@@ -962,7 +963,7 @@ mod tests {
         let params = test_params();
         let security = SoundnessCalculator::calculate_logup_soundness(
             &params,
-            babybear_quartic_extension_bits(),
+            babybear_quintic_extension_bits(),
             0.0,
         );
         assert!(security > TARGET_SECURITY_BITS as f64);
