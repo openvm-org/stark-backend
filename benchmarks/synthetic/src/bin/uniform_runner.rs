@@ -28,7 +28,7 @@ use openvm_stark_backend::{
     AirRef, PartitionedBaseAir, StarkEngine,
 };
 use openvm_stark_sdk::config::{
-    app_params_with_100_bits_security,
+    app_params_with_128_bits_security,
     baby_bear_poseidon2::{BabyBearPoseidon2Config, BabyBearPoseidon2RefEngine},
 };
 use p3_air::{Air, AirBuilder, BaseAir, BaseAirWithPublicValues};
@@ -247,7 +247,7 @@ fn run(args: &Args) {
         })
         .collect();
 
-    let params = app_params_with_100_bits_security(args.log_stacked_height);
+    let params = app_params_with_128_bits_security(args.log_stacked_height);
 
     // Keygen (always CPU)
     let keygen_engine: BabyBearPoseidon2RefEngine = StarkEngine::new(params.clone());

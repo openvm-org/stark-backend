@@ -4,9 +4,9 @@
 
 use openvm_stark_backend::{soundness::*, SystemParams};
 use openvm_stark_sdk::config::{
-    app_params_with_100_bits_security, internal_params_with_100_bits_security as internal_params,
-    leaf_params_with_100_bits_security as leaf_params,
-    root_params_with_100_bits_security as root_params, MAX_APP_LOG_STACKED_HEIGHT,
+    app_params_with_128_bits_security, internal_params_with_128_bits_security as internal_params,
+    leaf_params_with_128_bits_security as leaf_params,
+    root_params_with_128_bits_security as root_params, MAX_APP_LOG_STACKED_HEIGHT,
 };
 use p3_baby_bear::BabyBear;
 use p3_field::PrimeField64;
@@ -57,14 +57,14 @@ const RECURSION_NUM_AIRS: usize = 50;
 const RECURSION_NUM_COLUMNS: usize = 2000;
 const RECURSION_MAX_INTERACTIONS_PER_AIR: usize = 100; // estimate, needs verification
 
-const TARGET_SECURITY_BITS: usize = 100;
+const TARGET_SECURITY_BITS: usize = 128;
 
 fn babybear_quintic_extension_bits() -> f64 {
     5.0 * (BabyBear::ORDER_U64 as f64).log2()
 }
 
 fn app_params() -> SystemParams {
-    app_params_with_100_bits_security(MAX_APP_LOG_STACKED_HEIGHT)
+    app_params_with_128_bits_security(MAX_APP_LOG_STACKED_HEIGHT)
 }
 
 fn check_soundness(
