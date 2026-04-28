@@ -68,7 +68,7 @@ pub fn app_params_with_128_bits_security(log_stacked_height: usize) -> SystemPar
 /// - **Max trace height**: ≤ 2^21
 /// - **Max constraints per AIR**: ≤ 1,000
 /// - **Num AIRs**: ≤ 50
-/// - **Max interactions per AIR**: ≤ 128 (maximum number of interactions in a single AIR for a
+/// - **Max interactions per AIR**: ≤ 100 (maximum number of interactions in a single AIR for a
 ///   single row)
 /// - **Num trace columns** (unstacked, total across all AIRs): ≤ 2,000
 /// - **`w_stack`** = 2,048, bounding total stacked cells to `w_stack × 2^(n_stack + l_skip)`
@@ -99,7 +99,7 @@ pub fn leaf_params_with_128_bits_security() -> SystemParams {
 /// - **Max trace height**: ≤ 2^19
 /// - **Max constraints per AIR**: ≤ 1,000
 /// - **Num AIRs**: ≤ 50
-/// - **Max interactions per AIR**: ≤ 128
+/// - **Max interactions per AIR**: ≤ 100
 /// - **Num trace columns** (unstacked, total across all AIRs): ≤ 2,000
 /// - **`w_stack`** = 512, bounding total stacked cells to `w_stack × 2^(n_stack + l_skip)`
 ///
@@ -128,7 +128,7 @@ pub fn internal_params_with_128_bits_security() -> SystemParams {
 /// - **Max trace height**: ≤ 2^20
 /// - **Max constraints per AIR**: ≤ 1,000
 /// - **Num AIRs**: ≤ 50
-/// - **Max interactions per AIR**: ≤ 128
+/// - **Max interactions per AIR**: ≤ 100
 /// - **Num trace columns** (unstacked, total across all AIRs): ≤ 2,000
 /// - **`w_stack`** = 19, bounding total stacked cells to `w_stack × 2^(n_stack + l_skip)`
 ///
