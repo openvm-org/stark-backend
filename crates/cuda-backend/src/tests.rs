@@ -91,7 +91,7 @@ fn test_bn254_fib_air_roundtrip(l_skip: usize, log_trace_degree: usize) {
     use openvm_stark_backend::{
         test_utils::FibFixture, SystemParams, WhirConfig, WhirParams, WhirProximityStrategy,
     };
-    use openvm_stark_sdk::config::log_up_params::log_up_security_params_baby_bear_100_bits;
+    use openvm_stark_sdk::config::log_up_params::log_up_security_params_baby_bear_128_bits;
 
     setup_tracing_with_log_level(Level::DEBUG);
 
@@ -114,7 +114,7 @@ fn test_bn254_fib_air_roundtrip(l_skip: usize, log_trace_degree: usize) {
         w_stack,
         log_blowup,
         whir,
-        logup: log_up_security_params_baby_bear_100_bits(),
+        logup: log_up_security_params_baby_bear_128_bits(),
         max_constraint_degree: 3,
     };
 
