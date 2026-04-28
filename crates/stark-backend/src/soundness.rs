@@ -915,7 +915,7 @@ mod tests {
     // ==========================================================================
     // Unit tests
     // ==========================================================================
-    const TARGET_SECURITY_BITS: usize = 100;
+    const TARGET_SECURITY_BITS: usize = 128;
 
     #[test]
     fn test_soundness_calculation() {

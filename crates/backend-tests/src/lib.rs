@@ -70,7 +70,7 @@ use openvm_stark_sdk::{
             default_duplex_sponge, default_duplex_sponge_recorder, poseidon2_perm,
             BabyBearPoseidon2Config, BabyBearPoseidon2RefEngine, DuplexSponge, EF, F,
         },
-        log_up_params::log_up_security_params_baby_bear_100_bits,
+        log_up_params::log_up_security_params_baby_bear_128_bits,
     },
     utils::{setup_tracing, setup_tracing_with_log_level},
 };
@@ -164,7 +164,7 @@ pub fn proof_shape_verifier_rng_system_params<E: StarkEngine<SC = SC>>() -> eyre
             w_stack,
             log_blowup,
             whir,
-            logup: log_up_security_params_baby_bear_100_bits(),
+            logup: log_up_security_params_baby_bear_128_bits(),
             max_constraint_degree: 3,
         };
         let engine = E::new(params);
@@ -276,7 +276,7 @@ pub fn fib_air_roundtrip<E: StarkEngine<SC = SC>>(
         w_stack,
         log_blowup,
         whir,
-        logup: log_up_security_params_baby_bear_100_bits(),
+        logup: log_up_security_params_baby_bear_128_bits(),
         max_constraint_degree: 3,
     };
     let fib = FibFixture::new(0, 1, 1 << log_trace_degree);
@@ -1243,7 +1243,7 @@ pub fn whir_single_fib(
         w_stack,
         log_blowup,
         whir,
-        logup: log_up_security_params_baby_bear_100_bits(),
+        logup: log_up_security_params_baby_bear_128_bits(),
         max_constraint_degree: 3,
     };
     run_whir_fib_test(params)
@@ -1277,7 +1277,7 @@ pub fn whir_multiple_commitments() -> eyre::Result<()> {
         w_stack: 64,
         log_blowup: 1,
         whir: whir_test_config(2),
-        logup: log_up_security_params_baby_bear_100_bits(),
+        logup: log_up_security_params_baby_bear_128_bits(),
         max_constraint_degree: 3,
     };
     let config = BabyBearPoseidon2Config::default_from_params(params);
@@ -1358,7 +1358,7 @@ pub fn whir_multiple_commitments_negative() {
         w_stack: 64,
         log_blowup: 1,
         whir: whir_test_config(2),
-        logup: log_up_security_params_baby_bear_100_bits(),
+        logup: log_up_security_params_baby_bear_128_bits(),
         max_constraint_degree: 3,
     };
     let config = BabyBearPoseidon2Config::default_from_params(params);

@@ -583,7 +583,7 @@ mod tests {
             baby_bear_poseidon2::{
                 default_duplex_sponge, BabyBearPoseidon2RefEngine, DuplexSponge,
             },
-            log_up_params::log_up_security_params_baby_bear_100_bits,
+            log_up_params::log_up_security_params_baby_bear_128_bits,
         },
         utils::setup_tracing_with_log_level,
     };
@@ -741,7 +741,7 @@ mod tests {
             w_stack,
             log_blowup,
             whir,
-            logup: log_up_security_params_baby_bear_100_bits(),
+            logup: log_up_security_params_baby_bear_128_bits(),
             max_constraint_degree: 3,
         };
         run_whir_fib_test_gpu(params)
