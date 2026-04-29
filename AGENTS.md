@@ -19,9 +19,11 @@ cargo nextest run -p openvm-cuda-backend --test-threads=4
 
 ## Formatting and Linting
 
-Only run before committing.
+Before committing or opening/updating a PR, formatting and clippy must pass for
+the affected crate(s). Do not open a PR with known fmt or clippy failures.
+
 ```bash
-cargo clippy --all-targets --tests -- -D warnings
+cargo clippy -p <crate> --all-targets --tests -- -D warnings
 cargo +nightly fmt          # requires nightly for unstable rustfmt features
 cargo +nightly fmt -- --check  # check only
 ```
