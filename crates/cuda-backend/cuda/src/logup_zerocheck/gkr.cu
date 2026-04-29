@@ -74,6 +74,22 @@ __device__ __forceinline__ FpExt sqrt_buffer_get(
     return eq_xi_low[idx & ((1u << log_eq_low_cap) - 1)] * eq_xi_high[idx >> log_eq_low_cap];
 }
 
+__device__ __forceinline__ FracExt load_virtual_input_bitrev(
+    const FracExt *__restrict__ input,
+    uint32_t real_len,
+    uint32_t lg_domain_size,
+    uint32_t bitrev_pos,
+    FpExt alpha
+) {
+    uint32_t logical_idx = rev_len(bitrev_pos, lg_domain_size);
+    if (logical_idx < real_len) {
+        FracExt value = input[logical_idx];
+        value.q = value.q + alpha;
+        return value;
+    }
+    return {FpExt(Fp::zero()), alpha};
+}
+
 // Accumulate GKR sumcheck contributions for s'_t(1) and s'_t(2).
 // See docs/cuda-backend/gkr-prover.md § "Sumcheck round implementation".
 __device__ __forceinline__ void accumulate_compute_contributions(
@@ -490,6 +506,52 @@ __global__ void compute_round_and_revert_kernel(
             eq_xi_low, eq_xi_high, idx, log_eq_low_cap, lambda,
             p0_even, q0_even, p0_odd, q0_odd,
             p1_even, q1_even, p1_odd, q1_odd,
+            local0, local1
+        );
+    }
+
+    reduce_block_sums(shared, local0, local1, block_sums);
+}
+
+// Computes the first sumcheck round for the largest GKR layer directly from a
+// natural-order virtual input. This is equivalent to first materializing the
+// dense padded input, adding alpha to every denominator, bit-reversing it, and
+// then running compute_round on the leaf layer.
+__global__ void compute_round_virtual_input_kernel(
+    const FpExt *__restrict__ eq_xi_low,
+    const FpExt *__restrict__ eq_xi_high,
+    const FracExt *__restrict__ input,
+    uint32_t real_len,
+    uint32_t lg_domain_size,
+    uint32_t log_eq_low_cap,
+    FpExt lambda,
+    FpExt alpha,
+    FpExt *__restrict__ block_sums
+) {
+    extern __shared__ FpExt shared[];
+    const uint32_t pq_size = 1u << lg_domain_size;
+    const uint32_t num_x = pq_size >> 1;
+    const uint32_t half = pq_size >> 1;
+    const uint32_t quarter = pq_size >> 2;
+
+    const FpExt zero(Fp::zero());
+    FpExt local0 = zero, local1 = zero;
+    uint32_t idx_base = threadIdx.x + blockIdx.x * blockDim.x;
+
+    for (uint32_t idx = idx_base; idx < num_x / 2; idx += blockDim.x * gridDim.x) {
+        FracExt p0_even_v =
+            load_virtual_input_bitrev(input, real_len, lg_domain_size, idx, alpha);
+        FracExt p1_even_v =
+            load_virtual_input_bitrev(input, real_len, lg_domain_size, idx + half, alpha);
+        FracExt p0_odd_v =
+            load_virtual_input_bitrev(input, real_len, lg_domain_size, idx + quarter, alpha);
+        FracExt p1_odd_v =
+            load_virtual_input_bitrev(input, real_len, lg_domain_size, idx + half + quarter, alpha);
+
+        accumulate_compute_contributions(
+            eq_xi_low, eq_xi_high, idx, log_eq_low_cap, lambda,
+            p0_even_v.p, p0_even_v.q, p0_odd_v.p, p0_odd_v.q,
+            p1_even_v.p, p1_even_v.q, p1_odd_v.p, p1_odd_v.q,
             local0, local1
         );
     }
@@ -1054,6 +1116,48 @@ extern "C" int _frac_compute_round_and_revert(
         return err;
 
     // Launch final reduction kernel.
+    return final_reduce_block_sums(tmp_block_sums, out, grid.x, stream);
+}
+
+extern "C" int _frac_compute_round_virtual_input(
+    const FpExt *eq_xi_low,
+    const FpExt *eq_xi_high,
+    const FracExt *input,
+    size_t real_len,
+    size_t logical_len,
+    size_t eq_low_cap,
+    FpExt lambda,
+    FpExt alpha,
+    FpExt *out,
+    FpExt *tmp_block_sums,
+    cudaStream_t stream
+) {
+    assert(logical_len > 2);
+    assert((logical_len & (logical_len - 1)) == 0);
+    assert(real_len > 0 && real_len <= logical_len);
+
+    size_t num_x = logical_len >> 1;
+    auto [grid, block] = frac_compute_round_launch_params((uint32_t)num_x);
+    size_t shmem_bytes = div_ceil(block.x, WARP_SIZE) * sizeof(FpExt);
+    uint32_t lg_domain_size = 0;
+    for (size_t n = logical_len; n > 1; n >>= 1)
+        ++lg_domain_size;
+
+    compute_round_virtual_input_kernel<<<grid, block, shmem_bytes, stream>>>(
+        eq_xi_low,
+        eq_xi_high,
+        input,
+        (uint32_t)real_len,
+        lg_domain_size,
+        __builtin_ctz((uint32_t)eq_low_cap),
+        lambda,
+        alpha,
+        tmp_block_sums
+    );
+    int err = CHECK_KERNEL();
+    if (err != 0)
+        return err;
+
     return final_reduce_block_sums(tmp_block_sums, out, grid.x, stream);
 }
 

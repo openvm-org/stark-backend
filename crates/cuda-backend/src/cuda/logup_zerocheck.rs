@@ -146,6 +146,23 @@ extern "C" {
         stream: cudaStream_t,
     ) -> i32;
 
+    /// Computes the first sumcheck round for a virtual input layer. The input buffer contains only
+    /// `real_len` natural-order leaves without alpha applied; logical leaves outside that prefix
+    /// are interpreted as `Frac(0, alpha)`.
+    fn _frac_compute_round_virtual_input(
+        eq_xi_low: *const EF,
+        eq_xi_high: *const EF,
+        input: *const Frac<EF>,
+        real_len: usize,
+        logical_len: usize,
+        eq_low_cap: usize,
+        lambda: EF,
+        alpha: EF,
+        out_device: *mut EF,
+        tmp_block_sums: *mut EF,
+        stream: cudaStream_t,
+    ) -> i32;
+
     fn _frac_fold_fpext_columns(
         src: *const Frac<EF>,
         dst: *mut Frac<EF>,
@@ -699,6 +716,60 @@ pub unsafe fn frac_compute_round_and_revert(
         num_x,
         1 << low_n,
         lambda,
+        out_device.as_mut_ptr(),
+        tmp_block_sums.as_mut_ptr(),
+        stream,
+    ))
+}
+
+/// Computes sumcheck round 0 directly from a virtual input layer.
+///
+/// `input` is natural-order and contains only `real_len` leaves without alpha applied. Missing
+/// logical leaves are synthesized as `Frac(0, alpha)`. The kernel reads the same bit-reversed
+/// logical leaf positions as the dense padded input path.
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn frac_compute_round_virtual_input(
+    eq_xi: &SqrtEqLayers,
+    input: &DeviceBuffer<Frac<EF>>,
+    real_len: usize,
+    logical_len: usize,
+    lambda: EF,
+    alpha: EF,
+    out_device: &mut DeviceBuffer<EF>,
+    tmp_block_sums: &mut DeviceBuffer<EF>,
+    stream: cudaStream_t,
+) -> Result<(), CudaError> {
+    let low_n = eq_xi.low_n();
+    let high_n = eq_xi.high_n();
+    let num_x = logical_len >> 1;
+    debug_assert_eq!(2 << (low_n + high_n), num_x);
+    #[cfg(debug_assertions)]
+    {
+        assert!(logical_len.is_power_of_two());
+        assert!(logical_len > 2);
+        assert!(real_len > 0 && real_len <= logical_len);
+        assert!(
+            input.len() >= real_len,
+            "input too small: {} < {}",
+            input.len(),
+            real_len
+        );
+        let len = tmp_block_sums.len();
+        let required = _frac_compute_round_temp_buffer_size(num_x.try_into().unwrap(), stream);
+        assert!(
+            len >= required as usize,
+            "tmp_block_sums len={len} < required={required}"
+        );
+    }
+    CudaError::from_result(_frac_compute_round_virtual_input(
+        eq_xi.low.get_ptr(low_n),
+        eq_xi.high.get_ptr(high_n),
+        input.as_ptr(),
+        real_len,
+        logical_len,
+        1 << low_n,
+        lambda,
+        alpha,
         out_device.as_mut_ptr(),
         tmp_block_sums.as_mut_ptr(),
         stream,

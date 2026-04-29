@@ -84,7 +84,8 @@ pub fn collect_trace_interactions<HS: GpuHashScheme>(
 }
 
 /// Evaluate interactions from trace evaluation matrices to get (p, q) fractional sumcheck input.
-/// Returns leaves buffer (WITHOUT alpha applied) and alpha value to be applied in first tree layer.
+/// Returns the real leaves buffer (WITHOUT alpha applied) and alpha value to be applied by the GKR
+/// prover. Virtual padding is not written to this buffer.
 #[instrument(name = "prover.rap_constraints.logup_gkr.input_evals", skip_all)]
 #[allow(clippy::too_many_arguments)]
 pub fn log_gkr_input_evals<HS: GpuHashScheme>(
@@ -94,14 +95,14 @@ pub fn log_gkr_input_evals<HS: GpuHashScheme>(
     l_skip: usize,
     alpha_logup: EF,
     d_challenges: &DeviceBuffer<EF>,
-    total_leaves: usize,
+    real_len: usize,
     device_ctx: &GpuDeviceCtx,
 ) -> Result<(DeviceBuffer<Frac<EF>>, EF), InteractionGpuError> {
     if trace_interactions.iter().all(|meta| meta.is_none()) {
         return Ok((DeviceBuffer::new(), alpha_logup));
     }
 
-    let leaves = DeviceBuffer::<Frac<EF>>::with_capacity_on(total_leaves, device_ctx);
+    let leaves = DeviceBuffer::<Frac<EF>>::with_capacity_on(real_len, device_ctx);
     leaves.fill_zero_on(device_ctx)?;
     let null_preprocessed = DeviceBuffer::<F>::new();
 

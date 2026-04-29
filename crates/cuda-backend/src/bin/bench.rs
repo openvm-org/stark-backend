@@ -47,6 +47,8 @@ fn bench_fractional_sumcheck() -> Result<(), Box<dyn std::error::Error>> {
         let _ = fractional_sumcheck_gpu(
             &mut transcript,
             leaves,
+            1usize << n,
+            1usize << n,
             EF::ZERO,
             false,
             &mut mem,

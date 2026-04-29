@@ -1,7 +1,7 @@
 use std::{array::from_fn, convert::TryInto, env, ffi::c_void, mem::transmute};
 
 use openvm_cuda_common::{
-    copy::{cuda_memcpy_on, MemCopyD2H},
+    copy::{cuda_memcpy_on, MemCopyD2H, MemCopyH2D},
     d_buffer::DeviceBuffer,
     memory_manager::MemTracker,
     stream::GpuDeviceCtx,
@@ -23,8 +23,8 @@ use crate::{
             _frac_compute_round_temp_buffer_size, fold_ef_frac_columns,
             fold_ef_frac_columns_inplace, frac_build_tree_layer, frac_build_tree_two_layers,
             frac_compute_round, frac_compute_round_and_fold, frac_compute_round_and_fold_inplace,
-            frac_compute_round_and_revert, frac_multifold_raw, frac_precompute_m_build_raw,
-            frac_precompute_m_eval_round_raw,
+            frac_compute_round_and_revert, frac_compute_round_virtual_input, frac_multifold_raw,
+            frac_precompute_m_build_raw, frac_precompute_m_eval_round_raw,
         },
         ntt::{bit_rev_frac_ext, bit_rev_frac_ext_build_k2},
     },
@@ -505,12 +505,163 @@ where
     )
 }
 
+fn bit_reverse_usize(value: usize, bits: usize) -> usize {
+    if bits == 0 {
+        0
+    } else {
+        value.reverse_bits() >> (usize::BITS as usize - bits)
+    }
+}
+
+fn virtual_input_leaf(leaves: &[Frac<EF>], logical_idx: usize, alpha: EF) -> Frac<EF> {
+    if let Some(leaf) = leaves.get(logical_idx) {
+        Frac {
+            p: leaf.p,
+            q: leaf.q + alpha,
+        }
+    } else {
+        Frac {
+            p: EF::ZERO,
+            q: alpha,
+        }
+    }
+}
+
+fn virtual_input_bitrev_leaf(
+    leaves: &[Frac<EF>],
+    bitrev_pos: usize,
+    total_rounds: usize,
+    alpha: EF,
+) -> Frac<EF> {
+    virtual_input_leaf(leaves, bit_reverse_usize(bitrev_pos, total_rounds), alpha)
+}
+
+fn fold_frac(a: Frac<EF>, b: Frac<EF>, r: EF) -> Frac<EF> {
+    Frac {
+        p: a.p + r * (b.p - a.p),
+        q: a.q + r * (b.q - a.q),
+    }
+}
+
+fn virtual_input_parent_layer(
+    leaves: &[Frac<EF>],
+    logical_len: usize,
+    alpha: EF,
+) -> Vec<Frac<EF>> {
+    let parent_len = logical_len / 2;
+    (0..parent_len)
+        .map(|idx| {
+            virtual_input_leaf(leaves, 2 * idx, alpha)
+                + virtual_input_leaf(leaves, 2 * idx + 1, alpha)
+        })
+        .collect()
+}
+
+fn virtual_input_folded_layer(
+    leaves: &[Frac<EF>],
+    logical_len: usize,
+    total_rounds: usize,
+    alpha: EF,
+    r: EF,
+) -> Vec<Frac<EF>> {
+    let half = logical_len / 2;
+    let quarter = logical_len / 4;
+    let mut out = vec![Frac::default(); half];
+    for idx in 0..quarter {
+        out[idx] = fold_frac(
+            virtual_input_bitrev_leaf(leaves, idx, total_rounds, alpha),
+            virtual_input_bitrev_leaf(leaves, idx + quarter, total_rounds, alpha),
+            r,
+        );
+        out[idx + quarter] = fold_frac(
+            virtual_input_bitrev_leaf(leaves, idx + half, total_rounds, alpha),
+            virtual_input_bitrev_leaf(leaves, idx + half + quarter, total_rounds, alpha),
+            r,
+        );
+    }
+    out
+}
+
+fn build_dense_segment_tree(
+    layer: &mut DeviceBuffer<Frac<EF>>,
+    total_leaves: usize,
+    total_rounds: usize,
+    alpha: EF,
+    apply_alpha: bool,
+    stream: openvm_cuda_common::stream::cudaStream_t,
+) -> Result<(), FractionalSumcheckError> {
+    if total_rounds == 0 {
+        return Ok(());
+    }
+    debug_assert!(total_leaves.is_power_of_two());
+    debug_assert_eq!(total_rounds, log2_strict_usize(total_leaves));
+    debug_assert!(layer.len() >= total_leaves);
+
+    // For the dense LogUp input path, the large kernel fuses bit-reversal, alpha application, and
+    // two tree layers. For already-alpha-applied virtual parent layers, use the generic bit-rev
+    // plus tree-build path.
+    let start_layer_i = if apply_alpha && total_leaves > 1024 {
+        unsafe {
+            // SAFETY: Frac<EF> has exact same memory layout and alignment as (EF, EF).
+            let buf = transmute::<&DeviceBuffer<Frac<EF>>, &DeviceBuffer<(EF, EF)>>(layer);
+            bit_rev_frac_ext_build_k2(buf, total_rounds as u32, alpha, stream)
+                .map_err(FractionalSumcheckError::BitReversal)?;
+        }
+        2
+    } else {
+        unsafe {
+            let buf = transmute::<&DeviceBuffer<Frac<EF>>, &DeviceBuffer<(EF, EF)>>(layer);
+            bit_rev_frac_ext(
+                buf,
+                buf,
+                total_rounds as u32,
+                total_leaves.try_into().unwrap(),
+                1,
+                stream,
+            )
+            .map_err(FractionalSumcheckError::BitReversal)?;
+            frac_build_tree_layer(layer, total_leaves, false, alpha, apply_alpha, stream)
+                .map_err(FractionalSumcheckError::SegmentTree)?;
+            if apply_alpha {
+                use crate::cuda::logup_zerocheck::frac_add_alpha;
+                let half = total_leaves / 2;
+                let second_half_ptr = layer.as_mut_raw_ptr() as *mut Frac<EF>;
+                let second_half_buf =
+                    DeviceBuffer::<Frac<EF>>::from_raw_parts(second_half_ptr.add(half), half);
+                frac_add_alpha(&second_half_buf, alpha, stream)
+                    .map_err(FractionalSumcheckError::SegmentTree)?;
+                std::mem::forget(second_half_buf);
+            }
+        }
+        1
+    };
+
+    let mut i = start_layer_i;
+    while i + 1 < total_rounds {
+        let half_i1 = total_leaves >> (i + 2);
+        unsafe {
+            frac_build_tree_two_layers(layer, half_i1, stream)
+                .map_err(FractionalSumcheckError::SegmentTree)?;
+        }
+        i += 2;
+    }
+    if i < total_rounds {
+        unsafe {
+            frac_build_tree_layer(layer, total_leaves >> i, false, EF::ZERO, false, stream)
+                .map_err(FractionalSumcheckError::SegmentTree)?;
+        }
+    }
+    Ok(())
+}
+
 /// GKR fractional sumcheck prover. See `docs/cuda-backend/gkr-prover.md` (repo root) for the
 /// protocol and implementation details.
 #[instrument(skip_all)]
 pub fn fractional_sumcheck_gpu<SC, TS>(
     transcript: &mut TS,
     leaves: DeviceBuffer<Frac<EF>>,
+    real_len: usize,
+    logical_len: usize,
     alpha: EF,
     assert_zero: bool,
     mem: &mut MemTracker,
@@ -531,86 +682,52 @@ where
             vec![],
         ));
     };
+    assert_eq!(
+        layer.len(),
+        real_len,
+        "fractional_sumcheck_gpu input length must equal real_len"
+    );
+    assert!(real_len > 0, "real_len must be nonzero");
+    assert!(logical_len.is_power_of_two(), "logical_len must be a power of two");
+    assert!(
+        real_len <= logical_len,
+        "real_len must not exceed logical_len"
+    );
+    assert!(
+        logical_len / 2 <= real_len,
+        "virtual input requires logical_len / 2 <= real_len"
+    );
     let stream = device_ctx.stream.as_raw();
-    let total_leaves = layer.len();
+    let total_leaves = logical_len;
+    let virtual_input = real_len < logical_len;
     // total_rounds = l_skip + n_logup
     let total_rounds = log2_strict_usize(total_leaves);
     assert!(total_rounds > 0, "n_logup > 0 when there are interactions");
-    // Build segment tree.
-    // - We only maintain the current layer
-    // - Input layer uses separate F and EF buffers to save memory
-    // - First tree layer converts (F, EF) to FracExt (EF, EF)
 
-    // We store it in bit-reversal order for coalesced memory accesses.
-    // For large N (> 1024), fuse bitrev + tree layers 0 and 1 into a single kernel pass,
-    // eliminating ~1.5N global memory reads. For small N, fall back to separate operations.
-    let start_layer_i = if total_leaves > 1024 {
-        unsafe {
-            // SAFETY: Frac<EF> has exact same memory layout and alignment as (EF, EF).
-            let buf = transmute::<&DeviceBuffer<Frac<EF>>, &DeviceBuffer<(EF, EF)>>(&layer);
-            bit_rev_frac_ext_build_k2(buf, total_rounds as u32, alpha, stream)
-                .map_err(FractionalSumcheckError::BitReversal)?;
-        }
-        2 // layers 0+1 already done
+    let host_input_leaves = if virtual_input {
+        Some(layer.to_host_on(device_ctx)?)
     } else {
-        // Fallback: separate bitrev + layer 0.
-        unsafe {
-            let buf = transmute::<&DeviceBuffer<Frac<EF>>, &DeviceBuffer<(EF, EF)>>(&layer);
-            bit_rev_frac_ext(
-                buf,
-                buf,
-                total_rounds as u32,
-                total_leaves.try_into().unwrap(),
-                1,
-                stream,
-            )
-            .map_err(FractionalSumcheckError::BitReversal)?;
-            frac_build_tree_layer(&mut layer, total_leaves, false, alpha, true, stream)
-                .map_err(FractionalSumcheckError::SegmentTree)?;
-            use crate::cuda::logup_zerocheck::frac_add_alpha;
-            let half = total_leaves / 2;
-            let second_half_ptr = layer.as_mut_raw_ptr() as *mut Frac<EF>;
-            let second_half_buf =
-                DeviceBuffer::<Frac<EF>>::from_raw_parts(second_half_ptr.add(half), half);
-            frac_add_alpha(&second_half_buf, alpha, stream)
-                .map_err(FractionalSumcheckError::SegmentTree)?;
-            std::mem::forget(second_half_buf);
-        }
-        1 // layer 0 done; continue from layer 1
+        None
     };
 
-    // Remaining layers: fuse consecutive pairs via two-layer kernel (~33% traffic savings).
-    let mut i = start_layer_i;
-    while i + 1 < total_rounds {
-        let half_i1 = total_leaves >> (i + 2);
-        unsafe {
-            frac_build_tree_two_layers(&mut layer, half_i1, stream)
-                .map_err(FractionalSumcheckError::SegmentTree)?;
-        }
-        i += 2;
-    }
-    // Remaining single layer (if odd number of layers left).
-    if i < total_rounds {
-        unsafe {
-            frac_build_tree_layer(
-                &mut layer,
-                total_leaves >> i,
-                false,
-                EF::ZERO,
-                false,
-                stream,
-            )
-            .map_err(FractionalSumcheckError::SegmentTree)?;
-        }
+    if let Some(host_leaves) = &host_input_leaves {
+        let parent_layer = virtual_input_parent_layer(host_leaves, logical_len, alpha);
+        parent_layer.copy_to_on(&mut layer, device_ctx)?;
+        build_dense_segment_tree(
+            &mut layer,
+            logical_len / 2,
+            total_rounds - 1,
+            EF::ZERO,
+            false,
+            stream,
+        )?;
+    } else {
+        build_dense_segment_tree(&mut layer, total_leaves, total_rounds, alpha, true, stream)?;
     }
     mem.emit_metrics_with_label("frac_sumcheck.segment_tree");
     mem.tracing_info("fractional_sumcheck_gkr: after building segment tree");
     let mut copy_scratch = DeviceBuffer::<Frac<EF>>::with_capacity_on(1, device_ctx);
     let root = copy_from_device(&layer, 0, &mut copy_scratch, device_ctx)?;
-    unsafe {
-        frac_build_tree_layer(&mut layer, 2, true, EF::ZERO, false, stream)
-            .map_err(FractionalSumcheckError::SegmentTree)?;
-    }
     if assert_zero {
         if root.p != EF::ZERO {
             return Err(FractionalSumcheckError::NonzeroRootSum {
@@ -626,8 +743,22 @@ where
     let mut claims_per_layer = Vec::with_capacity(total_rounds);
     let mut sumcheck_polys = Vec::with_capacity(total_rounds);
 
-    let first_left = copy_from_device(&layer, 0, &mut copy_scratch, device_ctx)?;
-    let first_right = copy_from_device(&layer, 1, &mut copy_scratch, device_ctx)?;
+    let (first_left, first_right) = if total_rounds == 1 && virtual_input {
+        let host_leaves = host_input_leaves.as_ref().unwrap();
+        (
+            virtual_input_leaf(host_leaves, 0, alpha),
+            virtual_input_leaf(host_leaves, 1, alpha),
+        )
+    } else {
+        unsafe {
+            frac_build_tree_layer(&mut layer, 2, true, EF::ZERO, false, stream)
+                .map_err(FractionalSumcheckError::SegmentTree)?;
+        }
+        (
+            copy_from_device(&layer, 0, &mut copy_scratch, device_ctx)?,
+            copy_from_device(&layer, 1, &mut copy_scratch, device_ctx)?,
+        )
+    };
     claims_per_layer.push(GkrLayerClaims {
         p_xi_0: first_left.p,
         q_xi_0: first_left.q,
@@ -644,6 +775,16 @@ where
     }
     let mu_1 = transcript.sample_ext();
     let mut xi_prev = vec![mu_1];
+    if total_rounds == 1 {
+        return Ok((
+            FracSumcheckProof {
+                fractional_sum: (root.p, root.q),
+                claims_per_layer,
+                sumcheck_polys,
+            },
+            xi_prev,
+        ));
+    }
     let mut d_sum_evals = DeviceBuffer::<EF>::with_capacity_on(2, device_ctx);
 
     let precompute_m_env = precompute_m_enabled();
@@ -727,31 +868,126 @@ where
             reduce_to_single_evaluation(claims_per_layer.last().unwrap(), /* mu */ xi_prev[0]);
         let mut prev_s_eval = numer_claim + lambda * denom_claim;
         let mut eq_r_acc = EF::ONE;
-
-        // Round 0: compute + revert fused. The pq_buffer fold will be fused into next round's
-        // compute. This fuses frac_build_tree_layer(revert=true) with the first inner round
-        // compute.
-        let r0 = do_sumcheck_round_and_revert(
-            &mut eq_buffer,
-            &mut layer,
-            pq_size,
-            lambda,
-            transcript,
-            &mut d_sum_evals,
-            &mut tmp_block_sums,
-            &mut round_polys_eval,
-            &mut r_vec,
-            &mut prev_s_eval,
-            xi_prev[0],
-            &mut eq_r_acc,
-            device_ctx,
-        )?;
-
-        // Fused rounds 1..(round-1): compute + fold using prev_r.
-        let mut prev_r = r0;
+        let virtual_input_round = virtual_input && last_outer_round;
         let active: &mut DeviceBuffer<Frac<EF>>;
 
-        match backend {
+        if virtual_input_round {
+            let host_leaves = host_input_leaves.as_ref().unwrap();
+            host_leaves.copy_to_on(&mut layer, device_ctx)?;
+
+            unsafe {
+                frac_compute_round_virtual_input(
+                    &eq_buffer,
+                    &layer,
+                    real_len,
+                    logical_len,
+                    lambda,
+                    alpha,
+                    &mut d_sum_evals,
+                    &mut tmp_block_sums,
+                    stream,
+                )
+                .map_err(FractionalSumcheckError::ComputeRound)?;
+            }
+            eq_buffer.drop_layer();
+            let mut prev_r = observe_and_update(
+                &d_sum_evals,
+                transcript,
+                &mut round_polys_eval,
+                &mut r_vec,
+                &mut prev_s_eval,
+                xi_prev[0],
+                &mut eq_r_acc,
+                device_ctx,
+            )?;
+
+            let folded = virtual_input_folded_layer(
+                host_leaves,
+                logical_len,
+                total_rounds,
+                alpha,
+                prev_r,
+            );
+            folded.copy_to_on(&mut layer, device_ctx)?;
+            pq_size >>= 1;
+
+            if let Some(&xi_j) = xi_prev.get(1) {
+                unsafe {
+                    frac_compute_round(
+                        &eq_buffer,
+                        &layer,
+                        pq_size / 2,
+                        lambda,
+                        &mut d_sum_evals,
+                        &mut tmp_block_sums,
+                        stream,
+                    )
+                    .map_err(FractionalSumcheckError::ComputeRound)?;
+                }
+                eq_buffer.drop_layer();
+                prev_r = observe_and_update(
+                    &d_sum_evals,
+                    transcript,
+                    &mut round_polys_eval,
+                    &mut r_vec,
+                    &mut prev_s_eval,
+                    xi_j,
+                    &mut eq_r_acc,
+                    device_ctx,
+                )?;
+
+                for &xi_j in xi_prev.iter().skip(2) {
+                    let src_pq_size = pq_size;
+                    prev_r = do_fused_sumcheck_round_inplace(
+                        &mut eq_buffer,
+                        &mut layer,
+                        src_pq_size,
+                        lambda,
+                        prev_r,
+                        transcript,
+                        &mut d_sum_evals,
+                        &mut tmp_block_sums,
+                        &mut round_polys_eval,
+                        &mut r_vec,
+                        &mut prev_s_eval,
+                        xi_j,
+                        &mut eq_r_acc,
+                        device_ctx,
+                    )?;
+                    pq_size >>= 1;
+                }
+
+                unsafe {
+                    fold_ef_frac_columns_inplace(&mut layer, pq_size, prev_r, stream)
+                        .map_err(FractionalSumcheckError::FoldColumns)?;
+                }
+                pq_size >>= 1;
+            }
+            active = &mut layer;
+        } else {
+            // Round 0: compute + revert fused. The pq_buffer fold will be fused into next round's
+            // compute. This fuses frac_build_tree_layer(revert=true) with the first inner round
+            // compute.
+            let r0 = do_sumcheck_round_and_revert(
+                &mut eq_buffer,
+                &mut layer,
+                pq_size,
+                lambda,
+                transcript,
+                &mut d_sum_evals,
+                &mut tmp_block_sums,
+                &mut round_polys_eval,
+                &mut r_vec,
+                &mut prev_s_eval,
+                xi_prev[0],
+                &mut eq_r_acc,
+                device_ctx,
+            )?;
+
+            // Fused rounds 1..(round-1): compute + fold using prev_r.
+            let mut prev_r = r0;
+
+            match backend {
             GkrRoundStrategy::FoldEval => {
                 // Existing fused path.
                 let mut scheduler = BufferScheduler::new(max_work_size);
@@ -1113,6 +1349,7 @@ where
                 pq_size >>= 1;
             }
         }
+        }
 
         let pq_host = [
             copy_from_device(active, 0, &mut copy_scratch, device_ctx)?,
@@ -1254,14 +1491,16 @@ pub fn make_synthetic_leaves(
 mod tests {
     use openvm_cuda_common::{
         common::get_device,
+        copy::MemCopyH2D,
         memory_manager::MemTracker,
         stream::{CudaStream, GpuDeviceCtx, StreamGuard},
     };
     use p3_field::PrimeCharacteristicRing;
+    use rand::{rngs::StdRng, Rng, SeedableRng};
 
     use super::{
-        fractional_sumcheck_gpu, make_synthetic_leaves, FractionalSumcheckError, GkrRoundStrategy,
-        EF,
+        fractional_sumcheck_gpu, make_synthetic_leaves, Frac, FractionalSumcheckError,
+        GkrRoundStrategy, EF,
     };
     use crate::{prelude::SC, sponge::DuplexSpongeGpu};
 
@@ -1292,6 +1531,8 @@ mod tests {
         let result = fractional_sumcheck_gpu(
             &mut transcript,
             leaves,
+            1usize << n,
+            1usize << n,
             EF::ZERO,
             false,
             &mut mem,
@@ -1318,6 +1559,55 @@ mod tests {
             "sumcheck_polys mismatch"
         );
         assert_eq!(a.1, b.1, "final randomness mismatch");
+    }
+
+    fn make_host_leaves(len: usize) -> Vec<Frac<EF>> {
+        let mut rng = StdRng::seed_from_u64(20260429);
+        (0..len)
+            .map(|_| Frac {
+                p: rng.random::<EF>(),
+                q: rng.random::<EF>(),
+            })
+            .collect()
+    }
+
+    fn run_from_host(
+        host: &[Frac<EF>],
+        real_len: usize,
+        logical_len: usize,
+        alpha: EF,
+    ) -> Result<(super::FracSumcheckProof<SC>, Vec<EF>), FractionalSumcheckError> {
+        let device_ctx = test_ctx();
+        let leaves = host.to_device_on(&device_ctx)?;
+        let mut transcript = DuplexSpongeGpu::default();
+        let mut mem = MemTracker::start("test.virtual_input_padding");
+        let result = fractional_sumcheck_gpu(
+            &mut transcript,
+            leaves,
+            real_len,
+            logical_len,
+            alpha,
+            false,
+            &mut mem,
+            &device_ctx,
+        )?;
+        device_ctx.stream.synchronize().expect("sync");
+        Ok(result)
+    }
+
+    #[test]
+    fn test_virtual_input_padding_matches_dense_padding() -> Result<(), FractionalSumcheckError> {
+        for (real_len, logical_len) in [(2, 4), (4, 8), (5, 8), (1500, 2048)] {
+            let real = make_host_leaves(real_len);
+            let mut dense = real.clone();
+            dense.resize(logical_len, Frac::default());
+
+            let alpha = EF::ONE;
+            let virtual_proof = run_from_host(&real, real_len, logical_len, alpha)?;
+            let dense_proof = run_from_host(&dense, logical_len, logical_len, alpha)?;
+            assert_proofs_equal(&virtual_proof, &dense_proof);
+        }
+        Ok(())
     }
 
     /// Compares precompute-M against FoldEval at n=24,25,26.
