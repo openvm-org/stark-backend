@@ -84,7 +84,7 @@ pub fn leaf_params_with_128_bits_security() -> SystemParams {
         17,   // n_stack
         2048, // w_stack
         WHIR_MAX_LOG_FINAL_POLY_LEN,
-        0, // folding pow
+        1, // folding pow
         8, // mu pow
         WhirProximityStrategy::UniqueDecoding,
         SECURITY_BITS_TARGET,
@@ -96,14 +96,14 @@ pub fn leaf_params_with_128_bits_security() -> SystemParams {
 /// circuits.
 ///
 /// # Assumptions for 128-bit security
-/// - **Max trace height**: ≤ 2^19
+/// - **Max trace height**: ≤ 2^20
 /// - **Max constraints per AIR**: ≤ 1,000
 /// - **Num AIRs**: ≤ 50
 /// - **Max interactions per AIR**: ≤ 100
 /// - **Num trace columns** (unstacked, total across all AIRs): ≤ 2,000
 /// - **`w_stack`** = 512, bounding total stacked cells to `w_stack × 2^(n_stack + l_skip)`
 ///
-/// Config: `l_skip=2, n_stack=17, log_blowup=3`.
+/// Config: `l_skip=2, n_stack=18, log_blowup=3`.
 //
 // See `test_all_production_configs` in `crates/stark-backend/tests/soundness.rs` for the
 // full soundness analysis.
@@ -111,11 +111,11 @@ pub fn internal_params_with_128_bits_security() -> SystemParams {
     SystemParams::new(
         DEFAULT_INTERNAL_LOG_BLOWUP,
         2,   // l_skip
-        17,  // n_stack
+        18,  // n_stack
         512, // w_stack
         WHIR_MAX_LOG_FINAL_POLY_LEN,
-        12, // folding pow
-        15, // mu pow
+        13, // folding pow
+        16, // mu pow
         WhirProximityStrategy::ListDecoding { m: 2 },
         SECURITY_BITS_TARGET,
         log_up_security_params_baby_bear_128_bits(),
