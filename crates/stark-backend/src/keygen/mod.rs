@@ -112,7 +112,7 @@ impl<SC: StarkProtocolConfig> MultiStarkKeygenBuilder<SC> {
                 let labels = [
                     ("air_name", pk.air_name.clone()),
                     ("air_id", air_id.to_string()),
-                ];                
+                ];
                 metrics::counter!("constraint_deg", &labels)
                     .absolute(pk.vk.max_constraint_degree as u64);
                 // column info will be logged by prover later
