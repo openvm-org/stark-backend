@@ -86,7 +86,8 @@ impl<SC: StarkProtocolConfig> MultiStarkKeygenBuilder<SC> {
             .collect::<Result<Vec<_>, KeygenError>>()?;
 
         let mut air_max_constraint_degree = 0;
-        for pk in pk_per_air.iter() {
+        #[allow(unused)]
+        for (air_id, pk) in pk_per_air.iter().enumerate() {
             let width = &pk.vk.params.width;
             tracing::info!("{:<20} | Constraint Deg = {:<2} | Prep Cols = {:<2} | Main Cols = {:<8} | {:4} Constraints | {:3} Interactions",
                 pk.air_name,
@@ -108,7 +109,10 @@ impl<SC: StarkProtocolConfig> MultiStarkKeygenBuilder<SC> {
             );
             #[cfg(feature = "metrics")]
             {
-                let labels = [("air_name", pk.air_name.clone())];
+                let labels = [
+                    ("air_name", pk.air_name.clone()),
+                    ("air_id", air_id.to_string()),
+                ];
                 metrics::counter!("constraint_deg", &labels)
                     .absolute(pk.vk.max_constraint_degree as u64);
                 // column info will be logged by prover later
