@@ -1,7 +1,7 @@
 use std::{env, process};
 
 use openvm_cuda_backend::{
-    logup_zerocheck::{fractional_sumcheck_gpu, make_synthetic_leaves},
+    logup_zerocheck::{fractional_sumcheck_gpu, make_synthetic_leaves, FractionalInputSize},
     prelude::EF,
     sponge::DuplexSpongeGpu,
 };
@@ -47,6 +47,7 @@ fn bench_fractional_sumcheck() -> Result<(), Box<dyn std::error::Error>> {
         let _ = fractional_sumcheck_gpu(
             &mut transcript,
             leaves,
+            FractionalInputSize::dense(1usize << n),
             EF::ZERO,
             false,
             &mut mem,
