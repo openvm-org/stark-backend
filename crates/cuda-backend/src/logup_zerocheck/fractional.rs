@@ -359,6 +359,17 @@ fn virtual_padding_q(alpha: EF, subtree_len: usize) -> EF {
     q
 }
 
+fn folded_virtual_support_len(source_support_len: usize) -> usize {
+    if source_support_len == 0 {
+        return 0;
+    }
+    // The first GKR fold drops bit 1 of the logical input index under the bit-reversed
+    // layout. The compact threshold is therefore the max prefix index after removing
+    // that bit from any real source position.
+    let last = source_support_len - 1;
+    2 * (last / 4) + if last.is_multiple_of(4) { 1 } else { 2 }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn copy_compact_node_from_device(
     layer: &DeviceBuffer<Frac<EF>>,
@@ -913,7 +924,7 @@ where
                         && source_logical_len == total_leaves
                         && virtual_input;
                     let dst_real_len = if compact_inplace_layer {
-                        source_support_len.div_ceil(2)
+                        folded_virtual_support_len(source_support_len)
                     } else {
                         post_fold_size
                     };
@@ -1073,11 +1084,17 @@ where
                 // read/write active_pq with pending_fold=false.
                 let mut pending_fold = true;
                 let layer_read_ptr = layer.as_ptr();
-                let active_pq = if last_outer_round {
+                // Virtual compact reads can recover spilled real entries from compact source slots
+                // that are not owned by the output thread. Dense in-place multifold is safe, but
+                // virtual last-round multifold must write to the existing work buffer to avoid
+                // clobbering a source slot before another block reads it.
+                let active_pq = if last_outer_round && !virtual_input {
                     &mut layer
                 } else {
                     &mut work_buffer
                 };
+                let mut active_real_len = 0usize;
+                let mut active_logical_len = 0usize;
 
                 // w+1 to accommodate r_prev prepended to window challenges
                 // on the first iteration (inline fold on last outer round).
@@ -1155,9 +1172,13 @@ where
                     let build_real_len = if pending_fold {
                         real_len
                     } else {
-                        active_pq.len()
+                        active_real_len
                     };
-                    let build_logical_len = if pending_fold { total_leaves } else { pq_size };
+                    let build_logical_len = if pending_fold {
+                        total_leaves
+                    } else {
+                        active_logical_len
+                    };
                     unsafe {
                         frac_precompute_m_build_raw(
                             build_src,
@@ -1255,9 +1276,13 @@ where
                     let multifold_real_len = if pending_fold {
                         real_len
                     } else {
-                        active_pq.len()
+                        active_real_len
                     };
-                    let multifold_logical_len = if pending_fold { total_leaves } else { pq_size };
+                    let multifold_logical_len = if pending_fold {
+                        total_leaves
+                    } else {
+                        active_logical_len
+                    };
                     unsafe {
                         frac_multifold_raw(
                             multifold_src,
@@ -1273,6 +1298,8 @@ where
                         .map_err(FractionalSumcheckError::FoldColumns)?;
                     }
                     pq_size >>= w_fold;
+                    active_real_len = pq_size;
+                    active_logical_len = pq_size;
                     pending_fold = false;
                     base += w;
                 }
@@ -1536,19 +1563,45 @@ mod tests {
         a: &(super::FracSumcheckProof<SC>, Vec<EF>),
         b: &(super::FracSumcheckProof<SC>, Vec<EF>),
     ) {
+        assert_proofs_equal_with_context(a, b, "proof");
+    }
+
+    fn assert_proofs_equal_with_context(
+        a: &(super::FracSumcheckProof<SC>, Vec<EF>),
+        b: &(super::FracSumcheckProof<SC>, Vec<EF>),
+        context: &str,
+    ) {
         assert_eq!(
             a.0.fractional_sum, b.0.fractional_sum,
-            "fractional_sum mismatch"
+            "{context}: fractional_sum mismatch"
         );
         assert_eq!(
             a.0.claims_per_layer, b.0.claims_per_layer,
-            "claims_per_layer mismatch"
+            "{context}: claims_per_layer mismatch"
         );
         assert_eq!(
             a.0.sumcheck_polys, b.0.sumcheck_polys,
-            "sumcheck_polys mismatch"
+            "{context}: sumcheck_polys mismatch"
         );
-        assert_eq!(a.1, b.1, "final randomness mismatch");
+        assert_eq!(a.1, b.1, "{context}: final randomness mismatch");
+    }
+
+    fn assert_virtual_matches_dense(
+        real: &[Frac<EF>],
+        real_len: usize,
+        logical_len: usize,
+        alpha: EF,
+        strategy: GkrRoundStrategy,
+    ) -> Result<(), FractionalSumcheckError> {
+        let mut dense = real.to_vec();
+        dense.resize(logical_len, Frac::default());
+
+        let virtual_proof = run_from_host(real, real_len, logical_len, alpha, strategy)?;
+        let dense_proof = run_from_host(&dense, logical_len, logical_len, alpha, strategy)?;
+        let context =
+            format!("strategy={strategy:?}, real_len={real_len}, logical_len={logical_len}");
+        assert_proofs_equal_with_context(&virtual_proof, &dense_proof, &context);
+        Ok(())
     }
 
     fn make_host_leaves(len: usize) -> Vec<Frac<EF>> {
@@ -1561,15 +1614,31 @@ mod tests {
             .collect()
     }
 
+    fn virtual_padding_test_alpha() -> EF {
+        EF::from_u32(7)
+    }
+
     fn run_from_host(
         host: &[Frac<EF>],
         real_len: usize,
         logical_len: usize,
         alpha: EF,
+        strategy: GkrRoundStrategy,
     ) -> Result<(super::FracSumcheckProof<SC>, Vec<EF>), FractionalSumcheckError> {
         // SAFETY: test sets process env; run with --test-threads=1.
+        let enable_precompute_m = matches!(strategy, GkrRoundStrategy::PrecomputeM);
         unsafe {
-            std::env::set_var("SWIRL_CUDA_GKR_PRECOMPUTE_M", "0");
+            std::env::set_var(
+                "SWIRL_CUDA_GKR_PRECOMPUTE_M",
+                if enable_precompute_m { "1" } else { "0" },
+            );
+            if enable_precompute_m {
+                std::env::set_var("SWIRL_CUDA_GKR_PRECOMPUTE_M_MIN_BLOCKS", "1");
+                std::env::set_var("SWIRL_CUDA_GKR_PRECOMPUTE_M_MIN_N", "4");
+            } else {
+                std::env::remove_var("SWIRL_CUDA_GKR_PRECOMPUTE_M_MIN_BLOCKS");
+                std::env::remove_var("SWIRL_CUDA_GKR_PRECOMPUTE_M_MIN_N");
+            }
         }
         let device_ctx = test_ctx();
         let leaves = host.to_device_on(&device_ctx)?;
@@ -1590,15 +1659,47 @@ mod tests {
 
     #[test]
     fn test_virtual_input_padding_matches_dense_padding() -> Result<(), FractionalSumcheckError> {
-        for (real_len, logical_len) in [(2, 4), (4, 8), (5, 8), (8, 16), (9, 16), (1500, 2048)] {
+        let small_cases = [4, 8, 16, 32].into_iter().flat_map(|logical_len| {
+            (logical_len / 2..logical_len).map(move |real_len| (real_len, logical_len))
+        });
+        for (real_len, logical_len) in small_cases.chain([(1500, 2048)]) {
             let real = make_host_leaves(real_len);
-            let mut dense = real.clone();
-            dense.resize(logical_len, Frac::default());
+            assert_virtual_matches_dense(
+                &real,
+                real_len,
+                logical_len,
+                virtual_padding_test_alpha(),
+                GkrRoundStrategy::FoldEval,
+            )?;
+        }
+        Ok(())
+    }
 
-            let alpha = EF::ONE;
-            let virtual_proof = run_from_host(&real, real_len, logical_len, alpha)?;
-            let dense_proof = run_from_host(&dense, logical_len, logical_len, alpha)?;
-            assert_proofs_equal(&virtual_proof, &dense_proof);
+    #[test]
+    fn test_virtual_input_padding_matches_dense_padding_precompute_m(
+    ) -> Result<(), FractionalSumcheckError> {
+        for (real_len, logical_len) in [
+            (33, 64),
+            (47, 64),
+            (63, 64),
+            (65, 128),
+            (96, 128),
+            (127, 128),
+            (1025, 2048),
+            (1500, 2048),
+            (2047, 2048),
+            (32769, 65536),
+            (49153, 65536),
+            (65535, 65536),
+        ] {
+            let real = make_host_leaves(real_len);
+            assert_virtual_matches_dense(
+                &real,
+                real_len,
+                logical_len,
+                virtual_padding_test_alpha(),
+                GkrRoundStrategy::PrecomputeM,
+            )?;
         }
         Ok(())
     }
