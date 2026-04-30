@@ -180,7 +180,9 @@ where
         .mem
         .emit_metrics_with_label("prover.before_gkr_input_evals");
     prover.mem.reset_peak();
+    let sizes = FractionalInputSize::new(real_len, logical_len);
     let (inputs, alpha) = if has_interactions {
+        let memory_budget_bytes = sizes.peak_work_buffer_bytes();
         log_gkr_input_evals(
             &prover.trace_interactions,
             mpk,
@@ -189,6 +191,7 @@ where
             alpha_logup,
             &prover.d_challenges,
             real_len,
+            memory_budget_bytes,
             device_ctx,
         )?
     } else {
@@ -212,7 +215,7 @@ where
     let (frac_sum_proof, mut xi) = fractional_sumcheck_gpu(
         transcript,
         inputs,
-        FractionalInputSize::new(real_len, logical_len),
+        sizes,
         alpha,
         true,
         &mut prover.mem,
