@@ -748,7 +748,9 @@ pub unsafe fn frac_compute_round_and_revert(
 
 /// Folds `Frac<EF>` buffer. Pairs (idx, idx+quarter) and (idx+half, idx+3*quarter),
 /// writes results to dst[idx] and dst[idx+quarter]. Output size is `size / 2`.
-/// Safe for src == dst (in-place) because each thread handles disjoint indices.
+/// Dense folds are safe for src == dst because each thread handles disjoint indices.
+/// Compact virtual folds must use an out-of-place destination because virtual reads can
+/// recover source values from physical slots in the output range.
 #[allow(clippy::too_many_arguments)]
 pub unsafe fn fold_ef_frac_columns(
     src: &DeviceBuffer<Frac<EF>>,
@@ -787,6 +789,10 @@ pub unsafe fn fold_ef_frac_columns_inplace(
 ) -> Result<(), CudaError> {
     debug_assert!(buffer.len() >= size || size == logical_len || buffer.len() >= real_len);
     debug_assert!(real_len <= logical_len);
+    debug_assert_eq!(
+        real_len, logical_len,
+        "virtual compact folds must use an out-of-place destination"
+    );
     let ptr = buffer.as_mut_ptr();
     CudaError::from_result(_frac_fold_fpext_columns(
         ptr,

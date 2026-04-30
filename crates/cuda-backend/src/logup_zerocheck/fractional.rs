@@ -801,11 +801,12 @@ where
     // Work buffer to avoid revert operations on layer. Only needed for non-last rounds.
     // For the last round (round == total_rounds - 1), we fold in-place on layer.
     // When precompute-M is active, the first multifold folds w+1 variables at once
-    // (pending r_prev + w window challenges), so the output is total_leaves >> (2 + w).
+    // (pending r_prev + w window challenges). The largest case is the last outer round:
+    // input pq_size = total_leaves, output pq_size = total_leaves >> (1 + w).
     // Fold-eval fallback rounds (rem_n < min_n) need at most 2^min_n elements.
     let max_work_size = if total_rounds > 2 {
         if precompute_m_env {
-            (total_leaves >> (2 + GKR_WINDOW_SIZE)).max(1 << GKR_WINDOW_DEFAULT_MIN_N)
+            (total_leaves >> (1 + GKR_WINDOW_SIZE)).max(1 << GKR_WINDOW_DEFAULT_MIN_N)
         } else {
             total_leaves >> 2
         }
@@ -828,6 +829,7 @@ where
     } else {
         DeviceBuffer::new()
     };
+    let mut final_fold_buffer = DeviceBuffer::<Frac<EF>>::new();
     let precompute_m_min_blocks_threshold = precompute_m_min_blocks_threshold();
     let precompute_m_target_blocks = precompute_m_target_blocks();
     let precompute_m_tail_tile_override = precompute_m_tail_tile_override();
@@ -1022,7 +1024,50 @@ where
                 }
 
                 // Final fold after last r (no next compute to fuse with).
+                let compact_virtual_final_fold = source_real_len < source_logical_len;
                 active = match scheduler.final_fold_target(last_outer_round) {
+                    BufferTarget::InPlaceWork if compact_virtual_final_fold => {
+                        let output_len = pq_size / 2;
+                        if final_fold_buffer.len() < output_len {
+                            final_fold_buffer =
+                                DeviceBuffer::<Frac<EF>>::with_capacity_on(output_len, device_ctx);
+                        }
+                        unsafe {
+                            fold_ef_frac_columns(
+                                &work_buffer,
+                                &mut final_fold_buffer,
+                                pq_size,
+                                source_real_len,
+                                source_logical_len,
+                                prev_r,
+                                alpha,
+                                stream,
+                            )
+                            .map_err(FractionalSumcheckError::FoldColumns)?;
+                        }
+                        &mut final_fold_buffer
+                    }
+                    BufferTarget::InPlaceLayer if compact_virtual_final_fold => {
+                        let output_len = pq_size / 2;
+                        if final_fold_buffer.len() < output_len {
+                            final_fold_buffer =
+                                DeviceBuffer::<Frac<EF>>::with_capacity_on(output_len, device_ctx);
+                        }
+                        unsafe {
+                            fold_ef_frac_columns(
+                                &layer,
+                                &mut final_fold_buffer,
+                                pq_size,
+                                source_real_len,
+                                source_logical_len,
+                                prev_r,
+                                alpha,
+                                stream,
+                            )
+                            .map_err(FractionalSumcheckError::FoldColumns)?;
+                        }
+                        &mut final_fold_buffer
+                    }
                     BufferTarget::InPlaceWork => {
                         unsafe {
                             fold_ef_frac_columns_inplace(
@@ -1283,6 +1328,12 @@ where
                     } else {
                         active_logical_len
                     };
+                    debug_assert!(
+                        active_pq.len() >= (pq_size >> w_fold),
+                        "active_pq too small for multifold output: {} < {}",
+                        active_pq.len(),
+                        pq_size >> w_fold
+                    );
                     unsafe {
                         frac_multifold_raw(
                             multifold_src,
