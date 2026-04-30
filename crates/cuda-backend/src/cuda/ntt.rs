@@ -79,6 +79,7 @@ extern "C" {
     /// Requires domain_size >= 256.
     fn _bit_rev_frac_ext_build_k2(
         inout: *mut std::ffi::c_void,
+        real_len: usize,
         lg_domain_size: u32,
         alpha: EF,
         stream: cudaStream_t,
@@ -141,12 +142,14 @@ pub unsafe fn bit_rev_frac_ext(
 
 pub unsafe fn bit_rev_frac_ext_build_k2(
     inout: &DeviceBuffer<(EF, EF)>,
+    real_len: usize,
     lg_domain_size: u32,
     alpha: EF,
     stream: cudaStream_t,
 ) -> Result<(), CudaError> {
     CudaError::from_result(_bit_rev_frac_ext_build_k2(
         inout.as_mut_raw_ptr(),
+        real_len,
         lg_domain_size,
         alpha,
         stream,

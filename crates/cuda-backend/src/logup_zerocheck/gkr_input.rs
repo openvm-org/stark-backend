@@ -84,8 +84,8 @@ pub fn collect_trace_interactions<HS: GpuHashScheme>(
 }
 
 /// Evaluate interactions from trace evaluation matrices to get (p, q) fractional sumcheck input.
-/// Returns the real leaves buffer (WITHOUT alpha applied) and alpha value to be applied by the GKR
-/// prover. Virtual padding is not written to this buffer.
+/// Returns real leaves buffer (WITHOUT alpha applied) and alpha value to be applied in first tree
+/// layer. Virtual padding is not materialized.
 #[instrument(name = "prover.rap_constraints.logup_gkr.input_evals", skip_all)]
 #[allow(clippy::too_many_arguments)]
 pub fn log_gkr_input_evals<HS: GpuHashScheme>(
