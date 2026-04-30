@@ -101,7 +101,7 @@ pub fn leaf_params_with_128_bits_security() -> SystemParams {
 /// - **Num AIRs**: ≤ 50
 /// - **Max interactions per AIR**: ≤ 100
 /// - **Num trace columns** (unstacked, total across all AIRs): ≤ 2,000
-/// - **`w_stack`** = 512, bounding total stacked cells to `w_stack × 2^(n_stack + l_skip)`
+/// - **`w_stack`** = 256, bounding total stacked cells to `w_stack × 2^(n_stack + l_skip)`
 ///
 /// Config: `l_skip=2, n_stack=19, log_blowup=3`.
 //
