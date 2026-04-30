@@ -96,6 +96,24 @@ pub struct LogupMonomialCtx {
     pub d_combinations: *const EF,
     pub num_monomials: u32,
 }
+/// Per-AIR context for batched GKR input evaluation.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct GkrInputCtx {
+    pub d_fracs: *mut Frac<EF>,
+    pub d_preprocessed: *const F,
+    pub d_main: *const u64,
+    pub d_public_values: *const F,
+    pub d_challenges: *const EF,
+    pub d_intermediates: *mut EF,
+    pub d_rules: *const std::ffi::c_void,
+    pub d_used_nodes: *const usize,
+    pub d_pair_idxs: *const u32,
+    pub used_nodes_len: usize,
+    pub height: u32,
+    pub num_rows_per_tile: u32,
+}
+
 // end of types for batch MLE
 
 extern "C" {
@@ -320,6 +338,14 @@ extern "C" {
         used_nodes_len: usize,
         height: u32,
         num_rows_per_tile: u32,
+        stream: cudaStream_t,
+    ) -> i32;
+
+    fn _gkr_input_batch_intermediates_buffer_size(buffer_size: u32, stream: cudaStream_t) -> usize;
+
+    fn _logup_batch_gkr_input_eval(
+        d_ctxs: *const GkrInputCtx,
+        num_airs: u32,
         stream: cudaStream_t,
     ) -> i32;
 
@@ -1106,6 +1132,32 @@ pub unsafe fn logup_gkr_input_eval(
         num_rows_per_tile,
         stream,
     ))
+}
+
+/// Batch version of GKR input eval that processes multiple AIRs in a single kernel launch.
+///
+/// # Safety
+/// - `d_ctxs` must point to device memory containing `num_airs` valid `GkrInputCtx` structs.
+/// - All referenced device pointers in each ctx must be valid.
+pub unsafe fn logup_batch_gkr_input_eval(
+    d_ctxs: &DeviceBuffer<GkrInputCtx>,
+    num_airs: u32,
+    stream: cudaStream_t,
+) -> Result<(), CudaError> {
+    CudaError::from_result(_logup_batch_gkr_input_eval(
+        d_ctxs.as_ptr(),
+        num_airs,
+        stream,
+    ))
+}
+
+/// Computes the number of FpExt elements needed for intermediates in the batch GKR input eval
+/// kernel.
+pub unsafe fn gkr_input_batch_intermediates_buffer_size(
+    buffer_size: u32,
+    stream: cudaStream_t,
+) -> usize {
+    _gkr_input_batch_intermediates_buffer_size(buffer_size, stream)
 }
 
 pub unsafe fn frac_add_alpha(
