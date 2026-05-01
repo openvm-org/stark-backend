@@ -34,6 +34,7 @@ fn options_for(namespace: &str) -> LeanWriteOptions {
         air_namespace: namespace.to_string(),
         schema_import: format!("{namespace}.Generated.Schema"),
         constraints_import: format!("{namespace}.Generated.Constraints"),
+        partition_offsets: vec![0],
     }
 }
 
@@ -55,6 +56,8 @@ fn schema_emits_layout_and_columns() {
     assert!(s.contains("def tidxRef : ColumnRef layout :="));
     assert!(s.contains("namespace Recursion.Test.TinyAir"));
     assert!(s.contains("end Recursion.Test.TinyAir"));
+    // Per-AIR simp attribute is registered here.
+    assert!(s.contains("register_simp_attr TinyAir_inter"));
 }
 
 #[test]
@@ -91,6 +94,14 @@ fn constraints_inline_short_subtrees() {
     assert!(s.contains("def expr_0 : Expr F layout := fun va =>"));
     assert!(s.contains("(va (.cell .local is_validRef) * (va (.cell .local is_validRef) - 1))"));
     assert!(s.contains("def constraintsList"));
+    // One generic `mem_constraintsList` helper used inline by
+    // `of_satisfiesRow` for each sub-goal — no per-K helpers, no
+    // `List.Mem.tail` chain.
+    assert!(s.contains("private theorem mem_constraintsList"));
+    assert!(s.contains("List.getElem_mem"));
+    assert!(s.contains("· exact h expr_0 (mem_constraintsList 0 (by decide))"));
+    assert!(!s.contains("simp [constraintsList]"));
+    assert!(!s.contains("List.Mem.tail"));
     assert!(s.contains("def air : AIR F"));
     assert!(s.contains("structure RawConstraintsAt"));
     assert!(s.contains("theorem of_satisfiesRow"));
@@ -137,6 +148,8 @@ fn constraints_hoist_subtree_shared_across_constraints() {
 
     assert!(s.contains("Shared sub-expressions"));
     assert!(s.contains("def inter_0 : Expr F layout := fun va =>"));
+    // Helper is tagged with the per-AIR simp attribute.
+    assert!(s.contains("@[TinyAir_inter]\ndef inter_0"));
     // Both constraints reference the helper.
     assert_eq!(s.matches("inter_0 va").count(), 2);
 }
@@ -179,6 +192,97 @@ fn interactions_group_by_bus_name() {
     assert!(s.contains("bus := .stackingTranscriptBus"));
     assert!(s.contains("def allInteractions"));
     assert!(s.contains("transcriptBusInteractions ++ stackingTranscriptBusInteractions"));
+}
+
+#[test]
+fn interactions_simp_uses_per_air_inter_attribute_when_helper_referenced() {
+    // Helper-sharing across two constraints AND an interaction: a
+    // shared compound subtree gets hoisted to `inter_0`. The
+    // constraints exist only to drive global use-count above the
+    // share threshold; the interaction's count is a `Neg` of the
+    // same shared subtree, so its rendered multExpr is `-(inter_0
+    // va)` and the per-pick `_evalMultiplicityAt` simp arg list
+    // must include the per-AIR simp attribute (so transitive
+    // `inter_K → inter_M` references can be unfolded by simp).
+    let is_valid = Arc::new(main_var(0, 0, 0));
+    let one = Arc::new(SymbolicExpression::Constant(BabyBear::new(1)));
+    let sub = Arc::new(SymbolicExpression::Sub {
+        x: is_valid.clone(),
+        y: one,
+        degree_multiple: 1,
+    });
+    let shared = Arc::new(SymbolicExpression::Mul {
+        x: is_valid,
+        y: sub,
+        degree_multiple: 2,
+    });
+    let is_first = Arc::new(SymbolicExpression::IsFirstRow);
+    let is_last = Arc::new(SymbolicExpression::IsLastRow);
+    let c0 = SymbolicExpression::Mul {
+        x: is_first,
+        y: shared.clone(),
+        degree_multiple: 3,
+    };
+    let c1 = SymbolicExpression::Mul {
+        x: is_last,
+        y: shared.clone(),
+        degree_multiple: 3,
+    };
+    // Trace-form rendering (used by per-pick `_evalMultiplicityAt`
+    // lemmas) panics on selector entries, so message uses a plain
+    // column reference, not `IsFirstRow`/`IsLastRow`.
+    let interaction = Interaction {
+        message: vec![main_var(0, 0, 0)],
+        count: SymbolicExpression::Neg {
+            x: shared,
+            degree_multiple: 2,
+        },
+        bus_index: 0,
+        count_weight: 1,
+    };
+    let dag = SymbolicConstraintsDag::from(SymbolicConstraints::<BabyBear> {
+        constraints: vec![c0, c1],
+        interactions: vec![interaction],
+    });
+    let bus_table = vec![BusBinding {
+        vk_index: 0,
+        lean_name: "transcriptBus".to_string(),
+    }];
+    let names = vec!["is_valid".to_string()];
+    let opts = options_for("Recursion.Test.TinyAir");
+    let rendered = render_air(&dag, &names, &bus_table, &opts).unwrap();
+
+    // Constraints.lean tags the hoisted helper.
+    let mut cout = Vec::new();
+    write_constraints(&mut cout, "TinyAir", &names, &rendered, &opts).unwrap();
+    let cs = String::from_utf8(cout).unwrap();
+    assert!(
+        cs.contains("@[TinyAir_inter]\ndef inter_0"),
+        "expected `@[TinyAir_inter]` above hoisted helper, got:\n{cs}"
+    );
+
+    // Interactions.lean uses the attribute name (not the helper name)
+    // in the per-pick eval-lemma simp arg list.
+    let mut iout = Vec::new();
+    write_interactions(&mut iout, "TinyAir", &rendered, &opts).unwrap();
+    let is = String::from_utf8(iout).unwrap();
+    assert!(is.contains("_evalMultiplicityAt"));
+    let mult_simp_line = is
+        .lines()
+        .find(|l| {
+            l.trim_start().starts_with("simp [transcriptBus_0,")
+                && l.contains("Interaction.evalMultiplicityAt")
+        })
+        .expect("multiplicity simp line");
+    assert!(
+        mult_simp_line.contains("TinyAir_inter"),
+        "multiplicity simp line missing per-AIR attribute: {mult_simp_line}"
+    );
+    // Per-helper enumeration is no longer emitted in simp lists.
+    assert!(
+        !mult_simp_line.contains(", inter_0,") && !mult_simp_line.contains(", inter_0]"),
+        "multiplicity simp line should not enumerate inter_0: {mult_simp_line}"
+    );
 }
 
 #[test]

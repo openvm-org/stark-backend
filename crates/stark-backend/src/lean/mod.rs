@@ -90,6 +90,15 @@ pub fn air_file_stem(air_name: &str) -> &str {
     air_name.split('<').next().unwrap_or(air_name)
 }
 
+/// Name of the per-AIR simp attribute used to tag hoisted `inter_K`
+/// helpers. Registered (once) by `Schema.lean`; applied (`@[…]`) to
+/// each helper def in `Constraints.lean`; named in `simp […]` lists in
+/// `Interactions.lean`. Per-AIR so each `Schema.lean` can declare its
+/// own without colliding with sibling AIRs in the same project.
+pub fn air_inter_attr_name(air_name: &str) -> String {
+    format!("{}_inter", air_file_stem(air_name))
+}
+
 /// Configuration for the per-AIR writers.
 #[derive(Clone, Debug)]
 pub struct LeanWriteOptions {
@@ -113,6 +122,10 @@ pub struct LeanWriteOptions {
     pub schema_import: String,
     /// Constraints module path used by `Interactions.lean`'s `import`.
     pub constraints_import: String,
+    /// Flat-trace base offset for each `Entry::Main { part_index, .. }`
+    /// partition. Defaults to `vec![0]` (singleMain). For a partitioned
+    /// AIR with cached + common, set `vec![0, cached_width]`.
+    pub partition_offsets: Vec<usize>,
 }
 
 /// Pre-rendered bodies for one AIR, ready for the file writers.
@@ -158,6 +171,7 @@ pub fn render_air<F: Field>(
     let global = symbolic_global_use_counts(&symbolic);
     let mut ctx = LeanRenderContext::new(options.render.clone(), options.characteristic);
     ctx.global_use_counts = global;
+    ctx.partition_offsets = options.partition_offsets.clone();
 
     let mut constraint_bodies = Vec::with_capacity(symbolic.constraints.len());
     for c in &symbolic.constraints {
@@ -190,6 +204,7 @@ pub fn render_air<F: Field>(
                 Some(render_trace_body(
                     &interaction.count,
                     column_names,
+                    &options.partition_offsets,
                     options.characteristic,
                 ))
             } else {
@@ -200,17 +215,28 @@ pub fn render_air<F: Field>(
                     interaction
                         .message
                         .iter()
-                        .map(|m| render_trace_body(m, column_names, options.characteristic))
+                        .map(|m| {
+                            render_trace_body(
+                                m,
+                                column_names,
+                                &options.partition_offsets,
+                                options.characteristic,
+                            )
+                        })
                         .collect(),
                 )
             } else {
                 None
             };
 
-            let multiplicity_cols = collect_columns_used(&interaction.count, column_names);
+            let multiplicity_cols = collect_columns_used(
+                &interaction.count,
+                column_names,
+                &options.partition_offsets,
+            );
             let mut message_cols = ColumnsUsed::default();
             for m in &interaction.message {
-                let cu = collect_columns_used(m, column_names);
+                let cu = collect_columns_used(m, column_names, &options.partition_offsets);
                 message_cols.extend_from(&cu);
             }
 
@@ -233,15 +259,33 @@ pub fn render_air<F: Field>(
     })
 }
 
-/// Write Schema.lean.
+/// Write Schema.lean. For singleMain (one partition) the layout is
+/// `TraceLayout.singleMain W` and every column ref uses
+/// `ColumnRef.commonMain`. For partitioned AIRs (cached + common) the
+/// layout is `TraceLayout.ofWidths 0 [<cached_widths>] <common_width>`
+/// and cached-partition columns use `ColumnRef.cachedMain ⟨group, _⟩
+/// <localIdx>`.
 pub fn write_schema<W: Write>(
     writer: &mut W,
     air_name: &str,
     column_names: &[String],
     options: &LeanWriteOptions,
 ) -> io::Result<()> {
-    let width = column_names.len();
+    let total_width = column_names.len();
+    let parts = partition_widths(&options.partition_offsets, total_width);
+    let num_parts = parts.len();
+    debug_assert!(num_parts >= 1);
+    let cached_widths: Vec<usize> = parts[..num_parts - 1].iter().map(|p| p.1).collect();
+    let common_width = parts[num_parts - 1].1;
+    let is_partitioned = num_parts > 1;
+
     writeln!(writer, "import {}", options.fundamentals_import)?;
+    writeln!(writer)?;
+    writeln!(
+        writer,
+        "/-- Simp set for unfolding hoisted `inter_K` helpers of `{air_name}`. -/"
+    )?;
+    writeln!(writer, "register_simp_attr {}", air_inter_attr_name(air_name))?;
     writeln!(writer)?;
     writeln!(writer, "/-!")?;
     writeln!(writer, "# {air_name} (native)")?;
@@ -263,23 +307,79 @@ pub fn write_schema<W: Write>(
     writeln!(writer, "open Fundamentals.Air")?;
     writeln!(writer)?;
     writeln!(writer, "/-- Width of `{air_name}`'s main trace. -/")?;
-    writeln!(writer, "abbrev W : Nat := {width}")?;
+    writeln!(writer, "abbrev W : Nat := {total_width}")?;
     writeln!(writer)?;
     writeln!(writer, "/-- Structured trace layout for `{air_name}`. -/")?;
-    writeln!(writer, "def layout : TraceLayout := TraceLayout.singleMain W")?;
+    if is_partitioned {
+        let cached_list = cached_widths
+            .iter()
+            .map(|w| w.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        writeln!(
+            writer,
+            "def layout : TraceLayout := TraceLayout.ofWidths 0 [{cached_list}] {common_width}"
+        )?;
+    } else {
+        writeln!(writer, "def layout : TraceLayout := TraceLayout.singleMain W")?;
+    }
     writeln!(writer)?;
     writeln!(writer, "/-! ## Column indices -/")?;
     writeln!(writer)?;
-    for (idx, name) in column_names.iter().enumerate() {
-        writeln!(writer, "def {name}Idx : Fin W := ⟨{idx}, by decide⟩")?;
-        writeln!(
-            writer,
-            "def {name}Ref : ColumnRef layout := ColumnRef.commonMain {name}Idx"
-        )?;
+    for (flat_idx, name) in column_names.iter().enumerate() {
+        let (group, base, width) = locate_partition(&parts, flat_idx);
+        let local_idx = flat_idx - base;
+        let is_common = group + 1 == num_parts;
+        if is_common {
+            if is_partitioned {
+                writeln!(writer, "def {name}Idx : Fin {width} := ⟨{local_idx}, by decide⟩")?;
+            } else {
+                writeln!(writer, "def {name}Idx : Fin W := ⟨{local_idx}, by decide⟩")?;
+            }
+            writeln!(
+                writer,
+                "def {name}Ref : ColumnRef layout := ColumnRef.commonMain {name}Idx"
+            )?;
+        } else {
+            writeln!(writer, "def {name}Idx : Fin {width} := ⟨{local_idx}, by decide⟩")?;
+            writeln!(
+                writer,
+                "def {name}Ref : ColumnRef layout := ColumnRef.cachedMain ⟨{group}, by decide⟩ {name}Idx"
+            )?;
+        }
     }
     writeln!(writer)?;
     writeln!(writer, "end {}", options.air_namespace)?;
     Ok(())
+}
+
+/// Convert `partition_offsets` + total width into a list of
+/// `(base, width)` pairs, one per partition.
+fn partition_widths(partition_offsets: &[usize], total_width: usize) -> Vec<(usize, usize)> {
+    if partition_offsets.is_empty() {
+        return vec![(0, total_width)];
+    }
+    let mut out = Vec::with_capacity(partition_offsets.len());
+    for i in 0..partition_offsets.len() {
+        let base = partition_offsets[i];
+        let end = partition_offsets
+            .get(i + 1)
+            .copied()
+            .unwrap_or(total_width);
+        out.push((base, end - base));
+    }
+    out
+}
+
+/// Find which partition a flat column index belongs to. Returns
+/// `(group_index, partition_base, partition_width)`.
+fn locate_partition(parts: &[(usize, usize)], flat_idx: usize) -> (usize, usize, usize) {
+    for (i, (base, width)) in parts.iter().enumerate() {
+        if flat_idx < *base + *width {
+            return (i, *base, *width);
+        }
+    }
+    panic!("flat index {flat_idx} out of range for partitions");
 }
 
 /// Write Constraints.lean from a pre-rendered AIR.
@@ -306,6 +406,11 @@ pub fn write_constraints<W: Write>(
     writeln!(writer)?;
     writeln!(writer, "set_option linter.unusedVariables false")?;
     writeln!(writer, "set_option linter.unusedSectionVars false")?;
+    writeln!(writer, "set_option maxHeartbeats 800000")?;
+    // Defeq-checking `[K]'h ∈ constraintsList` (against the literal-Nat
+    // bound proof) walks 282-element lists in `constraintsList` for
+    // some AIRs (Poseidon2). Default 512 isn't enough.
+    writeln!(writer, "set_option maxRecDepth 4096")?;
     writeln!(writer)?;
     writeln!(writer, "namespace {}", options.air_namespace)?;
     writeln!(writer)?;
@@ -317,7 +422,9 @@ pub fn write_constraints<W: Write>(
     if !rendered.helper_defs.is_empty() {
         writeln!(writer, "/-! ## Shared sub-expressions -/")?;
         writeln!(writer)?;
+        let attr = air_inter_attr_name(air_name);
         for def in &rendered.helper_defs {
+            writeln!(writer, "@[{attr}]")?;
             writeln!(writer, "{def}")?;
         }
     }
@@ -397,6 +504,25 @@ pub fn write_constraints<W: Write>(
         )?;
     }
     writeln!(writer)?;
+
+    // One generic membership helper, used N times below. The bound
+    // is stated as `K < <N>` (literal Nat) so call sites can discharge
+    // it with closed `by decide`. `constraintsList.length` reduces to
+    // `<N>` by kernel defeq (the def's body is a list literal), so
+    // `[K]'h` accepts a `K < <N>` bound directly.
+    if n > 0 {
+        writeln!(
+            writer,
+            "private theorem mem_constraintsList (K : Nat) (h : K < {n}) :"
+        )?;
+        writeln!(
+            writer,
+            "    (constraintsList : List (Expr F layout))[K]'h ∈ constraintsList :="
+        )?;
+        writeln!(writer, "  List.getElem_mem _")?;
+        writeln!(writer)?;
+    }
+
     writeln!(writer, "namespace RawConstraintsAt")?;
     writeln!(writer)?;
     writeln!(
@@ -419,7 +545,7 @@ pub fn write_constraints<W: Write>(
         for i in 0..n {
             writeln!(
                 writer,
-                "  · exact h expr_{i} (by change expr_{i} ∈ constraintsList; simp [constraintsList])"
+                "  · exact h expr_{i} (mem_constraintsList {i} (by decide))"
             )?;
         }
     }
@@ -456,6 +582,7 @@ pub fn write_interactions<W: Write>(
     writeln!(writer)?;
     writeln!(writer, "set_option linter.unusedVariables false")?;
     writeln!(writer, "set_option linter.unusedSectionVars false")?;
+    writeln!(writer, "set_option maxHeartbeats 800000")?;
     writeln!(writer)?;
     writeln!(writer, "namespace {}", options.air_namespace)?;
     writeln!(writer)?;
@@ -485,11 +612,16 @@ pub fn write_interactions<W: Write>(
         for (i, entry) in group.entries.iter().enumerate() {
             writeln!(writer, "    {{ bus := .{lean_name}")?;
             writeln!(writer, "      multExpr := fun va =>")?;
-            writeln!(
-                writer,
-                "{}",
-                indent_block(&entry.multiplicity_body, "        ")
-            )?;
+            // Multi-line bodies (e.g. with `let t0 := …` bindings)
+            // need explicit parens to terminate the lambda cleanly
+            // before the next struct field — otherwise Lean's parser
+            // eats `msgExprs` as part of the lambda body.
+            let mult_body = if entry.multiplicity_body.contains('\n') {
+                format!("({})", entry.multiplicity_body)
+            } else {
+                entry.multiplicity_body.clone()
+            };
+            writeln!(writer, "{}", indent_block(&mult_body, "        "))?;
             writeln!(writer, "      msgExprs := #v[")?;
             for (j, body) in entry.message_bodies.iter().enumerate() {
                 let suffix = if j + 1 == entry.message_bodies.len() {
@@ -506,7 +638,7 @@ pub fn write_interactions<W: Write>(
         writeln!(writer, "  ]")?;
         writeln!(writer)?;
 
-        write_per_pick_lemmas(writer, group, &bus_def_ty)?;
+        write_per_pick_lemmas(writer, air_name, group, &bus_def_ty)?;
     }
 
     if !rendered.interactions.is_empty() {
@@ -611,6 +743,7 @@ where
 /// lemmas (when trace-form rendering succeeded for the entry).
 fn write_per_pick_lemmas<W: Write>(
     writer: &mut W,
+    air_name: &str,
     group: &RenderedBusGroup,
     bus_def_ty: &str,
 ) -> io::Result<()> {
@@ -686,6 +819,7 @@ fn write_per_pick_lemmas<W: Write>(
         // _evalMultiplicityAt
         let (acc_list, ref_list, ctx_list) =
             simp_args_for_columns(&entry.multiplicity_cols);
+        let mult_uses_inter = body_uses_inter_helper(&entry.multiplicity_body);
         writeln!(writer, "lemma {bus}_{i}_evalMultiplicityAt")?;
         writeln!(
             writer,
@@ -702,6 +836,9 @@ fn write_per_pick_lemmas<W: Write>(
             "Interaction.evalMultiplicityAt".to_string(),
             "AIR.Expr.evalAt".to_string(),
         ];
+        if mult_uses_inter {
+            simp_names.push(air_inter_attr_name(air_name));
+        }
         simp_names.extend(acc_list.iter().cloned());
         simp_names.extend(ctx_list.iter().cloned());
         simp_names.extend(ref_list.iter().cloned());
@@ -727,6 +864,10 @@ fn write_per_pick_lemmas<W: Write>(
         }
 
         let (msg_acc, msg_ref, msg_ctx) = simp_args_for_columns(&entry.message_cols);
+        let msg_uses_inter = entry
+            .message_bodies
+            .iter()
+            .any(|b| body_uses_inter_helper(b));
         writeln!(writer, "lemma {bus}_{i}_evalMessageAt")?;
         writeln!(
             writer,
@@ -751,6 +892,9 @@ fn write_per_pick_lemmas<W: Write>(
             "Interaction.evalMessageAt".to_string(),
             "AIR.Expr.evalAt".to_string(),
         ];
+        if msg_uses_inter {
+            simp_names.push(air_inter_attr_name(air_name));
+        }
         simp_names.extend(msg_acc.iter().cloned());
         simp_names.extend(msg_ctx.iter().cloned());
         simp_names.extend(msg_ref.iter().cloned());
@@ -787,6 +931,33 @@ fn build_disjunct_nav(i: usize, n: usize) -> String {
         }
     }
     steps.join("; ")
+}
+
+/// Whether a rendered expression body references any `inter_<N>`
+/// helper. The eval-lemma emitter uses this to decide whether to add
+/// the per-AIR `inter` simp attribute to a `simp` call. Word-boundary
+/// aware: matches `inter_3`, not e.g. `winter_3`.
+fn body_uses_inter_helper(body: &str) -> bool {
+    let bytes = body.as_bytes();
+    let mut search = bytes;
+    while let Some(pos) = find_subslice(search, b"inter_") {
+        let abs_start = (search.as_ptr() as usize) - (bytes.as_ptr() as usize) + pos;
+        let after = abs_start + b"inter_".len();
+        let prev_ok = abs_start == 0
+            || !(bytes[abs_start - 1].is_ascii_alphanumeric() || bytes[abs_start - 1] == b'_');
+        let has_digit = after < bytes.len() && bytes[after].is_ascii_digit();
+        if prev_ok && has_digit {
+            return true;
+        }
+        search = &search[pos + b"inter_".len()..];
+    }
+    false
+}
+
+fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .position(|w| w == needle)
 }
 
 /// Build the simp-arg fragments for an `evalMultiplicityAt` /
@@ -898,6 +1069,15 @@ fn write_classification_and_selector_lemmas<W: Write>(
         writeln!(writer, "    (hbus : I.bus = .{target_bus}) :")?;
         writeln!(writer, "    I ∈ {target_list} := by")?;
         writeln!(writer, "  unfold allInteractions at hI")?;
+
+        if groups.len() == 1 {
+            // Single bus group: `allInteractions` is a plain alias for
+            // the only `<bus>Interactions`, no `++` to split.
+            writeln!(writer, "  exact hI")?;
+            writeln!(writer)?;
+            continue;
+        }
+
         writeln!(writer, "  simp only [List.mem_append] at hI")?;
 
         // Build the rcases pattern reflecting `(((g0 ∨ g1) ∨ g2) ∨ g3)`

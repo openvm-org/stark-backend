@@ -68,6 +68,11 @@ pub struct LeanRenderContext<F> {
     pub temp_counter: usize,
     /// Field characteristic for negative-constant folding (None to skip).
     pub characteristic: Option<u32>,
+    /// Flat-trace base offset for each `Entry::Main { part_index, .. }`
+    /// partition. For a non-partitioned (singleMain) AIR this is just
+    /// `[0]`; for a partitioned AIR with cached + common, it's
+    /// `[0, cached_width]` (cached at part_index 0, common at part_index 1).
+    pub partition_offsets: Vec<usize>,
 }
 
 impl<F> LeanRenderContext<F> {
@@ -82,6 +87,7 @@ impl<F> LeanRenderContext<F> {
             inter_counter: 0,
             temp_counter: 0,
             characteristic,
+            partition_offsets: vec![0],
         }
     }
 
@@ -112,10 +118,14 @@ struct Rendered {
 
 impl Rendered {
     fn into_block(self, tail: impl FnOnce(String) -> String) -> String {
+        // Trailing `;` makes term-mode `let x := e₁; e₂` unambiguous
+        // even when `e₂` ends up at a column less than `let`'s — which
+        // happens when the surrounding writer wraps the block in
+        // parens (shifting `let` rightward by one column).
         let mut lines = self
             .bindings
             .into_iter()
-            .map(|(name, expr)| format!("let {name} := {expr}"))
+            .map(|(name, expr)| format!("let {name} := {expr};"))
             .collect_vec();
         lines.push(tail(self.result));
         lines.join("\n")
@@ -167,7 +177,12 @@ fn render_expression<F: Field>(
                 SymbolicExpression::Neg { x, .. } => combine_neg(rendered[&Arc::as_ptr(x)].clone()),
                 _ => Rendered {
                     bindings: vec![],
-                    result: render_leaf(expr, column_names, context.characteristic),
+                    result: render_leaf(
+                        expr,
+                        column_names,
+                        &context.partition_offsets,
+                        context.characteristic,
+                    ),
                     op_count: 0,
                 },
             };
@@ -293,19 +308,29 @@ fn decide_and_emit<F: Field>(
 fn render_leaf<F: Field>(
     x: &SymbolicExpression<F>,
     column_names: &[String],
+    partition_offsets: &[usize],
     characteristic: Option<u32>,
 ) -> String {
     match x {
         SymbolicExpression::Variable(SymbolicVariable { entry, index, .. }) => match entry {
-            Entry::Main { offset, .. } => {
+            Entry::Main { part_index, offset } => {
                 let rotation = match offset {
                     0 => "local",
                     1 => "next",
                     other => panic!("unsupported rotation offset {other} in main column"),
                 };
-                let name = column_names
-                    .get(*index)
-                    .unwrap_or_else(|| panic!("main column index {index} has no name"));
+                let base = *partition_offsets.get(*part_index).unwrap_or_else(|| {
+                    panic!(
+                        "main column part_index {part_index} out of range (partitions: {})",
+                        partition_offsets.len()
+                    )
+                });
+                let flat_idx = base + *index;
+                let name = column_names.get(flat_idx).unwrap_or_else(|| {
+                    panic!(
+                        "main column (part {part_index}, index {index}, flat {flat_idx}) has no name"
+                    )
+                });
                 format!("va (.cell .{rotation} {name}Ref)")
             }
             Entry::Preprocessed { .. } => panic!("preprocessed columns not supported in v1"),
@@ -396,41 +421,38 @@ pub fn symbolic_global_use_counts<F: Field>(
 pub fn render_trace_body<F: Field>(
     expr: &SymbolicExpression<F>,
     column_names: &[String],
+    partition_offsets: &[usize],
     characteristic: Option<u32>,
 ) -> String {
     let mut out = String::new();
-    render_trace_inner(expr, column_names, characteristic, &mut out, true);
+    render_trace_inner(expr, column_names, partition_offsets, characteristic, &mut out, true);
     out
 }
 
 fn render_trace_inner<F: Field>(
     expr: &SymbolicExpression<F>,
     column_names: &[String],
+    partition_offsets: &[usize],
     characteristic: Option<u32>,
     out: &mut String,
-    is_root: bool,
+    _is_root: bool,
 ) {
     match expr {
         SymbolicExpression::Variable(SymbolicVariable { entry, index, .. }) => match entry {
-            Entry::Main { offset: 0, .. } => {
+            Entry::Main { part_index, offset } => {
+                let base = *partition_offsets.get(*part_index).unwrap_or_else(|| {
+                    panic!("main column part_index {part_index} out of range")
+                });
+                let flat_idx = base + *index;
                 let name = column_names
-                    .get(*index)
-                    .unwrap_or_else(|| panic!("main column {index} has no name"));
-                if is_root {
-                    out.push_str(&format!("{name} trace row"));
-                } else {
-                    out.push_str(&format!("{name} trace row"));
-                }
-            }
-            Entry::Main { offset: 1, .. } => {
-                let name = column_names
-                    .get(*index)
-                    .unwrap_or_else(|| panic!("main column {index} has no name"));
-                if is_root {
-                    out.push_str(&format!("{name}_next trace row"));
-                } else {
-                    out.push_str(&format!("{name}_next trace row"));
-                }
+                    .get(flat_idx)
+                    .unwrap_or_else(|| panic!("main column (part {part_index}, index {index}) has no name"));
+                let suffix = match offset {
+                    0 => "",
+                    1 => "_next",
+                    other => panic!("unsupported rotation offset {other} in main column"),
+                };
+                out.push_str(&format!("{name}{suffix} trace row"));
             }
             other => panic!("unsupported entry {other:?} in trace form"),
         },
@@ -444,35 +466,28 @@ fn render_trace_inner<F: Field>(
         }
         SymbolicExpression::Add { x, y, .. } => {
             out.push('(');
-            render_trace_inner(x, column_names, characteristic, out, false);
+            render_trace_inner(x, column_names, partition_offsets, characteristic, out, false);
             out.push_str(" + ");
-            render_trace_inner(y, column_names, characteristic, out, false);
+            render_trace_inner(y, column_names, partition_offsets, characteristic, out, false);
             out.push(')');
         }
         SymbolicExpression::Sub { x, y, .. } => {
             out.push('(');
-            render_trace_inner(x, column_names, characteristic, out, false);
+            render_trace_inner(x, column_names, partition_offsets, characteristic, out, false);
             out.push_str(" - ");
-            render_trace_inner(y, column_names, characteristic, out, false);
+            render_trace_inner(y, column_names, partition_offsets, characteristic, out, false);
             out.push(')');
         }
         SymbolicExpression::Mul { x, y, .. } => {
             out.push('(');
-            render_trace_inner(x, column_names, characteristic, out, false);
+            render_trace_inner(x, column_names, partition_offsets, characteristic, out, false);
             out.push_str(" * ");
-            render_trace_inner(y, column_names, characteristic, out, false);
+            render_trace_inner(y, column_names, partition_offsets, characteristic, out, false);
             out.push(')');
         }
         SymbolicExpression::Neg { x, .. } => {
             out.push('-');
-            match &**x {
-                SymbolicExpression::Variable(_) | SymbolicExpression::Constant(_) => {
-                    render_trace_inner(x, column_names, characteristic, out, false);
-                }
-                _ => {
-                    render_trace_inner(x, column_names, characteristic, out, false);
-                }
-            }
+            render_trace_inner(x, column_names, partition_offsets, characteristic, out, false);
         }
     }
 }
@@ -523,6 +538,7 @@ impl ColumnsUsed {
 pub fn collect_columns_used<F: Field>(
     expr: &SymbolicExpression<F>,
     column_names: &[String],
+    partition_offsets: &[usize],
 ) -> ColumnsUsed {
     let mut out = ColumnsUsed::default();
     let mut visited: HashSet<*const SymbolicExpression<F>> = HashSet::new();
@@ -534,8 +550,11 @@ pub fn collect_columns_used<F: Field>(
         }
         match e {
             SymbolicExpression::Variable(SymbolicVariable { entry, index, .. }) => {
-                if let Entry::Main { offset, .. } = entry {
-                    if let Some(name) = column_names.get(*index) {
+                if let Entry::Main { part_index, offset } = entry {
+                    let Some(base) = partition_offsets.get(*part_index).copied() else {
+                        continue;
+                    };
+                    if let Some(name) = column_names.get(base + *index) {
                         match offset {
                             0 => {
                                 out.local.insert(name.clone());
