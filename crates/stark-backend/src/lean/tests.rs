@@ -1,136 +1,184 @@
+use std::sync::Arc;
+
 use p3_baby_bear::BabyBear;
 
 use super::{
-    extract_constraints_to_lean_writer, format_lean_air_name,
-    render::{
-        expression_direct_use_counts, symbolic_constraint_to_lean_definitions, LeanRenderContext,
-    },
+    air_file_stem, format_lean_air_name, render_air, write_constraints, write_interactions,
+    write_schema, BusBinding, LeanRenderOptions, LeanWriteOptions,
 };
 use crate::{
-    air_builders::symbolic::{symbolic_expression::SymbolicExpression, SymbolicConstraints},
+    air_builders::symbolic::{
+        symbolic_expression::SymbolicExpression,
+        symbolic_variable::{Entry, SymbolicVariable},
+        SymbolicConstraints, SymbolicConstraintsDag,
+    },
     interaction::Interaction,
 };
 
-#[test]
-fn symbolic_constraint_avoids_inter_defs_for_low_use_subexpressions() {
-    let delta =
-        SymbolicExpression::from(BabyBear::new(2)) - SymbolicExpression::from(BabyBear::new(1));
-    let inner = delta.clone() + (SymbolicExpression::from(BabyBear::new(3)) * delta);
-    let expr = SymbolicExpression::IsFirstRow * inner;
+const BABY_BEAR_P: u32 = 2_013_265_921;
 
-    let mut context = LeanRenderContext {
-        use_counts: expression_direct_use_counts(std::slice::from_ref(&expr)),
-        ..Default::default()
-    };
-    let (helper_defs, rendered) =
-        symbolic_constraint_to_lean_definitions(&expr, 5, "", None, &mut context);
+fn main_var(part_index: usize, index: usize, offset: usize) -> SymbolicExpression<BabyBear> {
+    SymbolicExpression::Variable(SymbolicVariable::new(
+        Entry::Main { part_index, offset },
+        index,
+    ))
+}
 
-    assert!(helper_defs.is_empty());
-    assert!(!rendered.contains("def inter_0"));
-    assert!(rendered.contains("let t0 := "));
-    assert!(rendered.contains("def constraint_5"));
-    assert!(rendered.contains("= 0"));
+fn options_for(namespace: &str) -> LeanWriteOptions {
+    LeanWriteOptions {
+        render: LeanRenderOptions::default(),
+        characteristic: Some(BABY_BEAR_P),
+        fundamentals_import: "Fundamentals.Air",
+        bus_defs_import: "Recursion.BusDefs",
+        bus_defs_namespace: "Recursion.BusDefs",
+        air_namespace: namespace.to_string(),
+        schema_import: format!("{namespace}.Generated.Schema"),
+        constraints_import: format!("{namespace}.Generated.Constraints"),
+    }
 }
 
 #[test]
-fn symbolic_constraints_reuse_inter_defs_across_constraints() {
-    let delta =
-        SymbolicExpression::from(BabyBear::new(2)) - SymbolicExpression::from(BabyBear::new(1));
-    let shared = delta.clone() + (SymbolicExpression::from(BabyBear::new(3)) * delta);
-    let expr0 = SymbolicExpression::IsFirstRow * shared.clone();
-    let expr1 = SymbolicExpression::IsLastRow * shared;
-
-    let mut context = LeanRenderContext {
-        use_counts: expression_direct_use_counts(&[expr0.clone(), expr1.clone()]),
-        ..Default::default()
-    };
-    let (helper_defs0, rendered0) =
-        symbolic_constraint_to_lean_definitions(&expr0, 0, "", None, &mut context);
-    let (helper_defs1, rendered1) =
-        symbolic_constraint_to_lean_definitions(&expr1, 1, "", None, &mut context);
-
-    assert_eq!(
-        helper_defs0
-            .iter()
-            .filter(|def| def.contains("def inter_0"))
-            .count(),
-        1
-    );
-    assert!(helper_defs1.is_empty());
-    assert!(!rendered0.contains("def inter_0"));
-    assert!(rendered1.contains("inter_0 c row"));
-}
-
-#[test]
-fn symbolic_constraint_dedupes_reused_local_let_bindings() {
-    let delta =
-        SymbolicExpression::from(BabyBear::new(2)) - SymbolicExpression::from(BabyBear::new(1));
-    let expr = delta.clone() + (SymbolicExpression::from(BabyBear::new(3)) * delta);
-
-    let mut context = LeanRenderContext {
-        use_counts: expression_direct_use_counts(std::slice::from_ref(&expr)),
-        ..Default::default()
-    };
-    let (helper_defs, rendered) =
-        symbolic_constraint_to_lean_definitions(&expr, 0, "", None, &mut context);
-
-    assert!(helper_defs.is_empty());
-    assert_eq!(rendered.matches("let t0 :=").count(), 1);
-}
-
-#[test]
-fn constrain_interactions_uses_intermediates_and_is_well_formed() {
-    let delta =
-        SymbolicExpression::from(BabyBear::new(2)) - SymbolicExpression::from(BabyBear::new(1));
-    let shared = delta.clone() + (SymbolicExpression::from(BabyBear::new(3)) * delta.clone());
-    let count = SymbolicExpression::IsFirstRow * shared.clone();
-    let field = SymbolicExpression::IsLastRow * shared;
-    let symbolic_constraints = SymbolicConstraints {
-        constraints: vec![],
-        interactions: vec![Interaction {
-            message: vec![field],
-            count,
-            bus_index: 7,
-            count_weight: 1,
-        }],
-    };
-
+fn schema_emits_layout_and_columns() {
     let mut out = Vec::new();
-    extract_constraints_to_lean_writer(&symbolic_constraints, "TestAir", &mut out).unwrap();
-    let rendered = String::from_utf8(out).unwrap();
-
-    assert!(rendered.contains("def inter_0"));
-    assert!(rendered.contains("def constrain_interactions"));
-    assert!(rendered.contains("if index = 7 then\n"));
-    assert!(rendered.contains("inter_0 c row"));
-    assert!(!rendered.contains("let t0 :=\n        let t0 :="));
+    let names = vec!["is_valid".to_string(), "tidx".to_string()];
+    write_schema(
+        &mut out,
+        "TinyAir",
+        &names,
+        &options_for("Recursion.Test.TinyAir"),
+    )
+    .unwrap();
+    let s = String::from_utf8(out).unwrap();
+    assert!(s.contains("abbrev W : Nat := 2"));
+    assert!(s.contains("def layout : TraceLayout := TraceLayout.singleMain W"));
+    assert!(s.contains("def is_validIdx : Fin W := ⟨0, by decide⟩"));
+    assert!(s.contains("def tidxRef : ColumnRef layout :="));
+    assert!(s.contains("namespace Recursion.Test.TinyAir"));
+    assert!(s.contains("end Recursion.Test.TinyAir"));
 }
 
 #[test]
-fn extracted_file_includes_prologue_and_namespace() {
-    let symbolic_constraints = SymbolicConstraints::<BabyBear> {
-        constraints: vec![SymbolicExpression::IsFirstRow],
+fn constraints_inline_short_subtrees() {
+    // is_valid * (is_valid - 1)
+    let is_valid = Arc::new(main_var(0, 0, 0));
+    let one = Arc::new(SymbolicExpression::Constant(BabyBear::new(1)));
+    let sub = Arc::new(SymbolicExpression::Sub {
+        x: is_valid.clone(),
+        y: one,
+        degree_multiple: 1,
+    });
+    let mul = SymbolicExpression::Mul {
+        x: is_valid,
+        y: sub,
+        degree_multiple: 2,
+    };
+    let dag = SymbolicConstraintsDag::from(SymbolicConstraints::<BabyBear> {
+        constraints: vec![mul],
         interactions: vec![],
-    };
+    });
 
+    let names = vec!["is_valid".to_string()];
+    let opts = options_for("Recursion.Test.TinyAir");
+    let rendered = render_air(&dag, &names, &[], &opts).unwrap();
     let mut out = Vec::new();
-    extract_constraints_to_lean_writer(&symbolic_constraints, "Sha2BlockHasherVmAir", &mut out)
-        .unwrap();
-    let rendered = String::from_utf8(out).unwrap();
+    write_constraints(&mut out, "TinyAir", &names, &rendered, &opts).unwrap();
+    let s = String::from_utf8(out).unwrap();
 
-    assert!(rendered.contains("import Mathlib.Algebra.Field.Basic"));
-    assert!(rendered.contains("import LeanZKCircuit.OpenVM.Circuit"));
-    assert!(rendered.contains("set_option linter.all false"));
-    assert!(rendered.contains("register_simp_attr Sha2BlockHasherVmAir_air_simplification"));
-    assert!(rendered.contains(
-        "register_simp_attr Sha2BlockHasherVmAir_constraint_and_interaction_simplification"
-    ));
-    assert!(rendered.contains("namespace Sha2BlockHasherVmAir.extraction"));
-    assert!(rendered.contains("def constraint_0"));
-    assert!(!rendered.contains("def allHold"));
-    assert!(!rendered.contains("def extracted_row_constraint_list"));
-    assert!(!rendered.contains("NAME"));
-    assert!(rendered.contains("end Sha2BlockHasherVmAir.extraction"));
+    // No `inter_K` or local `let tN` for short single-use subtrees.
+    assert!(!s.contains("inter_0"));
+    assert!(!s.contains("let t0 :="));
+    // Inlined form.
+    assert!(s.contains("def expr_0 : Expr F layout := fun va =>"));
+    assert!(s.contains("(va (.cell .local is_validRef) * (va (.cell .local is_validRef) - 1))"));
+    assert!(s.contains("def constraintsList"));
+    assert!(s.contains("def air : AIR F"));
+    assert!(s.contains("structure RawConstraintsAt"));
+    assert!(s.contains("theorem of_satisfiesRow"));
+}
+
+#[test]
+fn constraints_hoist_subtree_shared_across_constraints() {
+    // shared = is_valid * (is_valid - 1) -- 2 ops, used in both constraint_0 and constraint_1.
+    let is_valid = Arc::new(main_var(0, 0, 0));
+    let one = Arc::new(SymbolicExpression::Constant(BabyBear::new(1)));
+    let sub = Arc::new(SymbolicExpression::Sub {
+        x: is_valid.clone(),
+        y: one,
+        degree_multiple: 1,
+    });
+    let shared = Arc::new(SymbolicExpression::Mul {
+        x: is_valid,
+        y: sub,
+        degree_multiple: 2,
+    });
+    let is_first = Arc::new(SymbolicExpression::IsFirstRow);
+    let is_last = Arc::new(SymbolicExpression::IsLastRow);
+    let c0 = SymbolicExpression::Mul {
+        x: is_first,
+        y: shared.clone(),
+        degree_multiple: 3,
+    };
+    let c1 = SymbolicExpression::Mul {
+        x: is_last,
+        y: shared,
+        degree_multiple: 3,
+    };
+    let dag = SymbolicConstraintsDag::from(SymbolicConstraints::<BabyBear> {
+        constraints: vec![c0, c1],
+        interactions: vec![],
+    });
+
+    let names = vec!["is_valid".to_string()];
+    let opts = options_for("Recursion.Test.TinyAir");
+    let rendered = render_air(&dag, &names, &[], &opts).unwrap();
+    let mut out = Vec::new();
+    write_constraints(&mut out, "TinyAir", &names, &rendered, &opts).unwrap();
+    let s = String::from_utf8(out).unwrap();
+
+    assert!(s.contains("Shared sub-expressions"));
+    assert!(s.contains("def inter_0 : Expr F layout := fun va =>"));
+    // Both constraints reference the helper.
+    assert_eq!(s.matches("inter_0 va").count(), 2);
+}
+
+#[test]
+fn interactions_group_by_bus_name() {
+    // Two interactions on bus 60 (stackingTranscriptBus), one on bus 0.
+    let m = Arc::new(SymbolicExpression::IsFirstRow);
+    let v = Arc::new(SymbolicExpression::IsLastRow);
+    let mk = |bus: u16| Interaction {
+        message: vec![(*v).clone()],
+        count: (*m).clone(),
+        bus_index: bus,
+        count_weight: 1,
+    };
+    let dag = SymbolicConstraintsDag::from(SymbolicConstraints::<BabyBear> {
+        constraints: vec![],
+        interactions: vec![mk(0), mk(60), mk(60)],
+    });
+
+    let bus_table = vec![
+        BusBinding {
+            vk_index: 0,
+            lean_name: "transcriptBus".to_string(),
+        },
+        BusBinding {
+            vk_index: 60,
+            lean_name: "stackingTranscriptBus".to_string(),
+        },
+    ];
+    let opts = options_for("Recursion.Test.TinyAir");
+    let rendered = render_air(&dag, &[], &bus_table, &opts).unwrap();
+    let mut out = Vec::new();
+    write_interactions(&mut out, "TinyAir", &rendered, &opts).unwrap();
+    let s = String::from_utf8(out).unwrap();
+
+    assert!(s.contains("def transcriptBusInteractions"));
+    assert!(s.contains("def stackingTranscriptBusInteractions"));
+    assert!(s.contains("bus := .transcriptBus"));
+    assert!(s.contains("bus := .stackingTranscriptBus"));
+    assert!(s.contains("def allInteractions"));
+    assert!(s.contains("transcriptBusInteractions ++ stackingTranscriptBusInteractions"));
 }
 
 #[test]
@@ -139,8 +187,5 @@ fn formats_generic_air_names_for_lean_identifiers() {
         format_lean_air_name("Sha2BlockHasherVmAir<Sha256Config, Sha512Config>"),
         "Sha2BlockHasherVmAir_Sha256Config_Sha512Config"
     );
-    assert_eq!(
-        format_lean_air_name("VerifierSubCircuit<4, CachedSymbolicExpressionColumns<u8>>"),
-        "VerifierSubCircuit_4_CachedSymbolicExpressionColumns_u8"
-    );
+    assert_eq!(air_file_stem("WhirRoundAir<u8, 1>"), "WhirRoundAir");
 }
