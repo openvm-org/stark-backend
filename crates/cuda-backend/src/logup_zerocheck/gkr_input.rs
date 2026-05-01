@@ -213,7 +213,11 @@ pub fn log_gkr_input_evals<HS: GpuHashScheme>(
             let main_ptr = d_main_ptrs.as_ptr();
             main_ptrs_keepalive.push(d_main_ptrs);
 
-            let d_public_values = air_ctx.public_values.to_device_on(device_ctx)?;
+            let d_public_values = if air_ctx.public_values.is_empty() {
+                DeviceBuffer::<F>::new()
+            } else {
+                air_ctx.public_values.to_device_on(device_ctx)?
+            };
             let public_ptr = d_public_values.as_ptr();
             public_keepalive.push(d_public_values);
 
