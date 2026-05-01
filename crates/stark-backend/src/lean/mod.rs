@@ -1,11 +1,28 @@
-//! Extraction of AIR constraints (with interactions) from symbolic DAGs to Lean4 code.
-//! This extraction can be used for standalone Lean4 code generation from serialized circuit
-//! verifying keys.
-//
-// Original extraction code was introduced in Nethermind fork <https://github.com/NethermindEth/openvm-stark-backend/releases/tag/v1.2.2-extraction>
+//! Native-dialect Lean extraction for AIR constraints + interactions.
+//!
+//! Emits three files per AIR, designed to be consumed by the
+//! `Fundamentals.Air` Lean library:
+//!
+//! - **Schema.lean** — width, layout, per-column `…Idx` / `…Ref` defs.
+//! - **Constraints.lean** — symbolic constraints as `Expr F layout`,
+//!   `constraintsList`, the `air : AIR F` value, named-column
+//!   accessors, and a `RawConstraintsAt` extractor. Shared
+//!   sub-expressions (`inter_K`) live here too — `Interactions.lean`
+//!   can reference them via the open namespace.
+//! - **Interactions.lean** — per-bus `…Interactions` lists referencing
+//!   a hand-curated `BusIdx` enum, plus an `allInteractions` concat.
+//!
+//! Two-phase pipeline: [`render_air`] walks the DAG with one shared
+//! [`LeanRenderContext`] across both files (so a subtree shared between
+//! a constraint and an interaction picks a single `inter_K` name); the
+//! `write_*` functions then dump pre-rendered text into files in the
+//! right order.
+//!
+//! Cached partitions / preprocessed columns / public values are not
+//! supported in v1; callers are expected to skip such AIRs.
 
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::BTreeMap,
     io::{self, Write},
 };
 
@@ -23,17 +40,28 @@ mod render;
 #[cfg(test)]
 mod tests;
 
-pub use columns::{generate_lean_air_definition, LeanColumns, LeanEntry};
+pub use columns::{flat_columns_of, flatten_lean_columns, LeanColumns, LeanEntry};
 pub use openvm_codec_derive::LeanColumns;
-use render::{
-    indent_block, placeholder_column_names, symbolic_constraint_to_lean_definitions,
-    symbolic_constraints_use_counts, symbolic_interaction_bus_to_string, LeanRenderContext,
+pub use render::{
+    collect_columns_used, contains_selector, direct_use_counts, indent_block, precheck_supported,
+    render_expression_body, render_trace_body, symbolic_global_use_counts, ColumnsUsed,
+    LeanRenderContext, LeanRenderOptions,
 };
 
-fn format_lean_air_name(air_name: &str) -> String {
+/// A bus referenced by interactions in an AIR.
+#[derive(Clone, Debug)]
+pub struct BusBinding {
+    /// VK bus index as it appears in symbolic interactions.
+    pub vk_index: BusIndex,
+    /// Lean enum constructor name (without the leading `.`), e.g.
+    /// `"transcriptBus"` or `"sumcheckClaimsBus"`.
+    pub lean_name: String,
+}
+
+/// Sanitize an AIR name for use as a Lean identifier.
+pub fn format_lean_air_name(air_name: &str) -> String {
     let mut formatted = String::with_capacity(air_name.len());
     let mut prev_was_underscore = false;
-
     for ch in air_name.chars() {
         let replacement = match ch {
             '<' => Some('_'),
@@ -41,7 +69,6 @@ fn format_lean_air_name(air_name: &str) -> String {
             ',' | ' ' => Some('_'),
             _ => Some(ch),
         };
-
         if let Some(ch) = replacement {
             if ch == '_' {
                 if prev_was_underscore {
@@ -54,594 +81,862 @@ fn format_lean_air_name(air_name: &str) -> String {
             formatted.push(ch);
         }
     }
-
     formatted.trim_end_matches('_').to_string()
 }
 
+/// Stem of an AIR name used as a file name (everything before the
+/// first generic-arg `<`).
+pub fn air_file_stem(air_name: &str) -> &str {
+    air_name.split('<').next().unwrap_or(air_name)
+}
+
+/// Configuration for the per-AIR writers.
 #[derive(Clone, Debug)]
-pub struct LeanExtractionOptions<'a> {
-    pub attrs_import: Option<&'a str>,
-    pub helper_attr: Option<&'a str>,
-    pub register_inline_attrs: bool,
+pub struct LeanWriteOptions {
+    /// Inline / let / inter-K thresholds.
+    pub render: LeanRenderOptions,
+    /// Field characteristic for negative-constant folding (e.g.
+    /// BabyBear: 2_013_265_921). `None` to skip folding.
+    pub characteristic: Option<u32>,
+    /// Lean module path to import for the `Fundamentals.Air` library.
+    pub fundamentals_import: &'static str,
+    /// Lean module path of the shared bus-defs file (consumed by
+    /// `Interactions.lean`).
+    pub bus_defs_import: &'static str,
+    /// Lean namespace under which `BusIdx` lives.
+    pub bus_defs_namespace: &'static str,
+    /// Lean namespace for this AIR (e.g.
+    /// `Recursion.Stacking.UnivariateRoundAir`). Schema, Constraints,
+    /// and Interactions all open this namespace.
+    pub air_namespace: String,
+    /// Schema module path used by `Constraints.lean`'s `import`.
+    pub schema_import: String,
+    /// Constraints module path used by `Interactions.lean`'s `import`.
+    pub constraints_import: String,
 }
 
-impl Default for LeanExtractionOptions<'_> {
-    fn default() -> Self {
-        Self {
-            attrs_import: None,
-            helper_attr: None,
-            register_inline_attrs: true,
+/// Pre-rendered bodies for one AIR, ready for the file writers.
+pub struct RenderedAir {
+    pub constraint_bodies: Vec<String>,
+    pub interactions: Vec<RenderedBusGroup>,
+    pub helper_defs: Vec<String>,
+}
+
+/// All interactions on a single bus, post-render.
+pub struct RenderedBusGroup {
+    pub lean_name: String,
+    pub entries: Vec<RenderedInteraction>,
+}
+
+/// One interaction post-render. Both `*_body` (va-form, used in the
+/// list defs) and `*_trace` (named-accessor form, used in lemma RHSs)
+/// are populated; if rendering trace form panics on selectors, the
+/// trace fields are `None` and per-pick eval lemmas are skipped.
+pub struct RenderedInteraction {
+    pub multiplicity_body: String,
+    pub message_bodies: Vec<String>,
+    pub multiplicity_trace: Option<String>,
+    pub message_traces: Option<Vec<String>>,
+    /// Columns referenced in the multiplicity expression.
+    pub multiplicity_cols: ColumnsUsed,
+    /// Union of columns referenced across all message expressions.
+    pub message_cols: ColumnsUsed,
+}
+
+/// Walk the symbolic DAG, render every constraint and interaction
+/// expression once, and return the bodies + accumulated `inter_K` defs.
+pub fn render_air<F: Field>(
+    symbolic_dag: &SymbolicConstraintsDag<F>,
+    column_names: &[String],
+    bus_table: &[BusBinding],
+    options: &LeanWriteOptions,
+) -> io::Result<RenderedAir> {
+    let symbolic: SymbolicConstraints<F> = symbolic_dag.into();
+    if let Err(reason) = precheck_supported(&symbolic) {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, reason));
+    }
+    let global = symbolic_global_use_counts(&symbolic);
+    let mut ctx = LeanRenderContext::new(options.render.clone(), options.characteristic);
+    ctx.global_use_counts = global;
+
+    let mut constraint_bodies = Vec::with_capacity(symbolic.constraints.len());
+    for c in &symbolic.constraints {
+        ctx.begin_item(std::iter::once(c));
+        constraint_bodies.push(render_expression_body(c, column_names, &mut ctx));
+    }
+
+    let by_bus = group_interactions_by_bus(&symbolic, bus_table);
+    let mut interactions = Vec::with_capacity(by_bus.len());
+    for (lean_name, group) in by_bus {
+        let mut entries = Vec::with_capacity(group.len());
+        for interaction in group {
+            ctx.begin_item(
+                std::iter::once(&interaction.count).chain(interaction.message.iter()),
+            );
+            let multiplicity_body =
+                render_expression_body(&interaction.count, column_names, &mut ctx);
+            let message_bodies: Vec<String> = interaction
+                .message
+                .iter()
+                .map(|m| render_expression_body(m, column_names, &mut ctx))
+                .collect();
+
+            // Trace-form rendering is best-effort. The trace renderer
+            // panics on selectors / non-Main entries, so skip whenever
+            // any expression in this interaction contains one.
+            let trace_safe = !contains_selector(&interaction.count)
+                && interaction.message.iter().all(|m| !contains_selector(m));
+            let multiplicity_trace = if trace_safe {
+                Some(render_trace_body(
+                    &interaction.count,
+                    column_names,
+                    options.characteristic,
+                ))
+            } else {
+                None
+            };
+            let message_traces: Option<Vec<String>> = if trace_safe {
+                Some(
+                    interaction
+                        .message
+                        .iter()
+                        .map(|m| render_trace_body(m, column_names, options.characteristic))
+                        .collect(),
+                )
+            } else {
+                None
+            };
+
+            let multiplicity_cols = collect_columns_used(&interaction.count, column_names);
+            let mut message_cols = ColumnsUsed::default();
+            for m in &interaction.message {
+                let cu = collect_columns_used(m, column_names);
+                message_cols.extend_from(&cu);
+            }
+
+            entries.push(RenderedInteraction {
+                multiplicity_body,
+                message_bodies,
+                multiplicity_trace,
+                message_traces,
+                multiplicity_cols,
+                message_cols,
+            });
         }
+        interactions.push(RenderedBusGroup { lean_name, entries });
     }
+
+    Ok(RenderedAir {
+        constraint_bodies,
+        interactions,
+        helper_defs: std::mem::take(&mut ctx.helper_defs),
+    })
 }
 
-#[derive(Clone, Debug)]
-pub struct LeanConstraintsScaffoldOptions<'a> {
-    pub air_import: &'a str,
-    pub air_definition_name: Option<&'a str>,
-    pub attrs_import: &'a str,
-    pub extraction_import: &'a str,
-    pub bus_defs_import: &'a str,
-    pub bus_defs_namespace: &'a str,
-}
-
-/// Code generation operates by printing the Lean4 code to stdout.
-pub fn extract_constraints_to_lean<F: Field>(
-    symbolic_constraints: &SymbolicConstraints<F>,
-    air_name: &str,
-) {
-    let mut stdout = io::stdout().lock();
-    extract_constraints_to_lean_writer(symbolic_constraints, air_name, &mut stdout)
-        .expect("write Lean constraints to stdout");
-}
-
-pub fn extract_constraints_to_lean_writer<F: Field, W: Write>(
-    symbolic_constraints: &SymbolicConstraints<F>,
-    air_name: &str,
+/// Write Schema.lean.
+pub fn write_schema<W: Write>(
     writer: &mut W,
-) -> io::Result<()> {
-    extract_constraints_to_lean_writer_with_options(
-        symbolic_constraints,
-        air_name,
-        &LeanExtractionOptions::default(),
-        writer,
-    )
-}
-
-pub fn extract_constraints_to_lean_writer_with_options<F: Field, W: Write>(
-    symbolic_constraints: &SymbolicConstraints<F>,
     air_name: &str,
-    options: &LeanExtractionOptions<'_>,
-    writer: &mut W,
+    column_names: &[String],
+    options: &LeanWriteOptions,
 ) -> io::Result<()> {
-    let lean_air_name = format_lean_air_name(air_name);
-
-    if let Some(attrs_import) = options.attrs_import {
-        writeln!(writer, "import {attrs_import}")?;
-        writeln!(writer)?;
-        writeln!(writer, "import LeanZKCircuit.OpenVM.Circuit")?;
-        writeln!(writer, "import Mathlib.Algebra.Field.Basic")?;
-    } else {
-        writeln!(writer, "import Mathlib.Algebra.Field.Basic")?;
-        writeln!(writer)?;
-        writeln!(writer, "import LeanZKCircuit.OpenVM.Circuit")?;
-    }
+    let width = column_names.len();
+    writeln!(writer, "import {}", options.fundamentals_import)?;
     writeln!(writer)?;
-    writeln!(writer, "set_option linter.all false")?;
-    if options.register_inline_attrs {
-        writeln!(writer)?;
-        writeln!(
-            writer,
-            "register_simp_attr {lean_air_name}_air_simplification"
-        )?;
-        writeln!(
-            writer,
-            "register_simp_attr {lean_air_name}_constraint_and_interaction_simplification"
-        )?;
-    }
+    writeln!(writer, "/-!")?;
+    writeln!(writer, "# {air_name} (native)")?;
     writeln!(writer)?;
-    writeln!(writer, "namespace {lean_air_name}.extraction")?;
+    writeln!(writer, "Generated schema layer for `{air_name}`.")?;
     writeln!(writer)?;
-    writeln!(writer, "-----Constraints for {air_name}-----")?;
-    writeln!(writer)?;
-    writeln!(writer, "-----Used Columns-------------------")?;
-    writeln!(writer, "{}", placeholder_column_names(symbolic_constraints))?;
-    writeln!(writer)?;
-    writeln!(writer, "-----Extracted constraints----------")?;
-    let mut render_context = LeanRenderContext {
-        use_counts: symbolic_constraints_use_counts(symbolic_constraints),
-        ..Default::default()
-    };
-    let mut helper_defs = vec![];
-    let mut constraint_defs = vec![];
-    for (idx, constraint) in symbolic_constraints.constraints.iter().enumerate() {
-        let (new_helper_defs, constraint_text) =
-            symbolic_constraint_to_lean_definitions(constraint, idx, "", None, &mut render_context);
-        helper_defs.extend(new_helper_defs);
-        constraint_defs.push(constraint_text);
-    }
-    let mut interactions_by_bus: HashMap<u16, Vec<Interaction<_>>> = HashMap::new();
-    for interaction in symbolic_constraints.interactions.iter() {
-        interactions_by_bus
-            .entry(interaction.bus_index)
-            .or_default()
-            .push(interaction.clone());
-    }
-
-    let mut interaction_branches = vec![];
-    for (idx, (bus_idx, interactions)) in interactions_by_bus
-        .iter()
-        .sorted_by(|(a, _), (c, _)| a.cmp(c))
-        .enumerate()
-    {
-        let (new_helper_defs, expr) =
-            symbolic_interaction_bus_to_string(interactions, "", None, &mut render_context);
-        helper_defs.extend(new_helper_defs);
-        interaction_branches.push(format!(
-            "      {}if index = {} then\n{}",
-            if idx == 0 { "" } else { "else " },
-            bus_idx,
-            indent_block(&expr, "        "),
-        ));
-    }
-
-    for helper_def in helper_defs {
-        if let Some(helper_attr) = options.helper_attr {
-            writeln!(writer, "  @[{helper_attr}]")?;
-        }
-        writeln!(writer, "{helper_def}")?;
-    }
-    for constraint_def in constraint_defs {
-        writeln!(writer, "{constraint_def}")?;
-    }
-
     writeln!(
         writer,
-        "  def constrain_interactions {{C : Type → Type → Type}} {{F ExtF : Type}} [Field F] [Field ExtF] [Circuit F ExtF C] (c : C F ExtF) :="
+        "This file owns the trace layout, raw column indices, and structured column"
     )?;
-    writeln!(writer, "    Circuit.buses c = λ index =>")?;
-    for branch in interaction_branches {
-        writeln!(writer, "{branch}")?;
-    }
-    if interactions_by_bus.is_empty() {
-        writeln!(writer, "    []")?;
-    } else {
-        writeln!(writer, "    else []")?;
-    }
-    writeln!(writer)?;
-    writeln!(writer, "end {lean_air_name}.extraction")?;
-
-    writeln!(writer, "------")?;
-    Ok(())
-}
-
-pub fn extract_constraints_dag_to_lean_writer<F: Field, W: Write>(
-    symbolic_constraints: &SymbolicConstraintsDag<F>,
-    air_name: &str,
-    writer: &mut W,
-) -> io::Result<()> {
-    extract_constraints_dag_to_lean_writer_with_options(
-        symbolic_constraints,
-        air_name,
-        &LeanExtractionOptions::default(),
+    writeln!(
         writer,
-    )
-}
-
-pub fn extract_constraints_dag_to_lean_writer_with_options<F: Field, W: Write>(
-    symbolic_constraints: &SymbolicConstraintsDag<F>,
-    air_name: &str,
-    options: &LeanExtractionOptions<'_>,
-    writer: &mut W,
-) -> io::Result<()> {
-    let symbolic: SymbolicConstraints<_> = symbolic_constraints.into();
-    extract_constraints_to_lean_writer_with_options(&symbolic, air_name, options, writer)
-}
-
-pub fn extraction_intermediate_attrs_to_lean_writer<'a, I, W>(
-    air_names: I,
-    writer: &mut W,
-) -> io::Result<()>
-where
-    I: IntoIterator<Item = &'a str>,
-    W: Write,
-{
-    let air_names = air_names
-        .into_iter()
-        .map(format_lean_air_name)
-        .collect::<BTreeSet<_>>();
-
-    writeln!(writer, "import Mathlib.Algebra.Field.Basic")?;
+        "references. Constraints and interactions live in sibling generated modules."
+    )?;
+    writeln!(writer, "-/")?;
     writeln!(writer)?;
-    for air_name in air_names {
+    writeln!(writer, "namespace {}", options.air_namespace)?;
+    writeln!(writer)?;
+    writeln!(writer, "open Fundamentals.Air")?;
+    writeln!(writer)?;
+    writeln!(writer, "/-- Width of `{air_name}`'s main trace. -/")?;
+    writeln!(writer, "abbrev W : Nat := {width}")?;
+    writeln!(writer)?;
+    writeln!(writer, "/-- Structured trace layout for `{air_name}`. -/")?;
+    writeln!(writer, "def layout : TraceLayout := TraceLayout.singleMain W")?;
+    writeln!(writer)?;
+    writeln!(writer, "/-! ## Column indices -/")?;
+    writeln!(writer)?;
+    for (idx, name) in column_names.iter().enumerate() {
+        writeln!(writer, "def {name}Idx : Fin W := ⟨{idx}, by decide⟩")?;
         writeln!(
             writer,
-            "register_simp_attr {air_name}_extraction_intermediates"
+            "def {name}Ref : ColumnRef layout := ColumnRef.commonMain {name}Idx"
         )?;
     }
+    writeln!(writer)?;
+    writeln!(writer, "end {}", options.air_namespace)?;
     Ok(())
 }
 
-pub fn bus_defs_to_lean_writer<'a, F: Field + 'a, I, W>(
-    symbolic_constraints: I,
-    namespace: &str,
+/// Write Constraints.lean from a pre-rendered AIR.
+pub fn write_constraints<W: Write>(
     writer: &mut W,
-) -> io::Result<()>
-where
-    I: IntoIterator<Item = &'a SymbolicConstraintsDag<F>>,
-    W: Write,
-{
-    let bus_arities = collect_bus_arities(symbolic_constraints)?;
-
-    writeln!(writer, "namespace {namespace}")?;
-    writeln!(writer)?;
-
-    for (idx, arity) in &bus_arities {
-        writeln!(writer, "structure Bus{idx}Entry (F : Type) where")?;
-        writeln!(writer, "  multiplicity : F")?;
-        for field_idx in 0..*arity {
-            writeln!(writer, "  v{field_idx} : F")?;
-        }
-        writeln!(writer, "deriving BEq, DecidableEq, Inhabited")?;
-        writeln!(writer)?;
-    }
-
-    for (idx, arity) in &bus_arities {
-        writeln!(writer, "@[simp]")?;
-        writeln!(
-            writer,
-            "def Bus{idx}Entry.toRaw (entry : Bus{idx}Entry F) : F × List F :="
-        )?;
-        let fields = if *arity == 0 {
-            String::from("[]")
-        } else {
-            let entries = (0..*arity)
-                .map(|field_idx| format!("entry.v{field_idx}"))
-                .join(", ");
-            format!("[{entries}]")
-        };
-        writeln!(writer, "  (entry.multiplicity, {fields})")?;
-        writeln!(writer)?;
-    }
-
-    writeln!(writer, "end {namespace}")?;
-    Ok(())
-}
-
-pub fn constraints_scaffold_to_lean_writer<F: Field, W: Write>(
-    symbolic_constraints: &SymbolicConstraintsDag<F>,
     air_name: &str,
-    options: &LeanConstraintsScaffoldOptions<'_>,
-    writer: &mut W,
+    column_names: &[String],
+    rendered: &RenderedAir,
+    options: &LeanWriteOptions,
 ) -> io::Result<()> {
-    let symbolic: SymbolicConstraints<_> = symbolic_constraints.into();
-    let lean_air_name = format_lean_air_name(air_name);
-    let air_definition_name = options.air_definition_name.unwrap_or(&lean_air_name);
-    let valid_air_name = format!("Valid_{air_definition_name}");
-    let constraint_attr = format!("{lean_air_name}_constraint_and_interaction_simplification");
-    let air_attr = format!("{lean_air_name}_air_simplification");
-    let intermediates_attr = format!("{lean_air_name}_extraction_intermediates");
-    let bus_stats = collect_bus_stats(std::iter::once(symbolic_constraints))?;
-
-    writeln!(writer, "import {}", options.air_import)?;
-    writeln!(writer, "import {}", options.bus_defs_import)?;
-    writeln!(writer, "import {}", options.attrs_import)?;
-    writeln!(writer, "import {}", options.extraction_import)?;
+    writeln!(writer, "import {}", options.fundamentals_import)?;
+    writeln!(writer, "import {}", options.schema_import)?;
     writeln!(writer)?;
-    writeln!(writer, "import Mathlib.Algebra.Field.Basic")?;
+    writeln!(writer, "/-!")?;
+    writeln!(writer, "# {air_name} (native)")?;
+    writeln!(writer)?;
+    writeln!(
+        writer,
+        "Generated constraints for `{air_name}`. {} constraint expression(s), {} columns.",
+        rendered.constraint_bodies.len(),
+        column_names.len(),
+    )?;
+    writeln!(writer, "-/")?;
     writeln!(writer)?;
     writeln!(writer, "set_option linter.unusedVariables false")?;
-    writeln!(writer, "set_option linter.unusedSimpArgs false")?;
+    writeln!(writer, "set_option linter.unusedSectionVars false")?;
     writeln!(writer)?;
-    writeln!(writer, "namespace {lean_air_name}.constraints")?;
+    writeln!(writer, "namespace {}", options.air_namespace)?;
     writeln!(writer)?;
-    writeln!(writer, "section constraint_simplification")?;
+    writeln!(writer, "open Fundamentals.Air")?;
     writeln!(writer)?;
-    writeln!(writer, "  variable {{F ExtF : Type}} [Field F] [Field ExtF]")?;
-    writeln!(writer)?;
-    writeln!(writer, "  section constraints")?;
+    writeln!(writer, "variable {{F : Type}} [Field F]")?;
     writeln!(writer)?;
 
-    for idx in 0..symbolic.constraints.len() {
-        writeln!(writer, "    @[{constraint_attr}]")?;
-        writeln!(
-            writer,
-            "    def constraint_{idx} (air : {valid_air_name} F ExtF) (row : ℕ) : Prop :="
-        )?;
-        writeln!(writer, "      -- TODO: fill")?;
-        writeln!(writer, "      True")?;
+    if !rendered.helper_defs.is_empty() {
+        writeln!(writer, "/-! ## Shared sub-expressions -/")?;
         writeln!(writer)?;
-    }
-
-    for idx in 0..symbolic.constraints.len() {
-        writeln!(writer, "    @[{air_attr}]")?;
-        writeln!(writer, "    lemma constraint_{idx}_of_extraction")?;
-        writeln!(writer, "      (air : {valid_air_name} F ExtF) (row : ℕ)")?;
-        writeln!(
-            writer,
-            "    : {lean_air_name}.extraction.constraint_{idx} air row ↔ constraint_{idx} air row := by"
-        )?;
-        writeln!(
-            writer,
-            "      simp only [{lean_air_name}.extraction.constraint_{idx}, constraint_{idx},"
-        )?;
-        writeln!(
-            writer,
-            "        {intermediates_attr}, openvm_encapsulation]"
-        )?;
-        writeln!(writer)?;
-    }
-
-    writeln!(writer, "  end constraints")?;
-    writeln!(writer)?;
-    writeln!(writer, "  section interactions")?;
-    writeln!(writer)?;
-
-    for (bus_idx, (arity, interaction_count)) in &bus_stats {
-        writeln!(writer, "    @[{constraint_attr}]")?;
-        writeln!(
-            writer,
-            "    def bus{bus_idx}_row (air : {valid_air_name} F ExtF) (row : ℕ) : List ({}.Bus{}Entry F) :=",
-            options.bus_defs_namespace,
-            bus_idx
-        )?;
-        for line in render_placeholder_bus_row_lines(air_name, *bus_idx, *arity, *interaction_count) {
-            writeln!(writer, "{line}")?;
+        for def in &rendered.helper_defs {
+            writeln!(writer, "{def}")?;
         }
+    }
+
+    writeln!(writer, "/-! ## Constraint expressions -/")?;
+    writeln!(writer)?;
+    for (idx, body) in rendered.constraint_bodies.iter().enumerate() {
+        writeln!(writer, "/-- `constraint_{idx}`. -/")?;
+        writeln!(writer, "def expr_{idx} : Expr F layout := fun va =>")?;
+        writeln!(writer, "{}", indent_block(body, "  "))?;
         writeln!(writer)?;
     }
 
-    for bus_idx in bus_stats.keys() {
-        writeln!(writer, "    @[{air_attr}]")?;
-        writeln!(writer, "    lemma constrain_bus{bus_idx}_interactions_of_extraction")?;
-        writeln!(writer, "      (air : {valid_air_name} F ExtF)")?;
-        writeln!(
-            writer,
-            "      (h : {lean_air_name}.extraction.constrain_interactions air)"
-        )?;
-        writeln!(
-            writer,
-            "    : air.buses {bus_idx} = (List.range (air.last_row + 1)).flatMap (fun row => (bus{bus_idx}_row air row).map {}.Bus{}Entry.toRaw) := by",
-            options.bus_defs_namespace,
-            bus_idx
-        )?;
-        writeln!(
-            writer,
-            "      unfold {lean_air_name}.extraction.constrain_interactions at h"
-        )?;
-        writeln!(writer, "      simp [openvm_encapsulation] at h")?;
-        writeln!(
-            writer,
-            "      simp [h, {constraint_attr}, {intermediates_attr}, openvm_encapsulation]"
-        )?;
-        writeln!(writer)?;
+    writeln!(writer, "/-- Full constraint list. -/")?;
+    if rendered.constraint_bodies.is_empty() {
+        writeln!(writer, "def constraintsList : List (Expr F layout) := []")?;
+    } else {
+        writeln!(writer, "def constraintsList : List (Expr F layout) :=")?;
+        let names = (0..rendered.constraint_bodies.len())
+            .map(|i| format!("expr_{i}"))
+            .collect::<Vec<_>>();
+        write_wrapped_list(writer, "  ", &names)?;
     }
+    writeln!(writer)?;
 
-    writeln!(writer, "    @[{constraint_attr}]")?;
+    writeln!(writer, "/-! ## AIR value -/")?;
+    writeln!(writer)?;
     writeln!(
         writer,
-        "    def interactionBuses (air : {valid_air_name} F ExtF) (index : ℕ) : List (F × List F) :="
+        "/-- The AIR: structured layout plus all {} constraint(s). -/",
+        rendered.constraint_bodies.len()
     )?;
-    if bus_stats.is_empty() {
-        writeln!(writer, "      []")?;
+    writeln!(
+        writer,
+        "def air : AIR F := {{ layout := layout, constraints := constraintsList }}"
+    )?;
+    writeln!(writer)?;
+
+    writeln!(writer, "/-! ## Named-column accessors -/")?;
+    writeln!(writer)?;
+    for name in column_names {
+        writeln!(
+            writer,
+            "abbrev {name} (t : (air (F := F)).Trace) (row : Fin t.height) : F :="
+        )?;
+        writeln!(writer, "  t.col {name}Ref row")?;
+    }
+    writeln!(writer)?;
+    for name in column_names {
+        writeln!(
+            writer,
+            "abbrev {name}_next (t : (air (F := F)).Trace) (row : Fin t.height) : F :="
+        )?;
+        writeln!(writer, "  t.colNext {name}Ref row")?;
+    }
+    writeln!(writer)?;
+
+    writeln!(writer, "/-! ## Raw per-row constraint extraction -/")?;
+    writeln!(writer)?;
+    let n = rendered.constraint_bodies.len();
+    writeln!(
+        writer,
+        "/-- All {n} raw constraint(s) of `air` at a row. Field `cK` is the raw fact"
+    )?;
+    writeln!(
+        writer,
+        "    that `expr_K` evaluates to zero at `⟨trace, row, []⟩`. -/"
+    )?;
+    writeln!(
+        writer,
+        "structure RawConstraintsAt (trace : (air (F := F)).Trace) (row : Fin trace.height) : Prop where"
+    )?;
+    for i in 0..n {
+        writeln!(
+            writer,
+            "  c{i} : AIR.Expr.evalAt (A := air (F := F)) expr_{i} ⟨trace, row, []⟩ = 0"
+        )?;
+    }
+    writeln!(writer)?;
+    writeln!(writer, "namespace RawConstraintsAt")?;
+    writeln!(writer)?;
+    writeln!(
+        writer,
+        "/-- Extract raw per-row constraint facts from `air.satisfiesRow`. -/"
+    )?;
+    writeln!(
+        writer,
+        "theorem of_satisfiesRow {{trace : (air (F := F)).Trace}} {{row : Fin trace.height}}"
+    )?;
+    writeln!(
+        writer,
+        "    (h : AIR.satisfiesRow (air (F := F)) trace row) : RawConstraintsAt trace row := by"
+    )?;
+    if n == 0 {
+        writeln!(writer, "  exact ⟨⟩")?;
     } else {
-        for (idx, bus_idx) in bus_stats.keys().enumerate() {
-            let branch = if idx == 0 { "if" } else { "else if" };
-            writeln!(writer, "      {branch} index = {bus_idx} then")?;
+        let placeholders = std::iter::repeat("?_").take(n).join(", ");
+        writeln!(writer, "  refine ⟨{placeholders}⟩")?;
+        for i in 0..n {
             writeln!(
                 writer,
-                "        (List.range (air.last_row + 1)).flatMap"
-            )?;
-            writeln!(
-                writer,
-                "          (fun row => (bus{bus_idx}_row air row).map {}.Bus{}Entry.toRaw)",
-                options.bus_defs_namespace,
-                bus_idx
+                "  · exact h expr_{i} (by change expr_{i} ∈ constraintsList; simp [constraintsList])"
             )?;
         }
-        writeln!(writer, "      else")?;
-        writeln!(writer, "        []")?;
     }
     writeln!(writer)?;
-
-    writeln!(writer, "    @[{constraint_attr}]")?;
-    writeln!(
-        writer,
-        "    def constrain_interactions (air : {valid_air_name} F ExtF) : Prop :="
-    )?;
-    writeln!(writer, "      air.buses = interactionBuses air")?;
+    writeln!(writer, "end RawConstraintsAt")?;
     writeln!(writer)?;
-    writeln!(writer, "  end interactions")?;
-    writeln!(writer)?;
-    writeln!(writer, "end constraint_simplification")?;
-    writeln!(writer)?;
-    writeln!(writer, "section allHold")?;
-    writeln!(writer)?;
-    writeln!(writer, "  variable {{F ExtF : Type}} [Field F] [Field ExtF]")?;
-    writeln!(writer)?;
-    writeln!(writer, "  def extracted_row_constraint_list")?;
-    writeln!(writer, "    (air : {valid_air_name} F ExtF)")?;
-    writeln!(writer, "    (row : ℕ)")?;
-    writeln!(writer, "  : List Prop :=")?;
-    if symbolic.constraints.is_empty() {
-        writeln!(writer, "    []")?;
-    } else {
-        writeln!(writer, "    [")?;
-        for idx in 0..symbolic.constraints.len() {
-            let suffix = if idx + 1 == symbolic.constraints.len() {
-                ""
-            } else {
-                ","
-            };
-            writeln!(
-                writer,
-                "      {lean_air_name}.extraction.constraint_{idx} air row{suffix}"
-            )?;
-        }
-        writeln!(writer, "    ]")?;
-    }
-    writeln!(writer)?;
-    writeln!(writer, "  @[simp]")?;
-    writeln!(writer, "  def allHold")?;
-    writeln!(writer, "    (air : {valid_air_name} F ExtF)")?;
-    writeln!(writer, "    (row : ℕ)")?;
-    writeln!(writer, "    (_ : row ≤ air.last_row)")?;
-    writeln!(writer, "  : Prop :=")?;
-    writeln!(writer, "    {lean_air_name}.extraction.constrain_interactions air ∧")?;
-    writeln!(
-        writer,
-        "    List.Forall (·) (extracted_row_constraint_list air row)"
-    )?;
-    writeln!(writer)?;
-    writeln!(writer, "  def row_constraint_list")?;
-    writeln!(writer, "    (air : {valid_air_name} F ExtF)")?;
-    writeln!(writer, "    (row : ℕ)")?;
-    writeln!(writer, "  : List Prop :=")?;
-    if symbolic.constraints.is_empty() {
-        writeln!(writer, "    []")?;
-    } else {
-        writeln!(writer, "    [")?;
-        for idx in 0..symbolic.constraints.len() {
-            let suffix = if idx + 1 == symbolic.constraints.len() {
-                ""
-            } else {
-                ","
-            };
-            writeln!(writer, "      constraint_{idx} air row{suffix}")?;
-        }
-        writeln!(writer, "    ]")?;
-    }
-    writeln!(writer)?;
-    writeln!(writer, "  @[simp]")?;
-    writeln!(writer, "  def allHold_simplified")?;
-    writeln!(writer, "    (air : {valid_air_name} F ExtF)")?;
-    writeln!(writer, "    (row : ℕ)")?;
-    writeln!(writer, "    (_ : row ≤ air.last_row)")?;
-    writeln!(writer, "  : Prop :=")?;
-    writeln!(writer, "    constrain_interactions air ∧")?;
-    writeln!(writer, "    List.Forall (·) (row_constraint_list air row)")?;
-    writeln!(writer)?;
-    writeln!(writer, "  lemma allHold_simplified_of_allHold")?;
-    writeln!(writer, "    (air : {valid_air_name} F ExtF)")?;
-    writeln!(writer, "    (row : ℕ)")?;
-    writeln!(writer, "    (h_row : row ≤ air.last_row)")?;
-    writeln!(
-        writer,
-        "  : allHold air row h_row ↔ allHold_simplified air row h_row := by"
-    )?;
-    writeln!(writer, "    unfold allHold allHold_simplified")?;
-    writeln!(writer, "    apply Iff.and")?;
-    writeln!(writer, "    · constructor")?;
-    writeln!(writer, "      · intro h")?;
-    writeln!(
-        writer,
-        "        unfold constrain_interactions {lean_air_name}.extraction.constrain_interactions interactionBuses at *"
-    )?;
-    writeln!(
-        writer,
-        "        simp [{constraint_attr}, {intermediates_attr}, openvm_encapsulation] at *"
-    )?;
-    writeln!(writer, "        exact h")?;
-    writeln!(writer, "      · intro h")?;
-    writeln!(
-        writer,
-        "        unfold constrain_interactions {lean_air_name}.extraction.constrain_interactions interactionBuses at *"
-    )?;
-    writeln!(
-        writer,
-        "        simp [{constraint_attr}, {intermediates_attr}, openvm_encapsulation] at *"
-    )?;
-    writeln!(writer, "        exact h")?;
-    writeln!(
-        writer,
-        "    · simp only [extracted_row_constraint_list, row_constraint_list, {air_attr}]"
-    )?;
-    writeln!(writer)?;
-    writeln!(writer, "end allHold")?;
-    writeln!(writer)?;
-    writeln!(writer, "end {lean_air_name}.constraints")?;
+    writeln!(writer, "end {}", options.air_namespace)?;
     Ok(())
 }
 
-fn collect_bus_arities<'a, F: Field + 'a, I>(
-    symbolic_constraints: I,
-) -> io::Result<BTreeMap<BusIndex, usize>>
-where
-    I: IntoIterator<Item = &'a SymbolicConstraintsDag<F>>,
-{
-    Ok(collect_bus_stats(symbolic_constraints)?
-        .into_iter()
-        .map(|(bus_idx, (arity, _))| (bus_idx, arity))
-        .collect())
+/// Write Interactions.lean from a pre-rendered AIR. In addition to the
+/// per-bus `…Interactions` lists and the `allInteractions` concat, this
+/// emitter generates index-based named picks and a battery of mem /
+/// cases / `_evalMultiplicityAt` / `_evalMessageAt` / `_allInteractions_mem`
+/// / classification / `_of_allInteractions` lemmas — the same shape as
+/// the hand-written `ws-fv` reference. Picks use index suffixes
+/// (`<busName>_0`, `<busName>_1`, …); rename to semantic forms
+/// (`Receive`, `Send`, etc.) by hand. Helpers (`inter_K`) live in
+/// `Constraints.lean` and are in scope via the open namespace.
+pub fn write_interactions<W: Write>(
+    writer: &mut W,
+    air_name: &str,
+    rendered: &RenderedAir,
+    options: &LeanWriteOptions,
+) -> io::Result<()> {
+    writeln!(writer, "import {}", options.constraints_import)?;
+    writeln!(writer, "import {}", options.bus_defs_import)?;
+    writeln!(writer)?;
+    writeln!(writer, "/-!")?;
+    writeln!(writer, "# {air_name} (native)")?;
+    writeln!(writer)?;
+    writeln!(writer, "Generated bus interactions for `{air_name}`.")?;
+    writeln!(writer, "-/")?;
+    writeln!(writer)?;
+    writeln!(writer, "set_option linter.unusedVariables false")?;
+    writeln!(writer, "set_option linter.unusedSectionVars false")?;
+    writeln!(writer)?;
+    writeln!(writer, "namespace {}", options.air_namespace)?;
+    writeln!(writer)?;
+    writeln!(writer, "open Fundamentals.Air")?;
+    writeln!(writer)?;
+    writeln!(writer, "variable {{F : Type}} [Field F] [DecidableEq F]")?;
+    writeln!(writer)?;
+
+    let bus_def_ty = format!(
+        "Interaction (air (F := F)) ({}.busInventory F)",
+        options.bus_defs_namespace
+    );
+
+    let bus_defs_ns = options.bus_defs_namespace;
+
+    for group in &rendered.interactions {
+        let lean_name = group.lean_name.as_str();
+        writeln!(writer, "/-! ### {lean_name} -/")?;
+        writeln!(writer)?;
+        writeln!(writer, "def {lean_name}Interactions : List ({bus_def_ty}) :=")?;
+        if group.entries.is_empty() {
+            writeln!(writer, "  []")?;
+            writeln!(writer)?;
+            continue;
+        }
+        writeln!(writer, "  [")?;
+        for (i, entry) in group.entries.iter().enumerate() {
+            writeln!(writer, "    {{ bus := .{lean_name}")?;
+            writeln!(writer, "      multExpr := fun va =>")?;
+            writeln!(
+                writer,
+                "{}",
+                indent_block(&entry.multiplicity_body, "        ")
+            )?;
+            writeln!(writer, "      msgExprs := #v[")?;
+            for (j, body) in entry.message_bodies.iter().enumerate() {
+                let suffix = if j + 1 == entry.message_bodies.len() {
+                    ""
+                } else {
+                    ","
+                };
+                writeln!(writer, "        (fun va =>")?;
+                writeln!(writer, "{}){suffix}", indent_block(body, "          "))?;
+            }
+            let trailing = if i + 1 == group.entries.len() { "" } else { "," };
+            writeln!(writer, "      ] }}{trailing}")?;
+        }
+        writeln!(writer, "  ]")?;
+        writeln!(writer)?;
+
+        write_per_pick_lemmas(writer, group, &bus_def_ty)?;
+    }
+
+    if !rendered.interactions.is_empty() {
+        writeln!(writer, "/-- All interactions for `{air_name}`. -/")?;
+        writeln!(writer, "def allInteractions : List ({bus_def_ty}) :=")?;
+        let names = rendered
+            .interactions
+            .iter()
+            .map(|g| format!("{}Interactions", g.lean_name))
+            .collect::<Vec<_>>();
+        write_concat(writer, "  ", &names)?;
+        writeln!(writer)?;
+
+        write_classification_and_selector_lemmas(
+            writer,
+            &rendered.interactions,
+            &bus_def_ty,
+            bus_defs_ns,
+        )?;
+    }
+
+    writeln!(writer, "end {}", options.air_namespace)?;
+    Ok(())
 }
 
-fn collect_bus_stats<'a, F: Field + 'a, I>(
-    symbolic_constraints: I,
-) -> io::Result<BTreeMap<BusIndex, (usize, usize)>>
+fn write_wrapped_list<W: Write>(
+    writer: &mut W,
+    indent: &str,
+    names: &[String],
+) -> io::Result<()> {
+    writeln!(writer, "{indent}[")?;
+    let inner = format!("{indent}  ");
+    let mut line = String::new();
+    line.push_str(&inner);
+    for (i, name) in names.iter().enumerate() {
+        let token = if i + 1 == names.len() {
+            name.clone()
+        } else {
+            format!("{name},")
+        };
+        if line.trim().len() + token.len() + 1 > 76 && line.trim() != inner.trim() {
+            writeln!(writer, "{line}")?;
+            line.clear();
+            line.push_str(&inner);
+        }
+        if !line.ends_with(' ') && line.trim().len() > 0 {
+            line.push(' ');
+        }
+        line.push_str(&token);
+    }
+    if !line.trim().is_empty() {
+        writeln!(writer, "{line}")?;
+    }
+    writeln!(writer, "{indent}]")?;
+    Ok(())
+}
+
+fn write_concat<W: Write>(writer: &mut W, indent: &str, names: &[String]) -> io::Result<()> {
+    if names.is_empty() {
+        writeln!(writer, "{indent}[]")?;
+        return Ok(());
+    }
+    let joined = names.join(" ++ ");
+    writeln!(writer, "{indent}{joined}")?;
+    Ok(())
+}
+
+fn group_interactions_by_bus<'a, F>(
+    symbolic: &'a SymbolicConstraints<F>,
+    bus_table: &[BusBinding],
+) -> Vec<(
+    String,
+    Vec<&'a Interaction<crate::air_builders::symbolic::symbolic_expression::SymbolicExpression<F>>>,
+)>
 where
-    I: IntoIterator<Item = &'a SymbolicConstraintsDag<F>>,
+    F: Field,
 {
-    let mut bus_stats = BTreeMap::new();
-    for symbolic_constraints in symbolic_constraints {
-        let symbolic: SymbolicConstraints<_> = symbolic_constraints.into();
-        for interaction in symbolic.interactions {
-            let arity = interaction.message.len();
-            match bus_stats.get_mut(&interaction.bus_index) {
-                Some((prev_arity, count)) => {
-                    if *prev_arity != arity {
-                        return Err(io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            format!(
-                                "bus {} has inconsistent arity: {} vs {}",
-                                interaction.bus_index, *prev_arity, arity
-                            ),
-                        ));
-                    }
-                    *count += 1;
-                }
-                None => {
-                    bus_stats.insert(interaction.bus_index, (arity, 1));
-                }
+    let mut by_idx: BTreeMap<BusIndex, Vec<&Interaction<_>>> = BTreeMap::new();
+    for interaction in &symbolic.interactions {
+        by_idx
+            .entry(interaction.bus_index)
+            .or_default()
+            .push(interaction);
+    }
+    // Preserve VK index order; map each to its Lean name. Unknown
+    // indices fall back to `bus_<idx>` so emission never fails — the
+    // operator can wire up the missing constructor in `BusIdx` later.
+    let mut out: Vec<(String, Vec<&Interaction<_>>)> = Vec::new();
+    for (idx, group) in by_idx {
+        let lean_name = bus_table
+            .iter()
+            .find(|b| b.vk_index == idx)
+            .map(|b| b.lean_name.clone())
+            .unwrap_or_else(|| format!("bus_{idx}"));
+        out.push((lean_name, group));
+    }
+    out
+}
+
+/// Emit, for one bus group: indexed picks, `_mem` lemmas, optional
+/// `_cases` lemma, and per-pick `_evalMultiplicityAt`/`_evalMessageAt`
+/// lemmas (when trace-form rendering succeeded for the entry).
+fn write_per_pick_lemmas<W: Write>(
+    writer: &mut W,
+    group: &RenderedBusGroup,
+    bus_def_ty: &str,
+) -> io::Result<()> {
+    let bus = group.lean_name.as_str();
+    let list_def = format!("{bus}Interactions");
+    let n = group.entries.len();
+    if n == 0 {
+        return Ok(());
+    }
+
+    // Index-based named picks.
+    for i in 0..n {
+        writeln!(
+            writer,
+            "/-- Pick #{i} of `{list_def}`. Rename to a semantic suffix"
+        )?;
+        writeln!(writer, "    (e.g. `Receive`, `Send`) by hand if applicable. -/")?;
+        writeln!(writer, "def {bus}_{i} : {bus_def_ty} :=")?;
+        writeln!(
+            writer,
+            "  ({list_def}).get ⟨{i}, by simp [{list_def}]⟩"
+        )?;
+        writeln!(writer)?;
+    }
+
+    // Per-pick membership.
+    for i in 0..n {
+        writeln!(
+            writer,
+            "lemma {bus}_{i}_mem : {bus}_{i} (F := F) ∈ {list_def} (F := F) := by"
+        )?;
+        writeln!(writer, "  simp [{bus}_{i}, {list_def}]")?;
+        writeln!(writer)?;
+    }
+
+    // Cases lemma for buses with 2+ entries.
+    if n >= 2 {
+        writeln!(writer, "lemma {list_def}_cases")?;
+        writeln!(
+            writer,
+            "    {{I : {bus_def_ty}}} (hI : I ∈ {list_def} (F := F)) :"
+        )?;
+        let alts = (0..n)
+            .map(|i| format!("I = {bus}_{i} (F := F)"))
+            .collect::<Vec<_>>()
+            .join(" ∨ ");
+        writeln!(writer, "    {alts} := by")?;
+        writeln!(writer, "  unfold {list_def} at hI")?;
+        writeln!(
+            writer,
+            "  simp only [List.mem_cons, List.not_mem_nil, or_false] at hI"
+        )?;
+        let pattern = std::iter::repeat("rfl").take(n).collect::<Vec<_>>().join(" | ");
+        writeln!(writer, "  rcases hI with {pattern}")?;
+        for i in 0..n {
+            // Place the goal in the i-th disjunct slot, then simp.
+            // Build `left` ... `right; left` ... `right; right; ...; left/right`.
+            let nav = build_disjunct_nav(i, n);
+            writeln!(writer, "  · {nav}")?;
+            writeln!(writer, "    simp [{bus}_{i}, {list_def}]")?;
+        }
+        writeln!(writer)?;
+    }
+
+    // Per-pick eval lemmas (when trace form is available).
+    for (i, entry) in group.entries.iter().enumerate() {
+        let (Some(mult_trace), Some(msg_traces)) =
+            (&entry.multiplicity_trace, &entry.message_traces)
+        else {
+            continue;
+        };
+
+        // _evalMultiplicityAt
+        let (acc_list, ref_list, ctx_list) =
+            simp_args_for_columns(&entry.multiplicity_cols);
+        writeln!(writer, "lemma {bus}_{i}_evalMultiplicityAt")?;
+        writeln!(
+            writer,
+            "    (trace : (air (F := F)).Trace) (row : Fin trace.height) :"
+        )?;
+        writeln!(
+            writer,
+            "    ({bus}_{i} (F := F)).evalMultiplicityAt ⟨trace, row, []⟩ ="
+        )?;
+        writeln!(writer, "      {mult_trace} := by")?;
+        let mut simp_names: Vec<String> = vec![
+            format!("{bus}_{i}"),
+            list_def.clone(),
+            "Interaction.evalMultiplicityAt".to_string(),
+            "AIR.Expr.evalAt".to_string(),
+        ];
+        simp_names.extend(acc_list.iter().cloned());
+        simp_names.extend(ctx_list.iter().cloned());
+        simp_names.extend(ref_list.iter().cloned());
+        writeln!(writer, "  simp [{}]", simp_names.join(", "))?;
+        writeln!(writer)?;
+
+        // _evalMessageAt
+        let arity = msg_traces.len();
+        if arity == 0 {
+            // Empty message: just rfl after unfolding.
+            writeln!(writer, "lemma {bus}_{i}_evalMessageAt")?;
+            writeln!(
+                writer,
+                "    (trace : (air (F := F)).Trace) (row : Fin trace.height) :"
+            )?;
+            writeln!(
+                writer,
+                "    ({bus}_{i} (F := F)).evalMessageAt ⟨trace, row, []⟩ = #v[] := by"
+            )?;
+            writeln!(writer, "  simp [{bus}_{i}, {list_def}, Interaction.evalMessageAt]")?;
+            writeln!(writer)?;
+            continue;
+        }
+
+        let (msg_acc, msg_ref, msg_ctx) = simp_args_for_columns(&entry.message_cols);
+        writeln!(writer, "lemma {bus}_{i}_evalMessageAt")?;
+        writeln!(
+            writer,
+            "    (trace : (air (F := F)).Trace) (row : Fin trace.height) :"
+        )?;
+        writeln!(
+            writer,
+            "    ({bus}_{i} (F := F)).evalMessageAt ⟨trace, row, []⟩ ="
+        )?;
+        writeln!(writer, "      #v[")?;
+        for (j, body) in msg_traces.iter().enumerate() {
+            let suffix = if j + 1 == arity { "" } else { "," };
+            writeln!(writer, "        {body}{suffix}")?;
+        }
+        writeln!(writer, "      ] := by")?;
+        writeln!(writer, "  apply Vector.ext")?;
+        writeln!(writer, "  intro j hj")?;
+        writeln!(writer, "  change j < {arity} at hj")?;
+        let mut simp_names: Vec<String> = vec![
+            format!("{bus}_{i}"),
+            list_def.clone(),
+            "Interaction.evalMessageAt".to_string(),
+            "AIR.Expr.evalAt".to_string(),
+        ];
+        simp_names.extend(msg_acc.iter().cloned());
+        simp_names.extend(msg_ctx.iter().cloned());
+        simp_names.extend(msg_ref.iter().cloned());
+        writeln!(
+            writer,
+            "  interval_cases j <;> simp [{}] <;> rfl",
+            simp_names.join(", ")
+        )?;
+        writeln!(writer)?;
+    }
+
+    Ok(())
+}
+
+/// Build a sequence of `left`/`right` tactic invocations to place a
+/// goal in the i-th disjunct of a balanced right-leaning N-way `∨`.
+/// For a 2-element disjunct (i=0, n=2): `left`. (i=1, n=2): `right`.
+/// For 3 elements: i=0 → `left`, i=1 → `right; left`, i=2 → `right; right`.
+fn build_disjunct_nav(i: usize, n: usize) -> String {
+    if n <= 1 {
+        return String::new();
+    }
+    let mut steps: Vec<&str> = Vec::new();
+    let mut k = i;
+    let mut remaining = n;
+    while remaining > 1 {
+        if k == 0 {
+            steps.push("left");
+            break;
+        } else {
+            steps.push("right");
+            k -= 1;
+            remaining -= 1;
+        }
+    }
+    steps.join("; ")
+}
+
+/// Build the simp-arg fragments for an `evalMultiplicityAt` /
+/// `evalMessageAt` lemma, given the columns referenced. Returns
+/// `(accessors, refs, ctxs)` so the caller can place them in the
+/// canonical order: pick & list defs, then `evalAt`/`Interaction.evalAt`,
+/// then accessors, then ctxs (`localRow`/`nextRow`/`Trace.col[Next]`),
+/// then refs.
+fn simp_args_for_columns(cols: &ColumnsUsed) -> (Vec<String>, Vec<String>, Vec<String>) {
+    let mut accessors: Vec<String> = Vec::new();
+    let mut refs: Vec<String> = Vec::new();
+    let mut ctxs: Vec<String> = Vec::new();
+
+    for name in &cols.local {
+        accessors.push(name.clone());
+    }
+    for name in &cols.next {
+        accessors.push(format!("{name}_next"));
+    }
+    if !cols.local.is_empty() {
+        ctxs.push("AIR.EvalCtx.localRow".to_string());
+        ctxs.push("AIR.Trace.get".to_string());
+        ctxs.push("AIR.Trace.col".to_string());
+    }
+    if !cols.next.is_empty() {
+        if !ctxs.iter().any(|s| s == "AIR.Trace.get") {
+            ctxs.push("AIR.Trace.get".to_string());
+        }
+        ctxs.push("AIR.EvalCtx.nextRow".to_string());
+        ctxs.push("AIR.Trace.colNext".to_string());
+    }
+    let all_refs: std::collections::BTreeSet<&String> =
+        cols.local.iter().chain(cols.next.iter()).collect();
+    for name in all_refs {
+        refs.push(format!("{name}Ref"));
+    }
+    (accessors, refs, ctxs)
+}
+
+/// Emit (after `allInteractions`) per-bus classification, per-pick
+/// `_allInteractions_mem` lemmas, and the cross-bus
+/// `_of_allInteractions` selector lemmas.
+fn write_classification_and_selector_lemmas<W: Write>(
+    writer: &mut W,
+    groups: &[RenderedBusGroup],
+    bus_def_ty: &str,
+    _bus_defs_ns: &str,
+) -> io::Result<()> {
+    if groups.is_empty() {
+        return Ok(());
+    }
+
+    // Per-pick allInteractions_mem lemmas.
+    for group in groups {
+        let bus = group.lean_name.as_str();
+        for i in 0..group.entries.len() {
+            writeln!(
+                writer,
+                "lemma {bus}_{i}_allInteractions_mem : {bus}_{i} (F := F) ∈ allInteractions (F := F) := by"
+            )?;
+            writeln!(writer, "  unfold allInteractions")?;
+            writeln!(writer, "  simp [{bus}_{i}_mem]")?;
+            writeln!(writer)?;
+        }
+    }
+
+    // Per-bus classification: every entry's bus = .<busName>.
+    for group in groups {
+        let bus = group.lean_name.as_str();
+        let list_def = format!("{bus}Interactions");
+        let n = group.entries.len();
+        if n == 0 {
+            continue;
+        }
+        writeln!(writer, "private lemma {list_def}_bus")?;
+        writeln!(
+            writer,
+            "    (I : {bus_def_ty}) (hI : I ∈ {list_def} (F := F)) :"
+        )?;
+        writeln!(writer, "    I.bus = .{bus} := by")?;
+        writeln!(writer, "  unfold {list_def} at hI")?;
+        writeln!(
+            writer,
+            "  simp only [List.mem_cons, List.not_mem_nil, or_false] at hI"
+        )?;
+        let pattern = std::iter::repeat("rfl").take(n).collect::<Vec<_>>().join(" | ");
+        if n == 1 {
+            writeln!(writer, "  rcases hI with {pattern}")?;
+            writeln!(writer, "  rfl")?;
+        } else {
+            writeln!(writer, "  rcases hI with {pattern} <;> rfl")?;
+        }
+        writeln!(writer)?;
+    }
+
+    // Cross-bus selector lemma: any allInteractions member with bus=.<busName>
+    // must be in <busName>Interactions.
+    for (target_idx, target) in groups.iter().enumerate() {
+        if target.entries.is_empty() {
+            continue;
+        }
+        let target_bus = target.lean_name.as_str();
+        let target_list = format!("{target_bus}Interactions");
+        writeln!(writer, "lemma {target_list}_of_allInteractions")?;
+        writeln!(
+            writer,
+            "    {{I : {bus_def_ty}}} (hI : I ∈ allInteractions (F := F))"
+        )?;
+        writeln!(writer, "    (hbus : I.bus = .{target_bus}) :")?;
+        writeln!(writer, "    I ∈ {target_list} := by")?;
+        writeln!(writer, "  unfold allInteractions at hI")?;
+        writeln!(writer, "  simp only [List.mem_append] at hI")?;
+
+        // Build the rcases pattern reflecting `(((g0 ∨ g1) ∨ g2) ∨ g3)`
+        // shape produced by `++` left-association.
+        let mut hyps: Vec<String> = Vec::new();
+        for g in groups {
+            hyps.push(format!("h_{}", g.lean_name));
+        }
+        let pat = build_left_assoc_or_pattern(&hyps);
+        writeln!(writer, "  rcases hI with {pat}")?;
+        for (idx, g) in groups.iter().enumerate() {
+            let bus = g.lean_name.as_str();
+            let list = format!("{bus}Interactions");
+            let h = format!("h_{bus}");
+            if idx == target_idx {
+                writeln!(writer, "  · exact {h}")?;
+            } else {
+                writeln!(
+                    writer,
+                    "  · exfalso; have hb := {list}_bus _ {h}; rw [hbus] at hb; cases hb"
+                )?;
             }
         }
+        writeln!(writer)?;
     }
-    Ok(bus_stats)
+
+    Ok(())
 }
 
-fn render_placeholder_bus_row_lines(
-    air_name: &str,
-    bus_idx: BusIndex,
-    arity: usize,
-    interaction_count: usize,
-) -> Vec<String> {
-    if air_name == "PublicValuesAir" && bus_idx == 0 && arity == 4 && interaction_count == 1 {
-        return vec![
-            "      -- TODO: fill".to_string(),
-            "      [".to_string(),
-            "        {".to_string(),
-            "          multiplicity := -air.is_valid row 0".to_string(),
-            "          v0 := air.proof_idx row 0".to_string(),
-            "          v1 := air.tidx row 0".to_string(),
-            "          v2 := air.value row 0".to_string(),
-            "          v3 := 0".to_string(),
-            "        }".to_string(),
-            "      ]".to_string(),
-        ];
+/// Build an rcases pattern matching the left-associated `∨` shape
+/// produced by repeated `List.mem_append` rewrites of an N-way `++`:
+/// for groups [a, b, c, d] you get `(((ha | hb) | hc) | hd)`.
+fn build_left_assoc_or_pattern(names: &[String]) -> String {
+    if names.is_empty() {
+        return String::new();
     }
-
-    let mut lines = vec!["      -- TODO: fill".to_string(), "      [".to_string()];
-    for entry_idx in 0..interaction_count {
-        lines.push("        {".to_string());
-        lines.push("          multiplicity := 0".to_string());
-        for field_idx in 0..arity {
-            lines.push(format!("          v{field_idx} := 0"));
-        }
-        if entry_idx + 1 == interaction_count {
-            lines.push("        }".to_string());
-        } else {
-            lines.push("        },".to_string());
-        }
+    let mut acc = names[0].clone();
+    for name in &names[1..] {
+        acc = format!("({acc} | {name})");
     }
-    lines.push("      ]".to_string());
-    lines
+    acc
 }

@@ -1,5 +1,24 @@
+//! Symbolic-DAG rendering for the native Lean dialect.
+//!
+//! The output is a `Fundamentals.Air.Expr F layout` body — a function of a
+//! valuation `va`. Compound nodes are emitted in one of three forms,
+//! decided per-node by [`Decision`]:
+//!
+//! - **Inline.** `(<lhs> op <rhs>)` is dropped into the parent expression
+//!   directly. Default for short / single-use subtrees.
+//! - **Local `let tN`.** Pushed onto the constraint's binding list and
+//!   referenced as `tN` from the parent. Used when a subtree is reused
+//!   ≥`SHARE_THRESHOLD` times within one constraint and is large enough
+//!   to be worth a name.
+//! - **Global `inter_K`.** Hoisted to a top-level `def inter_K : Expr F
+//!   layout := fun va => …`. Used when a subtree is shared across
+//!   constraints/interactions.
+//!
+//! The DAG walk is post-order via an explicit stack; pointer identity
+//! (`*const SymbolicExpression<F>`) keys the dedup, helper-name, and
+//! use-count maps.
+
 use std::{
-    cmp::Ordering,
     collections::{HashMap, HashSet},
     iter,
     sync::Arc,
@@ -17,164 +36,81 @@ use crate::{
     interaction::Interaction,
 };
 
-fn collect_variables<F>(
-    expression: &SymbolicExpression<F>,
-    cache: &mut HashMap<*const SymbolicExpression<F>, Vec<SymbolicVariable<F>>>,
-    leaves: &mut HashSet<SymbolicVariable<F>>,
-) where
-    F: Clone + std::cmp::Eq + std::hash::Hash,
-{
-    let expr_ptr = expression as *const SymbolicExpression<F>;
-    if let Some(cached_leaves) = cache.get(&expr_ptr) {
-        leaves.extend(cached_leaves.iter().cloned());
-        return;
-    }
-
-    let mut subtree_leaves = HashSet::new();
-    match expression {
-        SymbolicExpression::Variable(symbolic_variable) => {
-            subtree_leaves.insert(symbolic_variable.clone());
-        }
-        SymbolicExpression::Add {
-            x,
-            y,
-            degree_multiple: _,
-        }
-        | SymbolicExpression::Sub {
-            x,
-            y,
-            degree_multiple: _,
-        }
-        | SymbolicExpression::Mul {
-            x,
-            y,
-            degree_multiple: _,
-        } => {
-            collect_variables(x, cache, &mut subtree_leaves);
-            collect_variables(y, cache, &mut subtree_leaves);
-        }
-        SymbolicExpression::Neg {
-            x,
-            degree_multiple: _,
-        } => {
-            collect_variables(x, cache, &mut subtree_leaves);
-        }
-        _ => {}
-    }
-
-    let cached_leaves = subtree_leaves.into_iter().collect_vec();
-    leaves.extend(cached_leaves.iter().cloned());
-    cache.insert(expr_ptr, cached_leaves);
-}
-
-fn get_entry_type_id(entry: &Entry) -> u8 {
-    match entry {
-        Entry::Preprocessed { offset: _ } => 0,
-        Entry::Main {
-            part_index: _,
-            offset: _,
-        } => 1,
-        Entry::Permutation { offset: _ } => unreachable!("permutation columns no longer exist"),
-        Entry::Public => 2,
-        Entry::Challenge => 3,
-        Entry::Exposed => 4,
-    }
-}
-
-pub(super) fn placeholder_column_names<F>(constraints: &SymbolicConstraints<F>) -> String
-where
-    F: Clone + std::cmp::Eq + std::hash::Hash,
-{
-    let leaves = {
-        let mut leaves = HashSet::new();
-        let mut variable_cache = HashMap::new();
-
-        constraints.constraints.iter().for_each(|expr| {
-            collect_variables(expr, &mut variable_cache, &mut leaves);
-        });
-
-        constraints.interactions.iter().for_each(|interaction| {
-            collect_variables(&interaction.count, &mut variable_cache, &mut leaves);
-            interaction.message.iter().for_each(|expr| {
-                collect_variables(expr, &mut variable_cache, &mut leaves);
-            });
-        });
-
-        leaves
-            .into_iter()
-            .sorted_by(|lhs, rhs| {
-                let type_order = get_entry_type_id(&lhs.entry).cmp(&get_entry_type_id(&rhs.entry));
-
-                let index_order = lhs.index.cmp(&rhs.index);
-
-                let (part_index_order, offset_order) = match (lhs.entry, rhs.entry) {
-                    (
-                        Entry::Preprocessed { offset: l_offset },
-                        Entry::Preprocessed { offset: r_offset },
-                    ) => (Ordering::Equal, l_offset.cmp(&r_offset)),
-                    (
-                        Entry::Main {
-                            part_index: l_part_index,
-                            offset: l_offset,
-                        },
-                        Entry::Main {
-                            part_index: r_part_index,
-                            offset: r_offset,
-                        },
-                    ) => (l_part_index.cmp(&r_part_index), l_offset.cmp(&r_offset)),
-                    (Entry::Permutation { .. }, _) | (_, Entry::Permutation { .. }) => {
-                        unreachable!("permutation columns no longer exist")
-                    }
-                    _ => (Ordering::Equal, Ordering::Equal),
-                };
-
-                type_order
-                    .then(part_index_order)
-                    .then(index_order)
-                    .then(offset_order)
-            })
-            .collect_vec()
-    };
-
-    leaves
-        .iter()
-        .map(|leaf| {
-            let column = leaf.index;
-            match leaf.entry {
-                Entry::Preprocessed { offset } => format!(
-                    "--def Circuit._ (c: Circuit F ExtF) (row: N) := c.preprocessed (column := {column}) (row := row) (rotation := {offset})"
-                ),
-                Entry::Main { part_index, offset } => format!(
-                    "--def Circuit._ (c: Circuit F ExtF) (row: N) := c.main (id := {part_index}) (column := {column}) (row := row) (rotation := {offset})"
-                ),
-                Entry::Permutation { offset: _ } =>
-                    unreachable!("permutation columns no longer exist"),
-                Entry::Public =>
-                    format!("--def Circuit._ (c: Circuit F ExtF) := c.public (index := {column})"),
-                Entry::Challenge => format!(
-                    "--def Circuit._ (c: Circuit F ExtF) := c.challenge (index := {column})"
-                ),
-                Entry::Exposed =>
-                    format!("--def Circuit._ (c: Circuit F ExtF) := c.exposed (index := {column})"),
-            }
-        })
-        .join("\n")
-}
-
-pub(super) fn indent_block(text: &str, indent: &str) -> String {
-    text.lines()
-        .map(|line| format!("{indent}{line}"))
-        .join("\n")
-}
-
+/// Knobs controlling when to lift a subtree out of inline form.
 #[derive(Clone, Debug)]
-pub(super) struct RenderedExpression {
+pub struct LeanRenderOptions {
+    /// Minimum op-count before a subtree is eligible for naming.
+    pub op_threshold: usize,
+    /// Minimum use-count (local or global) before naming kicks in.
+    pub share_threshold: usize,
+}
+
+impl Default for LeanRenderOptions {
+    fn default() -> Self {
+        Self {
+            op_threshold: 2,
+            share_threshold: 2,
+        }
+    }
+}
+
+/// Per-AIR rendering state. Lives across all constraints and
+/// interactions of one AIR; `local_use_counts` and `temp_counter` are
+/// reset per item via [`LeanRenderContext::begin_item`].
+pub struct LeanRenderContext<F> {
+    pub options: LeanRenderOptions,
+    pub global_use_counts: HashMap<*const SymbolicExpression<F>, usize>,
+    pub local_use_counts: HashMap<*const SymbolicExpression<F>, usize>,
+    pub helper_names: HashMap<*const SymbolicExpression<F>, String>,
+    pub emitted_helpers: HashSet<*const SymbolicExpression<F>>,
+    pub helper_defs: Vec<String>,
+    pub inter_counter: usize,
+    pub temp_counter: usize,
+    /// Field characteristic for negative-constant folding (None to skip).
+    pub characteristic: Option<u32>,
+}
+
+impl<F> LeanRenderContext<F> {
+    pub fn new(options: LeanRenderOptions, characteristic: Option<u32>) -> Self {
+        Self {
+            options,
+            global_use_counts: HashMap::new(),
+            local_use_counts: HashMap::new(),
+            helper_names: HashMap::new(),
+            emitted_helpers: HashSet::new(),
+            helper_defs: Vec::new(),
+            inter_counter: 0,
+            temp_counter: 0,
+            characteristic,
+        }
+    }
+
+    /// Reset per-item state. Call before rendering each constraint, or
+    /// each interaction's count / message component.
+    pub fn begin_item<'a, I>(&mut self, exprs: I)
+    where
+        F: 'a,
+        I: IntoIterator<Item = &'a SymbolicExpression<F>>,
+    {
+        self.local_use_counts = direct_use_counts(exprs);
+        self.temp_counter = 0;
+    }
+}
+
+/// Fully rendered subtree: the let-bindings to emit above, and the
+/// expression text to inline at the use site.
+#[derive(Clone, Debug)]
+struct Rendered {
+    /// Local `let tN := …` lines (already in dependency order).
     bindings: Vec<(String, String)>,
+    /// Inlined expression text, or a `tN` / `inter_K va` reference.
     result: String,
+    /// Number of compound operations in the subtree (used for the
+    /// op-count threshold).
     op_count: usize,
 }
 
-impl RenderedExpression {
+impl Rendered {
     fn into_block(self, tail: impl FnOnce(String) -> String) -> String {
         let mut lines = self
             .bindings
@@ -186,313 +122,115 @@ impl RenderedExpression {
     }
 }
 
-#[derive(Debug, Default)]
-pub(super) struct LeanRenderCounters {
-    next_temp_idx: usize,
-    next_intermediate_idx: usize,
-}
-
-#[derive(Debug, Default)]
-pub(super) struct LeanRenderContext<F> {
-    pub(super) counters: LeanRenderCounters,
-    pub(super) helper_names: HashMap<*const SymbolicExpression<F>, String>,
-    pub(super) emitted_helpers: HashSet<*const SymbolicExpression<F>>,
-    pub(super) use_counts: HashMap<*const SymbolicExpression<F>, usize>,
-}
-
-pub(super) fn symbolic_constraint_to_lean_definitions<F: Field>(
-    x: &SymbolicExpression<F>,
-    constraint_idx: usize,
-    scoping: &str,
-    characteristic: Option<u32>,
+/// Render one expression to a Lean term body. The returned string is
+/// the body of `fun va => <body>` and includes any local `let`s.
+pub fn render_expression_body<F: Field>(
+    expr: &SymbolicExpression<F>,
+    column_names: &[String],
     context: &mut LeanRenderContext<F>,
-) -> (Vec<String>, String) {
-    let (helper_defs, rendered) =
-        render_symbolic_expression_with_intermediates(x, scoping, characteristic, context);
-
-    let constraint_def = format!(
-        "  @[simp]\n  def constraint_{constraint_idx} {{C : Type → Type → Type}} {{F ExtF : Type}} [Field F] [Field ExtF] [Circuit F ExtF C] (c : C F ExtF) (row: ℕ) :=\n{}\n",
-        indent_block(&rendered.into_block(|result| format!("{result} = 0")), "    ")
-    );
-    (helper_defs, constraint_def)
+) -> String {
+    let rendered = render_expression(expr, column_names, context);
+    rendered.into_block(|result| result)
 }
 
-#[cfg(test)]
-pub(super) fn expression_direct_use_counts<F>(
-    constraints: &[SymbolicExpression<F>],
-) -> HashMap<*const SymbolicExpression<F>, usize> {
-    expression_direct_use_counts_iter(constraints.iter())
-}
-
-pub(super) fn symbolic_constraints_use_counts<F: Field>(
-    symbolic_constraints: &SymbolicConstraints<F>,
-) -> HashMap<*const SymbolicExpression<F>, usize> {
-    expression_direct_use_counts_iter(
-        symbolic_constraints.constraints.iter().chain(
-            symbolic_constraints
-                .interactions
-                .iter()
-                .flat_map(|interaction| {
-                    iter::once(&interaction.count).chain(interaction.message.iter())
-                }),
-        ),
-    )
-}
-
-fn expression_direct_use_counts_iter<'a, F: 'a>(
-    expressions: impl IntoIterator<Item = &'a SymbolicExpression<F>>,
-) -> HashMap<*const SymbolicExpression<F>, usize> {
-    let mut use_counts = HashMap::new();
-    let mut visited = HashSet::new();
-
-    for expression in expressions {
-        let mut stack = vec![expression];
-        while let Some(expr) = stack.pop() {
-            let ptr = expr as *const SymbolicExpression<F>;
-            if !visited.insert(ptr) {
-                continue;
-            }
-
-            match expr {
-                SymbolicExpression::Add { x, y, .. }
-                | SymbolicExpression::Sub { x, y, .. }
-                | SymbolicExpression::Mul { x, y, .. } => {
-                    *use_counts.entry(Arc::as_ptr(x)).or_insert(0) += 1;
-                    *use_counts.entry(Arc::as_ptr(y)).or_insert(0) += 1;
-                    stack.push(&**y);
-                    stack.push(&**x);
-                }
-                SymbolicExpression::Neg { x, .. } => {
-                    *use_counts.entry(Arc::as_ptr(x)).or_insert(0) += 1;
-                    stack.push(&**x);
-                }
-                _ => {}
-            }
-        }
-    }
-
-    use_counts
-}
-
-pub(super) fn symbolic_interaction_bus_to_string<F: Field>(
-    interactions: &[Interaction<SymbolicExpression<F>>],
-    scoping: &str,
-    characteristic: Option<u32>,
-    context: &mut LeanRenderContext<F>,
-) -> (Vec<String>, String) {
-    let mut helper_defs = vec![];
-    let mut row_bindings = vec![];
-    let mut row_items = vec![];
-
-    for interaction in interactions {
-        let (count_helper_defs, count_rendered) = render_symbolic_expression_with_intermediates(
-            &interaction.count,
-            scoping,
-            characteristic,
-            context,
-        );
-        helper_defs.extend(count_helper_defs);
-        let RenderedExpression {
-            bindings: count_bindings,
-            result: count_result,
-            ..
-        } = count_rendered;
-        merge_unique_bindings(&mut row_bindings, count_bindings);
-
-        let mut message_items = vec![];
-        for expr in &interaction.message {
-            let (expr_helper_defs, expr_rendered) = render_symbolic_expression_with_intermediates(
-                expr,
-                scoping,
-                characteristic,
-                context,
-            );
-            helper_defs.extend(expr_helper_defs);
-            let RenderedExpression {
-                bindings, result, ..
-            } = expr_rendered;
-            merge_unique_bindings(&mut row_bindings, bindings);
-            message_items.push(result);
-        }
-
-        row_items.push(format!("({count_result}, [{}])", message_items.join(", ")));
-    }
-
-    let row_body = RenderedExpression {
-        bindings: row_bindings,
-        result: format!("[{}]", row_items.join(", ")),
-        op_count: 0,
-    }
-    .into_block(|result| result);
-
-    (
-        helper_defs,
-        format!(
-            "(List.range (Circuit.last_row c + 1)).flatMap (λ row =>\n{})",
-            indent_block(&row_body, "  ")
-        ),
-    )
-}
-
-fn render_symbolic_expression_with_intermediates<F: Field>(
+fn render_expression<F: Field>(
     root: &SymbolicExpression<F>,
-    scoping: &str,
-    characteristic: Option<u32>,
+    column_names: &[String],
     context: &mut LeanRenderContext<F>,
-) -> (Vec<String>, RenderedExpression) {
-    let mut stack = vec![(root, false, true)];
-    let mut scheduled = HashSet::new();
-    let mut rendered: HashMap<*const SymbolicExpression<F>, RenderedExpression> = HashMap::new();
-    let mut helper_defs = vec![];
+) -> Rendered {
+    let mut stack: Vec<(*const SymbolicExpression<F>, &SymbolicExpression<F>, bool, bool)> =
+        vec![(root as *const _, root, false, true)];
+    let mut scheduled: HashSet<*const SymbolicExpression<F>> = HashSet::new();
+    let mut rendered: HashMap<*const SymbolicExpression<F>, Rendered> = HashMap::new();
 
-    while let Some((expr, visited, is_root)) = stack.pop() {
-        let ptr = expr as *const SymbolicExpression<F>;
+    while let Some((ptr, expr, visited, is_root)) = stack.pop() {
         if rendered.contains_key(&ptr) {
             continue;
         }
-
         if visited {
-            let rendered_expr = match expr {
-                SymbolicExpression::Add { x, y, .. } => {
-                    let lhs = rendered[&Arc::as_ptr(x)].clone();
-                    let rhs = rendered[&Arc::as_ptr(y)].clone();
-                    let current = combine_binary_expression(lhs, rhs, "+", &mut context.counters);
-                    maybe_lift_intermediate(
-                        ptr,
-                        is_root,
-                        current,
-                        scoping,
-                        &context.use_counts,
-                        &mut context.helper_names,
-                        &mut context.emitted_helpers,
-                        &mut helper_defs,
-                        &mut context.counters,
-                    )
-                }
-                SymbolicExpression::Sub { x, y, .. } => {
-                    let lhs = rendered[&Arc::as_ptr(x)].clone();
-                    let rhs = rendered[&Arc::as_ptr(y)].clone();
-                    let current = combine_binary_expression(lhs, rhs, "-", &mut context.counters);
-                    maybe_lift_intermediate(
-                        ptr,
-                        is_root,
-                        current,
-                        scoping,
-                        &context.use_counts,
-                        &mut context.helper_names,
-                        &mut context.emitted_helpers,
-                        &mut helper_defs,
-                        &mut context.counters,
-                    )
-                }
-                SymbolicExpression::Neg { x, .. } => {
-                    let inner = rendered[&Arc::as_ptr(x)].clone();
-                    let current = combine_unary_expression(inner, "-", &mut context.counters);
-                    maybe_lift_intermediate(
-                        ptr,
-                        is_root,
-                        current,
-                        scoping,
-                        &context.use_counts,
-                        &mut context.helper_names,
-                        &mut context.emitted_helpers,
-                        &mut helper_defs,
-                        &mut context.counters,
-                    )
-                }
-                SymbolicExpression::Mul { x, y, .. } => {
-                    let lhs = rendered[&Arc::as_ptr(x)].clone();
-                    let rhs = rendered[&Arc::as_ptr(y)].clone();
-                    let current = combine_binary_expression(lhs, rhs, "*", &mut context.counters);
-                    maybe_lift_intermediate(
-                        ptr,
-                        is_root,
-                        current,
-                        scoping,
-                        &context.use_counts,
-                        &mut context.helper_names,
-                        &mut context.emitted_helpers,
-                        &mut helper_defs,
-                        &mut context.counters,
-                    )
-                }
-                _ => RenderedExpression {
+            let r = match expr {
+                SymbolicExpression::Add { x, y, .. } => combine_binary(
+                    rendered[&Arc::as_ptr(x)].clone(),
+                    rendered[&Arc::as_ptr(y)].clone(),
+                    "+",
+                ),
+                SymbolicExpression::Sub { x, y, .. } => combine_binary(
+                    rendered[&Arc::as_ptr(x)].clone(),
+                    rendered[&Arc::as_ptr(y)].clone(),
+                    "-",
+                ),
+                SymbolicExpression::Mul { x, y, .. } => combine_binary(
+                    rendered[&Arc::as_ptr(x)].clone(),
+                    rendered[&Arc::as_ptr(y)].clone(),
+                    "*",
+                ),
+                SymbolicExpression::Neg { x, .. } => combine_neg(rendered[&Arc::as_ptr(x)].clone()),
+                _ => Rendered {
                     bindings: vec![],
-                    result: symbolic_expression_leaf_to_string(expr, scoping, characteristic),
+                    result: render_leaf(expr, column_names, context.characteristic),
                     op_count: 0,
                 },
             };
-            rendered.insert(ptr, rendered_expr);
+            let r = decide_and_emit(ptr, is_root, r, context);
+            rendered.insert(ptr, r);
             continue;
         }
 
         if !scheduled.insert(ptr) {
             continue;
         }
-
-        stack.push((expr, true, is_root));
+        stack.push((ptr, expr, true, is_root));
         match expr {
             SymbolicExpression::Add { x, y, .. }
             | SymbolicExpression::Sub { x, y, .. }
             | SymbolicExpression::Mul { x, y, .. } => {
-                stack.push((&**y, false, false));
-                stack.push((&**x, false, false));
+                let yp = Arc::as_ptr(y);
+                let xp = Arc::as_ptr(x);
+                stack.push((yp, &**y, false, false));
+                stack.push((xp, &**x, false, false));
             }
             SymbolicExpression::Neg { x, .. } => {
-                stack.push((&**x, false, false));
+                let xp = Arc::as_ptr(x);
+                stack.push((xp, &**x, false, false));
             }
             _ => {}
         }
     }
 
-    let result = rendered
-        .remove(&(root as *const SymbolicExpression<F>))
-        .expect("symbolic expression root should be rendered");
-    (helper_defs, result)
+    rendered.remove(&(root as *const _)).expect("root rendered")
 }
 
-fn combine_binary_expression(
-    lhs: RenderedExpression,
-    rhs: RenderedExpression,
-    op: &str,
-    counters: &mut LeanRenderCounters,
-) -> RenderedExpression {
+fn combine_binary(lhs: Rendered, rhs: Rendered, op: &str) -> Rendered {
     let mut bindings = lhs.bindings;
     merge_unique_bindings(&mut bindings, rhs.bindings);
-    let name = format!("t{}", counters.next_temp_idx);
-    counters.next_temp_idx += 1;
-    bindings.push((
-        name.clone(),
-        format!("({} {op} {})", lhs.result, rhs.result),
-    ));
-    RenderedExpression {
+    Rendered {
         bindings,
-        result: name,
+        result: format!("({} {op} {})", lhs.result, rhs.result),
         op_count: lhs.op_count + rhs.op_count + 1,
     }
 }
 
-fn combine_unary_expression(
-    inner: RenderedExpression,
-    op: &str,
-    counters: &mut LeanRenderCounters,
-) -> RenderedExpression {
-    let mut bindings = inner.bindings;
-    let name = format!("t{}", counters.next_temp_idx);
-    counters.next_temp_idx += 1;
-    bindings.push((name.clone(), format!("{op}({})", inner.result)));
-    RenderedExpression {
+fn combine_neg(inner: Rendered) -> Rendered {
+    let bindings = inner.bindings;
+    Rendered {
         bindings,
-        result: name,
+        result: format!("-{}", paren_if_compound(&inner.result)),
         op_count: inner.op_count + 1,
     }
 }
 
+fn paren_if_compound(s: &str) -> String {
+    // Already parenthesized (`(a + b)`) or a bare token (`t3`,
+    // `inter_2 va`, leaf form): leave alone.
+    if s.starts_with('(') || !s.contains(' ') {
+        s.to_string()
+    } else {
+        format!("({s})")
+    }
+}
+
 fn merge_unique_bindings(bindings: &mut Vec<(String, String)>, additional: Vec<(String, String)>) {
-    let mut seen = bindings
-        .iter()
-        .map(|(name, _)| name.clone())
-        .collect::<HashSet<_>>();
+    let mut seen: HashSet<String> = bindings.iter().map(|(name, _)| name.clone()).collect();
     for (name, expr) in additional {
         if seen.insert(name.clone()) {
             bindings.push((name, expr));
@@ -500,97 +238,373 @@ fn merge_unique_bindings(bindings: &mut Vec<(String, String)>, additional: Vec<(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn maybe_lift_intermediate<F: Field>(
-    expr_ptr: *const SymbolicExpression<F>,
+fn decide_and_emit<F: Field>(
+    ptr: *const SymbolicExpression<F>,
     is_root: bool,
-    rendered: RenderedExpression,
-    scoping: &str,
-    use_counts: &HashMap<*const SymbolicExpression<F>, usize>,
-    helper_names: &mut HashMap<*const SymbolicExpression<F>, String>,
-    emitted_helpers: &mut HashSet<*const SymbolicExpression<F>>,
-    helper_defs: &mut Vec<String>,
-    counters: &mut LeanRenderCounters,
-) -> RenderedExpression {
-    let use_count = use_counts.get(&expr_ptr).copied().unwrap_or(0);
-    if is_root || rendered.op_count <= 1 || use_count <= 1 {
-        return rendered;
+    r: Rendered,
+    ctx: &mut LeanRenderContext<F>,
+) -> Rendered {
+    if is_root || r.op_count < ctx.options.op_threshold {
+        return r;
+    }
+    let global = ctx.global_use_counts.get(&ptr).copied().unwrap_or(0);
+    let local = ctx.local_use_counts.get(&ptr).copied().unwrap_or(0);
+
+    // Cross-constraint sharing → hoist to top-level `inter_K`.
+    if global >= ctx.options.share_threshold && global > local {
+        let helper_name = ctx
+            .helper_names
+            .entry(ptr)
+            .or_insert_with(|| {
+                let n = ctx.inter_counter;
+                ctx.inter_counter += 1;
+                format!("inter_{n}")
+            })
+            .clone();
+        if ctx.emitted_helpers.insert(ptr) {
+            ctx.helper_defs.push(format!(
+                "def {helper_name} : Expr F layout := fun va =>\n{}\n",
+                indent_block(&r.clone().into_block(|res| res), "  ")
+            ));
+        }
+        return Rendered {
+            bindings: vec![],
+            result: format!("{helper_name} va"),
+            op_count: r.op_count,
+        };
     }
 
-    let helper_name = helper_names.entry(expr_ptr).or_insert_with(|| {
-        let name = format!("inter_{}", counters.next_intermediate_idx);
-        counters.next_intermediate_idx += 1;
-        name
-    });
-
-    if emitted_helpers.insert(expr_ptr) {
-        helper_defs.push(format!(
-            "  def {helper_name} {{C : Type → Type → Type}} {{F ExtF : Type}} [Field F] [Field ExtF] [Circuit F ExtF C] (c : C F ExtF) (row: ℕ) :=\n{}\n",
-            indent_block(&rendered.clone().into_block(|result| result), "    ")
-        ));
+    // Repeated within this constraint → local `let tN`.
+    if local >= ctx.options.share_threshold {
+        let name = format!("t{}", ctx.temp_counter);
+        ctx.temp_counter += 1;
+        let mut bindings = r.bindings;
+        bindings.push((name.clone(), r.result));
+        return Rendered {
+            bindings,
+            result: name,
+            op_count: r.op_count,
+        };
     }
 
-    RenderedExpression {
-        bindings: vec![],
-        result: format!("{scoping}{helper_name} c row"),
-        op_count: rendered.op_count,
-    }
+    r
 }
 
-#[allow(clippy::useless_format)]
-fn symbolic_expression_leaf_to_string<F: Field>(
+fn render_leaf<F: Field>(
     x: &SymbolicExpression<F>,
-    scoping: &str,
+    column_names: &[String],
     characteristic: Option<u32>,
 ) -> String {
     match x {
-        SymbolicExpression::Variable(symbolic_variable) => format!(
-            "{scoping}{}",
-            match symbolic_variable.entry {
-                Entry::Preprocessed { offset } => format!(
-                    "(Circuit.preprocessed c (column := {}) (row := row) (rotation := {offset}))",
-                    symbolic_variable.index
-                ),
-                Entry::Main { offset, part_index } => format!(
-                    "(Circuit.main c (id := {part_index}) (column := {}) (row := row) (rotation := {offset}))",
-                    symbolic_variable.index
-                ),
-                Entry::Permutation { offset: _ } =>
-                    unreachable!("permutation columns no longer exist"),
-                Entry::Public =>
-                    format!("(Circuit.public c (index := {}))", symbolic_variable.index),
-                Entry::Challenge =>
-                    format!("(Circuit.challenge c (index := {}))", symbolic_variable.index),
-                Entry::Exposed =>
-                    format!("(Circuit.exposed c (index := {}))", symbolic_variable.index),
-            },
-        ),
-        SymbolicExpression::IsFirstRow => format!("(Circuit.isFirstRow c row)"),
-        SymbolicExpression::IsLastRow => format!("(Circuit.isLastRow c row)"),
-        SymbolicExpression::IsTransition => format!("(Circuit.isTransitionRow c row)"),
-        SymbolicExpression::Constant(x) => {
-            let num = str::parse::<u32>(&format!("{x}"));
-            match num {
-                Ok(num) => match characteristic {
-                    Some(characteristic) => {
-                        if num >= characteristic {
-                            format!("{x}")
-                        } else if characteristic - num < num {
-                            format!("-{}", characteristic - num)
-                        } else {
-                            format!("{x}")
-                        }
-                    }
-                    None => format!("{x}"),
-                },
-                Err(_) => format!("{x}"),
+        SymbolicExpression::Variable(SymbolicVariable { entry, index, .. }) => match entry {
+            Entry::Main { offset, .. } => {
+                let rotation = match offset {
+                    0 => "local",
+                    1 => "next",
+                    other => panic!("unsupported rotation offset {other} in main column"),
+                };
+                let name = column_names
+                    .get(*index)
+                    .unwrap_or_else(|| panic!("main column index {index} has no name"));
+                format!("va (.cell .{rotation} {name}Ref)")
             }
-        }
-        SymbolicExpression::Add { .. }
-        | SymbolicExpression::Sub { .. }
-        | SymbolicExpression::Neg { .. }
-        | SymbolicExpression::Mul { .. } => {
-            unreachable!("compound expressions are handled in render_symbolic_expression")
+            Entry::Preprocessed { .. } => panic!("preprocessed columns not supported in v1"),
+            Entry::Permutation { .. } => unreachable!("permutation columns no longer exist"),
+            Entry::Public => panic!("public columns not supported in v1"),
+            Entry::Challenge => panic!("challenge columns not supported in v1"),
+            Entry::Exposed => panic!("exposed columns not supported in v1"),
+        },
+        SymbolicExpression::IsFirstRow => "va (.selector .isFirst)".to_string(),
+        SymbolicExpression::IsLastRow => "va (.selector .isLast)".to_string(),
+        SymbolicExpression::IsTransition => "va (.selector .isTransition)".to_string(),
+        SymbolicExpression::Constant(c) => render_constant(c, characteristic),
+        _ => unreachable!("compound expressions handled by render_expression"),
+    }
+}
+
+fn render_constant<F: Field>(c: &F, characteristic: Option<u32>) -> String {
+    let display = format!("{c}");
+    if let (Some(p), Ok(n)) = (characteristic, display.parse::<u32>()) {
+        if n < p && p - n < n {
+            return format!("-{}", p - n);
         }
     }
+    display
+}
+
+pub fn indent_block(text: &str, indent: &str) -> String {
+    text.lines()
+        .map(|line| format!("{indent}{line}"))
+        .join("\n")
+}
+
+/// Build a use-count map keyed by pointer identity. Counts how many
+/// times each subtree is referenced as a child of some other node.
+pub fn direct_use_counts<'a, F: 'a, I>(exprs: I) -> HashMap<*const SymbolicExpression<F>, usize>
+where
+    I: IntoIterator<Item = &'a SymbolicExpression<F>>,
+{
+    let mut counts: HashMap<*const SymbolicExpression<F>, usize> = HashMap::new();
+    let mut visited: HashSet<*const SymbolicExpression<F>> = HashSet::new();
+    for root in exprs {
+        let mut stack: Vec<&SymbolicExpression<F>> = vec![root];
+        while let Some(expr) = stack.pop() {
+            let ptr = expr as *const SymbolicExpression<F>;
+            if !visited.insert(ptr) {
+                continue;
+            }
+            match expr {
+                SymbolicExpression::Add { x, y, .. }
+                | SymbolicExpression::Sub { x, y, .. }
+                | SymbolicExpression::Mul { x, y, .. } => {
+                    *counts.entry(Arc::as_ptr(x)).or_insert(0) += 1;
+                    *counts.entry(Arc::as_ptr(y)).or_insert(0) += 1;
+                    stack.push(&**y);
+                    stack.push(&**x);
+                }
+                SymbolicExpression::Neg { x, .. } => {
+                    *counts.entry(Arc::as_ptr(x)).or_insert(0) += 1;
+                    stack.push(&**x);
+                }
+                _ => {}
+            }
+        }
+    }
+    counts
+}
+
+/// Build a global use-count map covering all constraints and the
+/// `count`/`message` exprs of all interactions in `symbolic`.
+pub fn symbolic_global_use_counts<F: Field>(
+    symbolic: &SymbolicConstraints<F>,
+) -> HashMap<*const SymbolicExpression<F>, usize> {
+    direct_use_counts(symbolic.constraints.iter().chain(
+        symbolic.interactions.iter().flat_map(|i: &Interaction<_>| {
+            iter::once(&i.count).chain(i.message.iter())
+        }),
+    ))
+}
+
+/// Render an expression in *trace form*: leaves print as named
+/// accessors (`<name> trace row` / `<name>_next trace row`), all
+/// compound nodes are inlined (no `let tN`, no `inter_K`). Used by the
+/// lemma generator to express the equality RHS of
+/// `evalMultiplicityAt` / `evalMessageAt` lemmas.
+///
+/// Panics on selector / non-Main entries — bus messages in the
+/// recursion verifier don't use them, but constraint expressions can.
+pub fn render_trace_body<F: Field>(
+    expr: &SymbolicExpression<F>,
+    column_names: &[String],
+    characteristic: Option<u32>,
+) -> String {
+    let mut out = String::new();
+    render_trace_inner(expr, column_names, characteristic, &mut out, true);
+    out
+}
+
+fn render_trace_inner<F: Field>(
+    expr: &SymbolicExpression<F>,
+    column_names: &[String],
+    characteristic: Option<u32>,
+    out: &mut String,
+    is_root: bool,
+) {
+    match expr {
+        SymbolicExpression::Variable(SymbolicVariable { entry, index, .. }) => match entry {
+            Entry::Main { offset: 0, .. } => {
+                let name = column_names
+                    .get(*index)
+                    .unwrap_or_else(|| panic!("main column {index} has no name"));
+                if is_root {
+                    out.push_str(&format!("{name} trace row"));
+                } else {
+                    out.push_str(&format!("{name} trace row"));
+                }
+            }
+            Entry::Main { offset: 1, .. } => {
+                let name = column_names
+                    .get(*index)
+                    .unwrap_or_else(|| panic!("main column {index} has no name"));
+                if is_root {
+                    out.push_str(&format!("{name}_next trace row"));
+                } else {
+                    out.push_str(&format!("{name}_next trace row"));
+                }
+            }
+            other => panic!("unsupported entry {other:?} in trace form"),
+        },
+        SymbolicExpression::Constant(c) => {
+            out.push_str(&render_constant(c, characteristic));
+        }
+        SymbolicExpression::IsFirstRow
+        | SymbolicExpression::IsLastRow
+        | SymbolicExpression::IsTransition => {
+            panic!("selectors not supported in trace form")
+        }
+        SymbolicExpression::Add { x, y, .. } => {
+            out.push('(');
+            render_trace_inner(x, column_names, characteristic, out, false);
+            out.push_str(" + ");
+            render_trace_inner(y, column_names, characteristic, out, false);
+            out.push(')');
+        }
+        SymbolicExpression::Sub { x, y, .. } => {
+            out.push('(');
+            render_trace_inner(x, column_names, characteristic, out, false);
+            out.push_str(" - ");
+            render_trace_inner(y, column_names, characteristic, out, false);
+            out.push(')');
+        }
+        SymbolicExpression::Mul { x, y, .. } => {
+            out.push('(');
+            render_trace_inner(x, column_names, characteristic, out, false);
+            out.push_str(" * ");
+            render_trace_inner(y, column_names, characteristic, out, false);
+            out.push(')');
+        }
+        SymbolicExpression::Neg { x, .. } => {
+            out.push('-');
+            match &**x {
+                SymbolicExpression::Variable(_) | SymbolicExpression::Constant(_) => {
+                    render_trace_inner(x, column_names, characteristic, out, false);
+                }
+                _ => {
+                    render_trace_inner(x, column_names, characteristic, out, false);
+                }
+            }
+        }
+    }
+}
+
+/// True if the expression tree contains any selector
+/// (`IsFirstRow`/`IsLastRow`/`IsTransition`).
+pub fn contains_selector<F: Field>(expr: &SymbolicExpression<F>) -> bool {
+    let mut visited: HashSet<*const SymbolicExpression<F>> = HashSet::new();
+    let mut stack: Vec<&SymbolicExpression<F>> = vec![expr];
+    while let Some(e) = stack.pop() {
+        let ptr = e as *const SymbolicExpression<F>;
+        if !visited.insert(ptr) {
+            continue;
+        }
+        match e {
+            SymbolicExpression::IsFirstRow
+            | SymbolicExpression::IsLastRow
+            | SymbolicExpression::IsTransition => return true,
+            SymbolicExpression::Add { x, y, .. }
+            | SymbolicExpression::Sub { x, y, .. }
+            | SymbolicExpression::Mul { x, y, .. } => {
+                stack.push(&**y);
+                stack.push(&**x);
+            }
+            SymbolicExpression::Neg { x, .. } => stack.push(&**x),
+            _ => {}
+        }
+    }
+    false
+}
+
+/// Local + next column names referenced in an expression.
+#[derive(Default, Clone, Debug)]
+pub struct ColumnsUsed {
+    pub local: std::collections::BTreeSet<String>,
+    pub next: std::collections::BTreeSet<String>,
+}
+
+impl ColumnsUsed {
+    pub fn extend_from(&mut self, other: &ColumnsUsed) {
+        self.local.extend(other.local.iter().cloned());
+        self.next.extend(other.next.iter().cloned());
+    }
+}
+
+/// Collect main-column names referenced by `expr`, partitioned by
+/// rotation. Selectors and non-Main entries are silently skipped.
+pub fn collect_columns_used<F: Field>(
+    expr: &SymbolicExpression<F>,
+    column_names: &[String],
+) -> ColumnsUsed {
+    let mut out = ColumnsUsed::default();
+    let mut visited: HashSet<*const SymbolicExpression<F>> = HashSet::new();
+    let mut stack: Vec<&SymbolicExpression<F>> = vec![expr];
+    while let Some(e) = stack.pop() {
+        let ptr = e as *const SymbolicExpression<F>;
+        if !visited.insert(ptr) {
+            continue;
+        }
+        match e {
+            SymbolicExpression::Variable(SymbolicVariable { entry, index, .. }) => {
+                if let Entry::Main { offset, .. } = entry {
+                    if let Some(name) = column_names.get(*index) {
+                        match offset {
+                            0 => {
+                                out.local.insert(name.clone());
+                            }
+                            1 => {
+                                out.next.insert(name.clone());
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            SymbolicExpression::Add { x, y, .. }
+            | SymbolicExpression::Sub { x, y, .. }
+            | SymbolicExpression::Mul { x, y, .. } => {
+                stack.push(&**y);
+                stack.push(&**x);
+            }
+            SymbolicExpression::Neg { x, .. } => stack.push(&**x),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Scan all expressions in `symbolic` for variable kinds not supported
+/// by the v1 emitter. Returns the first offending entry as a string,
+/// or `Ok(())` if every leaf is renderable.
+pub fn precheck_supported<F: Field>(symbolic: &SymbolicConstraints<F>) -> Result<(), String> {
+    let mut visited: HashSet<*const SymbolicExpression<F>> = HashSet::new();
+    let exprs = symbolic
+        .constraints
+        .iter()
+        .chain(symbolic.interactions.iter().flat_map(|i| {
+            iter::once(&i.count).chain(i.message.iter())
+        }));
+    for root in exprs {
+        let mut stack: Vec<&SymbolicExpression<F>> = vec![root];
+        while let Some(expr) = stack.pop() {
+            let ptr = expr as *const SymbolicExpression<F>;
+            if !visited.insert(ptr) {
+                continue;
+            }
+            match expr {
+                SymbolicExpression::Variable(SymbolicVariable { entry, .. }) => match entry {
+                    Entry::Main { offset, .. } if *offset <= 1 => {}
+                    Entry::Main { offset, .. } => {
+                        return Err(format!("main column rotation offset {offset} > 1"));
+                    }
+                    Entry::Preprocessed { .. } => {
+                        return Err("preprocessed columns not supported".to_string())
+                    }
+                    Entry::Permutation { .. } => {
+                        return Err("permutation columns not supported".to_string())
+                    }
+                    Entry::Public => return Err("public values not supported".to_string()),
+                    Entry::Challenge => return Err("challenges not supported".to_string()),
+                    Entry::Exposed => return Err("exposed values not supported".to_string()),
+                },
+                SymbolicExpression::Add { x, y, .. }
+                | SymbolicExpression::Sub { x, y, .. }
+                | SymbolicExpression::Mul { x, y, .. } => {
+                    stack.push(&**y);
+                    stack.push(&**x);
+                }
+                SymbolicExpression::Neg { x, .. } => stack.push(&**x),
+                _ => {}
+            }
+        }
+    }
+    Ok(())
 }
