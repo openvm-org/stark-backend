@@ -40,7 +40,6 @@ pub struct TraceCells {
     pub preprocessed: Option<usize>,
     pub cached_mains: Vec<usize>,
     pub common_main: usize,
-    pub after_challenge: Vec<usize>,
 }
 
 impl Display for TraceMetrics {
@@ -104,14 +103,11 @@ pub fn trace_metrics<SC: StarkProtocolConfig, PB: ProverBackend>(
                 preprocessed: width.preprocessed.map(|w| w * height),
                 cached_mains: width.cached_mains.iter().map(|w| w * height).collect(),
                 common_main: width.common_main * height,
-                // In OpenVM 2.0, there are no trace cells due to bus interactions.
-                after_challenge: vec![0],
             };
             let total_cells = cells
                 .cached_mains
                 .iter()
                 .chain([&cells.common_main])
-                .chain(cells.after_challenge.iter())
                 .sum::<usize>();
             SingleTraceMetrics {
                 air_name: air_name.to_string(),
@@ -150,16 +146,6 @@ pub fn trace_metrics<SC: StarkProtocolConfig, PB: ProverBackend>(
                 .per_air
                 .iter()
                 .map(|m| m.cells.cached_mains.iter().sum::<usize>() + m.cells.common_main)
-                .sum::<usize>()
-        )
-    );
-    info!(
-        "perm_trace_cells = {}",
-        format_number_with_underscores(
-            metrics
-                .per_air
-                .iter()
-                .map(|m| m.cells.after_challenge.iter().sum::<usize>())
                 .sum::<usize>()
         )
     );
