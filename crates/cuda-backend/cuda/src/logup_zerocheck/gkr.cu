@@ -31,7 +31,7 @@ __device__ __forceinline__ uint32_t lg_pow2(uint32_t x) {
 __device__ __forceinline__ FpExt virtual_padding_q(FpExt alpha, uint32_t subtree_len) {
     FpExt q = alpha;
     for (uint32_t len = subtree_len; len > 1; len >>= 1) {
-        q = q * q;
+        q *= q;
     }
     return q;
 }
@@ -87,39 +87,50 @@ __global__ void frac_build_tree_layer_kernel(
     FpExt alpha = FpExt(Fp(0))
 ) {
     uint32_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= half) {
-        return;
-    }
+    const bool in_range = idx < half;
 
     const uint32_t layer_size = half << 1;
     const bool virtual_mode = real_len < logical_len;
     if constexpr (apply_alpha) {
         if (virtual_mode && layer_size == logical_len) {
             const uint32_t parent_active_size = half;
-            const uint32_t parent_start =
-                rev_len(idx, lg_pow2(parent_active_size)) << 1;
+            FracExt lhs_val = FracExt::zero();
+            FracExt rhs_val = FracExt::zero();
+            FracExt rhs_leaf = FracExt::zero();
+            bool has_rhs_leaf = false;
+            if (in_range) {
+                const uint32_t parent_start =
+                    rev_len(idx, lg_pow2(parent_active_size)) << 1;
 
-            FracExt lhs_val = parent_start < real_len
-                ? layer[parent_start]
-                : FracExt{FpExt(Fp::zero()), FpExt(Fp::zero())};
-            FracExt rhs_val = parent_start + 1 < real_len
-                ? layer[parent_start + 1]
-                : FracExt{FpExt(Fp::zero()), FpExt(Fp::zero())};
-            FracExt rhs_leaf = rhs_val;
-            bool has_rhs_leaf = parent_start + 1 < real_len;
+                if (parent_start < real_len) {
+                    lhs_val = layer[parent_start];
+                }
+                if (parent_start + 1 < real_len) {
+                    rhs_val = layer[parent_start + 1];
+                    rhs_leaf = rhs_val;
+                    has_rhs_leaf = true;
+                }
+            }
             __syncthreads();
+            if (!in_range) {
+                return;
+            }
 
-            lhs_val.q = lhs_val.q + alpha;
-            rhs_val.q = rhs_val.q + alpha;
+            lhs_val.q += alpha;
+            rhs_val.q += alpha;
             frac_add_inplace(lhs_val, rhs_val);
             virtual_node_store(layer, idx, parent_active_size, real_len, logical_len, lhs_val);
 
             if (has_rhs_leaf) {
-                rhs_leaf.q = rhs_leaf.q + alpha;
+                rhs_leaf.q += alpha;
                 virtual_node_store(layer, idx + half, logical_len, real_len, logical_len, rhs_leaf);
             }
             return;
         }
+    }
+
+    if (!in_range) {
+        return;
     }
 
     uint32_t lhs_active_size = revert ? half : layer_size;
@@ -133,8 +144,8 @@ __global__ void frac_build_tree_layer_kernel(
     if constexpr (apply_alpha) {
         // When applying alpha, we need to modify both operands before combining
         // Read both values, apply alpha to denominators, then combine
-        lhs.q = lhs.q + alpha;
-        rhs.q = rhs.q + alpha;
+        lhs.q += alpha;
+        rhs.q += alpha;
 
         if constexpr (revert) {
             frac_unadd_inplace(lhs, rhs);
@@ -1109,7 +1120,7 @@ __global__ void multifold_kernel(
 __global__ void add_alpha_kernel(FracExt *data, size_t len, FpExt alpha) {
     size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < len) {
-        data[idx].q = data[idx].q + alpha;
+        data[idx].q += alpha;
     }
 }
 
@@ -1766,7 +1777,7 @@ void bit_rev_frac_build_k2_kernel(
     index_t step = (index_t)1 << (lg_domain_size - LG_Z_COUNT);
     index_t tid = threadIdx.x + blockDim.x * (index_t)blockIdx.x;
     bool virtual_mode = real_len < domain_size;
-    FracExt zero_frac{FpExt(Fp::zero()), FpExt(Fp::zero())};
+    FracExt zero_frac = FracExt::zero();
 
     #pragma unroll 1
     do {
@@ -1799,7 +1810,7 @@ void bit_rev_frac_build_k2_kernel(
             FracExt* row = xchg[gid][rev];
             #pragma unroll
             for (uint32_t i = 0; i < Z_COUNT; i++)
-                row[i].q = row[i].q + alpha;
+                row[i].q += alpha;
             #pragma unroll
             for (uint32_t i = 0; i < 4; i++)  // tree layer 0: pairs (0,4),(1,5),(2,6),(3,7)
                 frac_add_inplace(row[i], row[i + 4]);
@@ -1843,7 +1854,7 @@ void bit_rev_frac_build_k2_kernel(
             FracExt* row = xchg[gid][rev];
             #pragma unroll
             for (uint32_t i = 0; i < Z_COUNT; i++)
-                row[i].q = row[i].q + alpha;
+                row[i].q += alpha;
             #pragma unroll
             for (uint32_t i = 0; i < 4; i++)
                 frac_add_inplace(row[i], row[i + 4]);
