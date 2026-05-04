@@ -43,9 +43,9 @@ mod tests;
 pub use columns::{flat_columns_of, flatten_lean_columns, LeanColumns, LeanEntry};
 pub use openvm_codec_derive::LeanColumns;
 pub use render::{
-    collect_columns_used, contains_selector, direct_use_counts, indent_block, precheck_supported,
-    render_expression_body, render_trace_body, symbolic_global_use_counts, ColumnsUsed,
-    LeanRenderContext, LeanRenderOptions,
+    collect_columns_used, contains_public_value, contains_selector, direct_use_counts,
+    indent_block, precheck_supported, render_expression_body, render_trace_body,
+    symbolic_global_use_counts, ColumnsUsed, LeanRenderContext, LeanRenderOptions,
 };
 
 /// A bus referenced by interactions in an AIR.
@@ -126,6 +126,15 @@ pub struct LeanWriteOptions {
     /// partition. Defaults to `vec![0]` (singleMain). For a partitioned
     /// AIR with cached + common, set `vec![0, cached_width]`.
     pub partition_offsets: Vec<usize>,
+    /// Names for the AIR's flat public-value list, in the order matching
+    /// `BaseAirWithPublicValues::num_public_values()`. When the AIR
+    /// references public values and a name is provided for the index,
+    /// `Constraints.lean` emits an `abbrev <name> (publicValues : List F)
+    /// : F := publicValues.getD <i> 0` and the trace-form RHS uses
+    /// `<name> publicValues` instead of the raw `publicValues.getD i 0`.
+    /// Indices beyond this list (or all indices when this is empty) fall
+    /// back to the raw form.
+    pub public_value_names: Vec<String>,
 }
 
 /// Pre-rendered bodies for one AIR, ready for the file writers.
@@ -133,6 +142,12 @@ pub struct RenderedAir {
     pub constraint_bodies: Vec<String>,
     pub interactions: Vec<RenderedBusGroup>,
     pub helper_defs: Vec<String>,
+    /// True if any constraint or interaction expression references a
+    /// public value (`Entry::Public`). When set, the writers parameterize
+    /// the `RawConstraintsAt` structure and the per-pick eval lemmas on
+    /// a `publicValues : List F` argument and pass it through the eval
+    /// context. Otherwise the eval context uses `[]`.
+    pub uses_public_values: bool,
 }
 
 /// All interactions on a single bus, post-render.
@@ -172,6 +187,7 @@ pub fn render_air<F: Field>(
     let mut ctx = LeanRenderContext::new(options.render.clone(), options.characteristic);
     ctx.global_use_counts = global;
     ctx.partition_offsets = options.partition_offsets.clone();
+    ctx.public_value_names = options.public_value_names.clone();
 
     let mut constraint_bodies = Vec::with_capacity(symbolic.constraints.len());
     for c in &symbolic.constraints {
@@ -196,8 +212,10 @@ pub fn render_air<F: Field>(
                 .collect();
 
             // Trace-form rendering is best-effort. The trace renderer
-            // panics on selectors / non-Main entries, so skip whenever
-            // any expression in this interaction contains one.
+            // panics on selectors, so skip whenever any expression in
+            // this interaction contains one. (Public values are
+            // supported via the `publicValues` parameter on the lemma
+            // signature.)
             let trace_safe = !contains_selector(&interaction.count)
                 && interaction.message.iter().all(|m| !contains_selector(m));
             let multiplicity_trace = if trace_safe {
@@ -205,6 +223,7 @@ pub fn render_air<F: Field>(
                     &interaction.count,
                     column_names,
                     &options.partition_offsets,
+                    &options.public_value_names,
                     options.characteristic,
                 ))
             } else {
@@ -220,6 +239,7 @@ pub fn render_air<F: Field>(
                                 m,
                                 column_names,
                                 &options.partition_offsets,
+                                &options.public_value_names,
                                 options.characteristic,
                             )
                         })
@@ -233,10 +253,16 @@ pub fn render_air<F: Field>(
                 &interaction.count,
                 column_names,
                 &options.partition_offsets,
+                &options.public_value_names,
             );
             let mut message_cols = ColumnsUsed::default();
             for m in &interaction.message {
-                let cu = collect_columns_used(m, column_names, &options.partition_offsets);
+                let cu = collect_columns_used(
+                    m,
+                    column_names,
+                    &options.partition_offsets,
+                    &options.public_value_names,
+                );
                 message_cols.extend_from(&cu);
             }
 
@@ -252,9 +278,15 @@ pub fn render_air<F: Field>(
         interactions.push(RenderedBusGroup { lean_name, entries });
     }
 
+    let uses_public_values = symbolic.constraints.iter().any(contains_public_value)
+        || symbolic.interactions.iter().any(|i| {
+            contains_public_value(&i.count) || i.message.iter().any(contains_public_value)
+        });
+
     Ok(RenderedAir {
         constraint_bodies,
         interactions,
+        uses_public_values,
         helper_defs: std::mem::take(&mut ctx.helper_defs),
     })
 }
@@ -349,6 +381,27 @@ pub fn write_schema<W: Write>(
         }
     }
     writeln!(writer)?;
+
+    if !options.public_value_names.is_empty() {
+        writeln!(writer, "/-! ## Public-value indices and refs -/")?;
+        writeln!(writer)?;
+        // Both layers are `abbrev` (not `def`) so simp auto-reduces
+        // them when proving the trace-form sugar lemmas. Columns get
+        // away with `def` for `<name>Idx` / `<name>Ref` because the
+        // column-access chain bottoms out in a `Vector.get` that
+        // reduces by Fin indexing; the PV accessor bottoms out in
+        // `List.getD` on an opaque list, which doesn't reduce, so we
+        // make these reducible instead.
+        for (idx, name) in options.public_value_names.iter().enumerate() {
+            writeln!(writer, "abbrev {name}PvIdx : Nat := {idx}")?;
+            writeln!(
+                writer,
+                "abbrev {name}PvVar : Var layout := .publicValue {name}PvIdx"
+            )?;
+        }
+        writeln!(writer)?;
+    }
+
     writeln!(writer, "end {}", options.air_namespace)?;
     Ok(())
 }
@@ -482,25 +535,47 @@ pub fn write_constraints<W: Write>(
     }
     writeln!(writer)?;
 
+    if !options.public_value_names.is_empty() {
+        writeln!(writer, "/-! ## Named public-value accessors -/")?;
+        writeln!(writer)?;
+        for name in &options.public_value_names {
+            writeln!(
+                writer,
+                "abbrev {name} (publicValues : List F) : F := publicValues.getD {name}PvIdx 0"
+            )?;
+        }
+        writeln!(writer)?;
+    }
+
     writeln!(writer, "/-! ## Raw per-row constraint extraction -/")?;
     writeln!(writer)?;
     let n = rendered.constraint_bodies.len();
+    let pv_param = if rendered.uses_public_values {
+        " (publicValues : List F)"
+    } else {
+        ""
+    };
+    let pv_ctx = if rendered.uses_public_values {
+        "publicValues"
+    } else {
+        "[]"
+    };
     writeln!(
         writer,
         "/-- All {n} raw constraint(s) of `air` at a row. Field `cK` is the raw fact"
     )?;
     writeln!(
         writer,
-        "    that `expr_K` evaluates to zero at `⟨trace, row, []⟩`. -/"
+        "    that `expr_K` evaluates to zero at `⟨trace, row, {pv_ctx}⟩`. -/"
     )?;
     writeln!(
         writer,
-        "structure RawConstraintsAt (trace : (air (F := F)).Trace) (row : Fin trace.height) : Prop where"
+        "structure RawConstraintsAt (trace : (air (F := F)).Trace) (row : Fin trace.height){pv_param} : Prop where"
     )?;
     for i in 0..n {
         writeln!(
             writer,
-            "  c{i} : AIR.Expr.evalAt (A := air (F := F)) expr_{i} ⟨trace, row, []⟩ = 0"
+            "  c{i} : AIR.Expr.evalAt (A := air (F := F)) expr_{i} ⟨trace, row, {pv_ctx}⟩ = 0"
         )?;
     }
     writeln!(writer)?;
@@ -533,9 +608,19 @@ pub fn write_constraints<W: Write>(
         writer,
         "theorem of_satisfiesRow {{trace : (air (F := F)).Trace}} {{row : Fin trace.height}}"
     )?;
+    let (pv_binder, pv_arg, raw_args) = if rendered.uses_public_values {
+        (
+            "    (publicValues : List F)\n",
+            " publicValues",
+            " publicValues",
+        )
+    } else {
+        ("", "", "")
+    };
+    write!(writer, "{pv_binder}")?;
     writeln!(
         writer,
-        "    (h : AIR.satisfiesRow (air (F := F)) trace row) : RawConstraintsAt trace row := by"
+        "    (h : AIR.satisfiesRow (air (F := F)) trace row{pv_arg}) : RawConstraintsAt trace row{raw_args} := by"
     )?;
     if n == 0 {
         writeln!(writer, "  exact ⟨⟩")?;
@@ -638,7 +723,13 @@ pub fn write_interactions<W: Write>(
         writeln!(writer, "  ]")?;
         writeln!(writer)?;
 
-        write_per_pick_lemmas(writer, air_name, group, &bus_def_ty)?;
+        write_per_pick_lemmas(
+            writer,
+            air_name,
+            group,
+            &bus_def_ty,
+            rendered.uses_public_values,
+        )?;
     }
 
     if !rendered.interactions.is_empty() {
@@ -746,7 +837,18 @@ fn write_per_pick_lemmas<W: Write>(
     air_name: &str,
     group: &RenderedBusGroup,
     bus_def_ty: &str,
+    uses_public_values: bool,
 ) -> io::Result<()> {
+    let pv_param = if uses_public_values {
+        " (publicValues : List F)"
+    } else {
+        ""
+    };
+    let pv_ctx = if uses_public_values {
+        "publicValues"
+    } else {
+        "[]"
+    };
     let bus = group.lean_name.as_str();
     let list_def = format!("{bus}Interactions");
     let n = group.entries.len();
@@ -823,11 +925,11 @@ fn write_per_pick_lemmas<W: Write>(
         writeln!(writer, "lemma {bus}_{i}_evalMultiplicityAt")?;
         writeln!(
             writer,
-            "    (trace : (air (F := F)).Trace) (row : Fin trace.height) :"
+            "    (trace : (air (F := F)).Trace) (row : Fin trace.height){pv_param} :"
         )?;
         writeln!(
             writer,
-            "    ({bus}_{i} (F := F)).evalMultiplicityAt ⟨trace, row, []⟩ ="
+            "    ({bus}_{i} (F := F)).evalMultiplicityAt ⟨trace, row, {pv_ctx}⟩ ="
         )?;
         writeln!(writer, "      {mult_trace} := by")?;
         let mut simp_names: Vec<String> = vec![
@@ -836,6 +938,13 @@ fn write_per_pick_lemmas<W: Write>(
             "Interaction.evalMultiplicityAt".to_string(),
             "AIR.Expr.evalAt".to_string(),
         ];
+        if uses_public_values {
+            // `AIR.evalVar` reduces `(.publicValue i)` to
+            // `ctx.publicValues.getD i 0`. Cell/selector cases are
+            // already @[simp] in Fundamentals.Air, but `.publicValue`
+            // isn't, so unfold the def explicitly.
+            simp_names.push("AIR.evalVar".to_string());
+        }
         if mult_uses_inter {
             simp_names.push(air_inter_attr_name(air_name));
         }
@@ -852,11 +961,11 @@ fn write_per_pick_lemmas<W: Write>(
             writeln!(writer, "lemma {bus}_{i}_evalMessageAt")?;
             writeln!(
                 writer,
-                "    (trace : (air (F := F)).Trace) (row : Fin trace.height) :"
+                "    (trace : (air (F := F)).Trace) (row : Fin trace.height){pv_param} :"
             )?;
             writeln!(
                 writer,
-                "    ({bus}_{i} (F := F)).evalMessageAt ⟨trace, row, []⟩ = #v[] := by"
+                "    ({bus}_{i} (F := F)).evalMessageAt ⟨trace, row, {pv_ctx}⟩ = #v[] := by"
             )?;
             writeln!(writer, "  simp [{bus}_{i}, {list_def}, Interaction.evalMessageAt]")?;
             writeln!(writer)?;
@@ -871,11 +980,11 @@ fn write_per_pick_lemmas<W: Write>(
         writeln!(writer, "lemma {bus}_{i}_evalMessageAt")?;
         writeln!(
             writer,
-            "    (trace : (air (F := F)).Trace) (row : Fin trace.height) :"
+            "    (trace : (air (F := F)).Trace) (row : Fin trace.height){pv_param} :"
         )?;
         writeln!(
             writer,
-            "    ({bus}_{i} (F := F)).evalMessageAt ⟨trace, row, []⟩ ="
+            "    ({bus}_{i} (F := F)).evalMessageAt ⟨trace, row, {pv_ctx}⟩ ="
         )?;
         writeln!(writer, "      #v[")?;
         for (j, body) in msg_traces.iter().enumerate() {
@@ -892,6 +1001,9 @@ fn write_per_pick_lemmas<W: Write>(
             "Interaction.evalMessageAt".to_string(),
             "AIR.Expr.evalAt".to_string(),
         ];
+        if uses_public_values {
+            simp_names.push("AIR.evalVar".to_string());
+        }
         if msg_uses_inter {
             simp_names.push(air_inter_attr_name(air_name));
         }
@@ -976,6 +1088,9 @@ fn simp_args_for_columns(cols: &ColumnsUsed) -> (Vec<String>, Vec<String>, Vec<S
     }
     for name in &cols.next {
         accessors.push(format!("{name}_next"));
+    }
+    for name in &cols.pv {
+        accessors.push(name.clone());
     }
     if !cols.local.is_empty() {
         ctxs.push("AIR.EvalCtx.localRow".to_string());

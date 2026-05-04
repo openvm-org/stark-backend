@@ -35,6 +35,7 @@ fn options_for(namespace: &str) -> LeanWriteOptions {
         schema_import: format!("{namespace}.Generated.Schema"),
         constraints_import: format!("{namespace}.Generated.Constraints"),
         partition_offsets: vec![0],
+        public_value_names: Vec::new(),
     }
 }
 

@@ -73,6 +73,11 @@ pub struct LeanRenderContext<F> {
     /// `[0]`; for a partitioned AIR with cached + common, it's
     /// `[0, cached_width]` (cached at part_index 0, common at part_index 1).
     pub partition_offsets: Vec<usize>,
+    /// Names for public-value indices. When `Entry::Public { index }`
+    /// has a corresponding entry here, the va-form emits `va <name>PvVar`
+    /// (referencing the Schema-emitted ref); otherwise it falls back to
+    /// `va (.publicValue {index})`.
+    pub public_value_names: Vec<String>,
 }
 
 impl<F> LeanRenderContext<F> {
@@ -88,6 +93,7 @@ impl<F> LeanRenderContext<F> {
             temp_counter: 0,
             characteristic,
             partition_offsets: vec![0],
+            public_value_names: Vec::new(),
         }
     }
 
@@ -181,6 +187,7 @@ fn render_expression<F: Field>(
                         expr,
                         column_names,
                         &context.partition_offsets,
+                        &context.public_value_names,
                         context.characteristic,
                     ),
                     op_count: 0,
@@ -309,6 +316,7 @@ fn render_leaf<F: Field>(
     x: &SymbolicExpression<F>,
     column_names: &[String],
     partition_offsets: &[usize],
+    public_value_names: &[String],
     characteristic: Option<u32>,
 ) -> String {
     match x {
@@ -335,7 +343,13 @@ fn render_leaf<F: Field>(
             }
             Entry::Preprocessed { .. } => panic!("preprocessed columns not supported in v1"),
             Entry::Permutation { .. } => unreachable!("permutation columns no longer exist"),
-            Entry::Public => panic!("public columns not supported in v1"),
+            Entry::Public => {
+                if let Some(name) = public_value_names.get(*index) {
+                    format!("va {name}PvVar")
+                } else {
+                    format!("va (.publicValue {index})")
+                }
+            }
             Entry::Challenge => panic!("challenge columns not supported in v1"),
             Entry::Exposed => panic!("exposed columns not supported in v1"),
         },
@@ -422,10 +436,19 @@ pub fn render_trace_body<F: Field>(
     expr: &SymbolicExpression<F>,
     column_names: &[String],
     partition_offsets: &[usize],
+    public_value_names: &[String],
     characteristic: Option<u32>,
 ) -> String {
     let mut out = String::new();
-    render_trace_inner(expr, column_names, partition_offsets, characteristic, &mut out, true);
+    render_trace_inner(
+        expr,
+        column_names,
+        partition_offsets,
+        public_value_names,
+        characteristic,
+        &mut out,
+        true,
+    );
     out
 }
 
@@ -433,6 +456,7 @@ fn render_trace_inner<F: Field>(
     expr: &SymbolicExpression<F>,
     column_names: &[String],
     partition_offsets: &[usize],
+    public_value_names: &[String],
     characteristic: Option<u32>,
     out: &mut String,
     _is_root: bool,
@@ -454,6 +478,18 @@ fn render_trace_inner<F: Field>(
                 };
                 out.push_str(&format!("{name}{suffix} trace row"));
             }
+            Entry::Public => {
+                // Renders a public-value reference. If a name was
+                // provided for this index, use it: `<name> publicValues`.
+                // Otherwise fall back to the raw `publicValues.getD i 0`,
+                // which still matches the AIR's eval semantics
+                // (`ctx.publicValues.getD i 0`).
+                if let Some(name) = public_value_names.get(*index) {
+                    out.push_str(&format!("{name} publicValues"));
+                } else {
+                    out.push_str(&format!("publicValues.getD {index} 0"));
+                }
+            }
             other => panic!("unsupported entry {other:?} in trace form"),
         },
         SymbolicExpression::Constant(c) => {
@@ -466,28 +502,28 @@ fn render_trace_inner<F: Field>(
         }
         SymbolicExpression::Add { x, y, .. } => {
             out.push('(');
-            render_trace_inner(x, column_names, partition_offsets, characteristic, out, false);
+            render_trace_inner(x, column_names, partition_offsets, public_value_names, characteristic, out, false);
             out.push_str(" + ");
-            render_trace_inner(y, column_names, partition_offsets, characteristic, out, false);
+            render_trace_inner(y, column_names, partition_offsets, public_value_names, characteristic, out, false);
             out.push(')');
         }
         SymbolicExpression::Sub { x, y, .. } => {
             out.push('(');
-            render_trace_inner(x, column_names, partition_offsets, characteristic, out, false);
+            render_trace_inner(x, column_names, partition_offsets, public_value_names, characteristic, out, false);
             out.push_str(" - ");
-            render_trace_inner(y, column_names, partition_offsets, characteristic, out, false);
+            render_trace_inner(y, column_names, partition_offsets, public_value_names, characteristic, out, false);
             out.push(')');
         }
         SymbolicExpression::Mul { x, y, .. } => {
             out.push('(');
-            render_trace_inner(x, column_names, partition_offsets, characteristic, out, false);
+            render_trace_inner(x, column_names, partition_offsets, public_value_names, characteristic, out, false);
             out.push_str(" * ");
-            render_trace_inner(y, column_names, partition_offsets, characteristic, out, false);
+            render_trace_inner(y, column_names, partition_offsets, public_value_names, characteristic, out, false);
             out.push(')');
         }
         SymbolicExpression::Neg { x, .. } => {
             out.push('-');
-            render_trace_inner(x, column_names, partition_offsets, characteristic, out, false);
+            render_trace_inner(x, column_names, partition_offsets, public_value_names, characteristic, out, false);
         }
     }
 }
@@ -519,26 +555,65 @@ pub fn contains_selector<F: Field>(expr: &SymbolicExpression<F>) -> bool {
     false
 }
 
-/// Local + next column names referenced in an expression.
+/// True if the expression tree references any public value (`Entry::Public`).
+/// Trace-form rendering doesn't have a public-value accessor yet, so callers
+/// should skip trace-form for any expression that returns true here.
+pub fn contains_public_value<F: Field>(expr: &SymbolicExpression<F>) -> bool {
+    let mut visited: HashSet<*const SymbolicExpression<F>> = HashSet::new();
+    let mut stack: Vec<&SymbolicExpression<F>> = vec![expr];
+    while let Some(e) = stack.pop() {
+        let ptr = e as *const SymbolicExpression<F>;
+        if !visited.insert(ptr) {
+            continue;
+        }
+        match e {
+            SymbolicExpression::Variable(SymbolicVariable {
+                entry: Entry::Public,
+                ..
+            }) => return true,
+            SymbolicExpression::Add { x, y, .. }
+            | SymbolicExpression::Sub { x, y, .. }
+            | SymbolicExpression::Mul { x, y, .. } => {
+                stack.push(&**y);
+                stack.push(&**x);
+            }
+            SymbolicExpression::Neg { x, .. } => stack.push(&**x),
+            _ => {}
+        }
+    }
+    false
+}
+
+/// Local + next column names referenced in an expression, plus
+/// public-value accessor names (when a name was provided for the index).
 #[derive(Default, Clone, Debug)]
 pub struct ColumnsUsed {
     pub local: std::collections::BTreeSet<String>,
     pub next: std::collections::BTreeSet<String>,
+    /// Named public-value accessors referenced. Indices for which no
+    /// name was provided are silently skipped (the trace renderer falls
+    /// back to `publicValues.getD i 0`, which doesn't need an accessor
+    /// in the simp set).
+    pub pv: std::collections::BTreeSet<String>,
 }
 
 impl ColumnsUsed {
     pub fn extend_from(&mut self, other: &ColumnsUsed) {
         self.local.extend(other.local.iter().cloned());
         self.next.extend(other.next.iter().cloned());
+        self.pv.extend(other.pv.iter().cloned());
     }
 }
 
 /// Collect main-column names referenced by `expr`, partitioned by
-/// rotation. Selectors and non-Main entries are silently skipped.
+/// rotation, plus public-value accessor names (when `public_value_names`
+/// supplies one for the referenced index). Selectors and other entries
+/// are silently skipped.
 pub fn collect_columns_used<F: Field>(
     expr: &SymbolicExpression<F>,
     column_names: &[String],
     partition_offsets: &[usize],
+    public_value_names: &[String],
 ) -> ColumnsUsed {
     let mut out = ColumnsUsed::default();
     let mut visited: HashSet<*const SymbolicExpression<F>> = HashSet::new();
@@ -549,8 +624,8 @@ pub fn collect_columns_used<F: Field>(
             continue;
         }
         match e {
-            SymbolicExpression::Variable(SymbolicVariable { entry, index, .. }) => {
-                if let Entry::Main { part_index, offset } = entry {
+            SymbolicExpression::Variable(SymbolicVariable { entry, index, .. }) => match entry {
+                Entry::Main { part_index, offset } => {
                     let Some(base) = partition_offsets.get(*part_index).copied() else {
                         continue;
                     };
@@ -566,7 +641,13 @@ pub fn collect_columns_used<F: Field>(
                         }
                     }
                 }
-            }
+                Entry::Public => {
+                    if let Some(name) = public_value_names.get(*index) {
+                        out.pv.insert(name.clone());
+                    }
+                }
+                _ => {}
+            },
             SymbolicExpression::Add { x, y, .. }
             | SymbolicExpression::Sub { x, y, .. }
             | SymbolicExpression::Mul { x, y, .. } => {
@@ -610,7 +691,7 @@ pub fn precheck_supported<F: Field>(symbolic: &SymbolicConstraints<F>) -> Result
                     Entry::Permutation { .. } => {
                         return Err("permutation columns not supported".to_string())
                     }
-                    Entry::Public => return Err("public values not supported".to_string()),
+                    Entry::Public => {}
                     Entry::Challenge => return Err("challenges not supported".to_string()),
                     Entry::Exposed => return Err("exposed values not supported".to_string()),
                 },
