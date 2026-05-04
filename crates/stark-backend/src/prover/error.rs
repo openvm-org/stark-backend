@@ -95,8 +95,8 @@ pub enum LogupZerocheckError {
     },
     #[error("LogupZerocheckCpu::new: public value index {index} out of bounds for len {len}")]
     PublicValueIndexOutOfBounds { index: usize, len: usize },
-    #[error("LogupZerocheckCpu::new: after_challenge not supported")]
-    AfterChallengeNotSupported,
+    #[error("LogupZerocheckCpu::new: challenge not supported")]
+    ChallengeNotSupported,
     #[error("interactions_layout.get returned None for (trace_idx={trace_idx}, interaction_idx={interaction_idx})")]
     InteractionsLayoutMissing {
         trace_idx: usize,

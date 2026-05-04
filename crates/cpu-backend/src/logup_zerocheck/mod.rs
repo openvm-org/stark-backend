@@ -512,7 +512,7 @@ impl<F: Field, EF: ExtensionField<F>> SymbolicEvaluator<F, EF> for ConstraintEva
                 *self.partitioned_main[part_index].get(offset, index)
             },
             Entry::Public => unsafe { EF::from(*self.public_values.get_unchecked(index)) },
-            _ => unreachable!("after_challenge not supported"),
+            Entry::Challenge => unreachable!("challenge not supported"),
         }
     }
 }
@@ -566,7 +566,7 @@ impl<F: Field> SymbolicEvaluator<F, F::Packing> for PackedConstraintEvaluator<'_
             Entry::Public => unsafe {
                 F::Packing::from_fn(|_| *self.public_values.get_unchecked(index))
             },
-            _ => unreachable!("after_challenge not supported"),
+            Entry::Challenge => unreachable!("challenge not supported"),
         }
     }
 }
@@ -936,7 +936,7 @@ where
                             Entry::Public => {
                                 assert!(var.index < public_values.len());
                             }
-                            _ => unreachable!("after_challenge not supported"),
+                            Entry::Challenge => unreachable!("challenge not supported"),
                         }
                     }
                 }

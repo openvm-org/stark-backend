@@ -25,7 +25,6 @@ pub struct SingleTraceMetrics {
     pub air_name: String,
     pub air_id: usize,
     pub height: usize,
-    /// The after challenge width is adjusted to be in terms of **base field** elements.
     pub width: TraceWidth,
     pub cells: TraceCells,
     // TODO[jpw]: update this calculation accordingly
@@ -40,7 +39,6 @@ pub struct TraceCells {
     pub preprocessed: Option<usize>,
     pub cached_mains: Vec<usize>,
     pub common_main: usize,
-    pub after_challenge: Vec<usize>,
 }
 
 impl Display for TraceMetrics {
@@ -64,10 +62,12 @@ impl Display for SingleTraceMetrics {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "{:<20} | Rows = {:<10} | Cells = {:<11} | Prep Cols = {:<5} | Main Cols = {:<5} | Perm Cols = {:<5}",
-            self.air_name, format_number_with_underscores(self.height), format_number_with_underscores(self.total_cells), self.width.preprocessed.unwrap_or(0),
+            "{:<20} | Rows = {:<10} | Cells = {:<11} | Prep Cols = {:<5} | Main Cols = {:<5}",
+            self.air_name,
+            format_number_with_underscores(self.height),
+            format_number_with_underscores(self.total_cells),
+            self.width.preprocessed.unwrap_or(0),
             format!("{:?}", self.width.main_widths()),
-            format!("{:?}",self.width.after_challenge),
         )?;
         Ok(())
     }
@@ -100,20 +100,15 @@ pub fn trace_metrics<SC: StarkProtocolConfig, PB: ProverBackend>(
         .map(|(air_idx, (pk, height))| {
             let air_name = &pk.air_name;
             let width = pk.vk.params.width.clone();
-            let mut interaction_width = pk.vk.num_interactions();
-            let ext_degree = PB::CHALLENGE_EXT_DEGREE as usize;
-            interaction_width *= ext_degree;
             let cells = TraceCells {
                 preprocessed: width.preprocessed.map(|w| w * height),
                 cached_mains: width.cached_mains.iter().map(|w| w * height).collect(),
                 common_main: width.common_main * height,
-                after_challenge: vec![interaction_width * height],
             };
             let total_cells = cells
                 .cached_mains
                 .iter()
                 .chain([&cells.common_main])
-                .chain(cells.after_challenge.iter())
                 .sum::<usize>();
             SingleTraceMetrics {
                 air_name: air_name.to_string(),
@@ -152,16 +147,6 @@ pub fn trace_metrics<SC: StarkProtocolConfig, PB: ProverBackend>(
                 .per_air
                 .iter()
                 .map(|m| m.cells.cached_mains.iter().sum::<usize>() + m.cells.common_main)
-                .sum::<usize>()
-        )
-    );
-    info!(
-        "perm_trace_cells = {}",
-        format_number_with_underscores(
-            metrics
-                .per_air
-                .iter()
-                .map(|m| m.cells.after_challenge.iter().sum::<usize>())
                 .sum::<usize>()
         )
     );
@@ -218,8 +203,6 @@ mod emit {
             counter!("main_cols", &labels).absolute(
                 (self.width.cached_mains.iter().sum::<usize>() + self.width.common_main) as u64,
             );
-            counter!("perm_cols", &labels)
-                .absolute(self.width.after_challenge.iter().sum::<usize>() as u64);
         }
     }
 }

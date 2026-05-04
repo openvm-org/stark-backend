@@ -270,7 +270,6 @@ impl<SC: StarkProtocolConfig> AirKeygenBuilder<SC> {
             num_public_values,
             need_rot,
         };
-        assert!(vparams.width.after_challenge.is_empty());
 
         let unused_variables = find_unused_vars(&dag, &vparams.width, need_rot);
         let vk = StarkVerifyingKey {
@@ -295,9 +294,8 @@ impl<SC: StarkProtocolConfig> AirKeygenBuilder<SC> {
             preprocessed: self.prep_keygen_data.width(),
             cached_mains: self.air.cached_main_widths(),
             common_main: self.air.common_main_width(),
-            after_challenge: vec![],
         };
-        get_symbolic_builder(self.air.as_ref(), &width, &[], &[])
+        get_symbolic_builder(self.air.as_ref(), &width)
     }
 }
 
@@ -373,7 +371,7 @@ pub(crate) fn find_unused_vars<F: Field>(
                 main_present[part_index][var.index][offset] = true;
             }
             Entry::Public => {}
-            Entry::Challenge | Entry::Exposed | Entry::Permutation { .. } => unreachable!(),
+            Entry::Challenge => unreachable!(),
         }
     }
 
