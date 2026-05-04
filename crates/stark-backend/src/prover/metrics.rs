@@ -64,10 +64,9 @@ impl Display for SingleTraceMetrics {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "{:<20} | Rows = {:<10} | Cells = {:<11} | Prep Cols = {:<5} | Main Cols = {:<5} | Perm Cols = {:<5}",
+            "{:<20} | Rows = {:<10} | Cells = {:<11} | Prep Cols = {:<5} | Main Cols = {:<5}",
             self.air_name, format_number_with_underscores(self.height), format_number_with_underscores(self.total_cells), self.width.preprocessed.unwrap_or(0),
             format!("{:?}", self.width.main_widths()),
-            format!("{:?}",self.width.after_challenge),
         )?;
         Ok(())
     }
@@ -218,8 +217,6 @@ mod emit {
             counter!("main_cols", &labels).absolute(
                 (self.width.cached_mains.iter().sum::<usize>() + self.width.common_main) as u64,
             );
-            counter!("perm_cols", &labels)
-                .absolute(self.width.after_challenge.iter().sum::<usize>() as u64);
         }
     }
 }

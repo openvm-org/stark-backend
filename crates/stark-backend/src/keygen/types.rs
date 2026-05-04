@@ -21,8 +21,6 @@ pub struct TraceWidth {
     pub preprocessed: Option<usize>,
     pub cached_mains: Vec<usize>,
     pub common_main: usize,
-    /// Width counted by extension field elements, _not_ base field elements
-    pub after_challenge: Vec<usize>,
 }
 
 impl TraceWidth {
@@ -41,12 +39,9 @@ impl TraceWidth {
         self.cached_mains.iter().sum::<usize>() + self.common_main
     }
 
-    /// Total width of the trace matrix, including the preprocessed width, main width, and
-    /// after-challenge widths.
-    pub fn total_width(&self, ext_degree: usize) -> usize {
-        self.preprocessed.unwrap_or(0)
-            + self.main_width()
-            + self.after_challenge.iter().sum::<usize>() * ext_degree
+    /// Total width of the trace matrix, including the preprocessed width and main width.
+    pub fn total_width(&self) -> usize {
+        self.preprocessed.unwrap_or(0) + self.main_width()
     }
 }
 
