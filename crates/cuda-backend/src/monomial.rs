@@ -38,7 +38,7 @@ impl PackedVar {
             Entry::Main { part_index, offset } => (1, part_index as u8, offset as u8),
             Entry::Preprocessed { offset } => (0, 0, offset as u8),
             Entry::Public => (3, 0, 0),
-            Entry::Permutation { .. } | Entry::Challenge | Entry::Exposed => {
+            Entry::Challenge => {
                 panic!("unsupported symbolic entry in zerocheck monomial extraction")
             }
         };

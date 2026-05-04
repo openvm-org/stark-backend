@@ -88,7 +88,7 @@ impl<F: Field> SymbolicEvaluator<F, F> for Evaluator<'_, F> {
                 .get((n + offset) % height, index)
                 .expect("matrix index out of bounds"),
             Entry::Public => self.public_values[index],
-            _ => unreachable!("There should be no after challenge variables"),
+            Entry::Challenge => unreachable!("There should be no challenge variables"),
         }
     }
     fn eval_is_first_row(&self) -> F {

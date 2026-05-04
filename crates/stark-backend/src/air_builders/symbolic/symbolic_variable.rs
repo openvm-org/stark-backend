@@ -21,12 +21,8 @@ pub enum Entry {
         part_index: usize,
         offset: usize,
     },
-    Permutation {
-        offset: usize,
-    },
     Public,
     Challenge,
-    Exposed,
 }
 
 impl Entry {
@@ -34,10 +30,8 @@ impl Entry {
         match self {
             Entry::Preprocessed { offset } => Some(*offset),
             Entry::Main { offset, .. } => Some(*offset),
-            Entry::Permutation { offset } => Some(*offset),
             Entry::Public => None,
             Entry::Challenge => None,
-            Entry::Exposed => None,
         }
     }
 
@@ -54,10 +48,7 @@ impl Entry {
                 part_index,
                 offset: old_offset + offset,
             },
-            Entry::Permutation { offset: old_offset } => Entry::Permutation {
-                offset: old_offset + offset,
-            },
-            Entry::Public | Entry::Challenge | Entry::Exposed => self,
+            Entry::Public | Entry::Challenge => self,
         }
     }
 
@@ -86,8 +77,8 @@ impl<F: Field> SymbolicVariable<F> {
 
     pub const fn degree_multiple(&self) -> usize {
         match self.entry {
-            Entry::Preprocessed { .. } | Entry::Main { .. } | Entry::Permutation { .. } => 1,
-            Entry::Public | Entry::Challenge | Entry::Exposed => 0,
+            Entry::Preprocessed { .. } | Entry::Main { .. } => 1,
+            Entry::Public | Entry::Challenge => 0,
         }
     }
 

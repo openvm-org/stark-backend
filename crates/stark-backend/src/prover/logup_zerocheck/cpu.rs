@@ -170,7 +170,9 @@ where
                                     });
                                 }
                             }
-                            _ => return Err(LogupZerocheckError::AfterChallengeNotSupported),
+                            Entry::Challenge => {
+                                return Err(LogupZerocheckError::ChallengeNotSupported)
+                            }
                         }
                     }
                 }
