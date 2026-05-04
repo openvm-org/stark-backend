@@ -74,10 +74,8 @@ fn get_entry_type_id(entry: &Entry) -> u8 {
             part_index: _,
             offset: _,
         } => 1,
-        Entry::Permutation { offset: _ } => unreachable!("permutation columns no longer exist"),
         Entry::Public => 2,
         Entry::Challenge => 3,
-        Entry::Exposed => 4,
     }
 }
 
@@ -122,9 +120,6 @@ where
                             offset: r_offset,
                         },
                     ) => (l_part_index.cmp(&r_part_index), l_offset.cmp(&r_offset)),
-                    (Entry::Permutation { .. }, _) | (_, Entry::Permutation { .. }) => {
-                        unreachable!("permutation columns no longer exist")
-                    }
                     _ => (Ordering::Equal, Ordering::Equal),
                 };
 
@@ -147,15 +142,11 @@ where
                 Entry::Main { part_index, offset } => format!(
                     "--def Circuit._ (c: Circuit F ExtF) (row: N) := c.main (id := {part_index}) (column := {column}) (row := row) (rotation := {offset})"
                 ),
-                Entry::Permutation { offset: _ } =>
-                    unreachable!("permutation columns no longer exist"),
                 Entry::Public =>
                     format!("--def Circuit._ (c: Circuit F ExtF) := c.public (index := {column})"),
                 Entry::Challenge => format!(
                     "--def Circuit._ (c: Circuit F ExtF) := c.challenge (index := {column})"
                 ),
-                Entry::Exposed =>
-                    format!("--def Circuit._ (c: Circuit F ExtF) := c.exposed (index := {column})"),
             }
         })
         .join("\n")
@@ -555,14 +546,10 @@ fn symbolic_expression_leaf_to_string<F: Field>(
                     "(Circuit.main c (id := {part_index}) (column := {}) (row := row) (rotation := {offset}))",
                     symbolic_variable.index
                 ),
-                Entry::Permutation { offset: _ } =>
-                    unreachable!("permutation columns no longer exist"),
                 Entry::Public =>
                     format!("(Circuit.public c (index := {}))", symbolic_variable.index),
                 Entry::Challenge =>
                     format!("(Circuit.challenge c (index := {}))", symbolic_variable.index),
-                Entry::Exposed =>
-                    format!("(Circuit.exposed c (index := {}))", symbolic_variable.index),
             },
         ),
         SymbolicExpression::IsFirstRow => format!("(Circuit.isFirstRow c row)"),

@@ -297,7 +297,7 @@ impl<SC: StarkProtocolConfig> AirKeygenBuilder<SC> {
             common_main: self.air.common_main_width(),
             after_challenge: vec![],
         };
-        get_symbolic_builder(self.air.as_ref(), &width, &[], &[])
+        get_symbolic_builder(self.air.as_ref(), &width)
     }
 }
 
@@ -373,7 +373,7 @@ pub(crate) fn find_unused_vars<F: Field>(
                 main_present[part_index][var.index][offset] = true;
             }
             Entry::Public => {}
-            Entry::Challenge | Entry::Exposed | Entry::Permutation { .. } => unreachable!(),
+            Entry::Challenge => unreachable!(),
         }
     }
 

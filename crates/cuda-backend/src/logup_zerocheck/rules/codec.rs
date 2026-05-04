@@ -19,10 +19,8 @@ pub trait Codec {
 
 const PREPROCESSED: u64 = 0;
 const MAIN: u64 = 1;
-const PERMUTATION: u64 = 2;
-const PUBLIC: u64 = 3;
-const CHALLENGE: u64 = 4;
-const EXPOSED: u64 = 5;
+const PUBLIC: u64 = 2;
+const CHALLENGE: u64 = 3;
 
 // Entry is encoded in 16-bit little-endian
 impl Codec for Entry {
@@ -32,10 +30,8 @@ impl Codec for Entry {
         let (src, part_index, offset) = match self {
             Entry::Preprocessed { offset } => (PREPROCESSED, 0, *offset),
             Entry::Main { part_index, offset } => (MAIN, *part_index, *offset),
-            Entry::Permutation { offset } => (PERMUTATION, 0, *offset),
             Entry::Public => (PUBLIC, 0, 0),
             Entry::Challenge => (CHALLENGE, 0, 0),
-            Entry::Exposed => (EXPOSED, 0, 0),
         };
         // 4-bit src | 8-bit part_index | 4-bit offset
         assert!(src < 16);
@@ -52,10 +48,8 @@ impl Codec for Entry {
         match src {
             PREPROCESSED => Entry::Preprocessed { offset },
             MAIN => Entry::Main { part_index, offset },
-            PERMUTATION => Entry::Permutation { offset },
             PUBLIC => Entry::Public,
             CHALLENGE => Entry::Challenge,
-            EXPOSED => Entry::Exposed,
             _ => panic!(
                 "Invalid Entry: src={} part_index={} offset={}",
                 src, part_index, offset
@@ -89,8 +83,8 @@ impl<F: Field> Codec for SymbolicVariable<F> {
     }
 }
 
-// 0..=5 is reserved for Source::Var
-const SOURCE_INTERMEDIATE: u64 = EXPOSED + 1;
+// 0..=CHALLENGE is reserved for Source::Var
+const SOURCE_INTERMEDIATE: u64 = CHALLENGE + 1;
 const SOURCE_CONSTANT: u64 = SOURCE_INTERMEDIATE + 1;
 const SOURCE_IS_FIRST: u64 = SOURCE_CONSTANT + 1;
 const SOURCE_IS_LAST: u64 = SOURCE_IS_FIRST + 1;
@@ -138,7 +132,7 @@ impl<F: Field + PrimeField32> Codec for Source<F> {
                 const CONSTANT_SHIFT: u64 = 16;
                 Source::Constant(F::from_u32((encoded >> CONSTANT_SHIFT) as u32))
             }
-            PREPROCESSED..=EXPOSED => Source::Var(SymbolicVariable::decode(encoded)),
+            PREPROCESSED..=CHALLENGE => Source::Var(SymbolicVariable::decode(encoded)),
             SOURCE_INTERMEDIATE => {
                 const INTERMEDIATE_SHIFT: u64 = 4;
                 const INTERMEDIATE_MASK: u64 = 0xf_ffff; // 20-bit index
