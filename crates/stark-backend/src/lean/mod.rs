@@ -45,7 +45,8 @@ pub use openvm_codec_derive::LeanColumns;
 pub use render::{
     collect_columns_used, contains_public_value, contains_selector, direct_use_counts,
     indent_block, precheck_supported, render_expression_body, render_trace_body,
-    symbolic_global_use_counts, ColumnsUsed, LeanRenderContext, LeanRenderOptions,
+    symbolic_global_helper_nodes, symbolic_global_use_counts, ColumnsUsed, LeanRenderContext,
+    LeanRenderOptions,
 };
 
 /// A bus referenced by interactions in an AIR.
@@ -183,9 +184,8 @@ pub fn render_air<F: Field>(
     if let Err(reason) = precheck_supported(&symbolic) {
         return Err(io::Error::new(io::ErrorKind::InvalidData, reason));
     }
-    let global = symbolic_global_use_counts(&symbolic);
     let mut ctx = LeanRenderContext::new(options.render.clone(), options.characteristic);
-    ctx.global_use_counts = global;
+    ctx.global_helper_nodes = symbolic_global_helper_nodes(&symbolic, &options.render);
     ctx.partition_offsets = options.partition_offsets.clone();
     ctx.public_value_names = options.public_value_names.clone();
 
