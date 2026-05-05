@@ -6,6 +6,10 @@
 struct FracExt {
     FpExt p;
     FpExt q;
+
+    __device__ __forceinline__ static FracExt zero() {
+        return {FpExt(Fp::zero()), FpExt(Fp::zero())};
+    }
 };
 
 __device__ __forceinline__ void frac_add_inplace(FracExt& lhs, FracExt const& rhs) {
