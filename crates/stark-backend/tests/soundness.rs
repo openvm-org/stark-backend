@@ -4,7 +4,8 @@
 
 use openvm_stark_backend::{soundness::*, SystemParams};
 use openvm_stark_sdk::config::{
-    app_params_with_128_bits_security, internal_params_with_128_bits_security as internal_params,
+    app_params_with_128_bits_security, hook_params_with_128_bits_security as hook_params,
+    internal_params_with_128_bits_security as internal_params,
     leaf_params_with_128_bits_security as leaf_params,
     root_params_with_128_bits_security as root_params, MAX_APP_LOG_STACKED_HEIGHT,
 };
@@ -230,7 +231,7 @@ fn test_internal_aggregation_security() {
 #[test]
 fn test_root_aggregation_security() {
     let params = root_params();
-    let max_log_height = 21;
+    let max_log_height = 20;
     let n_logup = n_logup_bound(
         params.l_skip,
         RECURSION_NUM_AIRS,
@@ -255,6 +256,33 @@ fn test_root_aggregation_security() {
 }
 
 #[test]
+fn test_hook_aggregation_security() {
+    let params = hook_params();
+    let max_log_height = 20;
+    let n_logup = n_logup_bound(
+        params.l_skip,
+        RECURSION_NUM_AIRS,
+        RECURSION_MAX_INTERACTIONS_PER_AIR,
+        max_log_height,
+        params.logup.max_interaction_count as usize,
+    );
+    let soundness = check_soundness(
+        "Deferral Hook Aggregation",
+        &params,
+        RECURSION_MAX_CONSTRAINTS,
+        RECURSION_NUM_AIRS,
+        max_log_height,
+        RECURSION_NUM_COLUMNS,
+        n_logup,
+    );
+    assert!(
+        soundness.total_bits >= TARGET_SECURITY_BITS as f64,
+        "Deferral Hook: got {:.1} bits",
+        soundness.total_bits
+    );
+}
+
+#[test]
 fn test_all_production_configs() {
     println!("\n========== ALL PRODUCTION CONFIGS ==========");
 
@@ -262,6 +290,7 @@ fn test_all_production_configs() {
     let leaf = leaf_params();
     let internal = internal_params();
     let root = root_params();
+    let hook = hook_params();
 
     // (name, params, max_constraints, num_airs, max_log_height, num_columns,
     // max_interactions_per_air)
@@ -296,6 +325,15 @@ fn test_all_production_configs() {
         (
             "Root",
             &root,
+            RECURSION_MAX_CONSTRAINTS,
+            RECURSION_NUM_AIRS,
+            20,
+            RECURSION_NUM_COLUMNS,
+            RECURSION_MAX_INTERACTIONS_PER_AIR,
+        ),
+        (
+            "Deferral Hook",
+            &hook,
             RECURSION_MAX_CONSTRAINTS,
             RECURSION_NUM_AIRS,
             20,
