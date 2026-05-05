@@ -1752,12 +1752,12 @@ T bit_rev(T i, unsigned int nbits)
 //   [2,3]  : layer-0 results preserved (tree level 1 right half, for revert of layer 1)
 //   [4..7] : original+alpha preserved (leaves, for revert of layer 0)
 //
-// __launch_bounds__(256): not a correctness constraint. Sync is per 8-lane Z-tile
-// using subgroup masks because branch predicates are uniform per tile, not per whole
-// warp. bsize=256 was chosen after benchmarking: 2x faster than bsize=32 in isolation
-// (1525 vs 754 GB/s at lg=24 on RTX 5090). It requires 64KB dynamic shmem per block,
-// so cudaFuncSetAttribute is used in the launcher, paid once on the first call.
-__launch_bounds__(256) __global__
+// Sync is per 8-lane Z-tile using subgroup masks because branch predicates are
+// uniform per tile, not per whole warp. The launcher uses bsize=256, chosen after
+// benchmarking: 2x faster than bsize=32 in isolation (1525 vs 754 GB/s at lg=24
+// on RTX 5090). It requires 64KB dynamic shmem per block, so cudaFuncSetAttribute
+// is used in the launcher, paid once on the first call.
+__global__
 void bit_rev_frac_build_k2_kernel(
     FracExt* inout, uint32_t real_len, uint32_t lg_domain_size, FpExt alpha)
 {
