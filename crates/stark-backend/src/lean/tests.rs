@@ -156,6 +156,115 @@ fn constraints_hoist_subtree_shared_across_constraints() {
 }
 
 #[test]
+fn local_only_reuse_stays_local_let() {
+    let a = Arc::new(main_var(0, 0, 0));
+    let one = Arc::new(SymbolicExpression::Constant(BabyBear::new(1)));
+    let a_minus_one = Arc::new(SymbolicExpression::Sub {
+        x: a.clone(),
+        y: one,
+        degree_multiple: 1,
+    });
+    let shared = Arc::new(SymbolicExpression::Mul {
+        x: a,
+        y: a_minus_one,
+        degree_multiple: 2,
+    });
+    let c0 = SymbolicExpression::Add {
+        x: shared.clone(),
+        y: shared,
+        degree_multiple: 3,
+    };
+    let dag = SymbolicConstraintsDag::from(SymbolicConstraints::<BabyBear> {
+        constraints: vec![c0],
+        interactions: vec![],
+    });
+
+    let names = vec!["a".to_string()];
+    let opts = options_for("Recursion.Test.TinyAir");
+    let rendered = render_air(&dag, &names, &[], &opts).unwrap();
+
+    assert!(rendered.helper_defs.is_empty());
+    assert!(rendered.constraint_bodies[0].contains("let t0 :="));
+    assert!(rendered.constraint_bodies[0].contains("(t0 + t0)"));
+}
+
+#[test]
+fn helper_dependencies_are_emitted_before_parent_helpers() {
+    // common is used by both parent helpers. In the first constraint it
+    // appears twice locally, but it still needs to become an `inter_K`
+    // before either parent helper is emitted, otherwise both parents
+    // capture it as duplicate local lets and the later helper is unused.
+    let a = Arc::new(main_var(0, 0, 0));
+    let b = Arc::new(main_var(0, 1, 0));
+    let c = Arc::new(main_var(0, 2, 0));
+    let d = Arc::new(main_var(0, 3, 0));
+    let one = Arc::new(SymbolicExpression::Constant(BabyBear::new(1)));
+    let a_minus_one = Arc::new(SymbolicExpression::Sub {
+        x: a.clone(),
+        y: one,
+        degree_multiple: 1,
+    });
+    let common = Arc::new(SymbolicExpression::Mul {
+        x: a,
+        y: a_minus_one,
+        degree_multiple: 2,
+    });
+    let parent_0 = Arc::new(SymbolicExpression::Add {
+        x: common.clone(),
+        y: b,
+        degree_multiple: 3,
+    });
+    let parent_1 = Arc::new(SymbolicExpression::Add {
+        x: common,
+        y: c,
+        degree_multiple: 3,
+    });
+    let c0 = SymbolicExpression::Add {
+        x: parent_0.clone(),
+        y: parent_1.clone(),
+        degree_multiple: 4,
+    };
+    let c1 = SymbolicExpression::Mul {
+        x: parent_0,
+        y: d.clone(),
+        degree_multiple: 4,
+    };
+    let c2 = SymbolicExpression::Mul {
+        x: parent_1,
+        y: d,
+        degree_multiple: 4,
+    };
+    let dag = SymbolicConstraintsDag::from(SymbolicConstraints::<BabyBear> {
+        constraints: vec![c0, c1, c2],
+        interactions: vec![],
+    });
+
+    let names = vec![
+        "a".to_string(),
+        "b".to_string(),
+        "c".to_string(),
+        "d".to_string(),
+    ];
+    let opts = options_for("Recursion.Test.TinyAir");
+    let rendered = render_air(&dag, &names, &[], &opts).unwrap();
+    let helpers = rendered.helper_defs.join("\n");
+    let parent_0_def =
+        "def inter_1 : Expr F layout := fun va =>\n  (inter_0 va + va (.cell .local bRef))";
+    let parent_1_def =
+        "def inter_2 : Expr F layout := fun va =>\n  (inter_0 va + va (.cell .local cRef))";
+
+    assert!(helpers.contains("def inter_0 : Expr F layout := fun va =>"));
+    assert!(helpers.contains("(va (.cell .local aRef) * (va (.cell .local aRef) - 1))"));
+    assert!(helpers.contains(parent_0_def));
+    assert!(helpers.contains(parent_1_def));
+    assert_eq!(helpers.matches("inter_0 va").count(), 2);
+    assert!(
+        !helpers.contains("let t0 :="),
+        "shared helper dependency should not be captured as a local let:\n{helpers}"
+    );
+}
+
+#[test]
 fn interactions_group_by_bus_name() {
     // Two interactions on bus 60 (stackingTranscriptBus), one on bus 0.
     let m = Arc::new(SymbolicExpression::IsFirstRow);

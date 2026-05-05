@@ -8,11 +8,11 @@
 //!   directly. Default for short / single-use subtrees.
 //! - **Local `let tN`.** Pushed onto the constraint's binding list and
 //!   referenced as `tN` from the parent. Used when a subtree is reused
-//!   ≥`SHARE_THRESHOLD` times within one constraint and is large enough
-//!   to be worth a name.
+//!   ≥`SHARE_THRESHOLD` times within one constraint, is large enough to
+//!   be worth a name, and does not qualify for an AIR-wide helper.
 //! - **Global `inter_K`.** Hoisted to a top-level `def inter_K : Expr F
-//!   layout := fun va => …`. Used when a subtree is shared across
-//!   constraints/interactions.
+//!   layout := fun va => …`. A pre-pass chooses these nodes before any
+//!   expression body is rendered.
 //!
 //! The DAG walk is post-order via an explicit stack; pointer identity
 //! (`*const SymbolicExpression<F>`) keys the dedup, helper-name, and
@@ -59,7 +59,7 @@ impl Default for LeanRenderOptions {
 /// reset per item via [`LeanRenderContext::begin_item`].
 pub struct LeanRenderContext<F> {
     pub options: LeanRenderOptions,
-    pub global_use_counts: HashMap<*const SymbolicExpression<F>, usize>,
+    pub global_helper_nodes: HashSet<*const SymbolicExpression<F>>,
     pub local_use_counts: HashMap<*const SymbolicExpression<F>, usize>,
     pub helper_names: HashMap<*const SymbolicExpression<F>, String>,
     pub emitted_helpers: HashSet<*const SymbolicExpression<F>>,
@@ -84,7 +84,7 @@ impl<F> LeanRenderContext<F> {
     pub fn new(options: LeanRenderOptions, characteristic: Option<u32>) -> Self {
         Self {
             options,
-            global_use_counts: HashMap::new(),
+            global_helper_nodes: HashSet::new(),
             local_use_counts: HashMap::new(),
             helper_names: HashMap::new(),
             emitted_helpers: HashSet::new(),
@@ -269,11 +269,13 @@ fn decide_and_emit<F: Field>(
     if is_root || r.op_count < ctx.options.op_threshold {
         return r;
     }
-    let global = ctx.global_use_counts.get(&ptr).copied().unwrap_or(0);
     let local = ctx.local_use_counts.get(&ptr).copied().unwrap_or(0);
 
-    // Cross-constraint sharing → hoist to top-level `inter_K`.
-    if global >= ctx.options.share_threshold && global > local {
+    // The global decision is made before rendering starts. That keeps
+    // helper dependencies consistent: once a child is chosen for an
+    // AIR-wide helper, parent helpers will reference it even if the
+    // child's first use site also has enough local sharing for a `let`.
+    if ctx.global_helper_nodes.contains(&ptr) {
         let helper_name = ctx
             .helper_names
             .entry(ptr)
@@ -422,6 +424,119 @@ pub fn symbolic_global_use_counts<F: Field>(
             iter::once(&i.count).chain(i.message.iter())
         }),
     ))
+}
+
+/// Choose every subtree that should be rendered as a top-level `inter_K`.
+/// This is a pre-pass so local rendering cannot first capture a globally
+/// shared child inside a parent helper.
+pub fn symbolic_global_helper_nodes<F: Field>(
+    symbolic: &SymbolicConstraints<F>,
+    options: &LeanRenderOptions,
+) -> HashSet<*const SymbolicExpression<F>> {
+    let roots = symbolic
+        .constraints
+        .iter()
+        .chain(symbolic.interactions.iter().flat_map(|i: &Interaction<_>| {
+            iter::once(&i.count).chain(i.message.iter())
+        }))
+        .collect_vec();
+    let global_counts = direct_use_counts(roots.iter().copied());
+    let op_counts = expression_op_counts(roots.iter().copied());
+    let mut helper_nodes = HashSet::new();
+
+    for constraint in &symbolic.constraints {
+        collect_global_helpers_for_item(
+            std::iter::once(constraint),
+            &global_counts,
+            &op_counts,
+            options,
+            &mut helper_nodes,
+        );
+    }
+    for interaction in &symbolic.interactions {
+        collect_global_helpers_for_item(
+            std::iter::once(&interaction.count).chain(interaction.message.iter()),
+            &global_counts,
+            &op_counts,
+            options,
+            &mut helper_nodes,
+        );
+    }
+
+    helper_nodes
+}
+
+fn collect_global_helpers_for_item<'a, F: 'a, I>(
+    exprs: I,
+    global_counts: &HashMap<*const SymbolicExpression<F>, usize>,
+    op_counts: &HashMap<*const SymbolicExpression<F>, usize>,
+    options: &LeanRenderOptions,
+    helper_nodes: &mut HashSet<*const SymbolicExpression<F>>,
+) where
+    I: IntoIterator<Item = &'a SymbolicExpression<F>>,
+{
+    for (ptr, local) in direct_use_counts(exprs) {
+        let global = global_counts.get(&ptr).copied().unwrap_or(0);
+        let op_count = op_counts.get(&ptr).copied().unwrap_or(0);
+        if op_count >= options.op_threshold
+            && global >= options.share_threshold
+            && global > local
+        {
+            helper_nodes.insert(ptr);
+        }
+    }
+}
+
+fn expression_op_counts<'a, F: 'a, I>(
+    exprs: I,
+) -> HashMap<*const SymbolicExpression<F>, usize>
+where
+    I: IntoIterator<Item = &'a SymbolicExpression<F>>,
+{
+    let mut counts = HashMap::new();
+    let mut scheduled = HashSet::new();
+    let mut stack: Vec<(*const SymbolicExpression<F>, &SymbolicExpression<F>, bool)> = exprs
+        .into_iter()
+        .map(|expr| (expr as *const _, expr, false))
+        .collect();
+
+    while let Some((ptr, expr, visited)) = stack.pop() {
+        if counts.contains_key(&ptr) {
+            continue;
+        }
+        if visited {
+            let count = match expr {
+                SymbolicExpression::Add { x, y, .. }
+                | SymbolicExpression::Sub { x, y, .. }
+                | SymbolicExpression::Mul { x, y, .. } => {
+                    counts[&Arc::as_ptr(x)] + counts[&Arc::as_ptr(y)] + 1
+                }
+                SymbolicExpression::Neg { x, .. } => counts[&Arc::as_ptr(x)] + 1,
+                _ => 0,
+            };
+            counts.insert(ptr, count);
+            continue;
+        }
+
+        if !scheduled.insert(ptr) {
+            continue;
+        }
+        stack.push((ptr, expr, true));
+        match expr {
+            SymbolicExpression::Add { x, y, .. }
+            | SymbolicExpression::Sub { x, y, .. }
+            | SymbolicExpression::Mul { x, y, .. } => {
+                stack.push((Arc::as_ptr(y), &**y, false));
+                stack.push((Arc::as_ptr(x), &**x, false));
+            }
+            SymbolicExpression::Neg { x, .. } => {
+                stack.push((Arc::as_ptr(x), &**x, false));
+            }
+            _ => {}
+        }
+    }
+
+    counts
 }
 
 /// Render an expression in *trace form*: leaves print as named
