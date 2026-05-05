@@ -28,6 +28,7 @@ pub const DEFAULT_APP_LOG_BLOWUP: usize = 1;
 pub const DEFAULT_LEAF_LOG_BLOWUP: usize = 2;
 pub const DEFAULT_INTERNAL_LOG_BLOWUP: usize = 3;
 pub const DEFAULT_ROOT_LOG_BLOWUP: usize = 4;
+pub const DEFAULT_HOOK_LOG_BLOWUP: usize = 2;
 
 pub const MAX_APP_LOG_STACKED_HEIGHT: usize = 24;
 
@@ -130,7 +131,7 @@ pub fn internal_params_with_128_bits_security() -> SystemParams {
 /// - **Num AIRs**: ≤ 50
 /// - **Max interactions per AIR**: ≤ 100
 /// - **Num trace columns** (unstacked, total across all AIRs): ≤ 2,000
-/// - **`w_stack`** = 19, bounding total stacked cells to `w_stack × 2^(n_stack + l_skip)`
+/// - **`w_stack`** = 24, bounding total stacked cells to `w_stack × 2^(n_stack + l_skip)`
 ///
 /// Config: `l_skip=2, n_stack=18, log_blowup=4`.
 //
@@ -141,10 +142,39 @@ pub fn root_params_with_128_bits_security() -> SystemParams {
         DEFAULT_ROOT_LOG_BLOWUP,
         2,  // l_skip
         18, // n_stack
-        19, // w_stack
+        24, // w_stack
         WHIR_MAX_LOG_FINAL_POLY_LEN,
         12, // folding pow
-        10, // mu pow
+        11, // mu pow
+        WhirProximityStrategy::ListDecoding { m: 1 },
+        SECURITY_BITS_TARGET,
+        log_up_security_params_baby_bear_128_bits(),
+    )
+}
+
+/// Returns `SystemParams` targeting 128 bits of proven RBR security for deferral hook circuits.
+///
+/// # Assumptions for 128-bit security
+/// - **Max trace height**: ≤ 2^20
+/// - **Max constraints per AIR**: ≤ 1,000
+/// - **Num AIRs**: ≤ 50
+/// - **Max interactions per AIR**: ≤ 100
+/// - **Num trace columns** (unstacked, total across all AIRs): ≤ 2,000
+/// - **`w_stack`** = 80, bounding total stacked cells to `w_stack × 2^(n_stack + l_skip)`
+///
+/// Config: `l_skip=2, n_stack=18, log_blowup=2`.
+//
+// See `test_all_production_configs` in `crates/stark-backend/tests/soundness.rs` for the
+// full soundness analysis.
+pub fn hook_params_with_128_bits_security() -> SystemParams {
+    SystemParams::new(
+        DEFAULT_HOOK_LOG_BLOWUP,
+        2,  // l_skip
+        18, // n_stack
+        80, // w_stack
+        WHIR_MAX_LOG_FINAL_POLY_LEN,
+        12, // folding pow
+        8,  // mu pow
         WhirProximityStrategy::ListDecoding { m: 1 },
         SECURITY_BITS_TARGET,
         log_up_security_params_baby_bear_128_bits(),
