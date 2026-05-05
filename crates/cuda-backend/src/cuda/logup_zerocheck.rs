@@ -762,7 +762,10 @@ pub unsafe fn fold_ef_frac_columns(
     alpha: EF,
     stream: cudaStream_t,
 ) -> Result<(), CudaError> {
-    debug_assert!(src.len() >= size || size == logical_len || src.len() >= real_len);
+    debug_assert!(
+        src.len() >= real_len,
+        "compact buffer must hold at least real_len entries"
+    );
     debug_assert!(real_len <= logical_len);
     debug_assert!(dst.len() >= size / 2);
     CudaError::from_result(_frac_fold_fpext_columns(
@@ -787,7 +790,10 @@ pub unsafe fn fold_ef_frac_columns_inplace(
     alpha: EF,
     stream: cudaStream_t,
 ) -> Result<(), CudaError> {
-    debug_assert!(buffer.len() >= size || size == logical_len || buffer.len() >= real_len);
+    debug_assert!(
+        buffer.len() >= real_len,
+        "compact buffer must hold at least real_len entries"
+    );
     debug_assert!(real_len <= logical_len);
     debug_assert_eq!(
         real_len, logical_len,
