@@ -1744,20 +1744,19 @@ T bit_rev(T i, unsigned int nbits)
 //   - Extra `alpha` parameter: adds alpha to every denominator after bit-reversing
 //   - Two GKR tree layers (K=2) are computed inside shmem before writing to global mem,
 //     eliminating two separate kernel passes
-//   - __syncwarp() is used unconditionally (original conditionally uses __syncthreads()
-//     when Z_COUNT > WARP_SIZE, which is never true for Z_COUNT=8)
+//   - Masked __syncwarp(subgroup_mask) is used for each 8-lane Z-tile (matching
+//     the original Z_COUNT <= WARP_SIZE path)
 //
 // Output layout for each Z-tile written at base_rev (i*step + base_rev, i=0..7):
 //   [0,1]  : layer-1 results  (tree level 2)
 //   [2,3]  : layer-0 results preserved (tree level 1 right half, for revert of layer 1)
 //   [4..7] : original+alpha preserved (leaves, for revert of layer 0)
 //
-// __launch_bounds__(256): not a correctness constraint — __syncwarp() is safe for any
-// multiple-of-32 bsize because each gid group is Z_COUNT=8 threads (always within one
-// warp) and different warps operate on independent shmem tiles. bsize=256 was chosen after
-// benchmarking: 2× faster than bsize=32 in isolation (1525 vs 754 GB/s at lg=24 on RTX
-// 5090). It requires 64KB dynamic shmem per block, so cudaFuncSetAttribute is used in the
-// launcher — but only once (static local), paid on the first call and never again.
+// __launch_bounds__(256): not a correctness constraint. Sync is per 8-lane Z-tile
+// using subgroup masks because branch predicates are uniform per tile, not per whole
+// warp. bsize=256 was chosen after benchmarking: 2x faster than bsize=32 in isolation
+// (1525 vs 754 GB/s at lg=24 on RTX 5090). It requires 64KB dynamic shmem per block,
+// so cudaFuncSetAttribute is used in the launcher, paid once on the first call.
 __launch_bounds__(256) __global__
 void bit_rev_frac_build_k2_kernel(
     FracExt* inout, uint32_t real_len, uint32_t lg_domain_size, FpExt alpha)
@@ -1772,6 +1771,9 @@ void bit_rev_frac_build_k2_kernel(
     uint32_t gid = threadIdx.x / Z_COUNT;
     uint32_t idx = threadIdx.x % Z_COUNT;
     uint32_t rev = bit_rev(idx, LG_Z_COUNT);
+    uint32_t lane = threadIdx.x & (WARP_SIZE - 1);
+    uint32_t subgroup_base = lane - idx;
+    unsigned subgroup_mask = ((1u << Z_COUNT) - 1u) << subgroup_base;
 
     index_t domain_size = (index_t)1 << lg_domain_size;
     index_t step = (index_t)1 << (lg_domain_size - LG_Z_COUNT);
@@ -1803,7 +1805,7 @@ void bit_rev_frac_build_k2_kernel(
             }
         }
 
-        __syncwarp();
+        __syncwarp(subgroup_mask);
 
         // Apply alpha + tree layers 0 and 1 to transposed tile, then write to base_rev
         {
@@ -1841,13 +1843,13 @@ void bit_rev_frac_build_k2_kernel(
         if (group_idx == group_rev)
             continue;
 
-        __syncwarp();
+        __syncwarp(subgroup_mask);
 
         #pragma unroll
         for (uint32_t i = 0; i < Z_COUNT; i++)
             xchg[gid][i][rev] = regs[i];
 
-        __syncwarp();
+        __syncwarp(subgroup_mask);
 
         // Apply alpha + tree layers 0 and 1 to transposed tile, then write to base_idx
         {
