@@ -83,7 +83,7 @@ use batch_mle_monomial::{
     ZerocheckMonomialBatch, ZerocheckMonomialParYBatch,
 };
 pub use errors::*;
-pub use fractional::{fractional_sumcheck_gpu, make_synthetic_leaves};
+pub use fractional::{fractional_sumcheck_gpu, make_synthetic_leaves, FractionalInputSize};
 use gkr_input::{collect_trace_interactions, log_gkr_input_evals};
 use round0::evaluate_round0_constraints_gpu;
 
@@ -172,7 +172,10 @@ where
     )?;
     let n_global = prover.n_global;
 
-    let total_leaves = 1 << (l_skip + n_logup);
+    let real_len: usize = total_interactions
+        .try_into()
+        .expect("total interactions should fit in usize");
+    let logical_len = 1 << (l_skip + n_logup);
     prover
         .mem
         .emit_metrics_with_label("prover.before_gkr_input_evals");
@@ -185,7 +188,7 @@ where
             l_skip,
             alpha_logup,
             &prover.d_challenges,
-            total_leaves,
+            real_len,
             device_ctx,
         )?
     } else {
@@ -206,8 +209,15 @@ where
     }
     prover.mem.emit_metrics_with_label("prover.gkr_input_evals");
 
-    let (frac_sum_proof, mut xi) =
-        fractional_sumcheck_gpu(transcript, inputs, alpha, true, &mut prover.mem, device_ctx)?;
+    let (frac_sum_proof, mut xi) = fractional_sumcheck_gpu(
+        transcript,
+        inputs,
+        FractionalInputSize::new(real_len, logical_len),
+        alpha,
+        true,
+        &mut prover.mem,
+        device_ctx,
+    )?;
     while xi.len() != l_skip + n_global {
         xi.push(transcript.sample_ext());
     }
