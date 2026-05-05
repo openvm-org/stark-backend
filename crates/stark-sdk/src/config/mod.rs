@@ -130,7 +130,7 @@ pub fn internal_params_with_128_bits_security() -> SystemParams {
 /// - **Max constraints per AIR**: ≤ 1,000
 /// - **Num AIRs**: ≤ 50
 /// - **Max interactions per AIR**: ≤ 100
-/// - **Num trace columns** (unstacked, total across all AIRs): ≤ 2,000
+/// - **Num trace columns** (unstacked, total across all AIRs): ≤ 2,400
 /// - **`w_stack`** = 24, bounding total stacked cells to `w_stack × 2^(n_stack + l_skip)`
 ///
 /// Config: `l_skip=2, n_stack=18, log_blowup=4`.
