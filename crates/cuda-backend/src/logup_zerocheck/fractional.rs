@@ -44,6 +44,8 @@ pub struct FractionalInputSize {
 
 impl FractionalInputSize {
     pub fn new(real_len: usize, logical_len: usize) -> Self {
+        debug_assert!(real_len <= logical_len);
+        debug_assert!(logical_len.is_power_of_two() || real_len == logical_len);
         Self {
             real_len,
             logical_len,
