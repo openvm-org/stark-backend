@@ -28,6 +28,11 @@ struct FpExt {
     /// The non-residue W such that x^5 - W is irreducible
     static constexpr uint32_t W = 2;
 
+    // Montgomery constants for PTX multiplication
+    static constexpr uint32_t MOD  = 0x78000001;
+    static constexpr uint32_t M    = 0x77ffffff;
+    static constexpr uint32_t BETA = 0x1ffffffc;  // (W << 32) % MOD
+
     /// Default constructor - zero element
     __device__ FpExt() : elems{Fp(0), Fp(0), Fp(0), Fp(0), Fp(0)} {}
 
@@ -132,6 +137,169 @@ struct FpExt {
     __device__ FpExt operator*(FpExt rhs) const {
         FpExt ret;
 
+# if defined(__CUDA_ARCH__) && !defined(__clang_analyzer__)
+#  ifdef __GNUC__
+#   define asm __asm__ __volatile__
+#  else
+#   define asm asm volatile
+#  endif
+        // PTX assembly for fused multiply-accumulate with inline Montgomery reduction
+        // Operand mapping: %1=a0, %2=a1, %3=a2, %4=a3, %5=a4
+        //                  %6=b0, %7=b1, %8=b2, %9=b3, %10=b4
+        //                  %11=MOD, %12=M, %13=BETA
+
+        // ret[0] = a0*b0 + BETA * (a1*b4 + a2*b3 + a3*b2 + a4*b1)
+        asm("{ .reg.b32 %lo, %hi, %m; .reg.pred %p;\n\t"
+            "mul.lo.u32    %lo, %2, %10;     mul.hi.u32  %hi, %2, %10;\n\t"   // a1*b4
+            "mad.lo.cc.u32 %lo, %3, %9, %lo; madc.hi.u32 %hi, %3, %9, %hi;\n\t"  // +a2*b3
+            "mad.lo.cc.u32 %lo, %4, %8, %lo; madc.hi.u32 %hi, %4, %8, %hi;\n\t"  // +a3*b2
+            "mad.lo.cc.u32 %lo, %5, %7, %lo; madc.hi.u32 %hi, %5, %7, %hi;\n\t"  // +a4*b1
+            // Double reduction for 4 products (hi can be up to ~1.88*MOD)
+            "setp.ge.u32   %p, %hi, %11;\n\t"
+            "@%p sub.u32   %hi, %hi, %11;\n\t"
+            "setp.ge.u32   %p, %hi, %11;\n\t"
+            "@%p sub.u32   %hi, %hi, %11;\n\t"
+            "mul.lo.u32    %m, %lo, %12;\n\t"
+            "mad.lo.cc.u32 %lo, %m, %11, %lo; madc.hi.u32 %hi, %m, %11, %hi;\n\t"
+            "setp.ge.u32   %p, %hi, %11;\n\t"
+            "@%p sub.u32   %hi, %hi, %11;\n\t"
+            "mul.lo.u32    %lo, %hi, %13;    mul.hi.u32  %hi, %hi, %13;\n\t"  // *BETA
+            "mad.lo.cc.u32 %lo, %1, %6, %lo; madc.hi.u32 %hi, %1, %6, %hi;\n\t"  // +a0*b0
+            "setp.ge.u32   %p, %hi, %11;\n\t"
+            "@%p sub.u32   %hi, %hi, %11;\n\t"
+            "mul.lo.u32    %m, %lo, %12;\n\t"
+            "mad.lo.cc.u32 %lo, %m, %11, %lo; madc.hi.u32 %0, %m, %11, %hi;\n\t"
+            "setp.ge.u32   %p, %0, %11;\n\t"
+            "@%p sub.u32   %0, %0, %11;\n\t"
+            "}" : "=r"(ret.u[0])
+                : "r"(u[0]), "r"(u[1]), "r"(u[2]), "r"(u[3]), "r"(u[4]),
+                  "r"(rhs.u[0]), "r"(rhs.u[1]), "r"(rhs.u[2]), "r"(rhs.u[3]), "r"(rhs.u[4]),
+                  "r"(MOD), "r"(M), "r"(BETA));
+
+        // ret[1] = a0*b1 + a1*b0 + BETA * (a2*b4 + a3*b3 + a4*b2)
+        // After BETA part + 2 products, hi can be up to ~1.94*MOD, need double reduction
+        asm("{ .reg.b32 %lo, %hi, %m; .reg.pred %p;\n\t"
+            "mul.lo.u32    %lo, %3, %10;     mul.hi.u32  %hi, %3, %10;\n\t"   // a2*b4
+            "mad.lo.cc.u32 %lo, %4, %9, %lo; madc.hi.u32 %hi, %4, %9, %hi;\n\t"  // +a3*b3
+            "mad.lo.cc.u32 %lo, %5, %8, %lo; madc.hi.u32 %hi, %5, %8, %hi;\n\t"  // +a4*b2
+            // Double reduction for 3 products (hi up to ~1.41*MOD)
+            "setp.ge.u32   %p, %hi, %11;\n\t"
+            "@%p sub.u32   %hi, %hi, %11;\n\t"
+            "setp.ge.u32   %p, %hi, %11;\n\t"
+            "@%p sub.u32   %hi, %hi, %11;\n\t"
+            "mul.lo.u32    %m, %lo, %12;\n\t"
+            "mad.lo.cc.u32 %lo, %m, %11, %lo; madc.hi.u32 %hi, %m, %11, %hi;\n\t"
+            "setp.ge.u32   %p, %hi, %11;\n\t"
+            "@%p sub.u32   %hi, %hi, %11;\n\t"
+            "mul.lo.u32    %lo, %hi, %13;    mul.hi.u32  %hi, %hi, %13;\n\t"  // *BETA
+            "mad.lo.cc.u32 %lo, %1, %7, %lo; madc.hi.u32 %hi, %1, %7, %hi;\n\t"  // +a0*b1
+            "mad.lo.cc.u32 %lo, %2, %6, %lo; madc.hi.u32 %hi, %2, %6, %hi;\n\t"  // +a1*b0
+            // Double reduction for hi up to ~1.94*MOD
+            "setp.ge.u32   %p, %hi, %11;\n\t"
+            "@%p sub.u32   %hi, %hi, %11;\n\t"
+            "setp.ge.u32   %p, %hi, %11;\n\t"
+            "@%p sub.u32   %hi, %hi, %11;\n\t"
+            "mul.lo.u32    %m, %lo, %12;\n\t"
+            "mad.lo.cc.u32 %lo, %m, %11, %lo; madc.hi.u32 %0, %m, %11, %hi;\n\t"
+            "setp.ge.u32   %p, %0, %11;\n\t"
+            "@%p sub.u32   %0, %0, %11;\n\t"
+            "setp.ge.u32   %p, %0, %11;\n\t"
+            "@%p sub.u32   %0, %0, %11;\n\t"
+            "}" : "=r"(ret.u[1])
+                : "r"(u[0]), "r"(u[1]), "r"(u[2]), "r"(u[3]), "r"(u[4]),
+                  "r"(rhs.u[0]), "r"(rhs.u[1]), "r"(rhs.u[2]), "r"(rhs.u[3]), "r"(rhs.u[4]),
+                  "r"(MOD), "r"(M), "r"(BETA));
+
+        // ret[2] = a0*b2 + a1*b1 + a2*b0 + BETA * (a3*b4 + a4*b3)
+        // After BETA part + 3 products, hi can be up to ~2.41*MOD, need triple reduction
+        asm("{ .reg.b32 %lo, %hi, %m; .reg.pred %p;\n\t"
+            "mul.lo.u32    %lo, %4, %10;     mul.hi.u32  %hi, %4, %10;\n\t"   // a3*b4
+            "mad.lo.cc.u32 %lo, %5, %9, %lo; madc.hi.u32 %hi, %5, %9, %hi;\n\t"  // +a4*b3
+            "mul.lo.u32    %m, %lo, %12;\n\t"
+            "mad.lo.cc.u32 %lo, %m, %11, %lo; madc.hi.u32 %hi, %m, %11, %hi;\n\t"
+            "mul.lo.u32    %lo, %hi, %13;    mul.hi.u32  %hi, %hi, %13;\n\t"  // *BETA
+            "mad.lo.cc.u32 %lo, %1, %8, %lo; madc.hi.u32 %hi, %1, %8, %hi;\n\t"  // +a0*b2
+            "mad.lo.cc.u32 %lo, %2, %7, %lo; madc.hi.u32 %hi, %2, %7, %hi;\n\t"  // +a1*b1
+            "mad.lo.cc.u32 %lo, %3, %6, %lo; madc.hi.u32 %hi, %3, %6, %hi;\n\t"  // +a2*b0
+            // Triple reduction for hi up to ~2.41*MOD
+            "setp.ge.u32   %p, %hi, %11;\n\t"
+            "@%p sub.u32   %hi, %hi, %11;\n\t"
+            "setp.ge.u32   %p, %hi, %11;\n\t"
+            "@%p sub.u32   %hi, %hi, %11;\n\t"
+            "setp.ge.u32   %p, %hi, %11;\n\t"
+            "@%p sub.u32   %hi, %hi, %11;\n\t"
+            "mul.lo.u32    %m, %lo, %12;\n\t"
+            "mad.lo.cc.u32 %lo, %m, %11, %lo; madc.hi.u32 %0, %m, %11, %hi;\n\t"
+            "setp.ge.u32   %p, %0, %11;\n\t"
+            "@%p sub.u32   %0, %0, %11;\n\t"
+            "setp.ge.u32   %p, %0, %11;\n\t"
+            "@%p sub.u32   %0, %0, %11;\n\t"
+            "}" : "=r"(ret.u[2])
+                : "r"(u[0]), "r"(u[1]), "r"(u[2]), "r"(u[3]), "r"(u[4]),
+                  "r"(rhs.u[0]), "r"(rhs.u[1]), "r"(rhs.u[2]), "r"(rhs.u[3]), "r"(rhs.u[4]),
+                  "r"(MOD), "r"(M), "r"(BETA));
+
+        // ret[3] = a0*b3 + a1*b2 + a2*b1 + a3*b0 + BETA * (a4*b4)
+        // After BETA part + 4 products, hi can be up to ~2.88*MOD, need triple reduction
+        asm("{ .reg.b32 %lo, %hi, %m; .reg.pred %p;\n\t"
+            "mul.lo.u32    %lo, %5, %10;     mul.hi.u32  %hi, %5, %10;\n\t"   // a4*b4
+            "mul.lo.u32    %m, %lo, %12;\n\t"
+            "mad.lo.cc.u32 %lo, %m, %11, %lo; madc.hi.u32 %hi, %m, %11, %hi;\n\t"
+            "mul.lo.u32    %lo, %hi, %13;    mul.hi.u32  %hi, %hi, %13;\n\t"  // *BETA
+            "mad.lo.cc.u32 %lo, %1, %9, %lo; madc.hi.u32 %hi, %1, %9, %hi;\n\t"  // +a0*b3
+            "mad.lo.cc.u32 %lo, %2, %8, %lo; madc.hi.u32 %hi, %2, %8, %hi;\n\t"  // +a1*b2
+            "mad.lo.cc.u32 %lo, %3, %7, %lo; madc.hi.u32 %hi, %3, %7, %hi;\n\t"  // +a2*b1
+            "mad.lo.cc.u32 %lo, %4, %6, %lo; madc.hi.u32 %hi, %4, %6, %hi;\n\t"  // +a3*b0
+            // Triple reduction for hi up to ~2.88*MOD
+            "setp.ge.u32   %p, %hi, %11;\n\t"
+            "@%p sub.u32   %hi, %hi, %11;\n\t"
+            "setp.ge.u32   %p, %hi, %11;\n\t"
+            "@%p sub.u32   %hi, %hi, %11;\n\t"
+            "setp.ge.u32   %p, %hi, %11;\n\t"
+            "@%p sub.u32   %hi, %hi, %11;\n\t"
+            "mul.lo.u32    %m, %lo, %12;\n\t"
+            "mad.lo.cc.u32 %lo, %m, %11, %lo; madc.hi.u32 %0, %m, %11, %hi;\n\t"
+            "setp.ge.u32   %p, %0, %11;\n\t"
+            "@%p sub.u32   %0, %0, %11;\n\t"
+            "setp.ge.u32   %p, %0, %11;\n\t"
+            "@%p sub.u32   %0, %0, %11;\n\t"
+            "}" : "=r"(ret.u[3])
+                : "r"(u[0]), "r"(u[1]), "r"(u[2]), "r"(u[3]), "r"(u[4]),
+                  "r"(rhs.u[0]), "r"(rhs.u[1]), "r"(rhs.u[2]), "r"(rhs.u[3]), "r"(rhs.u[4]),
+                  "r"(MOD), "r"(M), "r"(BETA));
+
+        // ret[4] = a0*b4 + a1*b3 + a2*b2 + a3*b1 + a4*b0 (no BETA factor)
+        // 5 products, hi can be up to ~2.35*MOD, need triple reduction
+        asm("{ .reg.b32 %lo, %hi, %m; .reg.pred %p;\n\t"
+            "mul.lo.u32    %lo, %1, %10;     mul.hi.u32  %hi, %1, %10;\n\t"   // a0*b4
+            "mad.lo.cc.u32 %lo, %2, %9, %lo; madc.hi.u32 %hi, %2, %9, %hi;\n\t"  // +a1*b3
+            "mad.lo.cc.u32 %lo, %3, %8, %lo; madc.hi.u32 %hi, %3, %8, %hi;\n\t"  // +a2*b2
+            "mad.lo.cc.u32 %lo, %4, %7, %lo; madc.hi.u32 %hi, %4, %7, %hi;\n\t"  // +a3*b1
+            // After 4 products, hi < ~1.88*MOD < 2*MOD; reduce to < MOD so the
+            // subsequent madc.hi.u32 cannot overflow 2^64 (5*(p-1)^2 > 2^64).
+            "setp.ge.u32   %p, %hi, %11;\n\t"
+            "@%p sub.u32   %hi, %hi, %11;\n\t"
+            "mad.lo.cc.u32 %lo, %5, %6, %lo; madc.hi.u32 %hi, %5, %6, %hi;\n\t"  // +a4*b0
+            // Triple reduction for hi up to ~2.35*MOD
+            "setp.ge.u32   %p, %hi, %11;\n\t"
+            "@%p sub.u32   %hi, %hi, %11;\n\t"
+            "setp.ge.u32   %p, %hi, %11;\n\t"
+            "@%p sub.u32   %hi, %hi, %11;\n\t"
+            "setp.ge.u32   %p, %hi, %11;\n\t"
+            "@%p sub.u32   %hi, %hi, %11;\n\t"
+            "mul.lo.u32    %m, %lo, %12;\n\t"
+            "mad.lo.cc.u32 %lo, %m, %11, %lo; madc.hi.u32 %0, %m, %11, %hi;\n\t"
+            "setp.ge.u32   %p, %0, %11;\n\t"
+            "@%p sub.u32   %0, %0, %11;\n\t"
+            "setp.ge.u32   %p, %0, %11;\n\t"
+            "@%p sub.u32   %0, %0, %11;\n\t"
+            "}" : "=r"(ret.u[4])
+                : "r"(u[0]), "r"(u[1]), "r"(u[2]), "r"(u[3]), "r"(u[4]),
+                  "r"(rhs.u[0]), "r"(rhs.u[1]), "r"(rhs.u[2]), "r"(rhs.u[3]), "r"(rhs.u[4]),
+                  "r"(MOD), "r"(M), "r"(BETA));
+#  undef asm
+# else
+        // Fallback: schoolbook multiplication
         const Fp a0 = elems[0], a1 = elems[1], a2 = elems[2], a3 = elems[3], a4 = elems[4];
         const Fp b0 = rhs.elems[0], b1 = rhs.elems[1], b2 = rhs.elems[2], b3 = rhs.elems[3], b4 = rhs.elems[4];
 
@@ -152,6 +320,7 @@ struct FpExt {
         ret.elems[3] = c3 + a4b4 + a4b4;
 
         ret.elems[4] = a0 * b4 + a1 * b3 + a2 * b2 + a3 * b1 + a4 * b0;
+# endif
 
         return ret;
     }
