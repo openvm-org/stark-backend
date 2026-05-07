@@ -114,26 +114,34 @@ __global__ void algebraic_batch_matrices_kernel(
 
 // Inplace update.
 // Insert x_i from the back
-__global__ void eq_hypercube_stage_ext_kernel(FpExt *__restrict__ out, FpExt x_i, uint32_t step) {
+__global__ void eq_hypercube_stage_ext_kernel(
+    FpExt *__restrict__ out, FpExt x_i, uint32_t step SHADOW_KERNEL_PARAM
+) {
+    SHADOW_KERNEL_BEGIN("eq_hypercube_stage_ext");
     size_t y = blockIdx.x * blockDim.x + threadIdx.x;
-    if (y >= step)
-        return;
-    FpExt hi = out[y] * x_i;
-    out[y | step] = hi;
-    out[y] -= hi; // out[y] = out[y] * (FpExt(Fp(1)) - x_i), saves a multiplication
+    if (y < step) {
+        FpExt hi = out[y] * x_i;
+        out[y | step] = hi;
+        out[y] -= hi; // out[y] = out[y] * (FpExt(Fp(1)) - x_i), saves a multiplication
+    }
+    SHADOW_KERNEL_END("eq_hypercube_stage_ext");
 }
 
 // Inplace update for Möbius-adjusted equality kernel.
 // K_i(0) = 1 - 2*u_tilde_i, K_i(1) = u_tilde_i
 // Insert u_tilde_i from the back
-__global__ void mobius_eq_hypercube_stage_ext_kernel(FpExt *__restrict__ out, FpExt omega_i, uint32_t step) {
+__global__ void mobius_eq_hypercube_stage_ext_kernel(
+    FpExt *__restrict__ out, FpExt omega_i, uint32_t step SHADOW_KERNEL_PARAM
+) {
+    SHADOW_KERNEL_BEGIN("mobius_eq_hypercube_stage_ext");
     size_t y = blockIdx.x * blockDim.x + threadIdx.x;
-    if (y >= step)
-        return;
-    FpExt prev = out[y];
-    FpExt hi = prev * omega_i;
-    out[y | step] = hi;
-    out[y] = prev - hi - hi; // prev * (1 - 2*omega_i)
+    if (y < step) {
+        FpExt prev = out[y];
+        FpExt hi = prev * omega_i;
+        out[y | step] = hi;
+        out[y] = prev - hi - hi; // prev * (1 - 2*omega_i)
+    }
+    SHADOW_KERNEL_END("mobius_eq_hypercube_stage_ext");
 }
 
 // Same as eq_hypercube_stage_ext_kernel but does not modify in-place
@@ -142,15 +150,17 @@ __global__ void eq_hypercube_nonoverlapping_stage_ext_kernel(
     FpExt *__restrict__ out,
     const FpExt *__restrict__ in,
     FpExt x_i,
-    uint32_t step
+    uint32_t step SHADOW_KERNEL_PARAM
 ) {
+    SHADOW_KERNEL_BEGIN("eq_hypercube_nonoverlapping_stage_ext");
     size_t y = blockIdx.x * blockDim.x + threadIdx.x;
-    if (y >= step)
-        return;
-    FpExt prev = in[y];
-    FpExt hi = prev * x_i;
-    out[y | step] = hi;
-    out[y] = prev - hi; // save a multiplication
+    if (y < step) {
+        FpExt prev = in[y];
+        FpExt hi = prev * x_i;
+        out[y | step] = hi;
+        out[y] = prev - hi; // save a multiplication
+    }
+    SHADOW_KERNEL_END("eq_hypercube_nonoverlapping_stage_ext");
 }
 
 // Insert x_i from the front
@@ -158,15 +168,17 @@ __global__ void eq_hypercube_interleaved_stage_ext_kernel(
     FpExt *__restrict__ out,
     const FpExt *__restrict__ in,
     FpExt x_i,
-    uint32_t step
+    uint32_t step SHADOW_KERNEL_PARAM
 ) {
+    SHADOW_KERNEL_BEGIN("eq_hypercube_interleaved_stage_ext");
     size_t y = blockIdx.x * blockDim.x + threadIdx.x;
-    if (y >= step)
-        return;
-    FpExt prev = in[y];
-    FpExt hi = prev * x_i;
-    out[(y << 1) | 1] = hi;
-    out[y << 1] = prev - hi;
+    if (y < step) {
+        FpExt prev = in[y];
+        FpExt hi = prev * x_i;
+        out[(y << 1) | 1] = hi;
+        out[y << 1] = prev - hi;
+    }
+    SHADOW_KERNEL_END("eq_hypercube_interleaved_stage_ext");
 }
 
 // out is `height x width` column-major matrix of evaluations of eq(x[j], -) on hypercube for j in 0..width
@@ -235,13 +247,13 @@ extern "C" int _algebraic_batch_matrices(
 
 extern "C" int _eq_hypercube_stage_ext(FpExt *out, FpExt x_i, uint32_t step, cudaStream_t stream) {
     auto [grid, block] = kernel_launch_params(step);
-    eq_hypercube_stage_ext_kernel<<<grid, block, 0, stream>>>(out, x_i, step);
+    eq_hypercube_stage_ext_kernel<<<grid, block, 0, stream>>>(out, x_i, step SHADOW_LAUNCH_ARG);
     return CHECK_KERNEL();
 }
 
 extern "C" int _mobius_eq_hypercube_stage_ext(FpExt *out, FpExt omega_i, uint32_t step, cudaStream_t stream) {
     auto [grid, block] = kernel_launch_params(step);
-    mobius_eq_hypercube_stage_ext_kernel<<<grid, block, 0, stream>>>(out, omega_i, step);
+    mobius_eq_hypercube_stage_ext_kernel<<<grid, block, 0, stream>>>(out, omega_i, step SHADOW_LAUNCH_ARG);
     return CHECK_KERNEL();
 }
 
@@ -253,7 +265,7 @@ extern "C" int _eq_hypercube_nonoverlapping_stage_ext(
     cudaStream_t stream
 ) {
     auto [grid, block] = kernel_launch_params(step);
-    eq_hypercube_nonoverlapping_stage_ext_kernel<<<grid, block, 0, stream>>>(out, in, x_i, step);
+    eq_hypercube_nonoverlapping_stage_ext_kernel<<<grid, block, 0, stream>>>(out, in, x_i, step SHADOW_LAUNCH_ARG);
     return CHECK_KERNEL();
 }
 
@@ -265,7 +277,7 @@ extern "C" int _eq_hypercube_interleaved_stage_ext(
     cudaStream_t stream
 ) {
     auto [grid, block] = kernel_launch_params(step);
-    eq_hypercube_interleaved_stage_ext_kernel<<<grid, block, 0, stream>>>(out, in, x_i, step);
+    eq_hypercube_interleaved_stage_ext_kernel<<<grid, block, 0, stream>>>(out, in, x_i, step SHADOW_LAUNCH_ARG);
     return CHECK_KERNEL();
 }
 

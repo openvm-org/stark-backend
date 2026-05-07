@@ -3,6 +3,9 @@
 // "pointer" is never dereferenced in Rust — it is just forwarded to CUDA runtime calls.
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
+#[cfg(feature = "profiler")]
+mod profiler_init;
+
 pub mod base;
 #[cfg(feature = "baby-bear-bn254-poseidon2")]
 pub mod bn254_sponge;

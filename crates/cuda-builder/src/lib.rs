@@ -340,6 +340,23 @@ impl CudaBuilder {
             builder.flag("-Xptxas=-v"); // Verbose PTX compilation
             builder.define("CUDA_DEBUG", "1"); // Define CUDA_DEBUG macro
         }
+
+        // Forward the consumer-crate `profiler` feature to nvcc as
+        // -DSHADOW_CTA_PROFILE=1. Cargo automatically sets
+        // CARGO_FEATURE_PROFILER=1 in the build.rs environment of any crate
+        // whose `profiler` feature is enabled (or whose dependency has it
+        // enabled); the cuda-backend re-exposes this as its own `profiler`
+        // feature, so a `cargo build -p openvm-cuda-backend --features profiler`
+        // (or any downstream that enables it) flips the gate.
+        //
+        // When the env var is unset (the default), the macro is undefined and
+        // the SHADOW_KERNEL_BEGIN/END/PARAM macros in launcher.cuh expand to
+        // nothing; kernel signatures and SASS are unchanged.
+        if env::var("CARGO_FEATURE_PROFILER").is_ok() {
+            builder.define("SHADOW_CTA_PROFILE", "1");
+        }
+        // Always rerun if the feature is toggled on/off. Harmless when unset.
+        println!("cargo:rerun-if-env-changed=CARGO_FEATURE_PROFILER");
     }
 }
 

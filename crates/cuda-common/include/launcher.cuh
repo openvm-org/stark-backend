@@ -6,6 +6,55 @@
 #include <cstdio>
 #endif
 
+// =============================================================================
+// SHADOW CTA profiler hooks.
+//
+// When SHADOW_CTA_PROFILE is defined (set by cuda-builder when the consumer
+// crate enables the `profiler` feature on openvm-cuda-backend), every
+// instrumented kernel takes one extra parameter (a CtaProbeCtx) and records a
+// per-CTA start/end timestamp + %smid. When the macro is undefined, all of
+// these expand to nothing — kernel signatures, launch sites, and SASS are
+// byte-identical to the unprofiled build.
+//
+// Use pattern:
+//
+//   __global__ void my_kernel(int *a, int *b SHADOW_KERNEL_PARAM) {
+//       SHADOW_KERNEL_BEGIN(KID_MY_KERNEL);
+//       // ... body ...
+//       SHADOW_KERNEL_END(KID_MY_KERNEL);
+//   }
+//
+//   my_kernel<<<grid, block, 0, stream>>>(a, b SHADOW_LAUNCH_ARG);
+//
+// `KID_*` constants are defined in the consumer crate's CUDA sources and
+// mirrored on the Rust side via openvm-cuda-profiler::kernel_ids.
+// =============================================================================
+#ifdef SHADOW_CTA_PROFILE
+#include "cta_probe.cuh"
+// Implemented in the openvm-cuda-profiler crate; resolves to a process-global
+// CtaProbeCtx that the profiler's init publishes once. Returns a zeroed ctx
+// (mask == 0) when the profiler is compiled in but the runtime switch is off,
+// which the probe macros treat as a no-op.
+extern "C" CtaProbeCtx shadow_cta_ctx();
+
+// Used in kernel signatures: `__global__ void k(args... SHADOW_KERNEL_PARAM)`.
+#define SHADOW_KERNEL_PARAM , CtaProbeCtx __cta_ctx
+
+// Used at kernel body start/end: `SHADOW_KERNEL_BEGIN("kernel_name")`. The
+// name is hashed at compile time by `cta_kid_fnv1a`; the host-side
+// `register_kernel(name)` records the inverse mapping.
+#define SHADOW_KERNEL_BEGIN(NAME) CTA_PROBE_BEGIN(::cta_kid_fnv1a(NAME), __cta_ctx)
+#define SHADOW_KERNEL_END(NAME) CTA_PROBE_END(::cta_kid_fnv1a(NAME), __cta_ctx)
+
+// Used at the launch site: `kern<<<g,b,0,s>>>(args... SHADOW_LAUNCH_ARG)`.
+#define SHADOW_LAUNCH_ARG , shadow_cta_ctx()
+#else
+#define SHADOW_KERNEL_PARAM
+#define SHADOW_KERNEL_BEGIN(NAME) ((void)0)
+#define SHADOW_KERNEL_END(NAME) ((void)0)
+#define SHADOW_LAUNCH_ARG
+#endif
+
 static const size_t MAX_THREADS = 1024;
 static const size_t WARP_SIZE = 32;
 

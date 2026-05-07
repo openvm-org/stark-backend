@@ -9,6 +9,7 @@ description = "OpenVM CUDA prover backend for the SWIRL proof system"
 openvm-stark-backend.workspace = true
 openvm-stark-sdk = { workspace = true, features = ["nvtx"] }
 openvm-cuda-common.workspace = true
+openvm-cuda-profiler = { workspace = true, optional = true }
 
 itertools.workspace = true
 derive-new.workspace = true
@@ -50,6 +51,11 @@ baby-bear-bn254-poseidon2 = [
 ]
 touchemall = ["openvm-cuda-common/touchemall"]
 test-utils = ["openvm-stark-backend/test-utils"]
+# Hardware-mapped CUDA profiler (per-CTA + CUPTI sidecar). Off by default; with
+# this feature off the new crate is not compiled or linked, no SHADOW_*
+# preprocessor macros are defined, and instrumented kernels expand to their
+# unprofiled SASS.
+profiler = ["dep:openvm-cuda-profiler"]
 
 [[bin]]
 name = "bench"
