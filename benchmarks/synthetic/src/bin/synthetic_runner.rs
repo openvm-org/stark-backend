@@ -19,14 +19,13 @@
 
 use std::{
     collections::HashSet,
-    env,
     io::{BufRead, BufReader},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::Arc,
     time::Instant,
 };
 
-use eyre::eyre;
+use clap::Parser;
 use openvm_benchmark_synthetic::{
     segment_profile::{AirShapeRecord, SegmentProfile},
     synthetic_air::{SyntheticAir, SyntheticShape},
@@ -68,28 +67,31 @@ struct Scorecard<'a> {
     results: Vec<SegmentResult>,
 }
 
-fn parse_args() -> eyre::Result<(PathBuf, f64, u64, usize, Option<PathBuf>)> {
-    let mut profile: Option<PathBuf> = None;
-    let mut sample_frac: f64 = 0.1;
-    let mut seed: u64 = 42;
-    let mut max_log_height: usize = 22;
-    let mut out: Option<PathBuf> = None;
-    let mut args = env::args().skip(1);
-    while let Some(a) = args.next() {
-        match a.as_str() {
-            "--profile" => profile = args.next().map(PathBuf::from),
-            "--sample-frac" => sample_frac = args.next().unwrap().parse()?,
-            "--seed" => seed = args.next().unwrap().parse()?,
-            "--max-log-height" => max_log_height = args.next().unwrap().parse()?,
-            "--out" => out = args.next().map(PathBuf::from),
-            _ => eyre::bail!("unknown arg: {}", a),
-        }
-    }
-    let profile = profile.ok_or_else(|| eyre!("--profile <path> is required"))?;
-    Ok((profile, sample_frac, seed, max_log_height, out))
+#[derive(Parser)]
+#[command(about = "Sampled synthetic benchmark runner (cuda-backend / GPU)")]
+struct Args {
+    /// Path to the profile JSONL.
+    #[arg(long)]
+    profile: PathBuf,
+
+    /// Fraction of segments to sample (0 < frac <= 1).
+    #[arg(long, default_value_t = 0.1)]
+    sample_frac: f64,
+
+    /// RNG seed for the segment sampler.
+    #[arg(long, default_value_t = 42)]
+    seed: u64,
+
+    /// Per-AIR `log_height` clamp. Anything above is clipped.
+    #[arg(long, default_value_t = 22)]
+    max_log_height: usize,
+
+    /// If set, write scorecard JSON here. Otherwise print to stdout.
+    #[arg(long)]
+    out: Option<PathBuf>,
 }
 
-fn read_profile(path: &PathBuf) -> eyre::Result<Vec<SegmentProfile>> {
+fn read_profile(path: &Path) -> eyre::Result<Vec<SegmentProfile>> {
     let f = std::fs::File::open(path)?;
     let mut out = Vec::new();
     for line in BufReader::new(f).lines() {
@@ -135,7 +137,17 @@ fn build_params(max_log_height: usize) -> SystemParams {
 }
 
 fn main() -> eyre::Result<()> {
-    let (profile_path, sample_frac, seed, max_log_height, out_path) = parse_args()?;
+    let Args {
+        profile: profile_path,
+        sample_frac,
+        seed,
+        max_log_height,
+        out: out_path,
+    } = Args::parse();
+    eyre::ensure!(
+        sample_frac.is_finite() && sample_frac > 0.0 && sample_frac <= 1.0,
+        "--sample-frac must be in (0, 1], got {sample_frac}",
+    );
     let segments = read_profile(&profile_path)?;
     println!(
         "loaded {} segments from {}",
@@ -186,13 +198,15 @@ fn main() -> eyre::Result<()> {
             .collect();
         let clamped = segment.airs.iter().any(|r| r.log_height > max_log_height);
 
-        let airs: Vec<AirRef<_>> = shapes
+        // Build each SyntheticAir once and reuse it for both keygen
+        // (wrapped in AirRef) and trace generation. Constructing twice
+        // would be wasted work and would invite divergence if from_shape
+        // ever became non-deterministic.
+        let synths: Vec<Arc<SyntheticAir>> = shapes
             .iter()
-            .map(|s| {
-                let air: AirRef<_> = Arc::new(SyntheticAir::from_shape(s));
-                air
-            })
+            .map(|s| Arc::new(SyntheticAir::from_shape(s)))
             .collect();
+        let airs: Vec<AirRef<_>> = synths.iter().map(|a| a.clone() as AirRef<_>).collect();
 
         // Keygen (host-side; engine type is GPU but keygen runs on host).
         let kg_start = Instant::now();
@@ -206,10 +220,9 @@ fn main() -> eyre::Result<()> {
         // each to the device.
         let mut total_main_cells: u64 = 0;
         let mut per_trace = Vec::new();
-        for (air_id, s) in shapes.iter().enumerate() {
-            let synth = SyntheticAir::from_shape(s);
+        for (air_id, (s, synth)) in shapes.iter().zip(synths.iter()).enumerate() {
             let row_trace = synth.generate_trace::<BabyBear>(s.log_height);
-            total_main_cells += ((1u64) << s.log_height as u32) * (synth.width() as u64);
+            total_main_cells += (1u64 << s.log_height as u32) * (synth.width() as u64);
             let d_trace = <_ as DeviceDataTransporter<SC, GpuBackend>>::transport_matrix_to_device(
                 device,
                 &ColMajorMatrix::from_row_major(&row_trace),

@@ -84,16 +84,26 @@ pub struct SyntheticAir {
 
 impl SyntheticAir {
     pub fn from_shape(s: &SyntheticShape) -> Self {
-        // common_main_width must be >= 1 (col 0 is the kill column).
-        let width = s.common_main_width.max(1);
+        // Width must accommodate (a) the kill column (col 0) and (b)
+        // the largest captured interaction message — every field in a
+        // message references a real column. If common_main_width is too
+        // narrow (notably width=1 AIRs like ProgramAir whose 9 columns
+        // live in cached_mains, which v1 ignores), widen to fit the
+        // largest message + the kill column. Otherwise message lengths
+        // would silently clamp to 0 and the prover's per-interaction
+        // work would diverge from the captured shape.
+        let max_captured_msg_len = s
+            .interaction_message_lens
+            .iter()
+            .copied()
+            .max()
+            .unwrap_or(0);
+        let width = s.common_main_width.max(max_captured_msg_len + 1).max(1);
         let num_buses = s.num_distinct_buses.max(1);
-        // Per-interaction message length is captured in schema v2 and
-        // can vary across interactions of the same AIR. Each length is
-        // clamped to (width - 1) since field references must come from
-        // existing columns. For v1 atlases (empty lens), fall back to
-        // min(width - 1, 4) — a typical real value, comfortably below
-        // the keygen's 128-element message cap.
-        let max_field_count = width.saturating_sub(1);
+        // Each captured length is clamped to (width - 1). For v1 atlases
+        // (empty lens), fall back to min(width - 1, 4) — a typical real
+        // value, comfortably below the keygen's 128-element message cap.
+        let max_field_count = width - 1;
         let fallback_len = max_field_count.min(4);
         let interactions = (0..s.num_interactions)
             .map(|i| {
@@ -249,6 +259,31 @@ mod tests {
         assert_eq!(air.width(), s.common_main_width);
         assert_eq!(air.num_constraints(), s.num_constraints);
         assert_eq!(air.num_interactions(), s.num_interactions);
+    }
+
+    #[test]
+    fn width_widens_to_fit_captured_message_len() {
+        // Mirrors the ProgramAir-shaped records in the bundled profile:
+        // common_main_width=1 with a captured 9-field interaction. The
+        // synthetic AIR must widen to width=10 (kill col + 9 fields) so
+        // the interaction's per-field kernel cost survives.
+        let s = SyntheticShape {
+            air_name: "WidthOneWithMsg".into(),
+            log_height: 4,
+            preprocessed_width: 0,
+            cached_main_widths: vec![],
+            common_main_width: 1,
+            after_challenge_widths: vec![],
+            num_constraints: 0,
+            num_interactions: 1,
+            num_distinct_buses: 1,
+            max_constraint_degree: 1,
+            interaction_message_lens: vec![9],
+            interaction_count_weights: vec![0],
+            occurrences: 1,
+        };
+        let air = SyntheticAir::from_shape(&s);
+        assert_eq!(air.width(), 10, "kill col + 9 message fields");
     }
 
     #[test]
