@@ -1,0 +1,36 @@
+[package]
+name = "openvm-benchmark-synthetic"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+
+[dependencies]
+openvm-stark-backend = { workspace = true, features = ["parallel", "metrics"] }
+openvm-stark-sdk = { workspace = true, features = ["parallel", "metrics", "cpu-backend"] }
+openvm-cuda-backend = { workspace = true, optional = true }
+
+p3-air.workspace = true
+p3-baby-bear.workspace = true
+p3-field.workspace = true
+p3-matrix.workspace = true
+
+clap = { workspace = true }
+eyre = { workspace = true }
+rand = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+
+[features]
+default = []
+cuda = ["dep:openvm-cuda-backend"]
+
+# Profile-replay runner: heterogeneous AIRs from a captured profile JSONL.
+# GPU-only (imports openvm-cuda-backend unconditionally).
+[[bin]]
+name = "synthetic_runner"
+required-features = ["cuda"]
+
+# Uniform-shape runner: identical AIRs sized via CLI flags. CPU by
+# default; build with `--features cuda` to use the GPU prover.
+[[bin]]
+name = "uniform_runner"

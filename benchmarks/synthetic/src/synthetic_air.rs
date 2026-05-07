@@ -1,4 +1,4 @@
-//! Synthetic AIR generator for idea 0008 phase 2.
+//! Synthetic AIR generator.
 //!
 //! Reads a shape atlas (produced by `scripts/analyze_profile.py` from a
 //! profile JSONL captured by the `SHADOW_BENCH_PROFILE_PATH` probe) and
@@ -19,7 +19,7 @@
 //! v1 limitations: ignores preprocessed columns, cached_main partitions,
 //! and after-challenge widths. The captured profile distribution is
 //! dominated by AIRs with these set to small or zero values, so this is
-//! sufficient to start. Extend if validation (phase 4) shows drift.
+//! sufficient to start. Extend if validation shows drift.
 
 use std::path::Path;
 
@@ -251,26 +251,23 @@ mod tests {
         assert_eq!(air.num_interactions(), s.num_interactions);
     }
 
-    #[cfg(feature = "cpu-backend")]
     #[test]
     fn synthetic_air_keygen_prove_verify_round_trip() {
         use std::sync::Arc;
 
         use eyre::eyre;
-        use openvm_stark_backend::prover::{
-            AirProvingContext, DeviceDataTransporter, ProvingContext,
+        use openvm_stark_backend::{
+            prover::{AirProvingContext, DeviceDataTransporter, ProvingContext},
+            StarkEngine,
         };
-
-        use crate::{
-            config::{
-                app_params_with_100_bits_security, baby_bear_poseidon2::BabyBearPoseidon2CpuEngine,
-            },
-            openvm_stark_backend::StarkEngine,
+        use openvm_stark_sdk::config::{
+            app_params_with_100_bits_security, baby_bear_poseidon2::BabyBearPoseidon2CpuEngine,
         };
+        use p3_baby_bear::BabyBear;
 
         let s = shape_for_test();
         let air = SyntheticAir::from_shape(&s);
-        let trace = air.generate_trace::<crate::p3_baby_bear::BabyBear>(s.log_height);
+        let trace = air.generate_trace::<BabyBear>(s.log_height);
 
         // Stacked height must be >= log_height of any AIR; use a
         // value comfortably larger than the test shape's log_height.

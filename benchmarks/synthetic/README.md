@@ -1,45 +1,49 @@
 # Synthetic benchmark suite
 
-Replays a captured segment-shape profile as parametric synthetic AIRs
-— same number of constraints, interactions, buses, message lengths,
-and trace heights, but with all-zero traces that are
-kernel-cost-faithful. Intended for fast champ-vs-candidate iteration
-on `openvm-cuda-backend` changes without paying the original
-workload's build / proving / RPC cost.
+GPU/CPU benchmarks built on synthetic AIRs with all-zero traces:
+kernel-cost-faithful for the prover, but trivially valid (column 0 is
+a "kill column" — every constraint multiplies by it, every interaction
+count uses it). Proof validity is not exercised end-to-end; rely on
+the cuda-backend test suite for correctness.
 
-The runner (`synthetic_runner.rs`) and synthesizer (`synthetic_air.rs`)
-are generic to any captured profile. The bundled
-`reth-block-23992138-profile.jsonl` is the canonical baseline; swap in
-any other profile JSONL captured by the upstream probe to benchmark a
-different workload.
+Two binaries:
 
-This directory is the **consumer-only** bundle: a captured profile +
-the source files that read it and run the synthetic prove. The capture
-side (the `SHADOW_BENCH_PROFILE_PATH` probe and any
-workload-specific wrapper for invoking it) is not included here.
+| Binary             | Use case                                         | Inputs                          |
+|--------------------|--------------------------------------------------|---------------------------------|
+| `synthetic_runner` | Replay a captured workload's segment shapes for champ-vs-candidate iteration on `openvm-cuda-backend` changes. | A profile JSONL from the `SHADOW_BENCH_PROFILE_PATH` probe. |
+| `uniform_runner`   | Sweep cost dimensions with N identical AIRs.     | CLI flags (num AIRs, cols/AIR, constraints/col, etc.). |
+
+`synthetic_runner` is GPU-only (`required-features = ["cuda"]`).
+`uniform_runner` runs CPU by default; build with `--features cuda` for GPU.
 
 ## What's in here
 
 | File                                | What it is |
 |-------------------------------------|------------|
 | `reth-block-23992138-profile.jsonl` | Captured baseline profile: 209 segment proofs from a real reth `prove-stark` run on block 23992138 (schema v2, 6,382 per-AIR records). |
-| `segment_profile.rs`                | Consumer-side deser types (`SegmentProfile`, `AirShapeRecord`) for each line of the JSONL. |
-| `synthetic_air.rs`                  | `SyntheticAir` / `SyntheticShape` — kernel-cost-faithful replay AIR. Generic to any captured profile. |
-| `synthetic_runner.rs`               | Runner binary: samples segments, builds synthetic AIRs, times `prove`, writes a scorecard JSON. Generic to any captured profile. |
+| `src/lib.rs`                        | Re-exports the synthesizer + schema modules.                            |
+| `src/synthetic_air.rs`              | `SyntheticAir` / `SyntheticShape` — kernel-cost-faithful replay AIR.     |
+| `src/segment_profile.rs`            | Deserialization types (`SegmentProfile`, `AirShapeRecord`) for the JSONL. |
+| `src/bin/synthetic_runner.rs`       | Profile-replay runner.                                                  |
+| `src/bin/uniform_runner.rs`         | Uniform-shape runner.                                                   |
 
-## How the consumer pipeline works
+## `synthetic_runner` — profile replay
+
+Reads a captured profile JSONL, samples a fraction of segments,
+replays each as a `Coordinator::prove` call on the GPU, and writes a
+scorecard JSON.
 
 ```
 reth-block-23992138-profile.jsonl                 (one SegmentProfile per line)
   │
-  ▼  read_profile (synthetic_runner.rs)
-Vec<SegmentProfile>                               (segment_profile.rs schema)
+  ▼  read_profile
+Vec<SegmentProfile>
   │
   ▼  seeded sample of `ceil(total * sample_frac)` segments
   │
   ▼  shape_from_record  →  SyntheticShape         (per-AIR shape)
   │
-  ▼  SyntheticAir::from_shape                     (synthetic_air.rs)
+  ▼  SyntheticAir::from_shape
 Vec<AirRef<SC>>                                   (one AIR per record)
   │
   ▼  generate_trace (all zeros) + transport to device
@@ -51,41 +55,13 @@ Per-segment prove_ms / keygen_ms                  (timed)
 Scorecard JSON                                    (figure of merit: total_prove_ms)
 ```
 
-Why all-zero traces work: column 0 is a "kill column", every constraint
-multiplies by it, every interaction count uses it. Constraints
-trivially satisfied, multiplicities trivially zero, but the prover
-still touches the same number of trace cells and constraint /
-interaction terms — kernel timing is preserved. Proof validity is
-*not* exercised end-to-end; rely on the cuda-backend test suite for
-correctness.
-
-## Wiring into the workspace
-
-The .rs files in this directory are sources, not a buildable crate.
-To run the benchmark, place them where the workspace can compile them:
-
-| Source file            | Suggested location                                                                 |
-|------------------------|------------------------------------------------------------------------------------|
-| `segment_profile.rs`   | `crates/stark-backend/src/prover/segment_profile.rs` (and add `pub mod segment_profile;` to `crates/stark-backend/src/prover/mod.rs` and re-export the types) |
-| `synthetic_air.rs`     | `crates/stark-sdk/src/bench/synthetic_air.rs` (and add `pub mod synthetic_air;` to `crates/stark-sdk/src/bench/mod.rs`) |
-| `synthetic_runner.rs`  | `crates/cuda-backend/examples/synthetic_runner.rs`                                 |
-
-The runner imports:
-- `openvm_stark_backend::prover::segment_profile::{SegmentProfile, AirShapeRecord}`
-- `openvm_stark_sdk::bench::synthetic_air::{SyntheticAir, SyntheticShape}`
-- `openvm_stark_sdk::config::app_params_with_100_bits_security`
-- `openvm_cuda_backend::{BabyBearPoseidon2GpuEngine, GpuBackend, prelude::SC}`
-
-If you place the files at the suggested paths above, those imports
-resolve unmodified.
-
-## Quick start
+### Quick start
 
 Requires CUDA + an NVIDIA GPU.
 
 ```bash
 # Build (compiles cuda kernels — first build is slow, ~5 min)
-cargo build --release -p openvm-cuda-backend --example synthetic_runner
+cargo build --release -p openvm-benchmark-synthetic --features cuda --bin synthetic_runner
 
 # 16 GiB GPU memory pool.
 export VPMM_PAGE_SIZE=$((4 << 20))
@@ -96,13 +72,17 @@ export RUST_LOG=warn
 mkdir -p benchmarks/synthetic/scorecards
 
 # Screening tier (~60 s wall, 3.9 s GPU prove).
-target/release/examples/synthetic_runner \
+target/release/synthetic_runner \
   --profile benchmarks/synthetic/reth-block-23992138-profile.jsonl \
   --sample-frac 0.1 --seed 42 --max-log-height 22 \
   --out benchmarks/synthetic/scorecards/my-run.json
 ```
 
-The runner accepts these flags (defaults in parentheses):
+For the same `(sample-frac, seed, max-log-height)` triple the result
+is deterministic; champ-vs-candidate comparisons must use the same
+triple in both runs.
+
+CLI flags (defaults in parentheses):
 
 | Flag               | Default | Meaning                                                       |
 |--------------------|---------|---------------------------------------------------------------|
@@ -111,10 +91,6 @@ The runner accepts these flags (defaults in parentheses):
 | `--seed`           | `42`    | RNG seed for the segment sampler.                             |
 | `--max-log-height` | `22`    | Per-AIR `log_height` clamp. Anything above is clipped.        |
 | `--out <path>`     | —       | If unset, the scorecard JSON is printed to stdout instead.    |
-
-For the same `(sample-frac, seed, max-log-height)` triple the result
-is deterministic; champ-vs-candidate comparisons must use the same
-triple in both runs.
 
 ### Tiered modes
 
@@ -133,7 +109,7 @@ across champ vs. candidate.
 
 1. Check out the champion, run the screening tier with a fixed seed:
    ```bash
-   target/release/examples/synthetic_runner \
+   target/release/synthetic_runner \
      --profile benchmarks/synthetic/reth-block-23992138-profile.jsonl \
      --sample-frac 0.1 --seed 42 --max-log-height 22 \
      --out benchmarks/synthetic/scorecards/champ.json
@@ -159,9 +135,7 @@ If your CoV is much higher, possible causes: GPU shared with another
 workload, thermal throttling, kernel-launch contention from background
 processes.
 
-## Output format
-
-Scorecard JSON written by the runner:
+### Scorecard format
 
 ```jsonc
 {
@@ -193,3 +167,39 @@ Scorecard JSON written by the runner:
 is the figure of merit for champ-vs-candidate comparison.
 `skipped_segments` should be `0`; non-zero means a prove call returned
 an error and that segment's timing was excluded.
+
+## `uniform_runner` — uniform-shape sweep
+
+Builds N identical synthetic AIRs sized via CLI flags and runs one
+proof. Useful for understanding how cost moves with a single
+parameter (cols per AIR, constraints per column, etc.).
+
+### Quick start
+
+```bash
+# CPU
+cargo run -p openvm-benchmark-synthetic --release --bin uniform_runner -- \
+  --num-airs 4 --cols-per-air 100 --constraints-per-col 2 --log-rows-per-air 20
+
+# GPU
+cargo run -p openvm-benchmark-synthetic --release --features cuda --bin uniform_runner -- \
+  --num-airs 4 --cols-per-air 100 --constraints-per-col 2 --log-rows-per-air 20
+
+# Optional: write a metrics.json on completion
+METRICS_OUTPUT=metrics.json cargo run -p openvm-benchmark-synthetic --release \
+  --bin uniform_runner -- --num-airs 4 --cols-per-air 100 --log-rows-per-air 20
+```
+
+CLI flags (defaults in parentheses):
+
+| Flag                     | Default | Meaning                                                        |
+|--------------------------|---------|----------------------------------------------------------------|
+| `--num-airs`             | `1`     | Number of identical AIRs to keygen + prove.                    |
+| `--cols-per-air`         | `20`    | Common-main width per AIR.                                     |
+| `--constraints-per-col`  | `1.0`   | Boolean constraints per column (fractional OK).                |
+| `--interactions-per-col` | `0.25`  | Send/receive bus pairs per column (fractional OK).             |
+| `--log-rows-per-air`     | `18`    | log2 of rows per AIR.                                          |
+| `--log-stacked-height`   | `24`    | log2 of stacked height for the PCS (matches default app config). |
+
+Verifies the proof at the end — surfaces correctness regressions that
+the synthetic_runner's profile-replay path skips.

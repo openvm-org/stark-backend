@@ -1,10 +1,10 @@
 //! Consumer-side schema for the segment-shape profile JSONL.
 //!
 //! These two structs are the deserialization targets for each line of a
-//! profile captured by the upstream `SHADOW_BENCH_PROFILE_PATH` probe
-//! (idea 0008). The producer that writes the JSONL lives in
-//! `stark-backend`'s prover module; nothing in this directory captures
-//! profiles — we only consume them.
+//! profile captured by the upstream `SHADOW_BENCH_PROFILE_PATH` probe.
+//! The producer that writes the JSONL lives in `stark-backend`'s prover
+//! module; nothing in this directory captures profiles — we only
+//! consume them.
 //!
 //! `BusIndex` and `TraceWidth` come from `openvm-stark-backend`. When
 //! integrating these source files into a workspace, either re-use the

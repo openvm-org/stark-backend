@@ -1,20 +1,21 @@
-//! Synthetic proving benchmark.
+//! Uniform-shape proving benchmark.
 //!
-//! Creates configurable synthetic AIRs with:
+//! Creates N identical synthetic AIRs sized via CLI flags, with:
 //! - Zero witness (all trace cells are 0)
 //! - Boolean constraints: `x * (x - 1) = 0`
 //! - Self-canceling bus interactions: `bus_send([x])` + `bus_receive([x])`
 //!
 //! Usage (CPU):
-//!   cargo run -p openvm-benchmark-proving --release -- \
+//!   cargo run -p openvm-benchmark-synthetic --release --bin uniform_runner -- \
 //!     --num-airs 4 --cols-per-air 100 --constraints-per-col 2 --log-rows-per-air 20
 //!
 //! Usage (GPU):
-//!   cargo run -p openvm-benchmark-proving --release --features cuda -- \
+//!   cargo run -p openvm-benchmark-synthetic --release --features cuda --bin uniform_runner -- \
 //!     --num-airs 4 --cols-per-air 100 --constraints-per-col 2 --log-rows-per-air 20
 //!
 //! To also write a metrics.json file:
-//!   METRICS_OUTPUT=metrics.json cargo run -p openvm-benchmark-proving --release -- ...
+//!   METRICS_OUTPUT=metrics.json cargo run -p openvm-benchmark-synthetic --release \
+//!     --bin uniform_runner -- ...
 
 use std::{sync::Arc, time::Instant};
 

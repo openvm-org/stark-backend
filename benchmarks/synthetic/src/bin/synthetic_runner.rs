@@ -1,4 +1,4 @@
-//! Sampled synthetic benchmark runner — idea 0008 phase 3 (cuda-backend / GPU).
+//! Sampled synthetic benchmark runner (cuda-backend / GPU).
 //!
 //! Reads a captured profile JSONL (segment-by-segment AIR shapes from
 //! `SHADOW_BENCH_PROFILE_PATH`), samples a fraction of segments, and
@@ -6,8 +6,8 @@
 //! Outputs a scorecard JSON with per-segment timings.
 //!
 //! Usage:
-//!     cargo run --release -p openvm-cuda-backend \
-//!         --example synthetic_runner -- \
+//!     cargo run --release -p openvm-benchmark-synthetic \
+//!         --features cuda --bin synthetic_runner -- \
 //!         --profile benchmarks/synthetic/reth-block-23992138-profile.jsonl \
 //!         --sample-frac 0.1 --seed 42 \
 //!         --max-log-height 22 \
@@ -27,18 +27,16 @@ use std::{
 };
 
 use eyre::eyre;
+use openvm_benchmark_synthetic::{
+    segment_profile::{AirShapeRecord, SegmentProfile},
+    synthetic_air::{SyntheticAir, SyntheticShape},
+};
 use openvm_cuda_backend::{prelude::SC, BabyBearPoseidon2GpuEngine, GpuBackend};
 use openvm_stark_backend::{
-    prover::{
-        segment_profile::{AirShapeRecord, SegmentProfile},
-        AirProvingContext, ColMajorMatrix, DeviceDataTransporter, ProvingContext,
-    },
+    prover::{AirProvingContext, ColMajorMatrix, DeviceDataTransporter, ProvingContext},
     AirRef, StarkEngine, SystemParams,
 };
-use openvm_stark_sdk::{
-    bench::synthetic_air::{SyntheticAir, SyntheticShape},
-    config::app_params_with_100_bits_security,
-};
+use openvm_stark_sdk::config::app_params_with_100_bits_security;
 use p3_baby_bear::BabyBear;
 use rand::{rngs::StdRng, seq::SliceRandom, SeedableRng};
 use serde::Serialize;
