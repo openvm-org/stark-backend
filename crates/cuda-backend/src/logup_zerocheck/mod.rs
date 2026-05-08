@@ -66,6 +66,7 @@ use crate::{
 
 pub(crate) mod batch_mle;
 pub(crate) mod batch_mle_monomial;
+mod block_ctxs;
 mod errors;
 pub(crate) mod fold_ple;
 /// Fraction sumcheck via GKR

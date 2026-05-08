@@ -14,10 +14,11 @@ use super::errors::InteractionGpuError;
 use crate::{
     cuda::logup_zerocheck::{
         frac_matrix_vertically_repeat, frac_vector_scalar_multiply_ext_fp, logup_gkr_input_eval,
-        BlockCtx, GkrInputCtx,
+        GkrInputCtx,
     },
     gpu_backend::GenericGpuBackend,
     hash_scheme::GpuHashScheme,
+    logup_zerocheck::block_ctxs::build_block_ctxs,
     prelude::{EF, F},
 };
 
@@ -210,15 +211,16 @@ pub fn log_gkr_input_evals<HS: GpuHashScheme>(
             .then(|| DeviceBuffer::<Frac<EF>>::with_capacity_on(total_lift_elements, device_ctx));
         let mut tmp_offset: usize = 0;
 
-        // Build GkrInputCtx for each AIR in this batch, plus a flat BlockCtx list that maps each
-        // launched block to its AIR + sub-block index (mirrors the dispatch pattern in
-        // `batch_mle.cu`).
-        let total_blocks: usize = plans[plan_start..batch_end]
-            .iter()
-            .map(|p| p.num_blocks_x)
-            .sum();
+        // Flat BlockCtx list — one entry per launched block, grouped by AIR. Mirrors the
+        // dispatch pattern in `batch_mle.cu`.
+        let (block_ctxs_host, _air_offsets) = build_block_ctxs(
+            plans[plan_start..batch_end]
+                .iter()
+                .map(|p| p.num_blocks_x as u32),
+        );
+        let total_blocks = block_ctxs_host.len();
+
         let mut ctxs_host: Vec<GkrInputCtx> = Vec::with_capacity(count);
-        let mut block_ctxs_host: Vec<BlockCtx> = Vec::with_capacity(total_blocks);
         let mut intermediates_keepalive: Vec<DeviceBuffer<EF>> = Vec::with_capacity(count);
         let mut main_ptrs_keepalive: Vec<DeviceBuffer<u64>> = Vec::with_capacity(count);
         let mut public_keepalive: Vec<DeviceBuffer<F>> = Vec::with_capacity(count);
@@ -278,15 +280,6 @@ pub fn log_gkr_input_evals<HS: GpuHashScheme>(
             };
 
             let rules = &pk_air.other_data.interaction_rules;
-
-            // Push order is the contract: the kernel does `block_ctxs[blockIdx.x]` directly, so
-            // blocks must appear grouped by air_idx in the same order as ctxs_host.
-            for b in 0..plan.num_blocks_x {
-                block_ctxs_host.push(BlockCtx {
-                    local_block_idx_x: b as u32,
-                    air_idx: i as u32,
-                });
-            }
 
             ctxs_host.push(GkrInputCtx {
                 d_fracs: trace_output_ptr,

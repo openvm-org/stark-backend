@@ -23,7 +23,7 @@ use crate::{
     error::KernelError,
     gpu_backend::GenericGpuBackend,
     hash_scheme::GpuHashScheme,
-    logup_zerocheck::batch_mle::TraceCtx,
+    logup_zerocheck::{batch_mle::TraceCtx, block_ctxs::build_block_ctxs},
     prelude::EF,
 };
 
@@ -149,30 +149,18 @@ impl<'a> ZerocheckMonomialBatch<'a> {
 
         let threads_per_block = THREADS_PER_BLOCK;
 
-        // Build block_ctxs and air_offsets
-        // For each AIR: total_blocks = ceil(num_monomials / tpb) * num_y
-        // local_block_idx_x encodes (y_int * mono_blocks + mono_block_idx)
-        let mut block_ctxs_h: Vec<BlockCtx> = Vec::new();
-        let mut air_offsets: Vec<u32> = Vec::with_capacity(traces.len() + 1);
-        air_offsets.push(0);
-
-        for (local_air, t) in traces.iter().enumerate() {
+        // Block layout: each AIR contributes `mono_blocks * num_y` blocks, where
+        // `mono_blocks = ceil(num_monomials / tpb)`. `local_block_idx_x` runs `0..total_blocks`
+        // and the kernel decodes it as `y_int * mono_blocks + mono_block_idx`.
+        let (block_ctxs_h, air_offsets) = build_block_ctxs(traces.iter().map(|t| {
             let monomials = pk.per_air[t.air_idx]
                 .other_data
                 .zerocheck_monomials
                 .as_ref()
                 .unwrap();
             let mono_blocks = monomials.num_monomials.div_ceil(threads_per_block);
-            let total_blocks = mono_blocks * t.num_y;
-
-            for local_idx in 0..total_blocks {
-                block_ctxs_h.push(BlockCtx {
-                    local_block_idx_x: local_idx,
-                    air_idx: local_air as u32,
-                });
-            }
-            air_offsets.push(block_ctxs_h.len() as u32);
-        }
+            mono_blocks * t.num_y
+        }));
 
         // Build MonomialAirCtx for each trace
         let air_ctxs_h: Vec<MonomialAirCtx> = traces
@@ -381,26 +369,14 @@ impl<'a> ZerocheckMonomialParYBatch<'a> {
             chunk_size = (chunk_size / 2).max(1);
         }
 
-        // Build block_ctxs with per-AIR encoding
-        // Encoding: local_block_idx_x = y_block * air_mono_chunks + mono_chunk
-        let mut block_ctxs_h: Vec<BlockCtx> = Vec::new();
-        let mut air_offsets: Vec<u32> = Vec::with_capacity(traces.len() + 1);
-        air_offsets.push(0);
-
-        for (local_air, (y_blocks, num_mono)) in per_air_info.iter().enumerate() {
-            let air_mono_chunks = num_mono.div_ceil(chunk_size);
-
-            for y_block in 0..*y_blocks {
-                for mono_chunk in 0..air_mono_chunks {
-                    let local_idx = y_block * air_mono_chunks + mono_chunk;
-                    block_ctxs_h.push(BlockCtx {
-                        local_block_idx_x: local_idx,
-                        air_idx: local_air as u32,
-                    });
-                }
-            }
-            air_offsets.push(block_ctxs_h.len() as u32);
-        }
+        // Block layout: each AIR contributes `y_blocks * air_mono_chunks` blocks.
+        // `local_block_idx_x` runs `0..total_blocks` and the kernel decodes it as
+        // `y_block * air_mono_chunks + mono_chunk`.
+        let (block_ctxs_h, air_offsets) =
+            build_block_ctxs(per_air_info.iter().map(|(y_blocks, num_mono)| {
+                let air_mono_chunks = num_mono.div_ceil(chunk_size);
+                y_blocks * air_mono_chunks
+            }));
 
         let num_blocks = block_ctxs_h.len() as u32;
 
@@ -648,13 +624,11 @@ impl<'a> LogupMonomialBatch<'a> {
 
         let threads_per_block = THREADS_PER_BLOCK_LOGUP;
 
-        // Build block_ctxs: one block per (y_int, mono_block) per trace
-        // local_block_idx_x = y_int * mono_blocks + mono_block
-        let mut block_ctxs_h: Vec<BlockCtx> = Vec::new();
-        let mut air_offsets: Vec<u32> = Vec::with_capacity(traces.len() + 1);
-        air_offsets.push(0);
-
-        for (local_air, t) in traces.iter().enumerate() {
+        // Block layout: each AIR contributes `num_y * mono_blocks` blocks, where `mono_blocks`
+        // covers the larger of numerator/denominator monomial counts.
+        // `local_block_idx_x` runs `0..total_blocks` and the kernel decodes it as
+        // `y_int * mono_blocks + mono_block`.
+        let (block_ctxs_h, air_offsets) = build_block_ctxs(traces.iter().map(|t| {
             let monomials = pk.per_air[t.air_idx]
                 .other_data
                 .interaction_monomials
@@ -664,16 +638,8 @@ impl<'a> LogupMonomialBatch<'a> {
                 .num_numer_monomials
                 .max(monomials.num_denom_monomials);
             let mono_blocks = max_monomials.div_ceil(threads_per_block).max(1);
-            for y_int in 0..t.num_y {
-                for mono_block in 0..mono_blocks {
-                    block_ctxs_h.push(BlockCtx {
-                        local_block_idx_x: y_int * mono_blocks + mono_block,
-                        air_idx: local_air as u32,
-                    });
-                }
-            }
-            air_offsets.push(block_ctxs_h.len() as u32);
-        }
+            t.num_y * mono_blocks
+        }));
 
         let num_blocks = block_ctxs_h.len() as u32;
 
