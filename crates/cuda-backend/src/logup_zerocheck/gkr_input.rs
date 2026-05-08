@@ -14,7 +14,7 @@ use super::errors::InteractionGpuError;
 use crate::{
     cuda::logup_zerocheck::{
         frac_matrix_vertically_repeat, frac_vector_scalar_multiply_ext_fp,
-        gkr_input_batch_intermediates_buffer_size, logup_batch_gkr_input_eval, GkrInputCtx,
+        gkr_input_intermediates_buffer_size, logup_gkr_input_eval, GkrInputCtx,
     },
     gpu_backend::GenericGpuBackend,
     hash_scheme::GpuHashScheme,
@@ -119,10 +119,9 @@ pub fn log_gkr_input_evals<HS: GpuHashScheme>(
 
     // Pre-compute per-AIR batch planning info
     struct AirPlan {
-        air_idx: usize,
         height: usize,
         num_interactions: usize,
-        buffer_size: u32,
+        intermediate_elements: usize,
         intermediate_bytes: usize,
         lifted_height: usize,
         dst_offset: usize,
@@ -130,14 +129,14 @@ pub fn log_gkr_input_evals<HS: GpuHashScheme>(
     }
 
     let mut plans: Vec<AirPlan> = Vec::with_capacity(metas.len());
-    for (i, meta) in metas.iter().enumerate() {
+    for meta in &metas {
         let air_ctx = &proving_ctx.per_trace[meta.trace_idx].1;
         let pk_air = &pk.per_air[meta.air_idx];
         let height = air_ctx.height();
         let num_interactions = pk_air.vk.symbolic_constraints.interactions.len();
         let buffer_size = pk_air.other_data.interaction_rules.inner.buffer_size;
 
-        let intermediate_elements = gkr_input_batch_intermediates_buffer_size(buffer_size);
+        let intermediate_elements = gkr_input_intermediates_buffer_size(buffer_size);
         let intermediate_bytes = intermediate_elements * std::mem::size_of::<EF>();
 
         let slice = meta.layout_slices.first().unwrap();
@@ -149,10 +148,9 @@ pub fn log_gkr_input_evals<HS: GpuHashScheme>(
         debug_assert_eq!(slice.len(l_skip), lifted_height);
 
         plans.push(AirPlan {
-            air_idx: i,
             height,
             num_interactions,
-            buffer_size,
+            intermediate_elements,
             intermediate_bytes,
             lifted_height,
             dst_offset,
@@ -186,7 +184,7 @@ pub fn log_gkr_input_evals<HS: GpuHashScheme>(
 
         for i in 0..count {
             let plan = &plans[plan_start + i];
-            let meta = metas[plan.air_idx];
+            let meta = metas[plan_start + i];
             let air_ctx = &proving_ctx.per_trace[meta.trace_idx].1;
             let pk_air = &pk.per_air[meta.air_idx];
 
@@ -220,10 +218,9 @@ pub fn log_gkr_input_evals<HS: GpuHashScheme>(
             let public_ptr = d_public_values.as_ptr();
             public_keepalive.push(d_public_values);
 
-            let intermediates = if plan.buffer_size > 0 {
-                let intermediate_elements =
-                    gkr_input_batch_intermediates_buffer_size(plan.buffer_size);
-                let buf = DeviceBuffer::<EF>::with_capacity_on(intermediate_elements, device_ctx);
+            let intermediates = if plan.intermediate_elements > 0 {
+                let buf =
+                    DeviceBuffer::<EF>::with_capacity_on(plan.intermediate_elements, device_ctx);
                 let ptr = buf.as_mut_ptr();
                 intermediates_keepalive.push(buf);
                 ptr
@@ -262,7 +259,7 @@ pub fn log_gkr_input_evals<HS: GpuHashScheme>(
 
         let d_ctxs = ctxs_host.to_device_on(device_ctx)?;
         unsafe {
-            logup_batch_gkr_input_eval(&d_ctxs, count as u32, stream)?;
+            logup_gkr_input_eval(&d_ctxs, count as u32, stream)?;
         }
 
         // Handle lifting (normalization + vertical repeat) for AIRs that need it

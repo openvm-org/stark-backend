@@ -96,7 +96,8 @@ pub struct LogupMonomialCtx {
     pub d_combinations: *const EF,
     pub num_monomials: u32,
 }
-/// Per-AIR context for batched GKR input evaluation.
+
+/// Per-AIR context for GKR input evaluation.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct GkrInputCtx {
@@ -324,26 +325,9 @@ extern "C" {
     ) -> i32;
 
     // gkr_input.cu
+    fn _gkr_input_intermediates_buffer_size(buffer_size: u32) -> usize;
+
     fn _logup_gkr_input_eval(
-        is_global: bool,
-        fracs: *mut Frac<EF>,
-        preprocessed: *const F,
-        partitioned_main: *const u64,
-        public_values: *const F,
-        challenges: *const EF,
-        intermediates: *const EF,
-        rules: *const std::ffi::c_void,
-        used_nodes: *const usize,
-        pair_idxs: *const u32,
-        used_nodes_len: usize,
-        height: u32,
-        num_rows_per_tile: u32,
-        stream: cudaStream_t,
-    ) -> i32;
-
-    fn _gkr_input_batch_intermediates_buffer_size(buffer_size: u32) -> usize;
-
-    fn _logup_batch_gkr_input_eval(
         d_ctxs: *const GkrInputCtx,
         num_airs: u32,
         stream: cudaStream_t,
@@ -1096,65 +1080,22 @@ pub unsafe fn fold_ple_from_evals(
     ))
 }
 
-/// # Safety
-/// - `fracs` must be a pointer to a device buffer with capacity at least `num_interactions *
-///   height`.
-#[allow(clippy::too_many_arguments)]
-pub unsafe fn logup_gkr_input_eval(
-    is_global: bool,
-    fracs: *mut Frac<EF>,
-    preprocessed: &DeviceBuffer<F>,
-    partitioned_main: &DeviceBuffer<u64>,
-    public_values: &DeviceBuffer<F>,
-    challenges: &DeviceBuffer<EF>,
-    intermediates: &DeviceBuffer<EF>,
-    rules: &DeviceBuffer<u128>,
-    used_nodes: &DeviceBuffer<usize>,
-    pair_idxs: &DeviceBuffer<u32>,
-    height: u32,
-    num_rows_per_tile: u32,
-    stream: cudaStream_t,
-) -> Result<(), CudaError> {
-    debug_assert_eq!(used_nodes.len(), pair_idxs.len());
-    CudaError::from_result(_logup_gkr_input_eval(
-        is_global,
-        fracs,
-        preprocessed.as_ptr(),
-        partitioned_main.as_ptr(),
-        public_values.as_ptr(),
-        challenges.as_ptr(),
-        intermediates.as_ptr(),
-        rules.as_raw_ptr(),
-        used_nodes.as_ptr(),
-        pair_idxs.as_ptr(),
-        used_nodes.len(),
-        height,
-        num_rows_per_tile,
-        stream,
-    ))
-}
-
-/// Batch version of GKR input eval that processes multiple AIRs in a single kernel launch.
+/// GKR input eval that processes multiple AIRs in a single kernel launch.
 ///
 /// # Safety
 /// - `d_ctxs` must point to device memory containing `num_airs` valid `GkrInputCtx` structs.
 /// - All referenced device pointers in each ctx must be valid.
-pub unsafe fn logup_batch_gkr_input_eval(
+pub unsafe fn logup_gkr_input_eval(
     d_ctxs: &DeviceBuffer<GkrInputCtx>,
     num_airs: u32,
     stream: cudaStream_t,
 ) -> Result<(), CudaError> {
-    CudaError::from_result(_logup_batch_gkr_input_eval(
-        d_ctxs.as_ptr(),
-        num_airs,
-        stream,
-    ))
+    CudaError::from_result(_logup_gkr_input_eval(d_ctxs.as_ptr(), num_airs, stream))
 }
 
-/// Computes the number of FpExt elements needed for intermediates in the batch GKR input eval
-/// kernel.
-pub fn gkr_input_batch_intermediates_buffer_size(buffer_size: u32) -> usize {
-    unsafe { _gkr_input_batch_intermediates_buffer_size(buffer_size) }
+/// Number of `FpExt` elements needed for the per-AIR intermediates buffer.
+pub fn gkr_input_intermediates_buffer_size(buffer_size: u32) -> usize {
+    unsafe { _gkr_input_intermediates_buffer_size(buffer_size) }
 }
 
 pub unsafe fn frac_add_alpha(
