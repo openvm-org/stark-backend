@@ -93,6 +93,10 @@ use round0::evaluate_round0_constraints_gpu;
 /// This ratio can be tuned. Currently it is set to prefer the monomial kernel except for the
 /// Poseidon2Air where the DAG node size is much smaller than number of monomials.
 const DAG_FALLBACK_MONOMIAL_RATIO: usize = 2;
+// Batch MLE launch overhead dominates when the budget follows only the GKR input size.
+// Keep at least the historical non-save-memory batch budget while still allowing larger inputs.
+const BATCH_MLE_MEMORY_LIMIT_FLOOR: usize = 5 << 30; // 5GiB
+const BATCH_MLE_FOLD_MEMORY_LIMIT_FLOOR: usize = 6 << 30; // 6GiB
 
 #[inline]
 pub(crate) fn air_width_for_mat(need_rot: bool, mat_width: usize) -> u32 {
@@ -202,14 +206,15 @@ where
     prover.gkr_mem_contribution = inputs.len() * std::mem::size_of::<Frac<EF>>();
     prover.memory_limit_bytes = prover.gkr_mem_contribution;
     if !prover.save_memory {
-        const DEFAULT_MEMORY_LIMIT: usize = 5 << 30; // 5GiB
-        if prover.memory_limit_bytes > DEFAULT_MEMORY_LIMIT {
+        if prover.memory_limit_bytes > BATCH_MLE_MEMORY_LIMIT_FLOOR {
             tracing::warn!(
                 "prover.memory_limit_bytes {} already exceeds 5GiB",
                 prover.memory_limit_bytes
             );
         }
-        prover.memory_limit_bytes = DEFAULT_MEMORY_LIMIT;
+        prover.memory_limit_bytes = BATCH_MLE_MEMORY_LIMIT_FLOOR;
+    } else {
+        prover.memory_limit_bytes = prover.memory_limit_bytes.max(BATCH_MLE_MEMORY_LIMIT_FLOOR);
     }
     prover.mem.emit_metrics_with_label("prover.gkr_input_evals");
 
@@ -720,12 +725,23 @@ impl<'a, HS: GpuHashScheme> LogupZerocheckGpu<'a, HS> {
 
         // PERF[jpw]: we could also build the layers for different n in a transposed way using
         // eq_nonoverlapping_stage_ext, which is more memory efficient
+        let mut eq_xi_one_layer = None;
         for &n in &self.n_per_trace {
             let n_lift = n.max(0) as usize;
             if let Entry::Vacant(entry) = self.eq_xis.entry(n_lift) {
-                let layers = EqEvalLayers::new_rev(
+                let layer_0 = match &eq_xi_one_layer {
+                    Some(layer_0) => Arc::clone(layer_0),
+                    None => {
+                        let layer_0 = EqEvalLayers::one_layer(&self.device_ctx)
+                            .map_err(LogupZerocheckError::EqEvalLayers)?;
+                        eq_xi_one_layer = Some(Arc::clone(&layer_0));
+                        layer_0
+                    }
+                };
+                let layers = EqEvalLayers::new_rev_with_one(
                     n_lift,
                     xi[l_skip..l_skip + n_lift].iter().rev(),
+                    layer_0,
                     &self.device_ctx,
                 )
                 .map_err(LogupZerocheckError::EqEvalLayers)?;
@@ -983,7 +999,7 @@ impl<'a, HS: GpuHashScheme> LogupZerocheckGpu<'a, HS> {
             })
             .collect::<Result<Vec<_>, FoldPleError>>()?;
         if self.save_memory {
-            self.memory_limit_bytes = mem_limit;
+            self.memory_limit_bytes = mem_limit.max(BATCH_MLE_FOLD_MEMORY_LIMIT_FLOOR);
         }
 
         // GPU folding for sels_per_trace (rotate=false, only need offset=0)
@@ -1539,13 +1555,16 @@ impl<'a, HS: GpuHashScheme> LogupZerocheckGpu<'a, HS> {
                 .collect()
         };
         if self.save_memory {
-            self.memory_limit_bytes = self.gkr_mem_contribution.saturating_sub(
-                self.mat_evals_per_trace
-                    .iter()
-                    .flatten()
-                    .map(|m| m.buffer().len() * size_of::<EF>())
-                    .sum(),
-            );
+            self.memory_limit_bytes = self
+                .gkr_mem_contribution
+                .saturating_sub(
+                    self.mat_evals_per_trace
+                        .iter()
+                        .flatten()
+                        .map(|m| m.buffer().len() * size_of::<EF>())
+                        .sum(),
+                )
+                .max(BATCH_MLE_FOLD_MEMORY_LIMIT_FLOOR);
         }
 
         // Fold sels_per_trace: Vec<DeviceMatrix<EF>>

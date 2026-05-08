@@ -316,7 +316,7 @@ pub unsafe fn evals_mobius_eq_hypercube(
 /// + 1)`. We define `eq_0 = 1` always.
 #[derive(Getters)]
 pub struct EqEvalSegments<F> {
-    /// Index 0 should never to read, but it will be initialized to zero.
+    /// Index 0 stores the length-1 equality layer, shared when callers can reuse it.
     #[getset(get = "pub")]
     pub(crate) buffer: DeviceBuffer<F>,
     #[getset(get_copy = "pub")]
@@ -379,8 +379,29 @@ impl EqEvalSegments<EF> {
 /// dropping layers.
 #[derive(Getters)]
 pub struct EqEvalLayers<F> {
-    /// Index 0 should never to read, but it will be initialized to zero.
-    pub layers: Vec<DeviceBuffer<F>>,
+    /// Layer 0 stores the length-1 equality value and may be shared across trees.
+    pub layers: Vec<EqEvalLayer<F>>,
+}
+
+pub enum EqEvalLayer<F> {
+    Shared(Arc<DeviceBuffer<F>>),
+    Owned(DeviceBuffer<F>),
+}
+
+impl<F> EqEvalLayer<F> {
+    fn len(&self) -> usize {
+        match self {
+            Self::Shared(buffer) => buffer.len(),
+            Self::Owned(buffer) => buffer.len(),
+        }
+    }
+
+    fn as_ptr(&self) -> *const F {
+        match self {
+            Self::Shared(buffer) => buffer.as_ptr(),
+            Self::Owned(buffer) => buffer.as_ptr(),
+        }
+    }
 }
 
 impl<F> EqEvalLayers<F> {
@@ -394,6 +415,13 @@ impl<F> EqEvalLayers<F> {
 
 // Currently only implement kernels for EF.
 impl EqEvalLayers<EF> {
+    pub fn one_layer(device_ctx: &GpuDeviceCtx) -> Result<Arc<DeviceBuffer<EF>>, KernelError> {
+        [EF::ONE]
+            .to_device_on(device_ctx)
+            .map(Arc::new)
+            .map_err(KernelError::MemCopy)
+    }
+
     /// Creates a new `EqEvalLayers` instance with `layers.len() = x.len() + 1`.
     ///
     /// Inserts `x_i` from the front for each layer.
@@ -402,11 +430,17 @@ impl EqEvalLayers<EF> {
         x: impl IntoIterator<Item = &'a EF>,
         device_ctx: &GpuDeviceCtx,
     ) -> Result<Self, KernelError> {
+        Self::new_rev_with_one(n, x, Self::one_layer(device_ctx)?, device_ctx)
+    }
+
+    pub fn new_rev_with_one<'a>(
+        n: usize,
+        x: impl IntoIterator<Item = &'a EF>,
+        layer_0: Arc<DeviceBuffer<EF>>,
+        device_ctx: &GpuDeviceCtx,
+    ) -> Result<Self, KernelError> {
         let mut layers = Vec::with_capacity(n + 1);
-        let layer_0 = [EF::ONE]
-            .to_device_on(device_ctx)
-            .map_err(KernelError::MemCopy)?;
-        layers.push(layer_0);
+        layers.push(EqEvalLayer::Shared(layer_0));
         for (i, &x_i) in x.into_iter().enumerate() {
             let step = 1 << i;
             let buffer = DeviceBuffer::with_capacity_on(2 * step, device_ctx);
@@ -424,7 +458,7 @@ impl EqEvalLayers<EF> {
                 )
                 .map_err(KernelError::Kernel)?;
             }
-            layers.push(buffer);
+            layers.push(EqEvalLayer::Owned(buffer));
         }
         Ok(Self { layers })
     }
@@ -438,11 +472,17 @@ impl EqEvalLayers<EF> {
         x: impl IntoIterator<Item = &'a EF>,
         device_ctx: &GpuDeviceCtx,
     ) -> Result<Self, KernelError> {
+        Self::new_with_one(n, x, Self::one_layer(device_ctx)?, device_ctx)
+    }
+
+    pub fn new_with_one<'a>(
+        n: usize,
+        x: impl IntoIterator<Item = &'a EF>,
+        layer_0: Arc<DeviceBuffer<EF>>,
+        device_ctx: &GpuDeviceCtx,
+    ) -> Result<Self, KernelError> {
         let mut layers = Vec::with_capacity(n + 1);
-        let layer_0 = [EF::ONE]
-            .to_device_on(device_ctx)
-            .map_err(KernelError::MemCopy)?;
-        layers.push(layer_0);
+        layers.push(EqEvalLayer::Shared(layer_0));
         for (i, &x_i) in x.into_iter().enumerate() {
             let step = 1 << i;
             let buffer = DeviceBuffer::with_capacity_on(2 * step, device_ctx);
@@ -460,7 +500,7 @@ impl EqEvalLayers<EF> {
                 )
                 .map_err(KernelError::Kernel)?;
             }
-            layers.push(buffer);
+            layers.push(EqEvalLayer::Owned(buffer));
         }
         Ok(Self { layers })
     }
@@ -545,8 +585,15 @@ impl SqrtEqLayers {
         let low_n = n / 2;
         let high_n = n - low_n;
 
-        let low = EqEvalLayers::new(low_n, xi[high_n..].iter().rev(), device_ctx)?;
-        let high = EqEvalLayers::new(high_n, xi[..high_n].iter().rev(), device_ctx)?;
+        let layer_0 = EqEvalLayers::one_layer(device_ctx)?;
+        let low = EqEvalLayers::new_with_one(
+            low_n,
+            xi[high_n..].iter().rev(),
+            Arc::clone(&layer_0),
+            device_ctx,
+        )?;
+        let high =
+            EqEvalLayers::new_with_one(high_n, xi[..high_n].iter().rev(), layer_0, device_ctx)?;
 
         Ok(Self { low, high })
     }

@@ -4,6 +4,7 @@ use itertools::{zip_eq, Itertools};
 use openvm_cuda_common::{
     copy::{cuda_memcpy_on, MemCopyD2H, MemCopyH2D},
     d_buffer::DeviceBuffer,
+    error::MemCopyError,
     memory_manager::MemTracker,
     stream::GpuDeviceCtx,
 };
@@ -1041,13 +1042,37 @@ impl<D: Copy + Clone + Send + Sync + 'static> StackedReductionGpu<D> {
 
     #[instrument(level = "debug", skip_all)]
     fn get_stacked_openings(&self) -> Result<Vec<Vec<EF>>, StackedReductionError> {
-        self.q_evals
-            .iter()
-            .map(|q| {
-                q.to_host_on(&self.device_ctx)
-                    .map_err(StackedReductionError::MemCopy)
+        let lengths = self.q_evals.iter().map(DeviceBuffer::len).collect_vec();
+        let total_len = lengths.iter().sum();
+        let mut host = EF::zero_vec(total_len);
+
+        let mut offset = 0;
+        for (q, &len) in zip(&self.q_evals, &lengths) {
+            unsafe {
+                cuda_memcpy_on::<true, false>(
+                    host.as_mut_ptr().add(offset) as *mut c_void,
+                    q.as_ptr() as *const c_void,
+                    len * size_of::<EF>(),
+                    &self.device_ctx,
+                )?;
+            }
+            offset += len;
+        }
+        self.device_ctx
+            .stream
+            .synchronize()
+            .map_err(MemCopyError::from)?;
+
+        let mut offset = 0;
+        Ok(lengths
+            .into_iter()
+            .map(|len| {
+                let next = offset + len;
+                let values = host[offset..next].to_vec();
+                offset = next;
+                values
             })
-            .collect::<Result<Vec<_>, _>>()
+            .collect())
     }
 }
 
