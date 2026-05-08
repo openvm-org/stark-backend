@@ -15,7 +15,7 @@
 //! Run:  `cuda-profiler-assemble shadow_profile.bin > trace.json`
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs::File,
     io::{BufReader, BufWriter, Read, Write},
     path::PathBuf,
@@ -57,6 +57,30 @@ fn main() -> std::io::Result<()> {
     let nvtx_pid: i64 = 3;
     let plan_pid: i64 = 4;
 
+    // Sub-lane spread per primary lane. Multiple CTAs are routinely resident
+    // on the same SM concurrently (H100 allows up to 32), and Perfetto's
+    // slice tracker drops complete events that overlap on a single
+    // (pid, tid) — surfacing as `slice_drop_overlapping_complete_event` in
+    // the trace's import errors. The same applies to CUPTI kernel records
+    // that genuinely run concurrently on a single CUDA stream (rare, but it
+    // does happen with default-stream + per-thread-default-stream mixes).
+    //
+    // We post-process the buffered CTA / kernel events with a greedy
+    // sub-lane packer so each (smid, sub) and (stream, sub) pair stays
+    // strictly serial on its tid. Tid encoding is `primary * SUBLANES_STRIDE
+    // + sub`; the stride is large enough to keep distinct primaries from
+    // colliding even with worst-case concurrency.
+    const SUBLANES_STRIDE: i64 = 64;
+
+    // Defer per-SM CTA emission so we can pack overlapping records onto
+    // sub-lanes after the full scan. (smid, t_start, t_end, name, kid, blkl).
+    let mut cta_buf: Vec<(u32, u64, u64, String, u32, u32)> = Vec::new();
+    // Same idea for CUPTI kernel records on stream lanes.
+    let mut stream_kernel_buf: Vec<(u32, u64, u64, String)> = Vec::new();
+    // CUPTI memcpy goes onto its own sub-lane group within each stream so it
+    // doesn't fight kernels for sub-lane 0.
+    let mut stream_memcpy_buf: Vec<(u32, u64, u64, String, serde_json::Value)> = Vec::new();
+
     // Pair NVTX START/END markers by `(domain, id)`.
     // Value is `(name_from_start_if_seen, timestamp_ns_of_first_seen, kind_of_first_seen)`.
     let mut nvtx_open: HashMap<(String, u32), (String, u64, u32)> = HashMap::new();
@@ -80,18 +104,7 @@ fn main() -> std::io::Result<()> {
                     .get(&c.kernel_id)
                     .cloned()
                     .unwrap_or_else(|| format!("kid:{:#x}", c.kernel_id));
-                events.push(TraceEvent::complete(
-                    name,
-                    "gpu_cta",
-                    sm_pid,
-                    c.smid as i64,
-                    c.t_start,
-                    c.t_end.saturating_sub(c.t_start),
-                    serde_json::json!({
-                        "block_linear": c.block_linear,
-                        "kernel_id": format!("{:#010x}", c.kernel_id),
-                    }),
-                ));
+                cta_buf.push((c.smid, c.t_start, c.t_end, name, c.kernel_id, c.block_linear));
             }
             Record::Drop {
                 count,
@@ -114,15 +127,7 @@ fn main() -> std::io::Result<()> {
                 name,
                 ..
             } => {
-                events.push(TraceEvent::complete(
-                    name,
-                    "gpu_kernel",
-                    stream_pid,
-                    stream_id as i64,
-                    t_start_ns,
-                    t_end_ns.saturating_sub(t_start_ns),
-                    serde_json::json!({}),
-                ));
+                stream_kernel_buf.push((stream_id, t_start_ns, t_end_ns, name));
             }
             Record::CuptiMemcpy {
                 copy_kind,
@@ -133,13 +138,11 @@ fn main() -> std::io::Result<()> {
                 ..
             } => {
                 let label = format!("memcpy {} bytes (kind={})", bytes, copy_kind);
-                events.push(TraceEvent::complete(
-                    label,
-                    "gpu_memcpy",
-                    stream_pid,
-                    stream_id as i64,
+                stream_memcpy_buf.push((
+                    stream_id,
                     t_start_ns,
-                    t_end_ns.saturating_sub(t_start_ns),
+                    t_end_ns,
+                    label,
                     serde_json::json!({"bytes": bytes, "copy_kind": copy_kind}),
                 ));
             }
@@ -286,22 +289,182 @@ fn main() -> std::io::Result<()> {
         }
     }
 
-    // Stable order so file diffs are reproducible. f64 isn't Ord; convert to
-    // bits — events with NaN ts wouldn't sort meaningfully anyway.
+    // ---- Sub-lane packing for SM CTAs ----------------------------------
+    // Sort by primary (smid) then by start time so the greedy lane assigner
+    // sees events in temporal order within each SM.
+    cta_buf.sort_by_key(|x| (x.0, x.1));
+    {
+        // Per-SM lane end-time stacks. Index = primary smid (small dense
+        // integer space; max ~131 on H100 SXM).
+        let mut lanes: HashMap<u32, Vec<u64>> = HashMap::new();
+        let mut used_tids: HashSet<(u32, u32)> = HashSet::new();
+        for (smid, t_start, t_end, name, kid, blkl) in cta_buf {
+            let v = lanes.entry(smid).or_default();
+            // Greedy: assign to the first lane that's free at t_start.
+            // Strict-less-than (not `<=`) so that exactly-abutting events
+            // (`prev.t_end == this.t_start` in u64 ns) land on *different*
+            // sub-lanes. Same-lane abutters trigger a Perfetto false-positive
+            // overlap because Perfetto computes `ts + dur` for the previous
+            // X event in f64 and the resulting microsecond value can differ
+            // from the next event's `ts` by one ulp.
+            let lane = match v.iter().position(|&end| end < t_start) {
+                Some(i) => {
+                    v[i] = t_end;
+                    i as u32
+                }
+                None => {
+                    v.push(t_end);
+                    (v.len() - 1) as u32
+                }
+            };
+            // Each unique (smid, lane) becomes its own tid. Track for the
+            // thread_name metadata pass below.
+            used_tids.insert((smid, lane));
+            let tid = (smid as i64) * SUBLANES_STRIDE + (lane as i64);
+            events.push(TraceEvent::complete(
+                name,
+                "gpu_cta",
+                sm_pid,
+                tid,
+                t_start,
+                t_end.saturating_sub(t_start),
+                serde_json::json!({
+                    "block_linear": blkl,
+                    "kernel_id": format!("{:#010x}", kid),
+                }),
+            ));
+        }
+        // thread_name M events so Perfetto labels each (smid, lane) clearly.
+        for (smid, lane) in used_tids {
+            let tid = (smid as i64) * SUBLANES_STRIDE + (lane as i64);
+            events.push(TraceEvent::thread_name(sm_pid, tid, format!("SM {smid} / {lane}")));
+        }
+        events.push(TraceEvent::process_name(sm_pid, "GPU SMs (per-CTA)".into()));
+    }
+
+    // ---- Sub-lane packing for CUPTI kernel records ----------------------
+    // Per-stream kernels are normally serial, but CUDA does allow concurrent
+    // kernels (e.g., per-thread default streams, NCCL background work), and
+    // CUPTI wobble can produce 1-cycle apparent overlaps on adjacent
+    // launches. Pack defensively.
+    stream_kernel_buf.sort_by_key(|x| (x.0, x.1));
+    let mut stream_lanes: HashMap<u32, Vec<u64>> = HashMap::new();
+    let mut stream_kernel_used: HashSet<(u32, u32)> = HashSet::new();
+    for (stream_id, t_start, t_end, name) in stream_kernel_buf {
+        let v = stream_lanes.entry(stream_id).or_default();
+        let lane = match v.iter().position(|&end| end <= t_start) {
+            Some(i) => {
+                v[i] = t_end;
+                i as u32
+            }
+            None => {
+                v.push(t_end);
+                (v.len() - 1) as u32
+            }
+        };
+        stream_kernel_used.insert((stream_id, lane));
+        let tid = (stream_id as i64) * SUBLANES_STRIDE + (lane as i64);
+        events.push(TraceEvent::complete(
+            name,
+            "gpu_kernel",
+            stream_pid,
+            tid,
+            t_start,
+            t_end.saturating_sub(t_start),
+            serde_json::json!({}),
+        ));
+    }
+    for (stream_id, lane) in stream_kernel_used {
+        let tid = (stream_id as i64) * SUBLANES_STRIDE + (lane as i64);
+        events.push(TraceEvent::thread_name(
+            stream_pid,
+            tid,
+            if lane == 0 {
+                format!("stream {stream_id}")
+            } else {
+                format!("stream {stream_id} (concurrent #{lane})")
+            },
+        ));
+    }
+
+    // Memcpy lanes live in a separate tid range from kernels within the same
+    // stream (so the kernel timeline isn't visually shoved aside by long copies).
+    // We offset by SUBLANES_STRIDE/2 to keep them unambiguously distinct.
+    stream_memcpy_buf.sort_by_key(|x| (x.0, x.1));
+    let mut memcpy_lanes: HashMap<u32, Vec<u64>> = HashMap::new();
+    let mut memcpy_used: HashSet<(u32, u32)> = HashSet::new();
+    for (stream_id, t_start, t_end, label, args) in stream_memcpy_buf {
+        let v = memcpy_lanes.entry(stream_id).or_default();
+        let lane = match v.iter().position(|&end| end <= t_start) {
+            Some(i) => {
+                v[i] = t_end;
+                i as u32
+            }
+            None => {
+                v.push(t_end);
+                (v.len() - 1) as u32
+            }
+        };
+        memcpy_used.insert((stream_id, lane));
+        let tid =
+            (stream_id as i64) * SUBLANES_STRIDE + (SUBLANES_STRIDE / 2) + (lane as i64);
+        events.push(TraceEvent::complete(
+            label,
+            "gpu_memcpy",
+            stream_pid,
+            tid,
+            t_start,
+            t_end.saturating_sub(t_start),
+            args,
+        ));
+    }
+    for (stream_id, lane) in memcpy_used {
+        let tid =
+            (stream_id as i64) * SUBLANES_STRIDE + (SUBLANES_STRIDE / 2) + (lane as i64);
+        events.push(TraceEvent::thread_name(
+            stream_pid,
+            tid,
+            if lane == 0 {
+                format!("stream {stream_id} memcpy")
+            } else {
+                format!("stream {stream_id} memcpy (concurrent #{lane})")
+            },
+        ));
+    }
+    events.push(TraceEvent::process_name(stream_pid, "GPU streams".into()));
+    events.push(TraceEvent::process_name(nvtx_pid, "NVTX".into()));
+    events.push(TraceEvent::process_name(plan_pid, "Plan choices".into()));
+
+    // Stable order so file diffs are reproducible.
     events.sort_by(|a, b| {
         a.pid
             .cmp(&b.pid)
             .then(a.tid.cmp(&b.tid))
-            .then(a.ts.partial_cmp(&b.ts).unwrap_or(std::cmp::Ordering::Equal))
+            .then(a.t_ns.cmp(&b.t_ns))
     });
 
+    // Compute t0 from the first non-metadata timestamp (events are now sorted
+    // by (pid, tid, t_ns), so the min over t_ns lives in here). Subtracting
+    // `t0_ns` in u64 space *before* dividing by 1000 is what keeps the f64
+    // ts microsecond values precise enough not to introduce phantom overlaps.
+    let t0_ns_for_rebase = events
+        .iter()
+        .filter(|e| e.ph != "M" && e.t_ns != 0)
+        .map(|e| e.t_ns)
+        .min()
+        .unwrap_or(0);
+
     let metadata = serde_json::json!({
-        "gpu_t0_ns": t0_ns.unwrap_or(0),
+        "wallclock_t0_ns": t0_ns.unwrap_or(0),
+        "gpu_t0_ns": t0_ns_for_rebase,
         "kernels": kernels.iter().map(|(k, v)| (format!("{:#010x}", k), v)).collect::<HashMap<_, _>>(),
     });
 
+    let trace_events: Vec<serde_json::Value> =
+        events.iter().map(|e| e.to_json(t0_ns_for_rebase)).collect();
+
     let output = serde_json::json!({
-        "traceEvents": events,
+        "traceEvents": trace_events,
         "displayTimeUnit": "ns",
         "metadata": metadata,
     });
@@ -334,23 +497,36 @@ fn read_header<R: Read>(r: &mut R) -> std::io::Result<()> {
     Ok(())
 }
 
-#[derive(Debug, serde::Serialize)]
+/// In-memory trace event. We keep the raw nanosecond timestamps as `u64` and
+/// only convert to the Chrome-trace `ts` / `dur` floats (in microseconds) at
+/// serialization time, after a single `rebase` pass subtracts a common
+/// `t0_ns`. That order matters: `t_ns` is up to ~2^60-ish (nanoseconds since
+/// boot, ~1.8e18 in this run), and dividing it by 1000 directly produces a
+/// `f64` ~1.78e15 µs which has worse-than-microsecond precision — adjacent
+/// events that are *non-overlapping* in `u64` ns can become apparently
+/// overlapping after the lossy divide, and Perfetto then drops them with
+/// `slice_drop_overlapping_complete_event`. Subtracting a per-trace `t0_ns`
+/// in integer space first keeps the post-divide `f64` under ~3e8 µs (a few
+/// hundred seconds), where f64 has ~1e-8 µs precision — comfortably below the
+/// ns we care about.
+#[derive(Debug)]
 struct TraceEvent {
     name: String,
-    cat: String,
-    ph: String,
+    cat: &'static str,
+    ph: &'static str,
     pid: i64,
     tid: i64,
-    ts: f64, // microseconds since epoch (Chrome trace convention)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    dur: Option<f64>,
+    /// Raw start-time ns. For M (metadata) events this is 0 and is unused.
+    t_ns: u64,
+    /// Raw duration ns. Zero for I/M events.
+    dur_ns: u64,
     args: serde_json::Value,
 }
 
 impl TraceEvent {
     fn complete(
         name: String,
-        cat: &str,
+        cat: &'static str,
         pid: i64,
         tid: i64,
         t_start_ns: u64,
@@ -359,18 +535,18 @@ impl TraceEvent {
     ) -> Self {
         Self {
             name,
-            cat: cat.to_string(),
-            ph: "X".into(),
+            cat,
+            ph: "X",
             pid,
             tid,
-            ts: (t_start_ns as f64) / 1000.0,
-            dur: Some((dur_ns as f64) / 1000.0),
+            t_ns: t_start_ns,
+            dur_ns,
             args,
         }
     }
     fn instant(
         name: String,
-        cat: &str,
+        cat: &'static str,
         pid: i64,
         tid: i64,
         t_ns: u64,
@@ -378,13 +554,73 @@ impl TraceEvent {
     ) -> Self {
         Self {
             name,
-            cat: cat.to_string(),
-            ph: "i".into(),
+            cat,
+            ph: "i",
             pid,
             tid,
-            ts: (t_ns as f64) / 1000.0,
-            dur: None,
+            t_ns,
+            dur_ns: 0,
             args,
         }
+    }
+    /// Chrome-trace metadata event that names a thread (`(pid, tid)`).
+    /// `ph: "M"` events are not timed; `ts` and `dur` are ignored by Perfetto.
+    fn thread_name(pid: i64, tid: i64, name: String) -> Self {
+        Self {
+            name: "thread_name".into(),
+            cat: "__metadata",
+            ph: "M",
+            pid,
+            tid,
+            t_ns: 0,
+            dur_ns: 0,
+            args: serde_json::json!({ "name": name }),
+        }
+    }
+    /// Chrome-trace metadata event that names a process (`pid`).
+    fn process_name(pid: i64, name: String) -> Self {
+        Self {
+            name: "process_name".into(),
+            cat: "__metadata",
+            ph: "M",
+            pid,
+            tid: 0,
+            t_ns: 0,
+            dur_ns: 0,
+            args: serde_json::json!({ "name": name }),
+        }
+    }
+
+    /// Convert to the JSON shape Perfetto expects, with timestamps rebased
+    /// by `t0_ns` and divided by 1000 (ns -> µs).
+    fn to_json(&self, t0_ns: u64) -> serde_json::Value {
+        let ts_us = if self.ph == "M" {
+            0.0
+        } else {
+            (self.t_ns.saturating_sub(t0_ns) as f64) / 1000.0
+        };
+        let mut obj = serde_json::Map::new();
+        obj.insert("name".into(), serde_json::Value::String(self.name.clone()));
+        obj.insert("cat".into(), serde_json::Value::String(self.cat.to_string()));
+        obj.insert("ph".into(), serde_json::Value::String(self.ph.to_string()));
+        obj.insert("pid".into(), self.pid.into());
+        obj.insert("tid".into(), self.tid.into());
+        obj.insert(
+            "ts".into(),
+            serde_json::Number::from_f64(ts_us)
+                .map(serde_json::Value::Number)
+                .unwrap_or(serde_json::Value::Null),
+        );
+        if self.ph == "X" {
+            let dur_us = (self.dur_ns as f64) / 1000.0;
+            obj.insert(
+                "dur".into(),
+                serde_json::Number::from_f64(dur_us)
+                    .map(serde_json::Value::Number)
+                    .unwrap_or(serde_json::Value::Null),
+            );
+        }
+        obj.insert("args".into(), self.args.clone());
+        serde_json::Value::Object(obj)
     }
 }

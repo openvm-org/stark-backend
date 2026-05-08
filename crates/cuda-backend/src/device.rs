@@ -42,11 +42,6 @@ impl GpuDevice {
         ensure_device_ntt_twiddles_initialized()
             .expect("failed to initialize small-NTT twiddles for current CUDA device");
 
-        // Lazy profiler init. With the `profiler` feature off, this module
-        // does not exist and the call compiles to nothing.
-        #[cfg(feature = "profiler")]
-        crate::profiler_init::init_profiler_once();
-
         let prover_config = GpuProverConfig {
             zerocheck_save_memory: params.log_blowup == 1,
             ..Default::default()

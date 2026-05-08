@@ -22,7 +22,25 @@
 
 use std::io::{self, Read, Write};
 
-use crate::ffi::CtaRecord;
+/// 32-byte CTA telemetry record. Layout matches the device-side struct in
+/// the NVBit tool's `inject_funcs.cu`. The on-disk encoding is hand-rolled
+/// in `encode_payload` / `decode_payload` so adding fields here is a
+/// wire-format change.
+#[repr(C, align(8))]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CtaRecord {
+    pub kernel_id: u32,
+    pub smid: u32,
+    pub block_linear: u32,
+    pub seq_tag: u32,
+    pub t_start: u64,
+    pub t_end: u64,
+}
+
+const _: () = {
+    assert!(std::mem::size_of::<CtaRecord>() == 32);
+    assert!(std::mem::align_of::<CtaRecord>() == 8);
+};
 
 pub const MAGIC: &[u8; 8] = b"SHDWPROF";
 pub const VERSION_MAJOR: u16 = 1;

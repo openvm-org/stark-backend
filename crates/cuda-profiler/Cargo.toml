@@ -3,21 +3,12 @@ name = "openvm-cuda-profiler"
 version.workspace = true
 authors.workspace = true
 edition.workspace = true
-description = "OpenVM hardware-mapped CUDA profiler: per-CTA probes + CUPTI sidecar + Perfetto export"
+description = "OpenVM CUDA profiler: SHDWPROF binary log format and Perfetto exporter (consumed by an external NVBit tool, see ./nvbit-tool)"
 
 [dependencies]
-openvm-cuda-common.workspace = true
-tracing.workspace = true
-parking_lot.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
-thiserror.workspace = true
-once_cell.workspace = true
-libc = "0.2"
 clap.workspace = true
-
-[build-dependencies]
-openvm-cuda-builder.workspace = true
 
 [[bin]]
 name = "cuda-profiler-assemble"
