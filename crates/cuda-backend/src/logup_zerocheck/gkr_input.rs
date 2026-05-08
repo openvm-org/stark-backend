@@ -13,14 +13,18 @@ use tracing::instrument;
 use super::errors::InteractionGpuError;
 use crate::{
     cuda::logup_zerocheck::{
-        frac_matrix_vertically_repeat, frac_vector_scalar_multiply_ext_fp,
-        gkr_input_intermediates_buffer_size, logup_gkr_input_eval, GkrInputCtx,
+        frac_matrix_vertically_repeat, frac_vector_scalar_multiply_ext_fp, logup_gkr_input_eval,
+        BlockCtx, GkrInputCtx,
     },
     gpu_backend::GenericGpuBackend,
     hash_scheme::GpuHashScheme,
     prelude::{EF, F},
 };
 
+/// Threads per launched block.
+const THREADS_PER_BLOCK: u32 = 256;
+/// Per-AIR thread-count cap. Bounds the per-AIR intermediates buffer for tall AIRs;
+/// rows beyond this are picked up by the kernel's `num_rows_per_tile` inner loop.
 const TASK_SIZE: u32 = 65536;
 
 #[allow(dead_code)]
@@ -121,6 +125,12 @@ pub fn log_gkr_input_evals<HS: GpuHashScheme>(
     struct AirPlan {
         height: usize,
         num_interactions: usize,
+        /// Per-AIR thread count = `num_blocks_x * THREADS_PER_BLOCK`. Capped at `TASK_SIZE` for
+        /// tall AIRs (the kernel's `num_rows_per_tile` loop covers rows beyond `task_stride`).
+        /// Doubles as the column stride of the per-AIR intermediates buffer.
+        task_stride: usize,
+        num_blocks_x: usize,
+        num_rows_per_tile: usize,
         intermediate_elements: usize,
         intermediate_bytes: usize,
         lifted_height: usize,
@@ -134,9 +144,20 @@ pub fn log_gkr_input_evals<HS: GpuHashScheme>(
         let pk_air = &pk.per_air[meta.air_idx];
         let height = air_ctx.height();
         let num_interactions = pk_air.vk.symbolic_constraints.interactions.len();
-        let buffer_size = pk_air.other_data.interaction_rules.inner.buffer_size;
+        let buffer_size = pk_air.other_data.interaction_rules.inner.buffer_size as usize;
 
-        let intermediate_elements = gkr_input_intermediates_buffer_size(buffer_size);
+        // Size each AIR's launch to its own height: enough threads to cover the height
+        // (rounded up to a block), capped at TASK_SIZE so the per-AIR intermediates buffer stays
+        // bounded. AIRs taller than the cap pick up the rest via `num_rows_per_tile`. The lower
+        // clamp at THREADS_PER_BLOCK keeps both `num_blocks_x` and `intermediate_elements` from
+        // degenerating to zero for height==0 AIRs (the kernel's row-bound check makes their
+        // threads no-op anyway, but the launch still needs at least one block).
+        let raw_threads = height.div_ceil(THREADS_PER_BLOCK as usize) * THREADS_PER_BLOCK as usize;
+        let task_stride = raw_threads.clamp(THREADS_PER_BLOCK as usize, TASK_SIZE as usize);
+        let num_blocks_x = task_stride / THREADS_PER_BLOCK as usize;
+        let num_rows_per_tile = height.div_ceil(task_stride).max(1);
+
+        let intermediate_elements = task_stride * buffer_size;
         let intermediate_bytes = intermediate_elements * std::mem::size_of::<EF>();
 
         let slice = meta.layout_slices.first().unwrap();
@@ -150,6 +171,9 @@ pub fn log_gkr_input_evals<HS: GpuHashScheme>(
         plans.push(AirPlan {
             height,
             num_interactions,
+            task_stride,
+            num_blocks_x,
+            num_rows_per_tile,
             intermediate_elements,
             intermediate_bytes,
             lifted_height,
@@ -186,8 +210,15 @@ pub fn log_gkr_input_evals<HS: GpuHashScheme>(
             .then(|| DeviceBuffer::<Frac<EF>>::with_capacity_on(total_lift_elements, device_ctx));
         let mut tmp_offset: usize = 0;
 
-        // Build GkrInputCtx for each AIR in this batch
+        // Build GkrInputCtx for each AIR in this batch, plus a flat BlockCtx list that maps each
+        // launched block to its AIR + sub-block index (mirrors the dispatch pattern in
+        // `batch_mle.cu`).
+        let total_blocks: usize = plans[plan_start..batch_end]
+            .iter()
+            .map(|p| p.num_blocks_x)
+            .sum();
         let mut ctxs_host: Vec<GkrInputCtx> = Vec::with_capacity(count);
+        let mut block_ctxs_host: Vec<BlockCtx> = Vec::with_capacity(total_blocks);
         let mut intermediates_keepalive: Vec<DeviceBuffer<EF>> = Vec::with_capacity(count);
         let mut main_ptrs_keepalive: Vec<DeviceBuffer<u64>> = Vec::with_capacity(count);
         let mut public_keepalive: Vec<DeviceBuffer<F>> = Vec::with_capacity(count);
@@ -246,8 +277,16 @@ pub fn log_gkr_input_evals<HS: GpuHashScheme>(
                 unsafe { leaves.as_mut_ptr().add(plan.dst_offset) }
             };
 
-            let num_rows_per_tile = plan.height.div_ceil(TASK_SIZE as usize).max(1);
             let rules = &pk_air.other_data.interaction_rules;
+
+            // Push order is the contract: the kernel does `block_ctxs[blockIdx.x]` directly, so
+            // blocks must appear grouped by air_idx in the same order as ctxs_host.
+            for b in 0..plan.num_blocks_x {
+                block_ctxs_host.push(BlockCtx {
+                    local_block_idx_x: b as u32,
+                    air_idx: i as u32,
+                });
+            }
 
             ctxs_host.push(GkrInputCtx {
                 d_fracs: trace_output_ptr,
@@ -261,13 +300,24 @@ pub fn log_gkr_input_evals<HS: GpuHashScheme>(
                 d_pair_idxs: rules.d_pair_idxs.as_ptr(),
                 used_nodes_len: rules.inner.d_used_nodes.len(),
                 height: plan.height as u32,
-                num_rows_per_tile: num_rows_per_tile as u32,
+                task_stride: plan.task_stride as u32,
+                num_rows_per_tile: plan.num_rows_per_tile as u32,
             });
         }
 
         let d_ctxs = ctxs_host.to_device_on(device_ctx)?;
+        let d_block_ctxs = block_ctxs_host.to_device_on(device_ctx)?;
+        let total_blocks_u32: u32 = total_blocks
+            .try_into()
+            .expect("total_blocks fits in u32 (sum of per-AIR num_blocks_x)");
         unsafe {
-            logup_gkr_input_eval(&d_ctxs, count as u32, stream)?;
+            logup_gkr_input_eval(
+                &d_block_ctxs,
+                &d_ctxs,
+                total_blocks_u32,
+                THREADS_PER_BLOCK,
+                stream,
+            )?;
         }
 
         // Handle lifting (normalization + vertical repeat) for AIRs that need it

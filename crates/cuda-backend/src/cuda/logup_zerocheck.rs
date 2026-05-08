@@ -97,7 +97,13 @@ pub struct LogupMonomialCtx {
     pub num_monomials: u32,
 }
 
-/// Per-AIR context for GKR input evaluation.
+/// Per-AIR context for GKR input evaluation. Dispatched via a flat `BlockCtx` block list:
+/// each block reads its `air_idx` and `local_block_idx_x` from the `BlockCtx` table and
+/// then loads this struct for the AIR's pointers + sizing.
+///
+/// `task_stride` is the per-AIR thread count = `num_blocks_x * THREADS_PER_BLOCK`. It also
+/// serves as the column stride for `d_intermediates`, which must hold at least
+/// `task_stride * buffer_size` `EF` elements.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct GkrInputCtx {
@@ -112,6 +118,7 @@ pub struct GkrInputCtx {
     pub d_pair_idxs: *const u32,
     pub used_nodes_len: usize,
     pub height: u32,
+    pub task_stride: u32,
     pub num_rows_per_tile: u32,
 }
 
@@ -325,11 +332,11 @@ extern "C" {
     ) -> i32;
 
     // gkr_input.cu
-    fn _gkr_input_intermediates_buffer_size(buffer_size: u32) -> usize;
-
     fn _logup_gkr_input_eval(
+        d_block_ctxs: *const BlockCtx,
         d_ctxs: *const GkrInputCtx,
-        num_airs: u32,
+        num_blocks: u32,
+        threads_per_block: u32,
         stream: cudaStream_t,
     ) -> i32;
 
@@ -1080,22 +1087,29 @@ pub unsafe fn fold_ple_from_evals(
     ))
 }
 
-/// GKR input eval that processes multiple AIRs in a single kernel launch.
+/// GKR input eval that processes multiple AIRs in a single kernel launch via a flat block list.
+///
+/// Each entry of `d_block_ctxs` describes one block in the launch (which AIR it serves and its
+/// sub-block index within that AIR's allotment). Per-AIR sizing lives in `d_ctxs[air_idx]`.
 ///
 /// # Safety
-/// - `d_ctxs` must point to device memory containing `num_airs` valid `GkrInputCtx` structs.
-/// - All referenced device pointers in each ctx must be valid.
+/// - `d_block_ctxs` must contain exactly `num_blocks` valid `BlockCtx` entries.
+/// - `d_ctxs` must contain a valid `GkrInputCtx` for every distinct `air_idx` referenced by
+///   `d_block_ctxs`. All referenced device pointers in each ctx must be valid.
 pub unsafe fn logup_gkr_input_eval(
+    d_block_ctxs: &DeviceBuffer<BlockCtx>,
     d_ctxs: &DeviceBuffer<GkrInputCtx>,
-    num_airs: u32,
+    num_blocks: u32,
+    threads_per_block: u32,
     stream: cudaStream_t,
 ) -> Result<(), CudaError> {
-    CudaError::from_result(_logup_gkr_input_eval(d_ctxs.as_ptr(), num_airs, stream))
-}
-
-/// Number of `FpExt` elements needed for the per-AIR intermediates buffer.
-pub fn gkr_input_intermediates_buffer_size(buffer_size: u32) -> usize {
-    unsafe { _gkr_input_intermediates_buffer_size(buffer_size) }
+    CudaError::from_result(_logup_gkr_input_eval(
+        d_block_ctxs.as_ptr(),
+        d_ctxs.as_ptr(),
+        num_blocks,
+        threads_per_block,
+        stream,
+    ))
 }
 
 pub unsafe fn frac_add_alpha(
