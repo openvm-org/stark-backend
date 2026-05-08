@@ -91,7 +91,7 @@ impl FractionalInputSize {
         // Conservative estimate for M_precompute_EF: m_total + m_partial bound + eq_prefix/suffix.
         // In practice the max_window term is ceil(2^(rem_n - w) / tail_tile) * 2^(2w) EF elems;
         // use 2 * 2^(2w) as a safe floor (tail_tile >= 1, rem_n bounded by total_rounds).
-        let precompute_ef = (1 << (2 * w + 1) + (1 << (w + 1))) * s_ef;
+        let precompute_ef = ((1 << (2 * w + 1)) + (1 << (w + 1))) * s_ef;
 
         fold_eval.max(precompute_f + precompute_ef)
     }
