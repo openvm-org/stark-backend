@@ -137,8 +137,7 @@ pub fn log_gkr_input_evals<HS: GpuHashScheme>(
         let num_interactions = pk_air.vk.symbolic_constraints.interactions.len();
         let buffer_size = pk_air.other_data.interaction_rules.inner.buffer_size;
 
-        let intermediate_elements =
-            unsafe { gkr_input_batch_intermediates_buffer_size(buffer_size, stream) };
+        let intermediate_elements = gkr_input_batch_intermediates_buffer_size(buffer_size);
         let intermediate_bytes = intermediate_elements * std::mem::size_of::<EF>();
 
         let slice = meta.layout_slices.first().unwrap();
@@ -223,7 +222,7 @@ pub fn log_gkr_input_evals<HS: GpuHashScheme>(
 
             let intermediates = if plan.buffer_size > 0 {
                 let intermediate_elements =
-                    unsafe { gkr_input_batch_intermediates_buffer_size(plan.buffer_size, stream) };
+                    gkr_input_batch_intermediates_buffer_size(plan.buffer_size);
                 let buf = DeviceBuffer::<EF>::with_capacity_on(intermediate_elements, device_ctx);
                 let ptr = buf.as_mut_ptr();
                 intermediates_keepalive.push(buf);

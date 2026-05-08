@@ -341,7 +341,7 @@ extern "C" {
         stream: cudaStream_t,
     ) -> i32;
 
-    fn _gkr_input_batch_intermediates_buffer_size(buffer_size: u32, stream: cudaStream_t) -> usize;
+    fn _gkr_input_batch_intermediates_buffer_size(buffer_size: u32) -> usize;
 
     fn _logup_batch_gkr_input_eval(
         d_ctxs: *const GkrInputCtx,
@@ -1153,11 +1153,8 @@ pub unsafe fn logup_batch_gkr_input_eval(
 
 /// Computes the number of FpExt elements needed for intermediates in the batch GKR input eval
 /// kernel.
-pub unsafe fn gkr_input_batch_intermediates_buffer_size(
-    buffer_size: u32,
-    stream: cudaStream_t,
-) -> usize {
-    _gkr_input_batch_intermediates_buffer_size(buffer_size, stream)
+pub fn gkr_input_batch_intermediates_buffer_size(buffer_size: u32) -> usize {
+    unsafe { _gkr_input_batch_intermediates_buffer_size(buffer_size) }
 }
 
 pub unsafe fn frac_add_alpha(

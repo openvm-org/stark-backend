@@ -384,10 +384,7 @@ __global__ void evaluate_interactions_gkr_batch_kernel(
 }
 
 // Size helper: returns number of FpExt elements needed for intermediates per AIR.
-extern "C" size_t _gkr_input_batch_intermediates_buffer_size(
-    uint32_t buffer_size,
-    cudaStream_t stream
-) {
+extern "C" size_t _gkr_input_batch_intermediates_buffer_size(uint32_t buffer_size) {
     return (size_t)TASK_SIZE * buffer_size;
 }
 
