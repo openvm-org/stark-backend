@@ -91,7 +91,9 @@ __global__ void evaluate_interactions_gkr_kernel(
     for (uint32_t air = 0; air < num_airs; air++) {
         GkrInputCtx ctx = d_ctxs[air];
 
-        FpExt *intermediates_ptr = ctx.d_intermediates + task_offset;
+        // d_intermediates may be null for AIRs with buffer_size == 0; avoid UB pointer arithmetic.
+        FpExt *intermediates_ptr =
+            ctx.d_intermediates ? ctx.d_intermediates + task_offset : nullptr;
         uint32_t intermediate_stride = task_stride;
 
         for (uint32_t j = 0; j < ctx.num_rows_per_tile; j++) {

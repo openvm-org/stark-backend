@@ -174,13 +174,23 @@ pub fn log_gkr_input_evals<HS: GpuHashScheme>(
 
         let count = batch_end - plan_start;
 
+        // Single tmp allocation per batch, partitioned across lifting AIRs by offset.
+        // (One alloc beats N separate `with_capacity_on` calls; lifting AIRs in the same batch
+        // can't share one buffer because the kernel writes them concurrently.)
+        let total_lift_elements: usize = plans[plan_start..batch_end]
+            .iter()
+            .filter(|p| p.needs_lifting)
+            .map(|p| p.height * p.num_interactions)
+            .sum();
+        let tmp_buf = (total_lift_elements > 0)
+            .then(|| DeviceBuffer::<Frac<EF>>::with_capacity_on(total_lift_elements, device_ctx));
+        let mut tmp_offset: usize = 0;
+
         // Build GkrInputCtx for each AIR in this batch
         let mut ctxs_host: Vec<GkrInputCtx> = Vec::with_capacity(count);
         let mut intermediates_keepalive: Vec<DeviceBuffer<EF>> = Vec::with_capacity(count);
         let mut main_ptrs_keepalive: Vec<DeviceBuffer<u64>> = Vec::with_capacity(count);
         let mut public_keepalive: Vec<DeviceBuffer<F>> = Vec::with_capacity(count);
-        // Per-AIR tmp buffers for lifting AIRs (must be separate to avoid overwriting)
-        let mut tmp_per_air: Vec<DeviceBuffer<Frac<EF>>> = Vec::new();
 
         for i in 0..count {
             let plan = &plans[plan_start + i];
@@ -229,10 +239,8 @@ pub fn log_gkr_input_evals<HS: GpuHashScheme>(
             };
 
             let trace_output_ptr = if plan.needs_lifting {
-                let required = plan.height * plan.num_interactions;
-                let buf = DeviceBuffer::<Frac<EF>>::with_capacity_on(required, device_ctx);
-                let ptr = buf.as_mut_ptr();
-                tmp_per_air.push(buf);
+                let ptr = unsafe { tmp_buf.as_ref().unwrap().as_mut_ptr().add(tmp_offset) };
+                tmp_offset += plan.height * plan.num_interactions;
                 ptr
             } else {
                 unsafe { leaves.as_mut_ptr().add(plan.dst_offset) }
@@ -263,27 +271,22 @@ pub fn log_gkr_input_evals<HS: GpuHashScheme>(
         }
 
         // Handle lifting (normalization + vertical repeat) for AIRs that need it
-        let mut tmp_idx: usize = 0;
+        let mut lift_offset: usize = 0;
         for i in 0..count {
             let plan = &plans[plan_start + i];
             if plan.needs_lifting {
-                let tmp_buf = &tmp_per_air[tmp_idx];
-                tmp_idx += 1;
-                debug_assert_eq!(tmp_buf.len(), plan.height * plan.num_interactions);
+                let len = plan.height * plan.num_interactions;
                 debug_assert_eq!(plan.lifted_height % plan.height, 0);
                 let norm_factor_denom = plan.lifted_height / plan.height;
                 let norm_factor = F::from_usize(norm_factor_denom).inverse();
                 let leaves_ptr = unsafe { leaves.as_mut_ptr().add(plan.dst_offset) };
+                let slice_ptr = unsafe { tmp_buf.as_ref().unwrap().as_mut_ptr().add(lift_offset) };
+                lift_offset += len;
                 unsafe {
-                    frac_vector_scalar_multiply_ext_fp(
-                        tmp_buf.as_mut_ptr(),
-                        norm_factor,
-                        tmp_buf.len() as u32,
-                        stream,
-                    )?;
+                    frac_vector_scalar_multiply_ext_fp(slice_ptr, norm_factor, len as u32, stream)?;
                     frac_matrix_vertically_repeat(
                         leaves_ptr,
-                        tmp_buf.as_ptr(),
+                        slice_ptr,
                         plan.num_interactions as u32,
                         plan.lifted_height as u32,
                         plan.height as u32,
