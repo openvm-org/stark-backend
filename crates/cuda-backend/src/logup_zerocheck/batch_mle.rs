@@ -22,6 +22,7 @@ use crate::{
     hash_scheme::GpuHashScheme,
     logup_zerocheck::{
         batch_mle_monomial::{LogupCombinations, LogupMonomialBatch},
+        block_ctxs::build_block_ctxs,
         mle_round::{evaluate_mle_constraints_gpu, evaluate_mle_interactions_gpu},
     },
     prelude::{EF, F},
@@ -159,21 +160,8 @@ impl<'a> ZerocheckMleBatchBuilder<'a> {
         let max_num_y = traces.iter().map(|t| t.num_y).max().unwrap_or(0);
         let threads_per_block = max_num_y.min(MAX_THREADS_PER_BLOCK);
 
-        // Build block_ctxs and air_offsets
-        let mut block_ctxs_h: Vec<BlockCtx> = Vec::new();
-        let mut air_offsets: Vec<u32> = Vec::with_capacity(traces.len() + 1);
-        air_offsets.push(0);
-
-        for (local_air, t) in traces.iter().enumerate() {
-            let nb = t.num_y.div_ceil(threads_per_block);
-            for b in 0..nb {
-                block_ctxs_h.push(BlockCtx {
-                    local_block_idx_x: b,
-                    air_idx: local_air as u32,
-                });
-            }
-            air_offsets.push(block_ctxs_h.len() as u32);
-        }
+        let (block_ctxs_h, air_offsets) =
+            build_block_ctxs(traces.iter().map(|t| t.num_y.div_ceil(threads_per_block)));
 
         // Build ZerocheckCtx for each trace
         let mut intermediates_keepalive: Vec<DeviceBuffer<EF>> = Vec::new();
@@ -316,21 +304,8 @@ impl<'a> LogupMleBatchBuilder<'a> {
         let max_num_y = traces.iter().map(|t| t.num_y).max().unwrap_or(0);
         let threads_per_block = max_num_y.min(MAX_THREADS_PER_BLOCK);
 
-        // Build block_ctxs and air_offsets
-        let mut block_ctxs_h: Vec<BlockCtx> = Vec::new();
-        let mut air_offsets: Vec<u32> = Vec::with_capacity(traces.len() + 1);
-        air_offsets.push(0);
-
-        for (local_air, t) in traces.iter().enumerate() {
-            let nb = t.num_y.div_ceil(threads_per_block);
-            for b in 0..nb {
-                block_ctxs_h.push(BlockCtx {
-                    local_block_idx_x: b,
-                    air_idx: local_air as u32,
-                });
-            }
-            air_offsets.push(block_ctxs_h.len() as u32);
-        }
+        let (block_ctxs_h, air_offsets) =
+            build_block_ctxs(traces.iter().map(|t| t.num_y.div_ceil(threads_per_block)));
 
         // Build LogupCtx for each trace
         let mut intermediates_keepalive: Vec<DeviceBuffer<EF>> = Vec::new();

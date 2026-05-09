@@ -1,5 +1,6 @@
 #pragma once
 
+#include "block_ctx.cuh"
 #include "fp.h"
 #include "fpext.h"
 #include "matrix.cuh"
@@ -13,11 +14,6 @@ struct EvalCoreCtx {
     const MainMatrixPtrs<FpExt> d_preprocessed;
     const MainMatrixPtrs<FpExt> *__restrict__ d_main;
     const Fp *__restrict__ d_public;
-};
-
-struct BlockCtx {
-    uint32_t local_block_idx_x;
-    uint32_t air_idx;
 };
 
 } // namespace logup_zerocheck_mle
