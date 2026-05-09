@@ -96,6 +96,32 @@ pub struct LogupMonomialCtx {
     pub d_combinations: *const EF,
     pub num_monomials: u32,
 }
+
+/// Per-AIR context for GKR input evaluation. Dispatched via a flat `BlockCtx` block list:
+/// each block reads its `air_idx` and `local_block_idx_x` from the `BlockCtx` table and
+/// then loads this struct for the AIR's pointers + sizing.
+///
+/// `task_stride` is the per-AIR thread count = `num_blocks_x * THREADS_PER_BLOCK`. It also
+/// serves as the column stride for `d_intermediates`, which must hold at least
+/// `task_stride * buffer_size` `EF` elements.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct GkrInputCtx {
+    pub d_fracs: *mut Frac<EF>,
+    pub d_preprocessed: *const F,
+    pub d_main: *const u64,
+    pub d_public_values: *const F,
+    pub d_challenges: *const EF,
+    pub d_intermediates: *mut EF,
+    pub d_rules: *const std::ffi::c_void,
+    pub d_used_nodes: *const usize,
+    pub d_pair_idxs: *const u32,
+    pub used_nodes_len: usize,
+    pub height: u32,
+    pub task_stride: u32,
+    pub num_rows_per_tile: u32,
+}
+
 // end of types for batch MLE
 
 extern "C" {
@@ -307,19 +333,10 @@ extern "C" {
 
     // gkr_input.cu
     fn _logup_gkr_input_eval(
-        is_global: bool,
-        fracs: *mut Frac<EF>,
-        preprocessed: *const F,
-        partitioned_main: *const u64,
-        public_values: *const F,
-        challenges: *const EF,
-        intermediates: *const EF,
-        rules: *const std::ffi::c_void,
-        used_nodes: *const usize,
-        pair_idxs: *const u32,
-        used_nodes_len: usize,
-        height: u32,
-        num_rows_per_tile: u32,
+        d_block_ctxs: *const BlockCtx,
+        d_ctxs: *const GkrInputCtx,
+        num_blocks: u32,
+        threads_per_block: u32,
         stream: cudaStream_t,
     ) -> i32;
 
@@ -1070,40 +1087,27 @@ pub unsafe fn fold_ple_from_evals(
     ))
 }
 
+/// GKR input eval that processes multiple AIRs in a single kernel launch via a flat block list.
+///
+/// Each entry of `d_block_ctxs` describes one block in the launch (which AIR it serves and its
+/// sub-block index within that AIR's allotment). Per-AIR sizing lives in `d_ctxs[air_idx]`.
+///
 /// # Safety
-/// - `fracs` must be a pointer to a device buffer with capacity at least `num_interactions *
-///   height`.
-#[allow(clippy::too_many_arguments)]
+/// - `d_block_ctxs` must contain exactly `num_blocks` valid `BlockCtx` entries.
+/// - `d_ctxs` must contain a valid `GkrInputCtx` for every distinct `air_idx` referenced by
+///   `d_block_ctxs`. All referenced device pointers in each ctx must be valid.
 pub unsafe fn logup_gkr_input_eval(
-    is_global: bool,
-    fracs: *mut Frac<EF>,
-    preprocessed: &DeviceBuffer<F>,
-    partitioned_main: &DeviceBuffer<u64>,
-    public_values: &DeviceBuffer<F>,
-    challenges: &DeviceBuffer<EF>,
-    intermediates: &DeviceBuffer<EF>,
-    rules: &DeviceBuffer<u128>,
-    used_nodes: &DeviceBuffer<usize>,
-    pair_idxs: &DeviceBuffer<u32>,
-    height: u32,
-    num_rows_per_tile: u32,
+    d_block_ctxs: &DeviceBuffer<BlockCtx>,
+    d_ctxs: &DeviceBuffer<GkrInputCtx>,
+    num_blocks: u32,
+    threads_per_block: u32,
     stream: cudaStream_t,
 ) -> Result<(), CudaError> {
-    debug_assert_eq!(used_nodes.len(), pair_idxs.len());
     CudaError::from_result(_logup_gkr_input_eval(
-        is_global,
-        fracs,
-        preprocessed.as_ptr(),
-        partitioned_main.as_ptr(),
-        public_values.as_ptr(),
-        challenges.as_ptr(),
-        intermediates.as_ptr(),
-        rules.as_raw_ptr(),
-        used_nodes.as_ptr(),
-        pair_idxs.as_ptr(),
-        used_nodes.len(),
-        height,
-        num_rows_per_tile,
+        d_block_ctxs.as_ptr(),
+        d_ctxs.as_ptr(),
+        num_blocks,
+        threads_per_block,
         stream,
     ))
 }

@@ -5,7 +5,7 @@ use openvm_cuda_common::{copy::MemCopyH2D, d_buffer::DeviceBuffer, stream::GpuDe
 use openvm_stark_backend::prover::{
     fractional_sumcheck_gkr::Frac,
     stacked_pcs::{StackedLayout, StackedSlice},
-    DeviceMultiStarkProvingKey, MatrixDimensions, ProvingContext,
+    DeviceMultiStarkProvingKey, ProvingContext,
 };
 use p3_field::{Field, PrimeCharacteristicRing};
 use tracing::instrument;
@@ -14,12 +14,18 @@ use super::errors::InteractionGpuError;
 use crate::{
     cuda::logup_zerocheck::{
         frac_matrix_vertically_repeat, frac_vector_scalar_multiply_ext_fp, logup_gkr_input_eval,
+        GkrInputCtx,
     },
     gpu_backend::GenericGpuBackend,
     hash_scheme::GpuHashScheme,
+    logup_zerocheck::block_ctxs::build_block_ctxs,
     prelude::{EF, F},
 };
 
+/// Threads per launched block.
+const THREADS_PER_BLOCK: u32 = 256;
+/// Per-AIR thread-count cap. Bounds the per-AIR intermediates buffer for tall AIRs;
+/// rows beyond this are picked up by the kernel's `num_rows_per_tile` inner loop.
 const TASK_SIZE: u32 = 65536;
 
 #[allow(dead_code)]
@@ -86,6 +92,10 @@ pub fn collect_trace_interactions<HS: GpuHashScheme>(
 /// Evaluate interactions from trace evaluation matrices to get (p, q) fractional sumcheck input.
 /// Returns real leaves buffer (WITHOUT alpha applied) and alpha value to be applied in first tree
 /// layer. Virtual padding is not materialized.
+///
+/// Uses partial batching: groups AIRs into batches that fit within a memory budget to increase
+/// GPU parallelism without increasing peak memory usage. The batch kernel always uses global
+/// intermediates, so the memory budget controls peak usage.
 #[instrument(name = "prover.rap_constraints.logup_gkr.input_evals", skip_all)]
 #[allow(clippy::too_many_arguments)]
 pub fn log_gkr_input_evals<HS: GpuHashScheme>(
@@ -96,6 +106,7 @@ pub fn log_gkr_input_evals<HS: GpuHashScheme>(
     alpha_logup: EF,
     d_challenges: &DeviceBuffer<EF>,
     real_len: usize,
+    memory_budget_bytes: usize,
     device_ctx: &GpuDeviceCtx,
 ) -> Result<(DeviceBuffer<Frac<EF>>, EF), InteractionGpuError> {
     if trace_interactions.iter().all(|meta| meta.is_none()) {
@@ -107,60 +118,48 @@ pub fn log_gkr_input_evals<HS: GpuHashScheme>(
     let null_preprocessed = DeviceBuffer::<F>::new();
 
     let stream = device_ctx.stream.as_raw();
-    let mut d_partition_ptrs = DeviceBuffer::<u64>::new();
-    let mut tmp = DeviceBuffer::<Frac<EF>>::new();
-    for meta in trace_interactions.iter().flatten() {
+
+    // Collect all AIRs with interactions
+    let metas: Vec<&TraceInteractionMeta> = trace_interactions.iter().flatten().collect();
+
+    // Pre-compute per-AIR batch planning info
+    struct AirPlan {
+        height: usize,
+        num_interactions: usize,
+        /// Per-AIR thread count = `num_blocks_x * THREADS_PER_BLOCK`. Capped at `TASK_SIZE` for
+        /// tall AIRs (the kernel's `num_rows_per_tile` loop covers rows beyond `task_stride`).
+        /// Doubles as the column stride of the per-AIR intermediates buffer.
+        task_stride: usize,
+        num_blocks_x: usize,
+        num_rows_per_tile: usize,
+        intermediate_elements: usize,
+        intermediate_bytes: usize,
+        lifted_height: usize,
+        dst_offset: usize,
+        needs_lifting: bool,
+    }
+
+    let mut plans: Vec<AirPlan> = Vec::with_capacity(metas.len());
+    for meta in &metas {
         let air_ctx = &proving_ctx.per_trace[meta.trace_idx].1;
         let pk_air = &pk.per_air[meta.air_idx];
-
-        let preprocessed_matrix = pk_air
-            .preprocessed_data
-            .as_ref()
-            .map(|committed| &committed.trace);
-
-        let mut partitioned_main = Vec::with_capacity(air_ctx.cached_mains.len() + 1);
-        for committed in &air_ctx.cached_mains {
-            partitioned_main.push(&committed.trace);
-        }
-        partitioned_main.push(&air_ctx.common_main);
-
-        let rules = &pk_air.other_data.interaction_rules;
-        let num_interactions = pk_air.vk.symbolic_constraints.interactions.len();
-
-        let d_preprocessed = preprocessed_matrix
-            .as_ref()
-            .map(|m| m.buffer())
-            .unwrap_or(&null_preprocessed);
-        let d_public_values = if air_ctx.public_values.is_empty() {
-            DeviceBuffer::<F>::new()
-        } else {
-            air_ctx.public_values.to_device_on(device_ctx)?
-        };
-
         let height = air_ctx.height();
-        debug_assert_eq!(height, partitioned_main[0].height());
-        let partition_ptrs = partitioned_main
-            .iter()
-            .map(|m| m.buffer().as_ptr() as u64)
-            .collect_vec();
-        if partition_ptrs.len() > d_partition_ptrs.len() {
-            d_partition_ptrs = DeviceBuffer::with_capacity_on(partition_ptrs.len(), device_ctx);
-        }
-        partition_ptrs.copy_to_on(&mut d_partition_ptrs, device_ctx)?;
+        let num_interactions = pk_air.vk.symbolic_constraints.interactions.len();
+        let buffer_size = pk_air.other_data.interaction_rules.inner.buffer_size as usize;
 
-        let buffer_size = rules.inner.buffer_size;
-        // TODO[jpw]: remove magic 10
-        let is_global = buffer_size > 10;
-        let intermediates = if is_global {
-            DeviceBuffer::<EF>::with_capacity_on(
-                (TASK_SIZE as usize) * buffer_size as usize,
-                device_ctx,
-            )
-        } else {
-            DeviceBuffer::<EF>::with_capacity_on(1, device_ctx)
-        };
+        // Size each AIR's launch to its own height: enough threads to cover the height
+        // (rounded up to a block), capped at TASK_SIZE so the per-AIR intermediates buffer stays
+        // bounded. AIRs taller than the cap pick up the rest via `num_rows_per_tile`. The lower
+        // clamp at THREADS_PER_BLOCK keeps both `num_blocks_x` and `intermediate_elements` from
+        // degenerating to zero for height==0 AIRs (the kernel's row-bound check makes their
+        // threads no-op anyway, but the launch still needs at least one block).
+        let raw_threads = height.div_ceil(THREADS_PER_BLOCK as usize) * THREADS_PER_BLOCK as usize;
+        let task_stride = raw_threads.clamp(THREADS_PER_BLOCK as usize, TASK_SIZE as usize);
+        let num_blocks_x = task_stride / THREADS_PER_BLOCK as usize;
+        let num_rows_per_tile = height.div_ceil(task_stride).max(1);
 
-        let num_rows_per_tile = height.div_ceil(TASK_SIZE as usize).max(1);
+        let intermediate_elements = task_stride * buffer_size;
+        let intermediate_bytes = intermediate_elements * std::mem::size_of::<EF>();
 
         let slice = meta.layout_slices.first().unwrap();
         if slice.col_idx != 0 {
@@ -169,60 +168,178 @@ pub fn log_gkr_input_evals<HS: GpuHashScheme>(
         let dst_offset = slice.row_idx;
         let lifted_height = max(height, 1 << l_skip);
         debug_assert_eq!(slice.len(l_skip), lifted_height);
-        // SAFETY: by definition of interactions stacked layout, `leaves` has enough capacity
-        let leaves_ptr = unsafe { leaves.as_mut_ptr().add(dst_offset) };
 
-        let trace_output = if height != lifted_height {
-            let required = height * num_interactions;
-            if required > tmp.len() {
-                tmp = DeviceBuffer::with_capacity_on(required, device_ctx);
+        plans.push(AirPlan {
+            height,
+            num_interactions,
+            task_stride,
+            num_blocks_x,
+            num_rows_per_tile,
+            intermediate_elements,
+            intermediate_bytes,
+            lifted_height,
+            dst_offset,
+            needs_lifting: height != lifted_height,
+        });
+    }
+
+    let mut plan_start: usize = 0;
+    while plan_start < plans.len() {
+        // Greedy batching: add AIRs while cumulative intermediates fit within budget
+        let mut batch_end = plan_start + 1;
+        let mut batch_intermediate_bytes = plans[plan_start].intermediate_bytes;
+        while batch_end < plans.len() {
+            let next_bytes = batch_intermediate_bytes + plans[batch_end].intermediate_bytes;
+            if next_bytes > memory_budget_bytes {
+                break;
             }
-            tmp.as_mut_ptr()
-        } else {
-            leaves_ptr
-        };
+            batch_intermediate_bytes = next_bytes;
+            batch_end += 1;
+        }
+
+        let count = batch_end - plan_start;
+
+        // Single tmp allocation per batch, partitioned across lifting AIRs by offset.
+        // (One alloc beats N separate `with_capacity_on` calls; lifting AIRs in the same batch
+        // can't share one buffer because the kernel writes them concurrently.)
+        let total_lift_elements: usize = plans[plan_start..batch_end]
+            .iter()
+            .filter(|p| p.needs_lifting)
+            .map(|p| p.height * p.num_interactions)
+            .sum();
+        let tmp_buf = (total_lift_elements > 0)
+            .then(|| DeviceBuffer::<Frac<EF>>::with_capacity_on(total_lift_elements, device_ctx));
+        let mut tmp_offset: usize = 0;
+
+        // Flat BlockCtx list — one entry per launched block, grouped by AIR. Mirrors the
+        // dispatch pattern in `batch_mle.cu`.
+        let (block_ctxs_host, _air_offsets) = build_block_ctxs(
+            plans[plan_start..batch_end]
+                .iter()
+                .map(|p| p.num_blocks_x as u32),
+        );
+        let total_blocks = block_ctxs_host.len();
+
+        let mut ctxs_host: Vec<GkrInputCtx> = Vec::with_capacity(count);
+        let mut intermediates_keepalive: Vec<DeviceBuffer<EF>> = Vec::with_capacity(count);
+        let mut main_ptrs_keepalive: Vec<DeviceBuffer<u64>> = Vec::with_capacity(count);
+        let mut public_keepalive: Vec<DeviceBuffer<F>> = Vec::with_capacity(count);
+
+        for i in 0..count {
+            let plan = &plans[plan_start + i];
+            let meta = metas[plan_start + i];
+            let air_ctx = &proving_ctx.per_trace[meta.trace_idx].1;
+            let pk_air = &pk.per_air[meta.air_idx];
+
+            let preprocessed_matrix = pk_air
+                .preprocessed_data
+                .as_ref()
+                .map(|committed| &committed.trace);
+            let d_preprocessed = preprocessed_matrix
+                .as_ref()
+                .map(|m| m.buffer())
+                .unwrap_or(&null_preprocessed);
+
+            let mut partitioned_main = Vec::with_capacity(air_ctx.cached_mains.len() + 1);
+            for committed in &air_ctx.cached_mains {
+                partitioned_main.push(&committed.trace);
+            }
+            partitioned_main.push(&air_ctx.common_main);
+            let main_ptrs: Vec<u64> = partitioned_main
+                .iter()
+                .map(|m| m.buffer().as_ptr() as u64)
+                .collect_vec();
+            let d_main_ptrs = main_ptrs.to_device_on(device_ctx)?;
+            let main_ptr = d_main_ptrs.as_ptr();
+            main_ptrs_keepalive.push(d_main_ptrs);
+
+            let d_public_values = if air_ctx.public_values.is_empty() {
+                DeviceBuffer::<F>::new()
+            } else {
+                air_ctx.public_values.to_device_on(device_ctx)?
+            };
+            let public_ptr = d_public_values.as_ptr();
+            public_keepalive.push(d_public_values);
+
+            let intermediates = if plan.intermediate_elements > 0 {
+                let buf =
+                    DeviceBuffer::<EF>::with_capacity_on(plan.intermediate_elements, device_ctx);
+                let ptr = buf.as_mut_ptr();
+                intermediates_keepalive.push(buf);
+                ptr
+            } else {
+                std::ptr::null_mut()
+            };
+
+            let trace_output_ptr = if plan.needs_lifting {
+                let ptr = unsafe { tmp_buf.as_ref().unwrap().as_mut_ptr().add(tmp_offset) };
+                tmp_offset += plan.height * plan.num_interactions;
+                ptr
+            } else {
+                unsafe { leaves.as_mut_ptr().add(plan.dst_offset) }
+            };
+
+            let rules = &pk_air.other_data.interaction_rules;
+
+            ctxs_host.push(GkrInputCtx {
+                d_fracs: trace_output_ptr,
+                d_preprocessed: d_preprocessed.as_ptr(),
+                d_main: main_ptr,
+                d_public_values: public_ptr,
+                d_challenges: d_challenges.as_ptr(),
+                d_intermediates: intermediates,
+                d_rules: rules.inner.d_rules.as_raw_ptr(),
+                d_used_nodes: rules.inner.d_used_nodes.as_ptr(),
+                d_pair_idxs: rules.d_pair_idxs.as_ptr(),
+                used_nodes_len: rules.inner.d_used_nodes.len(),
+                height: plan.height as u32,
+                task_stride: plan.task_stride as u32,
+                num_rows_per_tile: plan.num_rows_per_tile as u32,
+            });
+        }
+
+        let d_ctxs = ctxs_host.to_device_on(device_ctx)?;
+        let d_block_ctxs = block_ctxs_host.to_device_on(device_ctx)?;
+        let total_blocks_u32: u32 = total_blocks
+            .try_into()
+            .expect("total_blocks fits in u32 (sum of per-AIR num_blocks_x)");
         unsafe {
             logup_gkr_input_eval(
-                is_global,
-                trace_output,
-                d_preprocessed,
-                &d_partition_ptrs,
-                &d_public_values,
-                d_challenges,
-                &intermediates,
-                &rules.inner.d_rules,
-                &rules.inner.d_used_nodes,
-                &rules.d_pair_idxs,
-                height as u32,
-                num_rows_per_tile as u32,
+                &d_block_ctxs,
+                &d_ctxs,
+                total_blocks_u32,
+                THREADS_PER_BLOCK,
                 stream,
             )?;
         }
-        if height != lifted_height {
-            debug_assert_eq!(lifted_height % height, 0);
-            debug_assert!(!tmp.is_empty());
-            let norm_factor_denom = lifted_height / height;
-            let norm_factor = F::from_usize(norm_factor_denom).inverse();
-            unsafe {
-                // SAFETY: scaling within buffer length
-                frac_vector_scalar_multiply_ext_fp(
-                    tmp.as_mut_ptr(),
-                    norm_factor,
-                    tmp.len() as u32,
-                    stream,
-                )?;
-                // SAFETY: stacked interaction layout is defined with respect to lifted height, and
-                // the vertical-repeat kernel guards rounded-up tail threads beyond lifted_height.
-                frac_matrix_vertically_repeat(
-                    leaves_ptr,
-                    tmp.as_ptr(),
-                    num_interactions as u32,
-                    lifted_height as u32,
-                    height as u32,
-                    stream,
-                )?;
+
+        // Handle lifting (normalization + vertical repeat) for AIRs that need it
+        let mut lift_offset: usize = 0;
+        for i in 0..count {
+            let plan = &plans[plan_start + i];
+            if plan.needs_lifting {
+                let len = plan.height * plan.num_interactions;
+                debug_assert_eq!(plan.lifted_height % plan.height, 0);
+                let norm_factor_denom = plan.lifted_height / plan.height;
+                let norm_factor = F::from_usize(norm_factor_denom).inverse();
+                let leaves_ptr = unsafe { leaves.as_mut_ptr().add(plan.dst_offset) };
+                let slice_ptr = unsafe { tmp_buf.as_ref().unwrap().as_mut_ptr().add(lift_offset) };
+                lift_offset += len;
+                unsafe {
+                    frac_vector_scalar_multiply_ext_fp(slice_ptr, norm_factor, len as u32, stream)?;
+                    frac_matrix_vertically_repeat(
+                        leaves_ptr,
+                        slice_ptr,
+                        plan.num_interactions as u32,
+                        plan.lifted_height as u32,
+                        plan.height as u32,
+                        stream,
+                    )?;
+                }
             }
         }
+
+        plan_start = batch_end;
     }
 
     // NOTE: alpha is NO LONGER applied here - it will be fused into the first tree layer
