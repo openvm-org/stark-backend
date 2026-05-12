@@ -377,6 +377,18 @@ fn interactions_simp_uses_per_air_inter_attribute_when_helper_referenced() {
     write_interactions(&mut iout, "TinyAir", &rendered, &opts).unwrap();
     let is = String::from_utf8(iout).unwrap();
     assert!(is.contains("_evalMultiplicityAt"));
+    assert!(
+        is.contains("lemma transcriptBus_0_busEventAt"),
+        "expected per-pick busEventAt lemma, got:\n{is}"
+    );
+    assert!(
+        is.contains("(transcriptBus_0 (F := F)).toBusEventAt ⟨trace, row, []⟩ ="),
+        "busEventAt lemma should normalize the typed BusEvent itself:\n{is}"
+    );
+    assert!(
+        is.contains("msg := #v[\n          is_valid trace row\n        ]"),
+        "busEventAt lemma should expose the normalized vector message:\n{is}"
+    );
     let mult_simp_line = is
         .lines()
         .find(|l| {
