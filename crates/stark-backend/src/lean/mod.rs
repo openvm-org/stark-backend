@@ -644,9 +644,9 @@ pub fn write_constraints<W: Write>(
 /// Write Interactions.lean from a pre-rendered AIR. In addition to the
 /// per-bus `…Interactions` lists and the `allInteractions` concat, this
 /// emitter generates index-based named picks and a battery of mem /
-/// cases / `_evalMultiplicityAt` / `_evalMessageAt` / `_allInteractions_mem`
-/// / classification / `_of_allInteractions` lemmas — the same shape as
-/// the hand-written `ws-fv` reference. Picks use index suffixes
+/// cases / `_evalMultiplicityAt` / `_evalMessageAt` / `_busEventAt` /
+/// `_allInteractions_mem` / classification / `_of_allInteractions` lemmas —
+/// the same shape as the hand-written `ws-fv` reference. Picks use index suffixes
 /// (`<busName>_0`, `<busName>_1`, …); rename to semantic forms
 /// (`Receive`, `Send`, etc.) by hand. Helpers (`inter_K`) live in
 /// `Constraints.lean` and are in scope via the open namespace.
@@ -830,8 +830,8 @@ where
 }
 
 /// Emit, for one bus group: indexed picks, `_mem` lemmas, optional
-/// `_cases` lemma, and per-pick `_evalMultiplicityAt`/`_evalMessageAt`
-/// lemmas (when trace-form rendering succeeded for the entry).
+/// `_cases` lemma, and per-pick `_evalMultiplicityAt`/`_evalMessageAt`/
+/// `_busEventAt` lemmas (when trace-form rendering succeeded for the entry).
 fn write_per_pick_lemmas<W: Write>(
     writer: &mut W,
     air_name: &str,
@@ -969,6 +969,23 @@ fn write_per_pick_lemmas<W: Write>(
             )?;
             writeln!(writer, "  simp [{bus}_{i}, {list_def}, Interaction.evalMessageAt]")?;
             writeln!(writer)?;
+
+            writeln!(writer, "lemma {bus}_{i}_busEventAt")?;
+            writeln!(
+                writer,
+                "    (trace : (air (F := F)).Trace) (row : Fin trace.height){pv_param} :"
+            )?;
+            writeln!(
+                writer,
+                "    ({bus}_{i} (F := F)).toBusEventAt ⟨trace, row, {pv_ctx}⟩ ="
+            )?;
+            writeln!(writer, "      {{ mult := {mult_trace}")?;
+            writeln!(writer, "        msg := #v[] }} := by")?;
+            writeln!(writer, "  simp only [Interaction.toBusEventAt]")?;
+            writeln!(writer, "  rw [{bus}_{i}_evalMultiplicityAt]")?;
+            writeln!(writer, "  rw [{bus}_{i}_evalMessageAt]")?;
+            writeln!(writer, "  rfl")?;
+            writeln!(writer)?;
             continue;
         }
 
@@ -1015,6 +1032,29 @@ fn write_per_pick_lemmas<W: Write>(
             "  interval_cases j <;> simp [{}] <;> rfl",
             simp_names.join(", ")
         )?;
+        writeln!(writer)?;
+
+        // _busEventAt
+        writeln!(writer, "lemma {bus}_{i}_busEventAt")?;
+        writeln!(
+            writer,
+            "    (trace : (air (F := F)).Trace) (row : Fin trace.height){pv_param} :"
+        )?;
+        writeln!(
+            writer,
+            "    ({bus}_{i} (F := F)).toBusEventAt ⟨trace, row, {pv_ctx}⟩ ="
+        )?;
+        writeln!(writer, "      {{ mult := {mult_trace}")?;
+        writeln!(writer, "        msg := #v[")?;
+        for (j, body) in msg_traces.iter().enumerate() {
+            let suffix = if j + 1 == arity { "" } else { "," };
+            writeln!(writer, "          {body}{suffix}")?;
+        }
+        writeln!(writer, "        ] }} := by")?;
+        writeln!(writer, "  simp only [Interaction.toBusEventAt]")?;
+        writeln!(writer, "  rw [{bus}_{i}_evalMultiplicityAt]")?;
+        writeln!(writer, "  rw [{bus}_{i}_evalMessageAt]")?;
+        writeln!(writer, "  rfl")?;
         writeln!(writer)?;
     }
 
