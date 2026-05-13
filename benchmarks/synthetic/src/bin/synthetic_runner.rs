@@ -30,13 +30,16 @@ use openvm_benchmark_synthetic::{
     segment_profile::{AirShapeRecord, SegmentProfile},
     synthetic_air::{SyntheticAir, SyntheticShape},
 };
-use openvm_cuda_backend::{prelude::SC, BabyBearPoseidon2GpuEngine, GpuBackend};
+#[cfg(feature = "baby-bear-bn254-poseidon2")]
+use openvm_cuda_backend::BabyBearBn254Poseidon2HashScheme;
+#[cfg(not(feature = "baby-bear-bn254-poseidon2"))]
+use openvm_cuda_backend::DefaultHashScheme;
+use openvm_cuda_backend::{GpuEngine, GpuHashScheme};
 use openvm_stark_backend::{
     prover::{AirProvingContext, ColMajorMatrix, DeviceDataTransporter, ProvingContext},
     AirRef, StarkEngine, SystemParams,
 };
 use openvm_stark_sdk::config::app_params_with_100_bits_security;
-use p3_baby_bear::BabyBear;
 use rand::{rngs::StdRng, seq::SliceRandom, SeedableRng};
 use serde::Serialize;
 
@@ -136,7 +139,10 @@ fn build_params(max_log_height: usize) -> SystemParams {
     app_params_with_100_bits_security(max_log_height)
 }
 
-fn main() -> eyre::Result<()> {
+fn run_on_hash_impl<HS: GpuHashScheme>() -> eyre::Result<()>
+where
+    GpuEngine<HS>: StarkEngine,
+{
     let Args {
         profile: profile_path,
         sample_frac,
@@ -173,7 +179,7 @@ fn main() -> eyre::Result<()> {
     // and VPMM are shared, so per-segment overhead is the host-side
     // keygen and the H2D/D2H transports — not GPU init.
     let params = build_params(max_log_height);
-    let mut engine = BabyBearPoseidon2GpuEngine::new(params);
+    let mut engine = GpuEngine::<HS>::new(params);
     // The captured runs disable this knob for AIRs without
     // interactions; safer default for our heterogeneous workload.
     engine
@@ -212,8 +218,10 @@ fn main() -> eyre::Result<()> {
         let kg_start = Instant::now();
         let (pk, _vk) = engine.keygen(&airs);
         let device = engine.device();
-        let d_pk =
-            <_ as DeviceDataTransporter<SC, GpuBackend>>::transport_pk_to_device(device, &pk);
+        let d_pk = <_ as DeviceDataTransporter<
+            <GpuEngine<HS> as StarkEngine>::SC,
+            <GpuEngine<HS> as StarkEngine>::PB,
+        >>::transport_pk_to_device(device, &pk);
         let keygen_ms = kg_start.elapsed().as_millis();
 
         // Build per-AIR proving contexts with all-zero traces, transport
@@ -221,11 +229,13 @@ fn main() -> eyre::Result<()> {
         let mut total_main_cells: u64 = 0;
         let mut per_trace = Vec::new();
         for (air_id, (s, synth)) in shapes.iter().zip(synths.iter()).enumerate() {
-            let row_trace = synth.generate_trace::<BabyBear>(s.log_height);
+            let row_trace = synth.generate_trace::<_>(s.log_height);
             total_main_cells += (1u64 << s.log_height as u32) * (synth.width() as u64);
-            let d_trace = <_ as DeviceDataTransporter<SC, GpuBackend>>::transport_matrix_to_device(
-                device,
-                &ColMajorMatrix::from_row_major(&row_trace),
+            let d_trace = <_ as DeviceDataTransporter<
+                <GpuEngine<HS> as StarkEngine>::SC,
+                <GpuEngine<HS> as StarkEngine>::PB,
+            >>::transport_matrix_to_device(
+                device, &ColMajorMatrix::from_row_major(&row_trace)
             );
             per_trace.push((air_id, AirProvingContext::simple_no_pis(d_trace)));
         }
@@ -293,5 +303,14 @@ fn main() -> eyre::Result<()> {
     } else {
         println!("\n{}", json);
     }
+    Ok(())
+}
+
+fn main() -> eyre::Result<()> {
+    #[cfg(feature = "baby-bear-bn254-poseidon2")]
+    run_on_hash_impl::<BabyBearBn254Poseidon2HashScheme>()?;
+    #[cfg(not(feature = "baby-bear-bn254-poseidon2"))]
+    run_on_hash_impl::<DefaultHashScheme>()?;
+
     Ok(())
 }

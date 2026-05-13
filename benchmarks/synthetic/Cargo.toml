@@ -6,7 +6,11 @@ edition.workspace = true
 
 [dependencies]
 openvm-stark-backend = { workspace = true, features = ["parallel", "metrics"] }
-openvm-stark-sdk = { workspace = true, features = ["parallel", "metrics", "cpu-backend"] }
+openvm-stark-sdk = { workspace = true, features = [
+  "parallel",
+  "metrics",
+  "cpu-backend",
+] }
 openvm-cuda-backend = { workspace = true, optional = true }
 
 p3-air.workspace = true
@@ -23,6 +27,7 @@ serde_json = { workspace = true }
 [features]
 default = []
 cuda = ["dep:openvm-cuda-backend"]
+baby-bear-bn254-poseidon2 = ["openvm-cuda-backend?/baby-bear-bn254-poseidon2"]
 
 # Profile-replay runner: heterogeneous AIRs from a captured profile JSONL.
 # GPU-only (imports openvm-cuda-backend unconditionally).
