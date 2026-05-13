@@ -4,6 +4,7 @@ use itertools::{zip_eq, Itertools};
 use openvm_cuda_common::{
     copy::{cuda_memcpy_on, MemCopyD2H, MemCopyH2D},
     d_buffer::DeviceBuffer,
+    error::MemCopyError,
     memory_manager::MemTracker,
     stream::GpuDeviceCtx,
 };
@@ -395,11 +396,7 @@ impl<D: Copy + Clone + Send + Sync + 'static> StackedReductionGpu<D> {
         let d_lambda_pows = lambda_pows.to_device_on(&device_ctx)?;
 
         let d_unstacked_cols = unstacked_cols.to_device_on(&device_ctx)?;
-        let max_window_len = ht_diff_idxs
-            .windows(2)
-            .map(|window| window[1] - window[0])
-            .max()
-            .unwrap_or(0);
+        let num_windows = ht_diff_idxs.len().saturating_sub(1).max(1);
 
         // layout per commit is sorted, first height is largest
         let n_max = r.len() - 1;
@@ -432,12 +429,14 @@ impl<D: Copy + Clone + Send + Sync + 'static> StackedReductionGpu<D> {
         } else {
             DeviceBuffer::with_capacity_on(stacked_per_commit.len(), &device_ctx)
         };
-        let d_accum =
-            DeviceBuffer::<u64>::with_capacity_on(STACKED_REDUCTION_S_DEG * D_EF, &device_ctx);
-        let d_eq_ub = if max_window_len > 0 {
-            DeviceBuffer::with_capacity_on(max_window_len, &device_ctx)
-        } else {
+        let d_accum = DeviceBuffer::<u64>::with_capacity_on(
+            num_windows * STACKED_REDUCTION_S_DEG * D_EF,
+            &device_ctx,
+        );
+        let d_eq_ub = if unstacked_cols.is_empty() {
             DeviceBuffer::new()
+        } else {
+            DeviceBuffer::with_capacity_on(unstacked_cols.len(), &device_ctx)
         };
 
         Ok(Self {
@@ -849,21 +848,34 @@ impl<D: Copy + Clone + Send + Sync + 'static> StackedReductionGpu<D> {
                 self.k_rot_stable.push(tmp[0]);
             }
         }
-        let mut s_evals_batch = Vec::with_capacity(self.ht_diff_idxs.len() - 1);
-        for window in self.ht_diff_idxs.windows(2) {
+        let accum_stride = STACKED_REDUCTION_S_DEG * D_EF;
+        let num_windows = self.ht_diff_idxs.len() - 1;
+        debug_assert!(self.d_accum.len() >= num_windows * accum_stride);
+
+        self.d_accum
+            .fill_zero_on(&self.device_ctx)
+            .map_err(StackedReductionError::FillZero)?;
+
+        let has_degenerate_window = self.ht_diff_idxs.windows(2).any(|window| {
+            let log_height = self.unstacked_cols[window[0]].log_height as usize;
+            log_height < l_skip + round
+        });
+        if has_degenerate_window {
+            self.eq_ub_per_trace
+                .copy_to_on(&mut self.d_eq_ub, &self.device_ctx)?;
+        }
+
+        for (window_idx, window) in self.ht_diff_idxs.windows(2).enumerate() {
             let window_len = window[1] - window[0];
             // SAFETY: in bounds by construction of ht_diff_idxs
             let unstacked_cols_ptr = unsafe { self.d_unstacked_cols.as_ptr().add(window[0]) };
             // 2 per column for (eq, k_rot)
             // SAFETY: in bounds by construction of lambda_pows
             let lambda_pows_ptr = unsafe { self.d_lambda_pows.as_ptr().add(2 * window[0]) };
+            // SAFETY: `d_accum` has one accumulator slot per window.
+            let output_ptr = unsafe { self.d_accum.as_mut_ptr().add(window_idx * accum_stride) };
 
             let log_height = self.unstacked_cols[window[0]].log_height as usize;
-
-            // Zero-initialize accumulator for atomic adds
-            self.d_accum
-                .fill_zero_on(&self.device_ctx)
-                .map_err(StackedReductionError::FillZero)?;
 
             if log_height < l_skip + round {
                 // We are in the eq, k_rot stable regime
@@ -872,24 +884,19 @@ impl<D: Copy + Clone + Send + Sync + 'static> StackedReductionGpu<D> {
                 // interpolate
                 let eq_r = self.eq_stable[log_height];
                 let k_rot_r = self.k_rot_stable[log_height];
-                // PERF[jpw]: most of eq_ub can be incorporated into eq_stable, k_rot_stable, so
-                // this transfer can be minimized.
-                let eq_ub_slice = &self.eq_ub_per_trace[window[0]..window[1]];
-                if eq_ub_slice.len() > self.d_eq_ub.len() {
-                    self.d_eq_ub =
-                        DeviceBuffer::with_capacity_on(eq_ub_slice.len(), &self.device_ctx);
-                }
-                eq_ub_slice.copy_to_on(&mut self.d_eq_ub, &self.device_ctx)?;
+                // SAFETY: the full per-trace buffer was copied above, so this window slice stays
+                // valid while all queued kernels run asynchronously.
+                let eq_ub_ptr = unsafe { self.d_eq_ub.as_ptr().add(window[0]) };
                 let stacked_height = self.stacked_height(round);
                 unsafe {
                     stacked_reduction_sumcheck_mle_round_degenerate(
                         &self.d_q_eval_ptrs,
-                        &self.d_eq_ub,
+                        eq_ub_ptr,
                         eq_r,
                         k_rot_r,
                         unstacked_cols_ptr,
                         lambda_pows_ptr,
-                        &mut self.d_accum,
+                        output_ptr,
                         stacked_height,
                         window_len,
                         l_skip,
@@ -912,7 +919,7 @@ impl<D: Copy + Clone + Send + Sync + 'static> StackedReductionGpu<D> {
                         &self.k_rot_ns,
                         unstacked_cols_ptr,
                         lambda_pows_ptr,
-                        &mut self.d_accum,
+                        output_ptr,
                         stacked_height,
                         window_len,
                         num_y,
@@ -922,12 +929,14 @@ impl<D: Copy + Clone + Send + Sync + 'static> StackedReductionGpu<D> {
                     .map_err(StackedReductionError::SumcheckMleRound)?;
                 };
             }
-
-            // D2H copy and reduce modulo P
-            let h_accum = self.d_accum.to_host_on(&self.device_ctx)?;
-            let evals = reduce_raw_u64_to_ef(&h_accum);
-            s_evals_batch.push(evals);
         }
+
+        // D2H copy and reduce modulo P once after all window kernels have queued.
+        let h_accum = self.d_accum.to_host_on(&self.device_ctx)?;
+        let s_evals_batch = h_accum[..num_windows * accum_stride]
+            .chunks_exact(accum_stride)
+            .map(reduce_raw_u64_to_ef)
+            .collect_vec();
 
         Ok(from_fn(|i| {
             s_evals_batch.iter().map(|evals| evals[i]).sum::<EF>()
@@ -1033,13 +1042,37 @@ impl<D: Copy + Clone + Send + Sync + 'static> StackedReductionGpu<D> {
 
     #[instrument(level = "debug", skip_all)]
     fn get_stacked_openings(&self) -> Result<Vec<Vec<EF>>, StackedReductionError> {
-        self.q_evals
-            .iter()
-            .map(|q| {
-                q.to_host_on(&self.device_ctx)
-                    .map_err(StackedReductionError::MemCopy)
+        let lengths = self.q_evals.iter().map(DeviceBuffer::len).collect_vec();
+        let total_len = lengths.iter().sum();
+        let mut host = EF::zero_vec(total_len);
+
+        let mut offset = 0;
+        for (q, &len) in zip(&self.q_evals, &lengths) {
+            unsafe {
+                cuda_memcpy_on::<true, false>(
+                    host.as_mut_ptr().add(offset) as *mut c_void,
+                    q.as_ptr() as *const c_void,
+                    len * size_of::<EF>(),
+                    &self.device_ctx,
+                )?;
+            }
+            offset += len;
+        }
+        self.device_ctx
+            .stream
+            .to_host_sync()
+            .map_err(MemCopyError::from)?;
+
+        let mut offset = 0;
+        Ok(lengths
+            .into_iter()
+            .map(|len| {
+                let next = offset + len;
+                let values = host[offset..next].to_vec();
+                offset = next;
+                values
             })
-            .collect::<Result<Vec<_>, _>>()
+            .collect())
     }
 }
 
