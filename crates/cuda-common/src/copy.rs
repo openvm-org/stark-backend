@@ -117,7 +117,7 @@ impl<T> MemCopyD2H<T> for DeviceBuffer<T> {
                 device_ctx.stream.as_raw(),
             )
         })?;
-        device_ctx.stream.synchronize()?;
+        device_ctx.stream.to_host_sync()?;
         unsafe {
             host_vec.set_len(self.len());
         }

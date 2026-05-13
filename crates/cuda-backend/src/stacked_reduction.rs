@@ -1060,7 +1060,7 @@ impl<D: Copy + Clone + Send + Sync + 'static> StackedReductionGpu<D> {
         }
         self.device_ctx
             .stream
-            .synchronize()
+            .to_host_sync()
             .map_err(MemCopyError::from)?;
 
         let mut offset = 0;
