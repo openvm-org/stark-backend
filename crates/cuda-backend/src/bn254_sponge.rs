@@ -234,6 +234,7 @@ impl GpuFiatShamirTranscript<BabyBearBn254Poseidon2Config> for MultiFieldTranscr
 
 #[cfg(test)]
 mod tests {
+    use openvm_cuda_common::{common::get_device, stream::GpuDeviceCtx};
     use openvm_stark_backend::FiatShamirTranscript;
     use openvm_stark_sdk::config::baby_bear_bn254_poseidon2::default_transcript;
     use p3_field::PrimeCharacteristicRing;
@@ -246,6 +247,7 @@ mod tests {
     #[test]
     fn test_grind_gpu_witness_valid_on_cpu() {
         let bits = 8;
+        let mut ctx = GpuDeviceCtx::for_device(get_device().unwrap() as u32).unwrap();
 
         // Test with several different transcript states to exercise partial observe buffers,
         // different sponge positions, etc.
@@ -260,15 +262,15 @@ mod tests {
             }
 
             let witness = gpu
-                .grind_gpu(bits)
+                .grind_gpu(bits, &ctx)
                 .unwrap_or_else(|e| panic!("grind_gpu failed with {num_observed} observed: {e:?}"));
-
+            FiatShamirTranscript::<BabyBearBn254Poseidon2Config>::observe(&mut cpu, witness);
+            let witness_bits =
+                FiatShamirTranscript::<BabyBearBn254Poseidon2Config>::sample_bits(&mut cpu, bits);
             // Verify the CUDA-found witness passes check_witness on the CPU transcript.
             assert!(
-                FiatShamirTranscript::<BabyBearBn254Poseidon2Config>::check_witness(
-                    &mut cpu, bits, witness
-                ),
-                "CUDA witness {witness:?} invalid on CPU (observed {num_observed} values)"
+                witness_bits == 0,
+                "CUDA witness {witness:?} invalid on CPU (observed {num_observed} values, witness_bits {witness_bits})"
             );
         }
     }
