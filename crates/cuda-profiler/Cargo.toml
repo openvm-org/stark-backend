@@ -1,0 +1,15 @@
+[package]
+name = "openvm-cuda-profiler"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+description = "OpenVM CUDA profiler: SHDWPROF binary log format and Perfetto exporter (consumed by an external NVBit tool, see ./nvbit-tool)"
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+clap.workspace = true
+
+[[bin]]
+name = "cuda-profiler-assemble"
+path = "src/bin/cuda-profiler-assemble.rs"

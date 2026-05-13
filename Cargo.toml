@@ -17,6 +17,7 @@ members = [
     "crates/cuda-common",
     "crates/cuda-builder",
     "crates/cuda-backend",
+    "crates/cuda-profiler",
     "benchmarks/fields",
     "benchmarks/synthetic",
 ]
@@ -74,6 +75,7 @@ openvm-cpu-backend = { path = "crates/cpu-backend", default-features = false }
 openvm-cuda-builder = { path = "crates/cuda-builder", default-features = false }
 openvm-cuda-common = { path = "crates/cuda-common", default-features = false }
 openvm-cuda-backend = { path = "crates/cuda-backend", default-features = false }
+openvm-cuda-profiler = { path = "crates/cuda-profiler", default-features = false }
 openvm-backend-tests = { path = "crates/backend-tests", default-features = false }
 
 # Plonky3 - we pin the exact version since this dependency is security critical
