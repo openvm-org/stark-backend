@@ -316,7 +316,7 @@ pub unsafe fn evals_mobius_eq_hypercube(
 /// + 1)`. We define `eq_0 = 1` always.
 #[derive(Getters)]
 pub struct EqEvalSegments<F> {
-    /// Index 0 stores the length-1 equality layer, shared when callers can reuse it.
+    /// Index 0 is unused and initialized to zero. Index 1 stores the length-1 `eq_0 = 1` layer.
     #[getset(get = "pub")]
     pub(crate) buffer: DeviceBuffer<F>,
     #[getset(get_copy = "pub")]
@@ -379,29 +379,8 @@ impl EqEvalSegments<EF> {
 /// dropping layers.
 #[derive(Getters)]
 pub struct EqEvalLayers<F> {
-    /// Layer 0 stores the length-1 equality value and may be shared across trees.
-    pub layers: Vec<EqEvalLayer<F>>,
-}
-
-pub enum EqEvalLayer<F> {
-    Shared(Arc<DeviceBuffer<F>>),
-    Owned(DeviceBuffer<F>),
-}
-
-impl<F> EqEvalLayer<F> {
-    fn len(&self) -> usize {
-        match self {
-            Self::Shared(buffer) => buffer.len(),
-            Self::Owned(buffer) => buffer.len(),
-        }
-    }
-
-    fn as_ptr(&self) -> *const F {
-        match self {
-            Self::Shared(buffer) => buffer.as_ptr(),
-            Self::Owned(buffer) => buffer.as_ptr(),
-        }
-    }
+    /// Layers are reference counted so the length-1 seed layer can be shared across trees.
+    pub layers: Vec<Arc<DeviceBuffer<F>>>,
 }
 
 impl<F> EqEvalLayers<F> {
@@ -415,7 +394,9 @@ impl<F> EqEvalLayers<F> {
 
 // Currently only implement kernels for EF.
 impl EqEvalLayers<EF> {
-    pub fn one_layer(device_ctx: &GpuDeviceCtx) -> Result<Arc<DeviceBuffer<EF>>, KernelError> {
+    pub(crate) fn one_layer(
+        device_ctx: &GpuDeviceCtx,
+    ) -> Result<Arc<DeviceBuffer<EF>>, KernelError> {
         [EF::ONE]
             .to_device_on(device_ctx)
             .map(Arc::new)
@@ -433,14 +414,14 @@ impl EqEvalLayers<EF> {
         Self::new_rev_with_one(n, x, Self::one_layer(device_ctx)?, device_ctx)
     }
 
-    pub fn new_rev_with_one<'a>(
+    pub(crate) fn new_rev_with_one<'a>(
         n: usize,
         x: impl IntoIterator<Item = &'a EF>,
         layer_0: Arc<DeviceBuffer<EF>>,
         device_ctx: &GpuDeviceCtx,
     ) -> Result<Self, KernelError> {
         let mut layers = Vec::with_capacity(n + 1);
-        layers.push(EqEvalLayer::Shared(layer_0));
+        layers.push(layer_0);
         for (i, &x_i) in x.into_iter().enumerate() {
             let step = 1 << i;
             let buffer = DeviceBuffer::with_capacity_on(2 * step, device_ctx);
@@ -458,7 +439,7 @@ impl EqEvalLayers<EF> {
                 )
                 .map_err(KernelError::Kernel)?;
             }
-            layers.push(EqEvalLayer::Owned(buffer));
+            layers.push(Arc::new(buffer));
         }
         Ok(Self { layers })
     }
@@ -475,14 +456,14 @@ impl EqEvalLayers<EF> {
         Self::new_with_one(n, x, Self::one_layer(device_ctx)?, device_ctx)
     }
 
-    pub fn new_with_one<'a>(
+    pub(crate) fn new_with_one<'a>(
         n: usize,
         x: impl IntoIterator<Item = &'a EF>,
         layer_0: Arc<DeviceBuffer<EF>>,
         device_ctx: &GpuDeviceCtx,
     ) -> Result<Self, KernelError> {
         let mut layers = Vec::with_capacity(n + 1);
-        layers.push(EqEvalLayer::Shared(layer_0));
+        layers.push(layer_0);
         for (i, &x_i) in x.into_iter().enumerate() {
             let step = 1 << i;
             let buffer = DeviceBuffer::with_capacity_on(2 * step, device_ctx);
@@ -500,7 +481,7 @@ impl EqEvalLayers<EF> {
                 )
                 .map_err(KernelError::Kernel)?;
             }
-            layers.push(EqEvalLayer::Owned(buffer));
+            layers.push(Arc::new(buffer));
         }
         Ok(Self { layers })
     }

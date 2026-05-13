@@ -93,9 +93,9 @@ use round0::evaluate_round0_constraints_gpu;
 /// This ratio can be tuned. Currently it is set to prefer the monomial kernel except for the
 /// Poseidon2Air where the DAG node size is much smaller than number of monomials.
 const DAG_FALLBACK_MONOMIAL_RATIO: usize = 2;
-// Batch MLE launch overhead dominates in the non-save-memory path, so keep the historical
-// fixed batch budget there.
-const BATCH_MLE_DEFAULT_MEMORY_LIMIT: usize = 6 << 30; // 6GiB
+// Batch MLE launch overhead dominates in the non-save-memory path, so keep at least this
+// much batching budget there.
+const BATCH_MLE_DEFAULT_MEMORY_FLOOR: usize = 6 << 30; // 6GiB
 
 #[inline]
 fn fractional_gkr_peak_memory_bytes(input_len: usize, peak_work_buffer_bytes: usize) -> usize {
@@ -220,7 +220,7 @@ where
     if !prover.save_memory {
         prover.memory_limit_bytes = prover
             .memory_limit_bytes
-            .max(BATCH_MLE_DEFAULT_MEMORY_LIMIT);
+            .max(BATCH_MLE_DEFAULT_MEMORY_FLOOR);
     }
     prover.mem.emit_metrics_with_label("prover.gkr_input_evals");
 
