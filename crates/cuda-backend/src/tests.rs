@@ -42,6 +42,8 @@ use openvm_stark_sdk::{
     },
     utils::setup_tracing_with_log_level,
 };
+#[cfg(feature = "baby-bear-bn254-poseidon2")]
+use p3_field::BasedVectorSpace;
 use p3_field::{PrimeCharacteristicRing, TwoAdicField};
 #[cfg(feature = "baby-bear-bn254-poseidon2")]
 use p3_symmetric::Permutation;
