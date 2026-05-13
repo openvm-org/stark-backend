@@ -93,6 +93,16 @@ use round0::evaluate_round0_constraints_gpu;
 /// This ratio can be tuned. Currently it is set to prefer the monomial kernel except for the
 /// Poseidon2Air where the DAG node size is much smaller than number of monomials.
 const DAG_FALLBACK_MONOMIAL_RATIO: usize = 2;
+// Batch MLE launch overhead dominates in the non-save-memory path, so keep at least this
+// much batching budget there.
+const BATCH_MLE_DEFAULT_MEMORY_FLOOR: usize = 6 << 30; // 6GiB
+
+#[inline]
+fn fractional_gkr_peak_memory_bytes(input_len: usize, peak_work_buffer_bytes: usize) -> usize {
+    input_len
+        .saturating_mul(std::mem::size_of::<Frac<EF>>())
+        .saturating_add(peak_work_buffer_bytes)
+}
 
 #[inline]
 pub(crate) fn air_width_for_mat(need_rot: bool, mat_width: usize) -> u32 {
@@ -182,8 +192,12 @@ where
         .emit_metrics_with_label("prover.before_gkr_input_evals");
     prover.mem.reset_peak();
     let sizes = FractionalInputSize::new(real_len, logical_len);
+    let peak_work_buffer_bytes = if has_interactions {
+        sizes.peak_work_buffer_bytes()
+    } else {
+        0
+    };
     let (inputs, alpha) = if has_interactions {
-        let memory_budget_bytes = sizes.peak_work_buffer_bytes();
         log_gkr_input_evals(
             &prover.trace_interactions,
             mpk,
@@ -192,24 +206,21 @@ where
             alpha_logup,
             &prover.d_challenges,
             real_len,
-            memory_budget_bytes,
+            peak_work_buffer_bytes,
             device_ctx,
         )?
     } else {
         (DeviceBuffer::new(), EF::ZERO)
     };
-    // Set memory limit for batch MLE based on inputs buffer size
-    prover.gkr_mem_contribution = inputs.len() * std::mem::size_of::<Frac<EF>>();
+    // Set memory limit for batch MLE based on the fractional-GKR peak: input buffer plus
+    // peak work buffers.
+    prover.gkr_mem_contribution =
+        fractional_gkr_peak_memory_bytes(inputs.len(), peak_work_buffer_bytes);
     prover.memory_limit_bytes = prover.gkr_mem_contribution;
     if !prover.save_memory {
-        const DEFAULT_MEMORY_LIMIT: usize = 5 << 30; // 5GiB
-        if prover.memory_limit_bytes > DEFAULT_MEMORY_LIMIT {
-            tracing::warn!(
-                "prover.memory_limit_bytes {} already exceeds 5GiB",
-                prover.memory_limit_bytes
-            );
-        }
-        prover.memory_limit_bytes = DEFAULT_MEMORY_LIMIT;
+        prover.memory_limit_bytes = prover
+            .memory_limit_bytes
+            .max(BATCH_MLE_DEFAULT_MEMORY_FLOOR);
     }
     prover.mem.emit_metrics_with_label("prover.gkr_input_evals");
 
@@ -481,6 +492,7 @@ pub struct LogupZerocheckGpu<'a, HS: GpuHashScheme> {
     mem: MemTracker,
     save_memory: bool,
 
+    /// Fractional-GKR peak budget: input buffer plus peak work buffers.
     gkr_mem_contribution: usize,
     /// Memory limit for batch MLE intermediate buffers (set after GKR input eval)
     memory_limit_bytes: usize,
@@ -720,12 +732,23 @@ impl<'a, HS: GpuHashScheme> LogupZerocheckGpu<'a, HS> {
 
         // PERF[jpw]: we could also build the layers for different n in a transposed way using
         // eq_nonoverlapping_stage_ext, which is more memory efficient
+        let mut eq_xi_one_layer = None;
         for &n in &self.n_per_trace {
             let n_lift = n.max(0) as usize;
             if let Entry::Vacant(entry) = self.eq_xis.entry(n_lift) {
-                let layers = EqEvalLayers::new_rev(
+                let layer_0 = match &eq_xi_one_layer {
+                    Some(layer_0) => Arc::clone(layer_0),
+                    None => {
+                        let layer_0 = EqEvalLayers::one_layer(&self.device_ctx)
+                            .map_err(LogupZerocheckError::EqEvalLayers)?;
+                        eq_xi_one_layer = Some(Arc::clone(&layer_0));
+                        layer_0
+                    }
+                };
+                let layers = EqEvalLayers::new_rev_with_one(
                     n_lift,
                     xi[l_skip..l_skip + n_lift].iter().rev(),
+                    layer_0,
                     &self.device_ctx,
                 )
                 .map_err(LogupZerocheckError::EqEvalLayers)?;

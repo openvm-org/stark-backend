@@ -154,27 +154,45 @@ pub(crate) fn stack_traces_into_expanded(
     buffer
         .fill_zero_on(device_ctx)
         .map_err(StackTracesError::FillZero)?;
-    for (mat_idx, j, s) in &layout.sorted_cols {
+    let mut idx = 0;
+    while idx < layout.sorted_cols.len() {
+        let (mat_idx, j, s) = &layout.sorted_cols[idx];
         let start = s.col_idx * padded_height + s.row_idx;
         let trace = traces[*mat_idx];
         let s_len = s.len(l_skip);
         debug_assert_eq!(trace.height(), 1 << s.log_height());
         if s.log_height() >= l_skip {
             debug_assert_eq!(trace.height(), s_len);
-            // SAFETY: matrix buffers are allocated correctly with respect to dimensions
-            // - `trace.height() = s_len` since `log_height >= l_skip`
-            // - `q_buf` has enough capacity by definition of stacked `layout`
+            let mut copy_len = s_len;
+            let mut end = idx + 1;
+            while end < layout.sorted_cols.len() {
+                let (next_mat_idx, next_j, next_s) = &layout.sorted_cols[end];
+                if *next_mat_idx != *mat_idx || next_s.log_height() != s.log_height() {
+                    break;
+                }
+                let expected_j = *j + (end - idx);
+                let next_len = next_s.len(l_skip);
+                let next_start = next_s.col_idx * padded_height + next_s.row_idx;
+                if *next_j != expected_j || next_len != s_len || next_start != start + copy_len {
+                    break;
+                }
+                copy_len += next_len;
+                end += 1;
+            }
+
+            // SAFETY: matrix buffers are allocated correctly with respect to dimensions.
+            // The grouped columns are contiguous in both source and destination buffers.
             unsafe {
                 let src = trace.buffer().as_ptr().add(*j * s_len);
                 let dst = buffer.as_mut_ptr().add(start);
-                // D2D memcpy
                 cuda_memcpy_on::<true, true>(
                     dst as *mut c_void,
                     src as *const c_void,
-                    s_len * size_of::<F>(),
+                    copy_len * size_of::<F>(),
                     device_ctx,
                 )?;
             }
+            idx = end;
         } else {
             let stride = s.stride(l_skip);
             debug_assert_eq!(stride * trace.height(), s_len);
@@ -195,6 +213,7 @@ pub(crate) fn stack_traces_into_expanded(
                 )
                 .map_err(StackTracesError::BatchExpandPadWide)?;
             }
+            idx += 1;
         }
     }
     Ok(())
