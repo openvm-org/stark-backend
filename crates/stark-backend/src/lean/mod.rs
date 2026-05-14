@@ -904,7 +904,6 @@ fn write_per_pick_lemmas<W: Write>(
             "Interaction.evalMultiplicityAt".to_string(),
             "AIR.Expr.evalAt".to_string(),
         ];
-        // simp_names.push("AIR.evalVar".to_string());
         if mult_uses_inter {
             simp_names.push(air_inter_attr_name(air_name));
         }
