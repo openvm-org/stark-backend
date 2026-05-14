@@ -82,7 +82,6 @@ static __device__ void bn254_poseidon2_permute_impl(
     }
 
     // --- Internal (partial) layer ---
-#pragma unroll 1
     for (int r = 0; r < ROUNDS_P; r++) {
         state[0] = bn254::bn254_add(state[0], partial_rc[r]);
         state[0] = bn254::bn254_sbox(state[0]);
