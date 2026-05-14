@@ -608,7 +608,7 @@ pub fn write_constraints<W: Write>(
     if n == 0 {
         writeln!(writer, "  exact ⟨⟩")?;
     } else {
-        let placeholders = std::iter::repeat("?_").take(n).join(", ");
+        let placeholders = std::iter::repeat_n("?_", n).join(", ");
         writeln!(writer, "  refine ⟨{placeholders}⟩")?;
         for i in 0..n {
             writeln!(
@@ -755,7 +755,7 @@ fn write_wrapped_list<W: Write>(writer: &mut W, indent: &str, names: &[String]) 
             line.clear();
             line.push_str(&inner);
         }
-        if !line.ends_with(' ') && line.trim().len() > 0 {
+        if !line.ends_with(' ') && !line.trim().is_empty() {
             line.push(' ');
         }
         line.push_str(&token);
@@ -869,8 +869,7 @@ fn write_per_pick_lemmas<W: Write>(
             writer,
             "  simp only [List.mem_cons, List.not_mem_nil, or_false] at hI"
         )?;
-        let pattern = std::iter::repeat("rfl")
-            .take(n)
+        let pattern = std::iter::repeat_n("rfl", n)
             .collect::<Vec<_>>()
             .join(" | ");
         writeln!(writer, "  rcases hI with {pattern}")?;
@@ -1163,8 +1162,7 @@ fn write_classification_and_selector_lemmas<W: Write>(
             writer,
             "  simp only [List.mem_cons, List.not_mem_nil, or_false] at hI"
         )?;
-        let pattern = std::iter::repeat("rfl")
-            .take(n)
+        let pattern = std::iter::repeat_n("rfl", n)
             .collect::<Vec<_>>()
             .join(" | ");
         if n == 1 {
