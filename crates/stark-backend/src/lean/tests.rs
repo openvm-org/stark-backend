@@ -382,7 +382,7 @@ fn interactions_simp_uses_per_air_inter_attribute_when_helper_referenced() {
         "expected per-pick busEventAt lemma, got:\n{is}"
     );
     assert!(
-        is.contains("(transcriptBus_0 (F := F)).toBusEventAt ⟨trace, row, []⟩ ="),
+        is.contains("(transcriptBus_0 (F := F)).toBusEventAt ⟨trace, row, publicValues⟩ ="),
         "busEventAt lemma should normalize the typed BusEvent itself:\n{is}"
     );
     assert!(

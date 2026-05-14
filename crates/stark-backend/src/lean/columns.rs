@@ -75,7 +75,7 @@ fn prefixed(prefix: &str, name: &str) -> String {
 }
 
 /// Convenience wrapper: flatten the column list of a `LeanColumns`
-/// implementor with a no-op resolver. Sub-air entries become numeric
+/// implementer with a no-op resolver. Sub-air entries become numeric
 /// placeholders.
 pub fn flat_columns_of<C: LeanColumns>() -> Vec<String> {
     flatten_lean_columns(C::lean_columns(), &|_| None)
