@@ -4,15 +4,13 @@
 //! valuation `va`. Compound nodes are emitted in one of three forms,
 //! decided per-node by [`Decision`]:
 //!
-//! - **Inline.** `(<lhs> op <rhs>)` is dropped into the parent expression
-//!   directly. Default for short / single-use subtrees.
-//! - **Local `let tN`.** Pushed onto the constraint's binding list and
-//!   referenced as `tN` from the parent. Used when a subtree is reused
-//!   ≥`SHARE_THRESHOLD` times within one constraint, is large enough to
-//!   be worth a name, and does not qualify for an AIR-wide helper.
-//! - **Global `inter_K`.** Hoisted to a top-level `def inter_K : Expr F
-//!   layout := fun va => …`. A pre-pass chooses these nodes before any
-//!   expression body is rendered.
+//! - **Inline.** `(<lhs> op <rhs>)` is dropped into the parent expression directly. Default for
+//!   short / single-use subtrees.
+//! - **Local `let tN`.** Pushed onto the constraint's binding list and referenced as `tN` from the
+//!   parent. Used when a subtree is reused ≥`SHARE_THRESHOLD` times within one constraint, is large
+//!   enough to be worth a name, and does not qualify for an AIR-wide helper.
+//! - **Global `inter_K`.** Hoisted to a top-level `def inter_K : Expr F layout := fun va => …`. A
+//!   pre-pass chooses these nodes before any expression body is rendered.
 //!
 //! The DAG walk is post-order via an explicit stack; pointer identity
 //! (`*const SymbolicExpression<F>`) keys the dedup, helper-name, and
@@ -154,8 +152,12 @@ fn render_expression<F: Field>(
     column_names: &[String],
     context: &mut LeanRenderContext<F>,
 ) -> Rendered {
-    let mut stack: Vec<(*const SymbolicExpression<F>, &SymbolicExpression<F>, bool, bool)> =
-        vec![(root as *const _, root, false, true)];
+    let mut stack: Vec<(
+        *const SymbolicExpression<F>,
+        &SymbolicExpression<F>,
+        bool,
+        bool,
+    )> = vec![(root as *const _, root, false, true)];
     let mut scheduled: HashSet<*const SymbolicExpression<F>> = HashSet::new();
     let mut rendered: HashMap<*const SymbolicExpression<F>, Rendered> = HashMap::new();
 
@@ -419,11 +421,14 @@ where
 pub fn symbolic_global_use_counts<F: Field>(
     symbolic: &SymbolicConstraints<F>,
 ) -> HashMap<*const SymbolicExpression<F>, usize> {
-    direct_use_counts(symbolic.constraints.iter().chain(
-        symbolic.interactions.iter().flat_map(|i: &Interaction<_>| {
-            iter::once(&i.count).chain(i.message.iter())
-        }),
-    ))
+    direct_use_counts(
+        symbolic.constraints.iter().chain(
+            symbolic
+                .interactions
+                .iter()
+                .flat_map(|i: &Interaction<_>| iter::once(&i.count).chain(i.message.iter())),
+        ),
+    )
 }
 
 /// Choose every subtree that should be rendered as a top-level `inter_K`.
@@ -436,9 +441,12 @@ pub fn symbolic_global_helper_nodes<F: Field>(
     let roots = symbolic
         .constraints
         .iter()
-        .chain(symbolic.interactions.iter().flat_map(|i: &Interaction<_>| {
-            iter::once(&i.count).chain(i.message.iter())
-        }))
+        .chain(
+            symbolic
+                .interactions
+                .iter()
+                .flat_map(|i: &Interaction<_>| iter::once(&i.count).chain(i.message.iter())),
+        )
         .collect_vec();
     let global_counts = direct_use_counts(roots.iter().copied());
     let op_counts = expression_op_counts(roots.iter().copied());
@@ -478,18 +486,13 @@ fn collect_global_helpers_for_item<'a, F: 'a, I>(
     for (ptr, local) in direct_use_counts(exprs) {
         let global = global_counts.get(&ptr).copied().unwrap_or(0);
         let op_count = op_counts.get(&ptr).copied().unwrap_or(0);
-        if op_count >= options.op_threshold
-            && global >= options.share_threshold
-            && global > local
-        {
+        if op_count >= options.op_threshold && global >= options.share_threshold && global > local {
             helper_nodes.insert(ptr);
         }
     }
 }
 
-fn expression_op_counts<'a, F: 'a, I>(
-    exprs: I,
-) -> HashMap<*const SymbolicExpression<F>, usize>
+fn expression_op_counts<'a, F: 'a, I>(exprs: I) -> HashMap<*const SymbolicExpression<F>, usize>
 where
     I: IntoIterator<Item = &'a SymbolicExpression<F>>,
 {
@@ -579,13 +582,13 @@ fn render_trace_inner<F: Field>(
     match expr {
         SymbolicExpression::Variable(SymbolicVariable { entry, index, .. }) => match entry {
             Entry::Main { part_index, offset } => {
-                let base = *partition_offsets.get(*part_index).unwrap_or_else(|| {
-                    panic!("main column part_index {part_index} out of range")
-                });
+                let base = *partition_offsets
+                    .get(*part_index)
+                    .unwrap_or_else(|| panic!("main column part_index {part_index} out of range"));
                 let flat_idx = base + *index;
-                let name = column_names
-                    .get(flat_idx)
-                    .unwrap_or_else(|| panic!("main column (part {part_index}, index {index}) has no name"));
+                let name = column_names.get(flat_idx).unwrap_or_else(|| {
+                    panic!("main column (part {part_index}, index {index}) has no name")
+                });
                 let suffix = match offset {
                     0 => "",
                     1 => "_next",
@@ -617,28 +620,84 @@ fn render_trace_inner<F: Field>(
         }
         SymbolicExpression::Add { x, y, .. } => {
             out.push('(');
-            render_trace_inner(x, column_names, partition_offsets, public_value_names, characteristic, out, false);
+            render_trace_inner(
+                x,
+                column_names,
+                partition_offsets,
+                public_value_names,
+                characteristic,
+                out,
+                false,
+            );
             out.push_str(" + ");
-            render_trace_inner(y, column_names, partition_offsets, public_value_names, characteristic, out, false);
+            render_trace_inner(
+                y,
+                column_names,
+                partition_offsets,
+                public_value_names,
+                characteristic,
+                out,
+                false,
+            );
             out.push(')');
         }
         SymbolicExpression::Sub { x, y, .. } => {
             out.push('(');
-            render_trace_inner(x, column_names, partition_offsets, public_value_names, characteristic, out, false);
+            render_trace_inner(
+                x,
+                column_names,
+                partition_offsets,
+                public_value_names,
+                characteristic,
+                out,
+                false,
+            );
             out.push_str(" - ");
-            render_trace_inner(y, column_names, partition_offsets, public_value_names, characteristic, out, false);
+            render_trace_inner(
+                y,
+                column_names,
+                partition_offsets,
+                public_value_names,
+                characteristic,
+                out,
+                false,
+            );
             out.push(')');
         }
         SymbolicExpression::Mul { x, y, .. } => {
             out.push('(');
-            render_trace_inner(x, column_names, partition_offsets, public_value_names, characteristic, out, false);
+            render_trace_inner(
+                x,
+                column_names,
+                partition_offsets,
+                public_value_names,
+                characteristic,
+                out,
+                false,
+            );
             out.push_str(" * ");
-            render_trace_inner(y, column_names, partition_offsets, public_value_names, characteristic, out, false);
+            render_trace_inner(
+                y,
+                column_names,
+                partition_offsets,
+                public_value_names,
+                characteristic,
+                out,
+                false,
+            );
             out.push(')');
         }
         SymbolicExpression::Neg { x, .. } => {
             out.push('-');
-            render_trace_inner(x, column_names, partition_offsets, public_value_names, characteristic, out, false);
+            render_trace_inner(
+                x,
+                column_names,
+                partition_offsets,
+                public_value_names,
+                characteristic,
+                out,
+                false,
+            );
         }
     }
 }
@@ -781,12 +840,12 @@ pub fn collect_columns_used<F: Field>(
 /// or `Ok(())` if every leaf is renderable.
 pub fn precheck_supported<F: Field>(symbolic: &SymbolicConstraints<F>) -> Result<(), String> {
     let mut visited: HashSet<*const SymbolicExpression<F>> = HashSet::new();
-    let exprs = symbolic
-        .constraints
-        .iter()
-        .chain(symbolic.interactions.iter().flat_map(|i| {
-            iter::once(&i.count).chain(i.message.iter())
-        }));
+    let exprs = symbolic.constraints.iter().chain(
+        symbolic
+            .interactions
+            .iter()
+            .flat_map(|i| iter::once(&i.count).chain(i.message.iter())),
+    );
     for root in exprs {
         let mut stack: Vec<&SymbolicExpression<F>> = vec![root];
         while let Some(expr) = stack.pop() {

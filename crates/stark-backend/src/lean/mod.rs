@@ -4,13 +4,12 @@
 //! `Fundamentals.Air` Lean library:
 //!
 //! - **Schema.lean** — width, layout, per-column `…Idx` / `…Ref` defs.
-//! - **Constraints.lean** — symbolic constraints as `Expr F layout`,
-//!   `constraintsList`, the `air : AIR F` value, named-column
-//!   accessors, and a `RawConstraintsAt` extractor. Shared
-//!   sub-expressions (`inter_K`) live here too — `Interactions.lean`
-//!   can reference them via the open namespace.
-//! - **Interactions.lean** — per-bus `…Interactions` lists referencing
-//!   a hand-curated `BusIdx` enum, plus an `allInteractions` concat.
+//! - **Constraints.lean** — symbolic constraints as `Expr F layout`, `constraintsList`, the `air :
+//!   AIR F` value, named-column accessors, and a `RawConstraintsAt` extractor. Shared
+//!   sub-expressions (`inter_K`) live here too — `Interactions.lean` can reference them via the
+//!   open namespace.
+//! - **Interactions.lean** — per-bus `…Interactions` lists referencing a hand-curated `BusIdx`
+//!   enum, plus an `allInteractions` concat.
 //!
 //! Two-phase pipeline: [`render_air`] walks the DAG with one shared
 //! [`LeanRenderContext`] across both files (so a subtree shared between
@@ -194,9 +193,7 @@ pub fn render_air<F: Field>(
     for (lean_name, group) in by_bus {
         let mut entries = Vec::with_capacity(group.len());
         for interaction in group {
-            ctx.begin_item(
-                std::iter::once(&interaction.count).chain(interaction.message.iter()),
-            );
+            ctx.begin_item(std::iter::once(&interaction.count).chain(interaction.message.iter()));
             let multiplicity_body =
                 render_expression_body(&interaction.count, column_names, &mut ctx);
             let message_bodies: Vec<String> = interaction
@@ -305,7 +302,11 @@ pub fn write_schema<W: Write>(
         writer,
         "/-- Simp set for unfolding hoisted `inter_K` helpers of `{air_name}`. -/"
     )?;
-    writeln!(writer, "register_simp_attr {}", air_inter_attr_name(air_name))?;
+    writeln!(
+        writer,
+        "register_simp_attr {}",
+        air_inter_attr_name(air_name)
+    )?;
     writeln!(writer)?;
     writeln!(writer, "/-!")?;
     writeln!(writer, "# {air_name} (native)")?;
@@ -341,7 +342,10 @@ pub fn write_schema<W: Write>(
             "def layout : TraceLayout := TraceLayout.ofWidths 0 [{cached_list}] {common_width}"
         )?;
     } else {
-        writeln!(writer, "def layout : TraceLayout := TraceLayout.singleMain W")?;
+        writeln!(
+            writer,
+            "def layout : TraceLayout := TraceLayout.singleMain W"
+        )?;
     }
     writeln!(writer)?;
     writeln!(writer, "/-! ## Column indices -/")?;
@@ -352,7 +356,10 @@ pub fn write_schema<W: Write>(
         let is_common = group + 1 == num_parts;
         if is_common {
             if is_partitioned {
-                writeln!(writer, "def {name}Idx : Fin {width} := ⟨{local_idx}, by decide⟩")?;
+                writeln!(
+                    writer,
+                    "def {name}Idx : Fin {width} := ⟨{local_idx}, by decide⟩"
+                )?;
             } else {
                 writeln!(writer, "def {name}Idx : Fin W := ⟨{local_idx}, by decide⟩")?;
             }
@@ -361,7 +368,10 @@ pub fn write_schema<W: Write>(
                 "def {name}Ref : ColumnRef layout := ColumnRef.commonMain {name}Idx"
             )?;
         } else {
-            writeln!(writer, "def {name}Idx : Fin {width} := ⟨{local_idx}, by decide⟩")?;
+            writeln!(
+                writer,
+                "def {name}Idx : Fin {width} := ⟨{local_idx}, by decide⟩"
+            )?;
             writeln!(
                 writer,
                 "def {name}Ref : ColumnRef layout := ColumnRef.cachedMain ⟨{group}, by decide⟩ {name}Idx"
@@ -403,10 +413,7 @@ fn partition_widths(partition_offsets: &[usize], total_width: usize) -> Vec<(usi
     let mut out = Vec::with_capacity(partition_offsets.len());
     for i in 0..partition_offsets.len() {
         let base = partition_offsets[i];
-        let end = partition_offsets
-            .get(i + 1)
-            .copied()
-            .unwrap_or(total_width);
+        let end = partition_offsets.get(i + 1).copied().unwrap_or(total_width);
         out.push((base, end - base));
     }
     out
@@ -589,10 +596,10 @@ pub fn write_constraints<W: Write>(
         "theorem of_satisfiesRow {{trace : (air (F := F)).Trace}} {{row : Fin trace.height}}"
     )?;
     let (pv_binder, pv_arg, raw_args) = (
-            "    {publicValues : List F}\n",
-            " publicValues",
-            " publicValues",
-        );
+        "    {publicValues : List F}\n",
+        " publicValues",
+        " publicValues",
+    );
     write!(writer, "{pv_binder}")?;
     writeln!(
         writer,
@@ -663,7 +670,10 @@ pub fn write_interactions<W: Write>(
         let lean_name = group.lean_name.as_str();
         writeln!(writer, "/-! ### {lean_name} -/")?;
         writeln!(writer)?;
-        writeln!(writer, "def {lean_name}Interactions : List ({bus_def_ty}) :=")?;
+        writeln!(
+            writer,
+            "def {lean_name}Interactions : List ({bus_def_ty}) :="
+        )?;
         if group.entries.is_empty() {
             writeln!(writer, "  []")?;
             writeln!(writer)?;
@@ -693,18 +703,17 @@ pub fn write_interactions<W: Write>(
                 writeln!(writer, "        (fun va =>")?;
                 writeln!(writer, "{}){suffix}", indent_block(body, "          "))?;
             }
-            let trailing = if i + 1 == group.entries.len() { "" } else { "," };
+            let trailing = if i + 1 == group.entries.len() {
+                ""
+            } else {
+                ","
+            };
             writeln!(writer, "      ] }}{trailing}")?;
         }
         writeln!(writer, "  ]")?;
         writeln!(writer)?;
 
-        write_per_pick_lemmas(
-            writer,
-            air_name,
-            group,
-            &bus_def_ty,
-        )?;
+        write_per_pick_lemmas(writer, air_name, group, &bus_def_ty)?;
     }
 
     if !rendered.interactions.is_empty() {
@@ -730,11 +739,7 @@ pub fn write_interactions<W: Write>(
     Ok(())
 }
 
-fn write_wrapped_list<W: Write>(
-    writer: &mut W,
-    indent: &str,
-    names: &[String],
-) -> io::Result<()> {
+fn write_wrapped_list<W: Write>(writer: &mut W, indent: &str, names: &[String]) -> io::Result<()> {
     writeln!(writer, "{indent}[")?;
     let inner = format!("{indent}  ");
     let mut line = String::new();
@@ -828,12 +833,12 @@ fn write_per_pick_lemmas<W: Write>(
             writer,
             "/-- Pick #{i} of `{list_def}`. Rename to a semantic suffix"
         )?;
-        writeln!(writer, "    (e.g. `Receive`, `Send`) by hand if applicable. -/")?;
-        writeln!(writer, "def {bus}_{i} : {bus_def_ty} :=")?;
         writeln!(
             writer,
-            "  ({list_def}).get ⟨{i}, by simp [{list_def}]⟩"
+            "    (e.g. `Receive`, `Send`) by hand if applicable. -/"
         )?;
+        writeln!(writer, "def {bus}_{i} : {bus_def_ty} :=")?;
+        writeln!(writer, "  ({list_def}).get ⟨{i}, by simp [{list_def}]⟩")?;
         writeln!(writer)?;
     }
 
@@ -864,7 +869,10 @@ fn write_per_pick_lemmas<W: Write>(
             writer,
             "  simp only [List.mem_cons, List.not_mem_nil, or_false] at hI"
         )?;
-        let pattern = std::iter::repeat("rfl").take(n).collect::<Vec<_>>().join(" | ");
+        let pattern = std::iter::repeat("rfl")
+            .take(n)
+            .collect::<Vec<_>>()
+            .join(" | ");
         writeln!(writer, "  rcases hI with {pattern}")?;
         for i in 0..n {
             // Place the goal in the i-th disjunct slot, then simp.
@@ -885,8 +893,7 @@ fn write_per_pick_lemmas<W: Write>(
         };
 
         // _evalMultiplicityAt
-        let (acc_list, ref_list, ctx_list) =
-            simp_args_for_columns(&entry.multiplicity_cols);
+        let (acc_list, ref_list, ctx_list) = simp_args_for_columns(&entry.multiplicity_cols);
         let mult_uses_inter = body_uses_inter_helper(&entry.multiplicity_body);
         writeln!(writer, "lemma {bus}_{i}_evalMultiplicityAt")?;
         writeln!(
@@ -926,7 +933,10 @@ fn write_per_pick_lemmas<W: Write>(
                 writer,
                 "    ({bus}_{i} (F := F)).evalMessageAt ⟨trace, row, {pv_ctx}⟩ = #v[] := by"
             )?;
-            writeln!(writer, "  simp [{bus}_{i}, {list_def}, Interaction.evalMessageAt]")?;
+            writeln!(
+                writer,
+                "  simp [{bus}_{i}, {list_def}, Interaction.evalMessageAt]"
+            )?;
             writeln!(writer)?;
 
             writeln!(writer, "lemma {bus}_{i}_busEventAt")?;
@@ -1064,9 +1074,7 @@ fn body_uses_inter_helper(body: &str) -> bool {
 }
 
 fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    haystack
-        .windows(needle.len())
-        .position(|w| w == needle)
+    haystack.windows(needle.len()).position(|w| w == needle)
 }
 
 /// Build the simp-arg fragments for an `evalMultiplicityAt` /
@@ -1155,7 +1163,10 @@ fn write_classification_and_selector_lemmas<W: Write>(
             writer,
             "  simp only [List.mem_cons, List.not_mem_nil, or_false] at hI"
         )?;
-        let pattern = std::iter::repeat("rfl").take(n).collect::<Vec<_>>().join(" | ");
+        let pattern = std::iter::repeat("rfl")
+            .take(n)
+            .collect::<Vec<_>>()
+            .join(" | ");
         if n == 1 {
             writeln!(writer, "  rcases hI with {pattern}")?;
             writeln!(writer, "  rfl")?;
