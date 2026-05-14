@@ -1,7 +1,6 @@
 /// BN254 field arithmetic and Poseidon2 permutation helpers for CUDA.
 ///
 /// This header provides:
-///   - Bn254Fr type (4 × u64 Montgomery form, little-endian limbs)
 ///   - CIOS Montgomery multiplication matching p3-bn254::helpers::monty_mul
 ///   - Field add / sub / neg / double / x^5 S-box
 ///   - Templated MDS layers (external and internal, any WIDTH)

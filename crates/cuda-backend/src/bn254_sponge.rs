@@ -268,8 +268,8 @@ mod tests {
             let witness_bits =
                 FiatShamirTranscript::<BabyBearBn254Poseidon2Config>::sample_bits(&mut cpu, bits);
             // Verify the CUDA-found witness passes check_witness on the CPU transcript.
-            assert!(
-                witness_bits == 0,
+            assert_eq!(
+                witness_bits, 0,
                 "CUDA witness {witness:?} invalid on CPU (observed {num_observed} values, witness_bits {witness_bits})"
             );
         }

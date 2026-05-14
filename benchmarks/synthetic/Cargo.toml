@@ -38,7 +38,7 @@ required-features = ["cuda"]
 
 [[bin]]
 name = "bn254_grind"
-required-features = ["cuda"]
+required-features = ["cuda", "baby-bear-bn254-poseidon2"]
 
 # Uniform-shape runner: identical AIRs sized via CLI flags. CPU by
 # default; build with `--features cuda` to use the GPU prover.

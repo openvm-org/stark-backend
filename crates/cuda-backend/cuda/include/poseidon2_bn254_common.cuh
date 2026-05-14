@@ -35,21 +35,5 @@ __device__ __constant__ static const uint64_t BN254_R2[4] = {
     0x0216d0b17f4e44a5ULL,
 };
 
-// 1 in Montgomery form = R mod P = 2^256 mod P
-__device__ __constant__ static const uint64_t BN254_R_ONE[4] = {
-    0xac96341c4ffffffbULL,
-    0x36fc76959f60cd29ULL,
-    0x666ea36f7879462eULL,
-    0x0e0a77c19a07df2fULL,
-};
-
-// 2 in Montgomery form
-__device__ __constant__ static const uint64_t BN254_R_TWO[4] = {
-    0x592c68389ffffff6ULL,
-    0x6df8ed2b3ec19a53ULL,
-    0xccdd46def0f28c5cULL,
-    0x1c14ef83340fbe5eULL,
-};
-
 // BabyBear prime
 static const uint64_t BABYBEAR_PRIME = 0x78000001ULL;

@@ -14,7 +14,7 @@ struct Args {
 
 fn main() {
     let Args { bits } = Args::parse();
-    let mut ctx = GpuDeviceCtx::for_device(get_device().unwrap() as u32).unwrap();
+    let ctx = GpuDeviceCtx::for_device(get_device().unwrap() as u32).unwrap();
     let mut dev = MultiFieldTranscriptGpu::default();
     dev.sync_h2d(&ctx).unwrap();
     let t0 = Instant::now();
