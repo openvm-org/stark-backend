@@ -143,12 +143,6 @@ pub struct RenderedAir {
     pub constraint_bodies: Vec<String>,
     pub interactions: Vec<RenderedBusGroup>,
     pub helper_defs: Vec<String>,
-    /// True if any constraint or interaction expression references a
-    /// public value (`Entry::Public`). When set, the writers parameterize
-    /// the `RawConstraintsAt` structure and the per-pick eval lemmas on
-    /// a `publicValues : List F` argument and pass it through the eval
-    /// context. Otherwise the eval context uses `[]`.
-    pub uses_public_values: bool,
 }
 
 /// All interactions on a single bus, post-render.
@@ -278,15 +272,9 @@ pub fn render_air<F: Field>(
         interactions.push(RenderedBusGroup { lean_name, entries });
     }
 
-    let uses_public_values = symbolic.constraints.iter().any(contains_public_value)
-        || symbolic.interactions.iter().any(|i| {
-            contains_public_value(&i.count) || i.message.iter().any(contains_public_value)
-        });
-
     Ok(RenderedAir {
         constraint_bodies,
         interactions,
-        uses_public_values,
         helper_defs: std::mem::take(&mut ctx.helper_defs),
     })
 }
@@ -550,16 +538,8 @@ pub fn write_constraints<W: Write>(
     writeln!(writer, "/-! ## Raw per-row constraint extraction -/")?;
     writeln!(writer)?;
     let n = rendered.constraint_bodies.len();
-    let pv_param = if rendered.uses_public_values {
-        " (publicValues : List F)"
-    } else {
-        ""
-    };
-    let pv_ctx = if rendered.uses_public_values {
-        "publicValues"
-    } else {
-        "[]"
-    };
+    let pv_param = " (publicValues : List F)";
+    let pv_ctx = "publicValues";
     writeln!(
         writer,
         "/-- All {n} raw constraint(s) of `air` at a row. Field `cK` is the raw fact"
@@ -608,15 +588,11 @@ pub fn write_constraints<W: Write>(
         writer,
         "theorem of_satisfiesRow {{trace : (air (F := F)).Trace}} {{row : Fin trace.height}}"
     )?;
-    let (pv_binder, pv_arg, raw_args) = if rendered.uses_public_values {
-        (
-            "    (publicValues : List F)\n",
+    let (pv_binder, pv_arg, raw_args) = (
+            "    {publicValues : List F}\n",
             " publicValues",
             " publicValues",
-        )
-    } else {
-        ("", "", "")
-    };
+        );
     write!(writer, "{pv_binder}")?;
     writeln!(
         writer,
@@ -728,7 +704,6 @@ pub fn write_interactions<W: Write>(
             air_name,
             group,
             &bus_def_ty,
-            rendered.uses_public_values,
         )?;
     }
 
@@ -837,18 +812,9 @@ fn write_per_pick_lemmas<W: Write>(
     air_name: &str,
     group: &RenderedBusGroup,
     bus_def_ty: &str,
-    uses_public_values: bool,
 ) -> io::Result<()> {
-    let pv_param = if uses_public_values {
-        " (publicValues : List F)"
-    } else {
-        ""
-    };
-    let pv_ctx = if uses_public_values {
-        "publicValues"
-    } else {
-        "[]"
-    };
+    let pv_param = " (publicValues : List F)";
+    let pv_ctx = "publicValues";
     let bus = group.lean_name.as_str();
     let list_def = format!("{bus}Interactions");
     let n = group.entries.len();
@@ -938,13 +904,7 @@ fn write_per_pick_lemmas<W: Write>(
             "Interaction.evalMultiplicityAt".to_string(),
             "AIR.Expr.evalAt".to_string(),
         ];
-        if uses_public_values {
-            // `AIR.evalVar` reduces `(.publicValue i)` to
-            // `ctx.publicValues.getD i 0`. Cell/selector cases are
-            // already @[simp] in Fundamentals.Air, but `.publicValue`
-            // isn't, so unfold the def explicitly.
-            simp_names.push("AIR.evalVar".to_string());
-        }
+        // simp_names.push("AIR.evalVar".to_string());
         if mult_uses_inter {
             simp_names.push(air_inter_attr_name(air_name));
         }
@@ -1018,9 +978,7 @@ fn write_per_pick_lemmas<W: Write>(
             "Interaction.evalMessageAt".to_string(),
             "AIR.Expr.evalAt".to_string(),
         ];
-        if uses_public_values {
-            simp_names.push("AIR.evalVar".to_string());
-        }
+        simp_names.push("AIR.evalVar".to_string());
         if msg_uses_inter {
             simp_names.push(air_inter_attr_name(air_name));
         }
