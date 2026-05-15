@@ -35,8 +35,7 @@ use crate::{
 };
 
 const WIDTH: usize = 3;
-/// Poseidon rate in F. <Poseidon RATE>(2) * <# of F in a N>(8) = 16
-const RATE: usize = 16;
+const RATE: usize = 2;
 const DIGEST_WIDTH: usize = 1;
 
 /// A configuration for  recursion.
