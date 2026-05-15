@@ -7,7 +7,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 ## Unreleased
 
 ## v1.4.0 (2026-05-15)
-- Updated Plonky3 to crates.io `v0.4.3`.
+
+### Changed
+- Updated Plonky3 to crates.io `v0.4.3` to fix `MultiField32Challenger`.
 
 ## v1.3.0 (2026-02-05)
 
