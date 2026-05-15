@@ -21,7 +21,7 @@ Contributors should read [Development without CUDA](./docs/README.md#development
 
 ## Status
 
-As of February 2026, STARK Backend v1.3.0 and later are recommended for production use. STARK Backend completed external [audits](https://github.com/openvm-org/openvm/blob/main/audits/) on [Cantina](https://cantina.xyz/) as well as an internal [audit](https://github.com/openvm-org/openvm/blob/main/audits/v1-internal/README.md) by members of the [Axiom](https://axiom.xyz/) team.
+As of May 2026, STARK Backend v1.4.0 and later are recommended for production use. STARK Backend completed external [audits](https://github.com/openvm-org/openvm/blob/main/audits/) on [Cantina](https://cantina.xyz/) as well as an internal [audit](https://github.com/openvm-org/openvm/blob/main/audits/v1-internal/README.md) by members of the [Axiom](https://axiom.xyz/) team.
 
 ## Security
 
