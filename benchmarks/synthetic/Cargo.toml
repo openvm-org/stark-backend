@@ -12,6 +12,7 @@ openvm-stark-sdk = { workspace = true, features = [
   "cpu-backend",
 ] }
 openvm-cuda-backend = { workspace = true, optional = true }
+openvm-cuda-common = { workspace = true, optional = true }
 
 p3-air.workspace = true
 p3-baby-bear.workspace = true
@@ -26,7 +27,7 @@ serde_json = { workspace = true }
 
 [features]
 default = []
-cuda = ["dep:openvm-cuda-backend"]
+cuda = ["dep:openvm-cuda-backend", "dep:openvm-cuda-common"]
 baby-bear-bn254-poseidon2 = ["openvm-cuda-backend?/baby-bear-bn254-poseidon2"]
 
 # Profile-replay runner: heterogeneous AIRs from a captured profile JSONL.
@@ -34,6 +35,10 @@ baby-bear-bn254-poseidon2 = ["openvm-cuda-backend?/baby-bear-bn254-poseidon2"]
 [[bin]]
 name = "synthetic_runner"
 required-features = ["cuda"]
+
+[[bin]]
+name = "bn254_grind"
+required-features = ["cuda", "baby-bear-bn254-poseidon2"]
 
 # Uniform-shape runner: identical AIRs sized via CLI flags. CPU by
 # default; build with `--features cuda` to use the GPU prover.
