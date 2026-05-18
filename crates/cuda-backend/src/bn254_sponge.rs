@@ -247,7 +247,7 @@ mod tests {
     #[test]
     fn test_grind_gpu_witness_valid_on_cpu() {
         let bits = 8;
-        let mut ctx = GpuDeviceCtx::for_device(get_device().unwrap() as u32).unwrap();
+        let ctx = GpuDeviceCtx::for_device(get_device().unwrap() as u32).unwrap();
 
         // Test with several different transcript states to exercise partial observe buffers,
         // different sponge positions, etc.

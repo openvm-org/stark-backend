@@ -35,6 +35,8 @@ struct Bn254PoseidonPermShared {
     Bn254Fr *partial_rc;
     Bn254Fr *terminal_rc;
 };
+
+// make sure to __syncthreads() before reading
 static __device__ Bn254PoseidonPermShared load_shared() {
     __shared__ uint64_t buf[(4 * 3 + 56 + 4 * 3) * 4];
     for (int i = threadIdx.x; i < 12 * 4; i += blockDim.x) {

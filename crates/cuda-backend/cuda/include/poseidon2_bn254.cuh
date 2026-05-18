@@ -7,10 +7,6 @@
 ///   - bn254_from_canonical / bn254_to_canonical conversions
 ///   - bn254_pack_base_2_31 / u256_mod_u32 helpers for MultiFieldTranscript
 ///     packing and sampling during grinding
-///
-/// All functions are pure computation (no globals). The Poseidon2 permutation
-/// function is declared here but defined in bn254_poseidon2.cu (where the
-/// round-constant globals live).
 #pragma once
 #include "poseidon2_bn254_common.cuh"
 
