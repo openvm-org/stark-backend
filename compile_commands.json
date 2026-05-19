@@ -1,0 +1,34 @@
+[
+  {
+    "directory": "/home/allanl/Programs/stark-backend-worktree/feat/bn254_fold",
+    "arguments": [
+      "clang++",
+      "-x", "cuda",
+      "--cuda-gpu-arch=sm_120",
+      "--cuda-path=/usr/local/cuda",
+      "-std=c++17",
+      "-I/home/allanl/Programs/stark-backend-worktree/feat/bn254_fold/crates/cuda-common/include",
+      "-I/home/allanl/Programs/stark-backend-worktree/feat/bn254_fold/crates/cuda-backend/cuda/include",
+      "-isystem", "/usr/local/cuda/include",
+      "-c",
+      "/home/allanl/Programs/stark-backend-worktree/feat/bn254_fold/bn254_compress.cu"
+    ],
+    "file": "/home/allanl/Programs/stark-backend-worktree/feat/bn254_fold/bn254_compress.cu"
+  },
+  {
+    "directory": "/home/allanl/Programs/stark-backend-worktree/feat/bn254_fold",
+    "arguments": [
+      "clang++",
+      "-x", "cuda",
+      "--cuda-gpu-arch=sm_120",
+      "--cuda-path=/usr/local/cuda",
+      "-std=c++17",
+      "-I/home/allanl/Programs/stark-backend-worktree/feat/bn254_fold/crates/cuda-common/include",
+      "-I/home/allanl/Programs/stark-backend-worktree/feat/bn254_fold/crates/cuda-backend/cuda/include",
+      "-isystem", "/usr/local/cuda/include",
+      "-c",
+      "/home/allanl/Programs/stark-backend-worktree/feat/bn254_fold/bn254_bench.cu"
+    ],
+    "file": "/home/allanl/Programs/stark-backend-worktree/feat/bn254_fold/bn254_bench.cu"
+  }
+]

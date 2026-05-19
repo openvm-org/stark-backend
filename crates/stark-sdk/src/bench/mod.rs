@@ -38,6 +38,8 @@ pub fn run_with_metric_collection<R>(
     let subscriber = subscriber.with(TimingMetricsLayer::new());
     #[cfg(feature = "nvtx")]
     let subscriber = subscriber.with(NvtxLayer::new(Default::default()));
+    #[cfg(feature = "nvtx")]
+    println!("using nvtx");
     // Prepare tracing.
     tracing::subscriber::set_global_default(subscriber).unwrap();
 

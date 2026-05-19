@@ -1,0 +1,37 @@
+{
+  "profile_path": "benchmarks/synthetic/reth-block-23992138-profile.jsonl",
+  "sample_frac": 0.01,
+  "seed": 42,
+  "max_log_height": 22,
+  "total_segments": 209,
+  "sampled_segments": 3,
+  "skipped_segments": 0,
+  "total_keygen_ms": 267,
+  "total_prove_ms": 2528,
+  "results": [
+    {
+      "segment_idx": 62,
+      "num_airs": 24,
+      "total_main_cells": 401136404,
+      "keygen_ms": 86,
+      "prove_ms": 845,
+      "clamped": false
+    },
+    {
+      "segment_idx": 98,
+      "num_airs": 34,
+      "total_main_cells": 398776112,
+      "keygen_ms": 127,
+      "prove_ms": 942,
+      "clamped": false
+    },
+    {
+      "segment_idx": 150,
+      "num_airs": 42,
+      "total_main_cells": 143752444,
+      "keygen_ms": 54,
+      "prove_ms": 741,
+      "clamped": false
+    }
+  ]
+}
