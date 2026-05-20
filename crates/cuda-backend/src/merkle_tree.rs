@@ -33,7 +33,7 @@ pub trait BatchQueryMerkle: Copy + Sized + 'static {
     fn reconstruct_from_f(out: &[F], base: usize) -> Self;
 }
 
-const MAX_MERKLE_ROWS_PER_QUERY: usize = 1024;
+const MAX_MERKLE_ROWS_PER_QUERY: usize = 512;
 
 fn validate_merkle_rows_per_query(
     rows_per_query: usize,

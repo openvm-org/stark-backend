@@ -465,13 +465,13 @@ fn test_bn254_row_hash_emulation_matches_host_multi_block_rows() {
 }
 
 #[test]
-fn test_merkle_gpu_supports_1024_rows_per_query() {
+fn test_merkle_gpu_supports_512_rows_per_query() {
     use openvm_cuda_common::copy::MemCopyH2D;
 
     let ctx = test_ctx();
-    let height = 1 << 10;
+    let height = 1 << 9;
     let width = 7;
-    let rows_per_query = 1 << 10;
+    let rows_per_query = 1 << 9;
     let host_matrix = (0..width * height)
         .map(|i| F::from_u32((i as u32).wrapping_mul(31).wrapping_add((i >> 2) as u32)))
         .collect_vec();
@@ -484,7 +484,7 @@ fn test_merkle_gpu_supports_1024_rows_per_query() {
     let tree = MerkleTreeGpu::<F, crate::prelude::Digest>::new_with_hash::<
         crate::hash_scheme::Poseidon2MerkleHash,
     >(device_matrix, rows_per_query, true, &ctx)
-    .expect("rows_per_query=1024 should be supported");
+    .expect("rows_per_query=512 should be supported");
 
     assert_eq!(tree.query_stride(), 1);
     assert_eq!(tree.proof_depth(), 0);
