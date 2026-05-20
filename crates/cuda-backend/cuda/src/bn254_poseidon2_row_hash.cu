@@ -396,7 +396,7 @@ extern "C" int _bn254_poseidon2_compressing_row_hashes(
     cudaStream_t stream
 ) {
     // make sure to change line 36 of merkle_tree.rs to adjust the constants
-    if (log_rows_per_query > 10) {
+    if (log_rows_per_query > 9) {
         return cudaErrorInvalidValue;
     }
     size_t block_y = size_t{1} << log_rows_per_query;
@@ -418,7 +418,7 @@ extern "C" int _bn254_poseidon2_compressing_row_hashes_ext(
     size_t log_rows_per_query,
     cudaStream_t stream
 ) {
-    if (log_rows_per_query > 10) {
+    if (log_rows_per_query > 9) {
         return cudaErrorInvalidValue;
     }
     size_t block_y = size_t{1} << log_rows_per_query;
