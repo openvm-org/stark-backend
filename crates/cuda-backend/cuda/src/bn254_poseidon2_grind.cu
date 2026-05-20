@@ -125,15 +125,6 @@ extern __device__ __constant__ Bn254Fr g_partial_rc_w2[50];
 extern __device__ __constant__ Bn254Fr g_terminal_rc_w2[3][2];
 
 // ---------------------------------------------------------------------------
-// BN254 Merkle digest: a single Bn254Fr element (32 bytes)
-// Matches Digest = [Bn254Scalar; 1] on the Rust side.
-// ---------------------------------------------------------------------------
-
-struct bn254_digest_t {
-    Bn254Fr elem;
-};
-
-// ---------------------------------------------------------------------------
 // Helper: zero-initialize a Bn254Fr
 // ---------------------------------------------------------------------------
 
@@ -143,17 +134,6 @@ static __device__ Bn254Fr bn254_zero_init() {
         z.limbs[i] = 0;
     return z;
 }
-
-// ---------------------------------------------------------------------------
-// Sponge constants for Merkle hashing
-//
-// Matches MultiFieldHasher<BabyBear, Bn254Scalar, Perm, 3, 16, 1>:
-//   BABY_BEAR_RATE = 16  BabyBear values absorbed per permutation
-//   NUM_F_ELMS = 8       BabyBear values packed per Bn254Fr (floor(254/31) = 8)
-// ---------------------------------------------------------------------------
-
-static const int BN254_BABY_BEAR_RATE = 16;
-static const int BN254_NUM_F_ELMS = 8;
 
 // ---------------------------------------------------------------------------
 // BN254 sponge state for GPU grinding

@@ -98,22 +98,6 @@ static __device__ void bn254_poseidon2_permute_w2_b32(Bn254Fr32 state[2]) {
     );
 }
 
-// ---------------------------------------------------------------------------
-// BN254 Merkle digest: a single Bn254Fr element (32 bytes)
-// Matches Digest = [Bn254Scalar; 1] on the Rust side.
-// ---------------------------------------------------------------------------
-
-struct bn254_digest_t {
-    Bn254Fr elem;
-};
-
-static const int BN254_BABY_BEAR_RATE = 16;
-static const int BN254_NUM_F_ELMS = 8;
-
-static_assert(
-    BN254_BABY_BEAR_RATE % 4 == 0,
-    "BN254_BABY_BEAR_RATE must be a multiple of FpExt degree (4)"
-);
 
 /// b32 mirror of bn254_row_hash. Uses bn254_b32::bn254_pack_base_2_31 and the
 /// b32 width-3 permutation. The 16-u32 sponge `buf` lives in shared memory
@@ -273,13 +257,14 @@ __global__ void bn254_adjacent_compress_layer_kernel(
     output[gid] = bn254_compress_b32(left, right);
 }
 
-template <int NThreads, int LogRowsPerQuery>
+template <int NThreads>
 __global__ __launch_bounds__(NThreads) void bn254_compressing_row_hashes_kernel_v3(
     Bn254Fr32 *out,
     const Fp *matrix,
     size_t width,
     size_t height,
-    size_t query_stride
+    size_t query_stride,
+    size_t log_rows_per_query
 ) {
     // 32-bit-limb digests through the row-hash + tree reduction. The shared
     // array serves two time-disjoint purposes:
@@ -313,7 +298,7 @@ __global__ __launch_bounds__(NThreads) void bn254_compressing_row_hashes_kernel_
 
     // Tree reduction (same structure as the BabyBear kernel)
 #pragma unroll 1
-    for (int layer = 0; layer < (int)LogRowsPerQuery; ++layer) {
+    for (int layer = 0; layer < (int)log_rows_per_query; ++layer) {
         uint32_t mask = (1 << (layer + 1)) - 1;
         uint32_t shared_offset = ((leaf_idx >> (layer + 1)) << layer) * blockDim.x + threadIdx.x;
 
@@ -335,13 +320,14 @@ __global__ __launch_bounds__(NThreads) void bn254_compressing_row_hashes_kernel_
 
 // b32 mirror of the ext row-hash kernel — same structure as v3 (F-field) but
 // uses bn254_row_hash_ext_b32, which iterates over FpExt rows.
-template <int NThreads, int LogRowsPerQuery>
+template <int NThreads>
 __global__ __launch_bounds__(NThreads) void bn254_compressing_row_hashes_ext_kernel_v3(
     bn254_digest_t *out,
     const FpExt *matrix,
     size_t width,
     size_t height,
-    size_t query_stride
+    size_t query_stride,
+    size_t log_rows_per_query
 ) {
     static_assert(NThreads % 32 == 0, "NThreads must be a multiple of warp size");
     static_assert(BN254_BABY_BEAR_RATE == 16, "buf-in-shared sizing assumes RATE=16");
@@ -361,7 +347,7 @@ __global__ __launch_bounds__(NThreads) void bn254_compressing_row_hashes_ext_ker
     __syncthreads();
 
 #pragma unroll 1
-    for (int layer = 0; layer < (int)LogRowsPerQuery; ++layer) {
+    for (int layer = 0; layer < (int)log_rows_per_query; ++layer) {
         uint32_t mask = (1 << (layer + 1)) - 1;
         uint32_t shared_offset = ((leaf_idx >> (layer + 1)) << layer) * blockDim.x + threadIdx.x;
 
@@ -409,7 +395,8 @@ extern "C" int _bn254_poseidon2_compressing_row_hashes(
     size_t log_rows_per_query,
     cudaStream_t stream
 ) {
-    if (log_rows_per_query > 4) {
+    // make sure to change line 36 of merkle_tree.rs to adjust the constants
+    if (log_rows_per_query > 10) {
         return cudaErrorInvalidValue;
     }
     size_t block_y = size_t{1} << log_rows_per_query;
@@ -418,28 +405,8 @@ extern "C" int _bn254_poseidon2_compressing_row_hashes(
     block.y = block_y;
     auto height = query_stride << log_rows_per_query;
 
-    switch (log_rows_per_query) {
-    case 0:
-        bn254_compressing_row_hashes_kernel_v3<512, 0>
-            <<<grid, block, 0, stream>>>((Bn254Fr32 *)out, matrix, width, height, query_stride);
-        break;
-    case 1:
-        bn254_compressing_row_hashes_kernel_v3<512, 1>
-            <<<grid, block, 0, stream>>>((Bn254Fr32 *)out, matrix, width, height, query_stride);
-        break;
-    case 2:
-        bn254_compressing_row_hashes_kernel_v3<512, 2>
-            <<<grid, block, 0, stream>>>((Bn254Fr32 *)out, matrix, width, height, query_stride);
-        break;
-    case 3:
-        bn254_compressing_row_hashes_kernel_v3<512, 3>
-            <<<grid, block, 0, stream>>>((Bn254Fr32 *)out, matrix, width, height, query_stride);
-        break;
-    case 4:
-        bn254_compressing_row_hashes_kernel_v3<512, 4>
-            <<<grid, block, 0, stream>>>((Bn254Fr32 *)out, matrix, width, height, query_stride);
-        break;
-    }
+    bn254_compressing_row_hashes_kernel_v3<512>
+        <<<grid, block, 0, stream>>>((Bn254Fr32 *)out, matrix, width, height, query_stride, log_rows_per_query);
     return CHECK_KERNEL();
 }
 
@@ -451,7 +418,7 @@ extern "C" int _bn254_poseidon2_compressing_row_hashes_ext(
     size_t log_rows_per_query,
     cudaStream_t stream
 ) {
-    if (log_rows_per_query > 4) {
+    if (log_rows_per_query > 10) {
         return cudaErrorInvalidValue;
     }
     size_t block_y = size_t{1} << log_rows_per_query;
@@ -460,27 +427,7 @@ extern "C" int _bn254_poseidon2_compressing_row_hashes_ext(
     block.y = block_y;
     auto height = query_stride << log_rows_per_query;
 
-    switch (log_rows_per_query) {
-    case 0:
-        bn254_compressing_row_hashes_ext_kernel_v3<512, 0>
-            <<<grid, block, 0, stream>>>(out, matrix, width, height, query_stride);
-        break;
-    case 1:
-        bn254_compressing_row_hashes_ext_kernel_v3<512, 1>
-            <<<grid, block, 0, stream>>>(out, matrix, width, height, query_stride);
-        break;
-    case 2:
-        bn254_compressing_row_hashes_ext_kernel_v3<512, 2>
-            <<<grid, block, 0, stream>>>(out, matrix, width, height, query_stride);
-        break;
-    case 3:
-        bn254_compressing_row_hashes_ext_kernel_v3<512, 3>
-            <<<grid, block, 0, stream>>>(out, matrix, width, height, query_stride);
-        break;
-    case 4:
-        bn254_compressing_row_hashes_ext_kernel_v3<512, 4>
-            <<<grid, block, 0, stream>>>(out, matrix, width, height, query_stride);
-        break;
-    }
+    bn254_compressing_row_hashes_ext_kernel_v3<512>
+        <<<grid, block, 0, stream>>>(out, matrix, width, height, query_stride, log_rows_per_query);
     return CHECK_KERNEL();
 }

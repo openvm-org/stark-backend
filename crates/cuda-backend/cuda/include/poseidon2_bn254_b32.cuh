@@ -103,10 +103,8 @@ sub256_ret(uint32_t r[8], const uint32_t a[8], const uint32_t b[8]) {
 //   - mul_small_and_acc computes lhs * rhs + add  (still ≤ 2^288, so 9 limbs)
 //
 // Both functions return the lowest 32-bit limb (r[0]) and write the upper
-// 8 limbs (r[1..8]) into `high`. Each iteration uses one `mad.wide.u32 t,
-// lhs[i], rhs, t` where `t` is the u64 accumulator threaded through
-// `shr.u64 t, t, 32` between steps — the shifted low 32 bits hold the previous
-// limb's carry. 
+// 8 limbs (r[1..8]) into `high`. Each iteration uses mul.lo/hi instead of mul.wide 
+// because the former performed better
 // ---------------------------------------------------------------------------
 
 static __device__ __forceinline__ uint32_t
