@@ -117,11 +117,11 @@ impl SystemParams {
         proximity: WhirProximityStrategy,
         security_bits: usize,
         logup: LogUpSecurityParameters,
+        max_constraint_degree: usize,
     ) -> SystemParams {
         const WHIR_QUERY_PHASE_POW_BITS: usize = 20;
 
         let k_whir = DEFAULT_K_WHIR;
-        let max_constraint_degree = 4;
         let log_stacked_height = l_skip + n_stack;
 
         SystemParams {
