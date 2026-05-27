@@ -82,7 +82,7 @@ impl MemoryManager {
         assert!(size != 0, "Requested size must be non-zero");
 
         let mut tracked_size = size;
-        let ptr = if size < self.pool.page_size {
+        let ptr =  if true { // if size < self.pool.page_size {
             let mut ptr: *mut c_void = std::ptr::null_mut();
             check(unsafe { cudaMallocAsync(&mut ptr, size, stream.as_raw()) }).map_err(|e| {
                 tracing::error!("cudaMallocAsync failed: size={}: {:?}", size, e);
