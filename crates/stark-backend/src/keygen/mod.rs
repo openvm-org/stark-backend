@@ -120,6 +120,7 @@ impl<SC: StarkProtocolConfig> MultiStarkKeygenBuilder<SC> {
                     .absolute(pk.vk.symbolic_constraints.constraints.constraint_idx.len() as u64);
                 metrics::counter!("interactions", &labels)
                     .absolute(pk.vk.symbolic_constraints.interactions.len() as u64);
+                metrics::counter!("need_rot", &labels).absolute(pk.vk.params.need_rot as u64);
             }
         }
         if max_constraint_degree != air_max_constraint_degree as usize {
