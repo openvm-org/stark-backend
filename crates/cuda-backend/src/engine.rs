@@ -1,5 +1,7 @@
 use getset::MutGetters;
-use openvm_stark_backend::{prover::Coordinator, StarkEngine, SystemParams};
+use openvm_stark_backend::{
+    memory_metering::SegmentMemoryConfig, prover::Coordinator, StarkEngine, SystemParams,
+};
 #[cfg(feature = "baby-bear-bn254-poseidon2")]
 use openvm_stark_sdk::config::baby_bear_bn254_poseidon2::BabyBearBn254Poseidon2Config;
 
@@ -61,6 +63,11 @@ impl StarkEngine for GpuEngine<DefaultHashScheme> {
         &self.device
     }
 
+    fn segment_memory_config(&self) -> SegmentMemoryConfig {
+        SegmentMemoryConfig::from_protocol_config(self.config())
+            .with_cache_rs_code_matrix(self.device.prover_config().cache_rs_code_matrix)
+    }
+
     fn initial_transcript(&self) -> Self::TS {
         DuplexSpongeGpu::default()
     }
@@ -90,6 +97,11 @@ impl StarkEngine for GpuEngine<BabyBearBn254Poseidon2HashScheme> {
 
     fn device(&self) -> &Self::PD {
         &self.device
+    }
+
+    fn segment_memory_config(&self) -> SegmentMemoryConfig {
+        SegmentMemoryConfig::from_protocol_config(self.config())
+            .with_cache_rs_code_matrix(self.device.prover_config().cache_rs_code_matrix)
     }
 
     fn initial_transcript(&self) -> Self::TS {

@@ -91,13 +91,12 @@ impl GpuDevice {
     }
 }
 
-/// Default configuration is to reduce peak memory usage when there is not a significant performance
-/// trade-off. The Reed-Solomon code computation does incur a performance penalty, so we cache it.
+/// Default GPU prover cache settings.
 impl Default for GpuProverConfig {
     fn default() -> Self {
         Self {
             cache_stacked_matrix: false,
-            cache_rs_code_matrix: true,
+            cache_rs_code_matrix: false,
             zerocheck_save_memory: true,
         }
     }
