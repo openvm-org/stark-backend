@@ -110,7 +110,7 @@ impl Default for GpuProverConfig {
     fn default() -> Self {
         Self {
             cache_stacked_matrix: false,
-            cache_rs_code_matrix: false,
+            cache_rs_code_matrix: true,
             zerocheck_save_memory: true,
         }
     }
