@@ -33,6 +33,8 @@ fn options_for(namespace: &str) -> LeanWriteOptions {
         bus_defs_namespace: "Recursion.BusDefs",
         air_namespace: namespace.to_string(),
         schema_import: format!("{namespace}.Generated.Schema"),
+        schema_namespace: None,
+        schema_param_value: None,
         constraints_import: format!("{namespace}.Generated.Constraints"),
         partition_offsets: vec![0],
         public_value_names: Vec::new(),
@@ -400,10 +402,26 @@ fn interactions_simp_uses_per_air_inter_attribute_when_helper_referenced() {
         mult_simp_line.contains("TinyAir_inter"),
         "multiplicity simp line missing per-AIR attribute: {mult_simp_line}"
     );
+    assert!(
+        mult_simp_line.contains("Interaction.evalMultiplicity"),
+        "multiplicity simp line missing evalMultiplicity wrapper: {mult_simp_line}"
+    );
+    assert!(
+        !mult_simp_line.contains("AIR.Expr.evalAt"),
+        "multiplicity simp line should not mention obsolete AIR.Expr.evalAt: {mult_simp_line}"
+    );
     // Per-helper enumeration is no longer emitted in simp lists.
     assert!(
         !mult_simp_line.contains(", inter_0,") && !mult_simp_line.contains(", inter_0]"),
         "multiplicity simp line should not enumerate inter_0: {mult_simp_line}"
+    );
+    assert!(
+        is.contains("Interaction (air (F := F)).layout"),
+        "interactions should be indexed by the AIR layout, got:\n{is}"
+    );
+    assert!(
+        is.contains("Interaction.evalMessageAt, Interaction.evalMessage"),
+        "message simp list should unfold evalMessageAt and evalMessage, got:\n{is}"
     );
 }
 

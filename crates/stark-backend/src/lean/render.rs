@@ -76,6 +76,12 @@ pub struct LeanRenderContext<F> {
     /// (referencing the Schema-emitted ref); otherwise it falls back to
     /// `va (.publicValue {index})`.
     pub public_value_names: Vec<String>,
+    /// Lean expressions for main-column refs, indexed by flat column.
+    /// Defaults to `<name>Ref`; shared-schema callers use qualified refs.
+    pub column_ref_exprs: Vec<String>,
+    /// Lean expressions for public-value vars, indexed by public value.
+    /// Defaults to `<name>PvVar`; shared-schema callers use qualified vars.
+    pub public_value_var_exprs: Vec<String>,
 }
 
 impl<F> LeanRenderContext<F> {
@@ -92,6 +98,8 @@ impl<F> LeanRenderContext<F> {
             characteristic,
             partition_offsets: vec![0],
             public_value_names: Vec::new(),
+            column_ref_exprs: Vec::new(),
+            public_value_var_exprs: Vec::new(),
         }
     }
 
@@ -185,13 +193,7 @@ fn render_expression<F: Field>(
                 SymbolicExpression::Neg { x, .. } => combine_neg(rendered[&Arc::as_ptr(x)].clone()),
                 _ => Rendered {
                     bindings: vec![],
-                    result: render_leaf(
-                        expr,
-                        column_names,
-                        &context.partition_offsets,
-                        &context.public_value_names,
-                        context.characteristic,
-                    ),
+                    result: render_leaf(expr, column_names, context),
                     op_count: 0,
                 },
             };
@@ -319,9 +321,7 @@ fn decide_and_emit<F: Field>(
 fn render_leaf<F: Field>(
     x: &SymbolicExpression<F>,
     column_names: &[String],
-    partition_offsets: &[usize],
-    public_value_names: &[String],
-    characteristic: Option<u32>,
+    context: &LeanRenderContext<F>,
 ) -> String {
     match x {
         SymbolicExpression::Variable(SymbolicVariable { entry, index, .. }) => match entry {
@@ -331,24 +331,37 @@ fn render_leaf<F: Field>(
                     1 => "next",
                     other => panic!("unsupported rotation offset {other} in main column"),
                 };
-                let base = *partition_offsets.get(*part_index).unwrap_or_else(|| {
-                    panic!(
-                        "main column part_index {part_index} out of range (partitions: {})",
-                        partition_offsets.len()
-                    )
-                });
+                let base = *context
+                    .partition_offsets
+                    .get(*part_index)
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "main column part_index {part_index} out of range (partitions: {})",
+                            context.partition_offsets.len()
+                        )
+                    });
                 let flat_idx = base + *index;
                 let name = column_names.get(flat_idx).unwrap_or_else(|| {
                     panic!(
                         "main column (part {part_index}, index {index}, flat {flat_idx}) has no name"
                     )
                 });
-                format!("va (.cell .{rotation} {name}Ref)")
+                let column_ref = context
+                    .column_ref_exprs
+                    .get(flat_idx)
+                    .cloned()
+                    .unwrap_or_else(|| format!("{name}Ref"));
+                format!("va (.cell .{rotation} {column_ref})")
             }
             Entry::Preprocessed { .. } => panic!("preprocessed columns not supported in v1"),
             Entry::Public => {
-                if let Some(name) = public_value_names.get(*index) {
-                    format!("va {name}PvVar")
+                if let Some(name) = context.public_value_names.get(*index) {
+                    let pv_var = context
+                        .public_value_var_exprs
+                        .get(*index)
+                        .cloned()
+                        .unwrap_or_else(|| format!("{name}PvVar"));
+                    format!("va {pv_var}")
                 } else {
                     format!("va (.publicValue {index})")
                 }
@@ -358,7 +371,7 @@ fn render_leaf<F: Field>(
         SymbolicExpression::IsFirstRow => "va (.selector .isFirst)".to_string(),
         SymbolicExpression::IsLastRow => "va (.selector .isLast)".to_string(),
         SymbolicExpression::IsTransition => "va (.selector .isTransition)".to_string(),
-        SymbolicExpression::Constant(c) => render_constant(c, characteristic),
+        SymbolicExpression::Constant(c) => render_constant(c, context.characteristic),
         _ => unreachable!("compound expressions handled by render_expression"),
     }
 }

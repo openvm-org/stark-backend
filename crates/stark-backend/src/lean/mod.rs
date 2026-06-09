@@ -120,6 +120,13 @@ pub struct LeanWriteOptions {
     pub air_namespace: String,
     /// Schema module path used by `Constraints.lean`'s `import`.
     pub schema_import: String,
+    /// Lean namespace containing the schema definitions. When present,
+    /// generated constraints reference schema definitions through this
+    /// namespace instead of expecting them in `air_namespace`.
+    pub schema_namespace: Option<String>,
+    /// Concrete semantic schema parameter for this AIR variant, if the
+    /// shared schema is parameterized.
+    pub schema_param_value: Option<usize>,
     /// Constraints module path used by `Interactions.lean`'s `import`.
     pub constraints_import: String,
     /// Flat-trace base offset for each `Entry::Main { part_index, .. }`
@@ -135,6 +142,81 @@ pub struct LeanWriteOptions {
     /// Indices beyond this list (or all indices when this is empty) fall
     /// back to the raw form.
     pub public_value_names: Vec<String>,
+}
+
+impl LeanWriteOptions {
+    fn schema_root(&self) -> Option<String> {
+        self.schema_namespace
+            .as_ref()
+            .map(|namespace| format!("_root_.{namespace}"))
+    }
+
+    fn schema_param_arg(&self) -> String {
+        self.schema_param_value
+            .map(|value| format!(" {value}"))
+            .unwrap_or_default()
+    }
+
+    fn schema_layout_expr(&self) -> String {
+        let Some(schema) = self.schema_root() else {
+            return "layout".to_string();
+        };
+        format!("{schema}.layout{}", self.schema_param_arg())
+    }
+
+    fn schema_column_ref_expr(&self, name: &str) -> String {
+        let Some(schema) = self.schema_root() else {
+            return format!("{name}Ref");
+        };
+        if let Some(value) = self.schema_param_value {
+            format!("({schema}.{name}Ref {value} (by decide))")
+        } else {
+            format!("{schema}.{name}Ref")
+        }
+    }
+
+    fn schema_column_ref_simp_arg(&self, name: &str) -> String {
+        let Some(schema) = self.schema_root() else {
+            return format!("{name}Ref");
+        };
+        format!("{schema}.{name}Ref")
+    }
+
+    fn schema_public_value_idx_expr(&self, name: &str) -> String {
+        let Some(schema) = self.schema_root() else {
+            return format!("{name}PvIdx");
+        };
+        format!("{schema}.{name}PvIdx")
+    }
+
+    fn schema_public_value_var_expr(&self, name: &str) -> String {
+        let Some(schema) = self.schema_root() else {
+            return format!("{name}PvVar");
+        };
+        if let Some(value) = self.schema_param_value {
+            format!("({schema}.{name}PvVar {value})")
+        } else {
+            format!("{schema}.{name}PvVar")
+        }
+    }
+}
+
+/// One concrete circuit variant covered by a shared schema module.
+#[derive(Clone, Debug)]
+pub struct LeanSchemaVariant<'a> {
+    /// AIR label used for comments.
+    pub air_name: &'a str,
+    /// Flat column names for this variant.
+    pub column_names: &'a [String],
+    /// Flat-trace base offset for each main partition.
+    pub partition_offsets: &'a [usize],
+    /// Flat public-value names for this variant.
+    pub public_value_names: &'a [String],
+    /// Optional semantic schema parameter name used when sibling
+    /// variants differ structurally, e.g. `"numChildren"`.
+    pub schema_param_name: Option<&'a str>,
+    /// Concrete value for `schema_param_name` in this variant.
+    pub schema_param_value: Option<usize>,
 }
 
 /// Pre-rendered bodies for one AIR, ready for the file writers.
@@ -181,6 +263,15 @@ pub fn render_air<F: Field>(
     ctx.global_helper_nodes = symbolic_global_helper_nodes(&symbolic, &options.render);
     ctx.partition_offsets = options.partition_offsets.clone();
     ctx.public_value_names = options.public_value_names.clone();
+    ctx.column_ref_exprs = column_names
+        .iter()
+        .map(|name| options.schema_column_ref_expr(name))
+        .collect();
+    ctx.public_value_var_exprs = options
+        .public_value_names
+        .iter()
+        .map(|name| options.schema_public_value_var_expr(name))
+        .collect();
 
     let mut constraint_bodies = Vec::with_capacity(symbolic.constraints.len());
     for c in &symbolic.constraints {
@@ -404,6 +495,638 @@ pub fn write_schema<W: Write>(
     Ok(())
 }
 
+/// Write Schema.lean shared by multiple concrete variants of the same
+/// AIR. Identical schemas emit one concrete schema. Differing schemas
+/// emit semantic-parameterized layout/column definitions covering the
+/// union of all variant columns. Concrete variants instantiate those
+/// definitions directly from their constraints/interactions files.
+pub fn write_shared_schema<W: Write>(
+    writer: &mut W,
+    air_name: &str,
+    shared_namespace: &str,
+    variants: &[LeanSchemaVariant<'_>],
+    fundamentals_import: &str,
+) -> io::Result<()> {
+    if variants.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "shared schema requires at least one variant",
+        ));
+    }
+
+    if schema_variants_identical(variants) {
+        return write_exact_shared_schema(
+            writer,
+            air_name,
+            shared_namespace,
+            variants,
+            fundamentals_import,
+        );
+    }
+
+    let param = shared_schema_param(variants)?;
+    let layout_kind = shared_layout_kind(variants, &param)?;
+
+    writeln!(writer, "import {fundamentals_import}")?;
+    writeln!(writer)?;
+    writeln!(writer, "/-!")?;
+    writeln!(writer, "# {air_name} shared schema (native)")?;
+    writeln!(writer)?;
+    writeln!(
+        writer,
+        "Generated shared trace layout and column references for `{air_name}`."
+    )?;
+    writeln!(writer, "-/")?;
+    writeln!(writer)?;
+    writeln!(writer, "namespace {shared_namespace}")?;
+    writeln!(writer)?;
+    writeln!(writer, "open Fundamentals.Air")?;
+    writeln!(writer)?;
+    write_inter_simp_attrs(writer, variants)?;
+    write_parameterized_layout(writer, &param, &layout_kind)?;
+
+    writeln!(writer, "/-! ## Column indices -/")?;
+    writeln!(writer)?;
+    for name in schema_column_union(variants) {
+        write_parameterized_column(writer, &name, variants, &param, &layout_kind)?;
+    }
+
+    let public_value_names = schema_public_value_union(variants);
+    if !public_value_names.is_empty() {
+        writeln!(writer, "/-! ## Public-value indices and refs -/")?;
+        writeln!(writer)?;
+        for name in public_value_names {
+            let idx = variants[0]
+                .public_value_names
+                .iter()
+                .position(|pv| pv == &name)
+                .unwrap_or(0);
+            writeln!(writer, "abbrev {name}PvIdx : Nat := {idx}")?;
+            writeln!(
+                writer,
+                "abbrev {name}PvVar ({} : Nat) : Var (layout {}) :=",
+                param.name, param.name
+            )?;
+            writeln!(writer, "  .publicValue {name}PvIdx")?;
+            writeln!(writer)?;
+        }
+    }
+
+    writeln!(writer, "end {shared_namespace}")?;
+    Ok(())
+}
+
+#[derive(Clone, Debug)]
+struct SharedSchemaParam {
+    name: String,
+}
+
+#[derive(Clone, Debug)]
+enum SharedLayoutKind {
+    SingleMain {
+        width: LinearExpr,
+    },
+    Partitioned {
+        cached_widths: Vec<usize>,
+        common_width: LinearExpr,
+    },
+}
+
+impl SharedLayoutKind {
+    fn total_width_expr(&self, param_name: &str) -> String {
+        match self {
+            SharedLayoutKind::SingleMain { width } => width.to_lean(param_name),
+            SharedLayoutKind::Partitioned {
+                cached_widths,
+                common_width: _,
+            } => {
+                let cached_total: usize = cached_widths.iter().sum();
+                format!("{cached_total} + commonWidth {param_name}")
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct LinearExpr {
+    base: isize,
+    coeff: isize,
+}
+
+impl LinearExpr {
+    fn to_lean(self, param_name: &str) -> String {
+        match (self.base, self.coeff) {
+            (base, 0) => base.to_string(),
+            (0, 1) => param_name.to_string(),
+            (0, coeff) => format!("{coeff} * {param_name}"),
+            (base, 1) => format!("{base} + {param_name}"),
+            (base, coeff) => format!("{base} + {coeff} * {param_name}"),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct SchemaColumnPosition {
+    group: usize,
+    local_idx: usize,
+    width: usize,
+    is_common: bool,
+}
+
+fn write_parameterized_layout<W: Write>(
+    writer: &mut W,
+    param: &SharedSchemaParam,
+    layout_kind: &SharedLayoutKind,
+) -> io::Result<()> {
+    let param_name = param.name.as_str();
+    match layout_kind {
+        SharedLayoutKind::SingleMain { width: _ } => {
+            writeln!(writer, "/-- Width of the main trace. -/")?;
+            writeln!(
+                writer,
+                "abbrev W ({param_name} : Nat) : Nat := {}",
+                layout_kind.total_width_expr(param_name)
+            )?;
+            writeln!(writer)?;
+            writeln!(writer, "/-- Structured trace layout. -/")?;
+            writeln!(
+                writer,
+                "abbrev layout ({param_name} : Nat) : TraceLayout := TraceLayout.singleMain (W {param_name})"
+            )?;
+        }
+        SharedLayoutKind::Partitioned {
+            cached_widths,
+            common_width,
+        } => {
+            let cached_list = cached_widths
+                .iter()
+                .map(|w| w.to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            writeln!(writer, "/-- Width of the common-main partition. -/")?;
+            writeln!(
+                writer,
+                "abbrev commonWidth ({param_name} : Nat) : Nat := {}",
+                common_width.to_lean(param_name)
+            )?;
+            writeln!(writer)?;
+            writeln!(writer, "/-- Width of the main trace. -/")?;
+            writeln!(
+                writer,
+                "abbrev W ({param_name} : Nat) : Nat := {}",
+                layout_kind.total_width_expr(param_name)
+            )?;
+            writeln!(writer)?;
+            writeln!(writer, "/-- Structured trace layout. -/")?;
+            writeln!(
+                writer,
+                "abbrev layout ({param_name} : Nat) : TraceLayout := TraceLayout.ofWidths 0 [{cached_list}] (commonWidth {param_name})"
+            )?;
+        }
+    }
+    writeln!(writer)?;
+    Ok(())
+}
+
+fn write_inter_simp_attrs<W: Write>(
+    writer: &mut W,
+    variants: &[LeanSchemaVariant<'_>],
+) -> io::Result<()> {
+    for variant in variants {
+        writeln!(
+            writer,
+            "/-- Simp set for unfolding hoisted `inter_K` helpers of `{}`. -/",
+            variant.air_name
+        )?;
+        writeln!(
+            writer,
+            "register_simp_attr {}",
+            air_inter_attr_name(variant.air_name)
+        )?;
+        writeln!(writer)?;
+    }
+    Ok(())
+}
+
+fn schema_column_position(
+    variant: &LeanSchemaVariant<'_>,
+    name: &str,
+) -> Option<SchemaColumnPosition> {
+    let flat_idx = variant
+        .column_names
+        .iter()
+        .position(|column| column.as_str() == name)?;
+    let parts = partition_widths(variant.partition_offsets, variant.column_names.len());
+    let num_parts = parts.len();
+    debug_assert!(num_parts >= 1);
+    let (group, base, width) = locate_partition(&parts, flat_idx);
+    Some(SchemaColumnPosition {
+        group,
+        local_idx: flat_idx - base,
+        width,
+        is_common: group + 1 == num_parts,
+    })
+}
+
+fn write_exact_shared_schema<W: Write>(
+    writer: &mut W,
+    air_name: &str,
+    shared_namespace: &str,
+    variants: &[LeanSchemaVariant<'_>],
+    fundamentals_import: &str,
+) -> io::Result<()> {
+    let variant = variants.first().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "shared schema requires at least one variant",
+        )
+    })?;
+    let total_width = variant.column_names.len();
+    let parts = partition_widths(variant.partition_offsets, total_width);
+    let num_parts = parts.len();
+    debug_assert!(num_parts >= 1);
+    let cached_widths: Vec<usize> = parts[..num_parts - 1].iter().map(|p| p.1).collect();
+    let common_width = parts[num_parts - 1].1;
+    let is_partitioned = num_parts > 1;
+
+    writeln!(writer, "import {fundamentals_import}")?;
+    writeln!(writer)?;
+    writeln!(writer, "/-!")?;
+    writeln!(writer, "# {air_name} shared schema (native)")?;
+    writeln!(writer)?;
+    writeln!(
+        writer,
+        "Generated shared trace layout and column references for `{air_name}`."
+    )?;
+    writeln!(writer, "-/")?;
+    writeln!(writer)?;
+    writeln!(writer, "namespace {shared_namespace}")?;
+    writeln!(writer)?;
+    writeln!(writer, "open Fundamentals.Air")?;
+    writeln!(writer)?;
+    write_inter_simp_attrs(writer, variants)?;
+    writeln!(writer, "/-- Width of `{air_name}`'s main trace. -/")?;
+    writeln!(writer, "abbrev W : Nat := {total_width}")?;
+    writeln!(writer)?;
+    writeln!(writer, "/-- Structured trace layout for `{air_name}`. -/")?;
+    if is_partitioned {
+        let cached_list = cached_widths
+            .iter()
+            .map(|w| w.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        writeln!(
+            writer,
+            "abbrev layout : TraceLayout := TraceLayout.ofWidths 0 [{cached_list}] {common_width}"
+        )?;
+    } else {
+        writeln!(
+            writer,
+            "abbrev layout : TraceLayout := TraceLayout.singleMain W"
+        )?;
+    }
+    writeln!(writer)?;
+
+    writeln!(writer, "/-! ## Column indices -/")?;
+    writeln!(writer)?;
+    for (flat_idx, name) in variant.column_names.iter().enumerate() {
+        let (group, base, width) = locate_partition(&parts, flat_idx);
+        let local_idx = flat_idx - base;
+        let is_common = group + 1 == num_parts;
+        write_concrete_column_defs(
+            writer,
+            name,
+            SchemaColumnPosition {
+                group,
+                local_idx,
+                width,
+                is_common,
+            },
+            is_partitioned,
+        )?;
+    }
+    writeln!(writer)?;
+
+    if !variant.public_value_names.is_empty() {
+        writeln!(writer, "/-! ## Public-value indices and refs -/")?;
+        writeln!(writer)?;
+        for (idx, name) in variant.public_value_names.iter().enumerate() {
+            writeln!(writer, "abbrev {name}PvIdx : Nat := {idx}")?;
+            writeln!(
+                writer,
+                "abbrev {name}PvVar : Var layout := .publicValue {name}PvIdx"
+            )?;
+        }
+        writeln!(writer)?;
+    }
+
+    writeln!(writer, "end {shared_namespace}")?;
+    Ok(())
+}
+
+fn write_concrete_column_defs<W: Write>(
+    writer: &mut W,
+    name: &str,
+    position: SchemaColumnPosition,
+    is_partitioned: bool,
+) -> io::Result<()> {
+    if position.is_common {
+        if is_partitioned {
+            writeln!(
+                writer,
+                "abbrev {name}Idx : Fin {} := ⟨{}, by decide⟩",
+                position.width, position.local_idx
+            )?;
+        } else {
+            writeln!(
+                writer,
+                "abbrev {name}Idx : Fin W := ⟨{}, by decide⟩",
+                position.local_idx
+            )?;
+        }
+        writeln!(
+            writer,
+            "abbrev {name}Ref : ColumnRef layout := ColumnRef.commonMain {name}Idx"
+        )?;
+    } else {
+        writeln!(
+            writer,
+            "abbrev {name}Idx : Fin {} := ⟨{}, by decide⟩",
+            position.width, position.local_idx
+        )?;
+        writeln!(
+            writer,
+            "abbrev {name}Ref : ColumnRef layout := ColumnRef.cachedMain ⟨{}, by decide⟩ {name}Idx",
+            position.group
+        )?;
+    }
+    Ok(())
+}
+
+fn write_parameterized_column<W: Write>(
+    writer: &mut W,
+    name: &str,
+    variants: &[LeanSchemaVariant<'_>],
+    param: &SharedSchemaParam,
+    layout_kind: &SharedLayoutKind,
+) -> io::Result<()> {
+    let positions = variants
+        .iter()
+        .filter_map(|variant| {
+            schema_column_position(variant, name).map(|position| {
+                (
+                    variant
+                        .schema_param_value
+                        .expect("parameterized schema variant must have a value"),
+                    position,
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    if positions.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("schema column `{name}` is not present in any variant"),
+        ));
+    }
+    let samples = positions
+        .iter()
+        .map(|(value, position)| (*value, position.local_idx))
+        .collect::<Vec<_>>();
+    let idx_expr = infer_linear_expr(&samples).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("cannot infer a linear schema index for `{name}`"),
+        )
+    })?;
+    let idx = idx_expr.to_lean(&param.name);
+    let column_positions = positions
+        .iter()
+        .map(|(_, position)| *position)
+        .collect::<Vec<_>>();
+    let all_common = column_positions.iter().all(|position| position.is_common);
+    let all_cached_same_shape = column_positions.iter().all(|position| {
+        !position.is_common
+            && position.group == column_positions[0].group
+            && position.width == column_positions[0].width
+    });
+
+    if all_common {
+        let width = common_column_width_expr(layout_kind, &param.name);
+        writeln!(
+            writer,
+            "abbrev {name}Idx ({} : Nat) (h : {idx} < {width}) : Fin ({width}) :=",
+            param.name
+        )?;
+        writeln!(writer, "  ⟨{idx}, h⟩")?;
+        writeln!(
+            writer,
+            "abbrev {name}Ref ({} : Nat) (h : {idx} < {width}) : ColumnRef (layout {}) :=",
+            param.name, param.name
+        )?;
+        writeln!(
+            writer,
+            "  ColumnRef.commonMain ({name}Idx {} h)",
+            param.name
+        )?;
+    } else if all_cached_same_shape {
+        let width = column_positions[0].width;
+        let group = column_positions[0].group;
+        writeln!(
+            writer,
+            "abbrev {name}Idx (h : {idx} < {width}) : Fin {width} :="
+        )?;
+        writeln!(writer, "  ⟨{idx}, h⟩")?;
+        writeln!(
+            writer,
+            "abbrev {name}Ref ({} : Nat) (h : {idx} < {width}) : ColumnRef (layout {}) :=",
+            param.name, param.name
+        )?;
+        writeln!(
+            writer,
+            "  ColumnRef.cachedMain ⟨{group}, by simp [layout, TraceLayout.ofWidths]⟩ ({name}Idx h)"
+        )?;
+    } else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("cannot parameterize mixed cached/common column `{name}`"),
+        ));
+    }
+    writeln!(writer)?;
+    Ok(())
+}
+
+fn schema_column_union(variants: &[LeanSchemaVariant<'_>]) -> Vec<String> {
+    let mut columns = Vec::new();
+    for variant in variants {
+        for name in variant.column_names {
+            if !columns.iter().any(|existing| existing == name) {
+                columns.push(name.clone());
+            }
+        }
+    }
+    columns
+}
+
+fn schema_public_value_union(variants: &[LeanSchemaVariant<'_>]) -> Vec<String> {
+    let mut public_values = Vec::new();
+    for variant in variants {
+        for name in variant.public_value_names {
+            if !public_values.iter().any(|existing| existing == name) {
+                public_values.push(name.clone());
+            }
+        }
+    }
+    public_values
+}
+
+fn schema_variants_identical(variants: &[LeanSchemaVariant<'_>]) -> bool {
+    let Some(first) = variants.first() else {
+        return true;
+    };
+    variants.iter().all(|variant| {
+        variant.column_names == first.column_names
+            && variant.partition_offsets == first.partition_offsets
+            && variant.public_value_names == first.public_value_names
+    })
+}
+
+fn shared_schema_param(variants: &[LeanSchemaVariant<'_>]) -> io::Result<SharedSchemaParam> {
+    let first_name = variants
+        .first()
+        .and_then(|variant| variant.schema_param_name)
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "differing schemas require a semantic schema parameter",
+            )
+        })?;
+    for variant in variants {
+        if variant.schema_param_name != Some(first_name) || variant.schema_param_value.is_none() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "all differing schema variants must use the same semantic parameter",
+            ));
+        }
+    }
+    Ok(SharedSchemaParam {
+        name: first_name.to_string(),
+    })
+}
+
+fn shared_layout_kind(
+    variants: &[LeanSchemaVariant<'_>],
+    param: &SharedSchemaParam,
+) -> io::Result<SharedLayoutKind> {
+    let first = variants.first().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "shared schema requires at least one variant",
+        )
+    })?;
+    let first_parts = partition_widths(first.partition_offsets, first.column_names.len());
+    if first_parts.len() == 1 {
+        if !variants.iter().all(|variant| {
+            partition_widths(variant.partition_offsets, variant.column_names.len()).len() == 1
+        }) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "cannot share schemas with mixed single and partitioned layouts",
+            ));
+        }
+        let samples = variants
+            .iter()
+            .map(|variant| {
+                (
+                    variant
+                        .schema_param_value
+                        .expect("parameterized schema variant must have a value"),
+                    variant.column_names.len(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let width = infer_linear_expr(&samples).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("cannot infer width from `{}`", param.name),
+            )
+        })?;
+        return Ok(SharedLayoutKind::SingleMain { width });
+    }
+
+    let cached_widths = first_parts[..first_parts.len() - 1]
+        .iter()
+        .map(|(_, width)| *width)
+        .collect::<Vec<_>>();
+    if !variants.iter().all(|variant| {
+        let parts = partition_widths(variant.partition_offsets, variant.column_names.len());
+        parts.len() == first_parts.len()
+            && parts[..parts.len() - 1]
+                .iter()
+                .map(|(_, width)| *width)
+                .eq(cached_widths.iter().copied())
+    }) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "cannot share partitioned schemas with different cached layout shapes",
+        ));
+    }
+    let samples = variants
+        .iter()
+        .map(|variant| {
+            let parts = partition_widths(variant.partition_offsets, variant.column_names.len());
+            (
+                variant
+                    .schema_param_value
+                    .expect("parameterized schema variant must have a value"),
+                parts.last().map(|(_, width)| *width).unwrap_or(0),
+            )
+        })
+        .collect::<Vec<_>>();
+    let common_width = infer_linear_expr(&samples).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("cannot infer common width from `{}`", param.name),
+        )
+    })?;
+    Ok(SharedLayoutKind::Partitioned {
+        cached_widths,
+        common_width,
+    })
+}
+
+fn infer_linear_expr(samples: &[(usize, usize)]) -> Option<LinearExpr> {
+    let (&(x0, y0), rest) = samples.split_first()?;
+    if rest.iter().all(|(_, y)| *y == y0) {
+        return Some(LinearExpr {
+            base: y0 as isize,
+            coeff: 0,
+        });
+    }
+    let (x1, y1) = rest.iter().find(|(x, _)| *x != x0).copied()?;
+    let dx = x1 as isize - x0 as isize;
+    let dy = y1 as isize - y0 as isize;
+    if dx == 0 || dy % dx != 0 {
+        return None;
+    }
+    let coeff = dy / dx;
+    let base = y0 as isize - coeff * x0 as isize;
+    if coeff < 0 || base < 0 {
+        return None;
+    }
+    samples
+        .iter()
+        .all(|(x, y)| base + coeff * *x as isize == *y as isize)
+        .then_some(LinearExpr { base, coeff })
+}
+
+fn common_column_width_expr(layout_kind: &SharedLayoutKind, param_name: &str) -> String {
+    match layout_kind {
+        SharedLayoutKind::SingleMain { .. } => format!("W {param_name}"),
+        SharedLayoutKind::Partitioned { .. } => format!("commonWidth {param_name}"),
+    }
+}
+
 /// Convert `partition_offsets` + total width into a list of
 /// `(base, width)` pairs, one per partition.
 fn partition_widths(partition_offsets: &[usize], total_width: usize) -> Vec<(usize, usize)> {
@@ -464,6 +1187,18 @@ pub fn write_constraints<W: Write>(
     writeln!(writer)?;
     writeln!(writer, "open Fundamentals.Air")?;
     writeln!(writer)?;
+    if options.schema_namespace.is_some() {
+        writeln!(
+            writer,
+            "/-- Concrete trace layout instantiated from the shared schema. -/"
+        )?;
+        writeln!(
+            writer,
+            "abbrev layout : TraceLayout := {}",
+            options.schema_layout_expr()
+        )?;
+        writeln!(writer)?;
+    }
     writeln!(writer, "variable {{F : Type}} [Field F]")?;
     writeln!(writer)?;
 
@@ -514,19 +1249,21 @@ pub fn write_constraints<W: Write>(
     writeln!(writer, "/-! ## Named-column accessors -/")?;
     writeln!(writer)?;
     for name in column_names {
+        let column_ref = options.schema_column_ref_expr(name);
         writeln!(
             writer,
             "abbrev {name} (t : (air (F := F)).Trace) (row : Fin t.height) : F :="
         )?;
-        writeln!(writer, "  t.col {name}Ref row")?;
+        writeln!(writer, "  t.col {column_ref} row")?;
     }
     writeln!(writer)?;
     for name in column_names {
+        let column_ref = options.schema_column_ref_expr(name);
         writeln!(
             writer,
             "abbrev {name}_next (t : (air (F := F)).Trace) (row : Fin t.height) : F :="
         )?;
-        writeln!(writer, "  t.colNext {name}Ref row")?;
+        writeln!(writer, "  t.colNext {column_ref} row")?;
     }
     writeln!(writer)?;
 
@@ -534,9 +1271,10 @@ pub fn write_constraints<W: Write>(
         writeln!(writer, "/-! ## Named public-value accessors -/")?;
         writeln!(writer)?;
         for name in &options.public_value_names {
+            let pv_idx = options.schema_public_value_idx_expr(name);
             writeln!(
                 writer,
-                "abbrev {name} (publicValues : List F) : F := publicValues.getD {name}PvIdx 0"
+                "abbrev {name} (publicValues : List F) : F := publicValues.getD {pv_idx} 0"
             )?;
         }
         writeln!(writer)?;
@@ -660,7 +1398,7 @@ pub fn write_interactions<W: Write>(
     writeln!(writer)?;
 
     let bus_def_ty = format!(
-        "Interaction (air (F := F)) ({}.busInventory F)",
+        "Interaction (air (F := F)).layout ({}.busInventory F)",
         options.bus_defs_namespace
     );
 
@@ -713,7 +1451,7 @@ pub fn write_interactions<W: Write>(
         writeln!(writer, "  ]")?;
         writeln!(writer)?;
 
-        write_per_pick_lemmas(writer, air_name, group, &bus_def_ty)?;
+        write_per_pick_lemmas(writer, air_name, group, &bus_def_ty, options)?;
     }
 
     if !rendered.interactions.is_empty() {
@@ -817,6 +1555,7 @@ fn write_per_pick_lemmas<W: Write>(
     air_name: &str,
     group: &RenderedBusGroup,
     bus_def_ty: &str,
+    options: &LeanWriteOptions,
 ) -> io::Result<()> {
     let pv_param = " (publicValues : List F)";
     let pv_ctx = "publicValues";
@@ -892,7 +1631,8 @@ fn write_per_pick_lemmas<W: Write>(
         };
 
         // _evalMultiplicityAt
-        let (acc_list, ref_list, ctx_list) = simp_args_for_columns(&entry.multiplicity_cols);
+        let (acc_list, ref_list, ctx_list) =
+            simp_args_for_columns(&entry.multiplicity_cols, options);
         let mult_uses_inter = body_uses_inter_helper(&entry.multiplicity_body);
         writeln!(writer, "lemma {bus}_{i}_evalMultiplicityAt")?;
         writeln!(
@@ -908,7 +1648,7 @@ fn write_per_pick_lemmas<W: Write>(
             format!("{bus}_{i}"),
             list_def.clone(),
             "Interaction.evalMultiplicityAt".to_string(),
-            "AIR.Expr.evalAt".to_string(),
+            "Interaction.evalMultiplicity".to_string(),
         ];
         if mult_uses_inter {
             simp_names.push(air_inter_attr_name(air_name));
@@ -934,7 +1674,7 @@ fn write_per_pick_lemmas<W: Write>(
             )?;
             writeln!(
                 writer,
-                "  simp [{bus}_{i}, {list_def}, Interaction.evalMessageAt]"
+                "  simp [{bus}_{i}, {list_def}, Interaction.evalMessageAt, Interaction.evalMessage]"
             )?;
             writeln!(writer)?;
 
@@ -957,7 +1697,7 @@ fn write_per_pick_lemmas<W: Write>(
             continue;
         }
 
-        let (msg_acc, msg_ref, msg_ctx) = simp_args_for_columns(&entry.message_cols);
+        let (msg_acc, msg_ref, msg_ctx) = simp_args_for_columns(&entry.message_cols, options);
         let msg_uses_inter = entry
             .message_bodies
             .iter()
@@ -984,7 +1724,7 @@ fn write_per_pick_lemmas<W: Write>(
             format!("{bus}_{i}"),
             list_def.clone(),
             "Interaction.evalMessageAt".to_string(),
-            "AIR.Expr.evalAt".to_string(),
+            "Interaction.evalMessage".to_string(),
         ];
         simp_names.push("AIR.evalVar".to_string());
         if msg_uses_inter {
@@ -1082,7 +1822,10 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 /// canonical order: pick & list defs, then `evalAt`/`Interaction.evalAt`,
 /// then accessors, then ctxs (`localRow`/`nextRow`/`Trace.col[Next]`),
 /// then refs.
-fn simp_args_for_columns(cols: &ColumnsUsed) -> (Vec<String>, Vec<String>, Vec<String>) {
+fn simp_args_for_columns(
+    cols: &ColumnsUsed,
+    options: &LeanWriteOptions,
+) -> (Vec<String>, Vec<String>, Vec<String>) {
     let mut accessors: Vec<String> = Vec::new();
     let mut refs: Vec<String> = Vec::new();
     let mut ctxs: Vec<String> = Vec::new();
@@ -1111,7 +1854,7 @@ fn simp_args_for_columns(cols: &ColumnsUsed) -> (Vec<String>, Vec<String>, Vec<S
     let all_refs: std::collections::BTreeSet<&String> =
         cols.local.iter().chain(cols.next.iter()).collect();
     for name in all_refs {
-        refs.push(format!("{name}Ref"));
+        refs.push(options.schema_column_ref_simp_arg(name));
     }
     (accessors, refs, ctxs)
 }
