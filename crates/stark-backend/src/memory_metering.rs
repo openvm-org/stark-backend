@@ -1,19 +1,19 @@
-//! Memory estimates for segmented proving.
+//! Memory estimates for proving.
 
 use std::{cmp::max, mem::size_of};
 
 use crate::{StarkProtocolConfig, SystemParams};
 
-/// Fixed per-segment interaction scratch not proportional to interaction cells.
-const DEFAULT_INTERACTION_MEMORY_OVERHEAD: usize = 2 << 20;
+/// Fixed interaction scratch not proportional to interaction cells.
+pub const INTERACTION_MEMORY_OVERHEAD: usize = 2 << 20;
 
-/// Per-segment cell counts derived from trace heights.
+/// Cell counts for a proving memory estimate.
 ///
 /// `main_cells_*` are `Σ(padded_height * width)` in base-field cells, split by whether a trace
 /// opens next-row rotations. `interaction_cells` is the metered row-interaction slot count after
 /// power-of-two trace padding.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct SegmentMemoryCounts {
+pub struct ProvingMemoryCounts {
     /// Main trace cells for AIRs that open next-row rotations after power-of-two padding.
     pub main_cells_with_rot: usize,
     /// Main trace cells for AIRs without next-row rotations after power-of-two padding.
@@ -22,7 +22,7 @@ pub struct SegmentMemoryCounts {
     pub interaction_cells: usize,
 }
 
-impl SegmentMemoryCounts {
+impl ProvingMemoryCounts {
     pub const fn new(
         main_cells_with_rot: usize,
         main_cells_without_rot: usize,
@@ -41,10 +41,10 @@ impl SegmentMemoryCounts {
     }
 }
 
-/// Estimated memory components for one segment, in bytes.
+/// Estimated memory components, in bytes.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct SegmentMemoryEstimate {
-    /// Selected peak estimate for the segment.
+pub struct ProvingMemoryEstimate {
+    /// Selected peak estimate.
     pub total: usize,
     /// Cached main trace data.
     pub main: usize,
@@ -58,49 +58,44 @@ pub struct SegmentMemoryEstimate {
     pub secondary_peak: usize,
 }
 
-/// Configuration for segment memory estimates.
+/// Configuration for proving memory estimates.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct SegmentMemoryConfig {
+pub struct ProvingMemoryConfig {
     /// Size of one base-field element in bytes.
     pub base_field_size: usize,
     /// Degree of the extension field over the base field.
     pub extension_degree: usize,
     /// `-log_2` of the rate for the initial Reed-Solomon code.
     pub log_blowup: usize,
+    /// `log_2` of the univariate skip domain.
+    pub l_skip: usize,
+    /// Maximum constraint degree across AIR and interaction constraints.
+    pub max_constraint_degree: usize,
     /// Whether the prover keeps the Reed-Solomon code matrix cached after `stacked_commit`.
     pub cache_rs_code_matrix: bool,
-    /// Secondary memory contribution per main cell, per PCS opening, in base-field cells.
-    pub main_cell_secondary_weight: f64,
-    /// Weight multiplier for interaction cells in base-field cells.
-    pub interaction_cell_weight: f64,
-    /// Interaction memory overhead: eq buffers, M matrix, and misc small buffers.
-    /// Added once per segment.
-    pub interaction_memory_overhead: usize,
 }
 
-impl SegmentMemoryConfig {
-    pub fn from_protocol_config<SC: StarkProtocolConfig>(config: &SC) -> Self {
-        Self::from_params::<SC::F>(config.params(), SC::D_EF)
+impl ProvingMemoryConfig {
+    pub fn from_protocol_config<SC: StarkProtocolConfig>(
+        config: &SC,
+        cache_rs_code_matrix: bool,
+    ) -> Self {
+        Self::from_params::<SC::F>(config.params(), SC::D_EF, cache_rs_code_matrix)
     }
 
-    fn from_params<F>(params: &SystemParams, extension_degree: usize) -> Self {
+    fn from_params<F>(
+        params: &SystemParams,
+        extension_degree: usize,
+        cache_rs_code_matrix: bool,
+    ) -> Self {
         Self {
             base_field_size: size_of::<F>(),
             extension_degree,
             log_blowup: params.log_blowup,
-            cache_rs_code_matrix: true,
-            main_cell_secondary_weight: default_main_cell_secondary_weight(
-                params,
-                extension_degree,
-            ),
-            interaction_cell_weight: default_interaction_cell_weight(extension_degree),
-            interaction_memory_overhead: DEFAULT_INTERACTION_MEMORY_OVERHEAD,
+            l_skip: params.l_skip,
+            max_constraint_degree: params.max_constraint_degree,
+            cache_rs_code_matrix,
         }
-    }
-
-    pub fn with_cache_rs_code_matrix(mut self, cache_rs_code_matrix: bool) -> Self {
-        self.cache_rs_code_matrix = cache_rs_code_matrix;
-        self
     }
 
     #[inline]
@@ -111,6 +106,15 @@ impl SegmentMemoryConfig {
     #[inline]
     pub fn rs_code_matrix_memory_bytes(&self, main_cells: usize) -> usize {
         main_cells * (1usize << self.log_blowup) * self.base_field_size
+    }
+
+    #[inline]
+    pub fn main_cell_secondary_weight(&self) -> f64 {
+        default_main_cell_secondary_weight(
+            self.extension_degree,
+            self.l_skip,
+            self.max_constraint_degree,
+        )
     }
 
     /// Secondary memory for `main_cells = Σ(padded_height * width)`.
@@ -127,16 +131,17 @@ impl SegmentMemoryConfig {
     /// AIRs with `need_rot = true` open two PCS cells per column.
     #[inline]
     pub fn main_secondary_memory_bytes_for_rot(&self, main_cells: usize, need_rot: bool) -> usize {
+        let main_cell_secondary_weight = self.main_cell_secondary_weight();
         let weight = if need_rot {
-            2.0 * self.main_cell_secondary_weight
+            2.0 * main_cell_secondary_weight
         } else {
-            self.main_cell_secondary_weight
+            main_cell_secondary_weight
         };
         ceil_weighted_bytes(main_cells, self.base_field_size, weight)
     }
 
     #[inline]
-    pub fn main_secondary_memory_bytes(&self, counts: SegmentMemoryCounts) -> usize {
+    pub fn main_secondary_memory_bytes(&self, counts: ProvingMemoryCounts) -> usize {
         self.main_secondary_memory_bytes_for_rot(counts.main_cells_with_rot, true)
             + self.main_secondary_memory_bytes_for_rot(counts.main_cells_without_rot, false)
     }
@@ -146,14 +151,14 @@ impl SegmentMemoryConfig {
         ceil_weighted_bytes(
             interaction_cells,
             self.base_field_size,
-            self.interaction_cell_weight,
+            default_interaction_cell_weight(self.extension_degree),
         )
     }
 
     #[inline]
     pub fn interaction_memory_bytes(&self, interaction_cells: usize) -> usize {
         self.interaction_memory_bytes_without_overhead(interaction_cells)
-            + self.interaction_memory_overhead
+            + INTERACTION_MEMORY_OVERHEAD
     }
 
     /// Convert main trace cells and interaction cells to memory bytes.
@@ -163,10 +168,10 @@ impl SegmentMemoryConfig {
     /// main             = main_cells * sizeof(F)
     /// rs_code_matrix   = main_cells * 2^log_blowup * sizeof(F)
     /// main_secondary   = sizeof(F) *
-    ///                    (2 * main_cell_secondary_weight * main_cells_with_rot
-    ///                     + main_cell_secondary_weight * main_cells_without_rot)
+    ///                    (2 * main_cell_secondary_weight() * main_cells_with_rot
+    ///                     + main_cell_secondary_weight() * main_cells_without_rot)
     /// interaction      = sizeof(F) * interaction_cell_weight * interaction_cells
-    ///                    + interaction_memory_overhead
+    ///                    + INTERACTION_MEMORY_OVERHEAD
     /// ```
     ///
     /// Cached RS code matrix:
@@ -175,13 +180,13 @@ impl SegmentMemoryConfig {
     /// total = main + rs_code_matrix + max(main_secondary, interaction)
     /// ```
     ///
-    /// Dropped RS code matrix (`cache_rs_code_matrix = false`):
+    /// Dropped RS code matrix:
     ///
     /// ```text
     /// total = main + max(rs_code_matrix, main_secondary, interaction)
     /// ```
     #[inline]
-    pub fn estimate(&self, counts: SegmentMemoryCounts) -> SegmentMemoryEstimate {
+    pub fn estimate(&self, counts: ProvingMemoryCounts) -> ProvingMemoryEstimate {
         let main_cells = counts.main_cells();
         let main = self.main_memory_bytes(main_cells);
         let rs_code_matrix = self.rs_code_matrix_memory_bytes(main_cells);
@@ -193,7 +198,7 @@ impl SegmentMemoryConfig {
             max(rs_code_matrix, max(main_secondary, interaction))
         };
 
-        SegmentMemoryEstimate {
+        ProvingMemoryEstimate {
             total: main + secondary_peak,
             main,
             rs_code_matrix,
@@ -204,15 +209,7 @@ impl SegmentMemoryConfig {
     }
 }
 
-fn default_main_cell_secondary_weight(params: &SystemParams, extension_degree: usize) -> f64 {
-    default_main_cell_secondary_weight_from_parts(
-        extension_degree,
-        params.l_skip,
-        params.max_constraint_degree,
-    )
-}
-
-fn default_main_cell_secondary_weight_from_parts(
+fn default_main_cell_secondary_weight(
     extension_degree: usize,
     l_skip: usize,
     max_constraint_degree: usize,
@@ -243,15 +240,16 @@ mod tests {
     use super::*;
     use crate::test_utils::default_test_params_small;
 
-    fn test_memory_config() -> SegmentMemoryConfig {
+    fn test_memory_config() -> ProvingMemoryConfig {
         let params = default_test_params_small();
-        SegmentMemoryConfig::from_params::<u32>(&params, 4)
+        ProvingMemoryConfig::from_params::<u32>(&params, 4, true)
     }
 
     #[test]
     fn dropped_rs_code_matrix_is_phase_disjoint() {
-        let config = test_memory_config().with_cache_rs_code_matrix(false);
-        let counts = SegmentMemoryCounts::new(10, 20, 5);
+        let params = default_test_params_small();
+        let config = ProvingMemoryConfig::from_params::<u32>(&params, 4, false);
+        let counts = ProvingMemoryCounts::new(10, 20, 5);
 
         let estimate = config.estimate(counts);
 
@@ -270,7 +268,7 @@ mod tests {
     #[test]
     fn cached_rs_code_matrix_is_additive() {
         let config = test_memory_config();
-        let counts = SegmentMemoryCounts::new(10, 20, 5);
+        let counts = ProvingMemoryCounts::new(10, 20, 5);
 
         let estimate = config.estimate(counts);
 

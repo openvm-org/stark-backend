@@ -1,6 +1,6 @@
 use getset::MutGetters;
 use openvm_stark_backend::{
-    memory_metering::SegmentMemoryConfig, prover::Coordinator, StarkEngine, SystemParams,
+    memory_metering::ProvingMemoryConfig, prover::Coordinator, StarkEngine, SystemParams,
 };
 #[cfg(feature = "baby-bear-bn254-poseidon2")]
 use openvm_stark_sdk::config::baby_bear_bn254_poseidon2::BabyBearBn254Poseidon2Config;
@@ -63,9 +63,10 @@ impl StarkEngine for GpuEngine<DefaultHashScheme> {
         &self.device
     }
 
-    fn segment_memory_config(&self) -> SegmentMemoryConfig {
-        SegmentMemoryConfig::from_protocol_config(self.config())
-            .with_cache_rs_code_matrix(self.device.prover_config().cache_rs_code_matrix)
+    fn proving_memory_config(&self) -> ProvingMemoryConfig {
+        self.device
+            .prover_config()
+            .proving_memory_config(self.config())
     }
 
     fn initial_transcript(&self) -> Self::TS {
@@ -99,9 +100,10 @@ impl StarkEngine for GpuEngine<BabyBearBn254Poseidon2HashScheme> {
         &self.device
     }
 
-    fn segment_memory_config(&self) -> SegmentMemoryConfig {
-        SegmentMemoryConfig::from_protocol_config(self.config())
-            .with_cache_rs_code_matrix(self.device.prover_config().cache_rs_code_matrix)
+    fn proving_memory_config(&self) -> ProvingMemoryConfig {
+        self.device
+            .prover_config()
+            .proving_memory_config(self.config())
     }
 
     fn initial_transcript(&self) -> Self::TS {

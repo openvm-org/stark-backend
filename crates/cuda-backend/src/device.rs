@@ -1,6 +1,8 @@
 use getset::{CopyGetters, Getters, MutGetters};
 use openvm_cuda_common::{common::get_device, stream::GpuDeviceCtx};
-use openvm_stark_backend::SystemParams;
+use openvm_stark_backend::{
+    memory_metering::ProvingMemoryConfig, StarkProtocolConfig, SystemParams,
+};
 
 use crate::cuda::{
     batch_ntt_small::{ensure_device_ntt_twiddles_initialized, validate_gpu_l_skip},
@@ -25,6 +27,15 @@ pub struct GpuProverConfig {
     pub cache_stacked_matrix: bool,
     pub cache_rs_code_matrix: bool,
     pub zerocheck_save_memory: bool,
+}
+
+impl GpuProverConfig {
+    pub fn proving_memory_config<SC: StarkProtocolConfig>(
+        &self,
+        config: &SC,
+    ) -> ProvingMemoryConfig {
+        ProvingMemoryConfig::from_protocol_config(config, self.cache_rs_code_matrix)
+    }
 }
 
 /// Stream-owning device handle. Wraps [`GpuDeviceConfig`] with a
