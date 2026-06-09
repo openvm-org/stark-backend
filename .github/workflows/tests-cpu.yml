@@ -71,7 +71,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.cpu_backend == 'true' || needs.changes.outputs.workflow == 'true'
     runs-on:
-      - runs-on=${{ github.run_id }}/runner=test-gpu-nvidia
+      - runs-on=${{ github.run_id }}/image=ubuntu24-gpu-x64/family=g6.*+g5+g6e/cpu=4+32/volume=40gb/spot=capacity-optimized/extras=s3-cache
 
     steps:
       - uses: runs-on/action@v2
