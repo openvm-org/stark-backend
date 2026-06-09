@@ -41,6 +41,8 @@ Non-default members (require GPU/CUDA toolchain — don't add to default-members
 - **`openvm-cuda-common`** (`crates/cuda-common`): Shared CUDA runtime utilities. Includes `launcher.cuh` and virtual memory manager (VPMM).
 - **`openvm-cuda-backend`** (`crates/cuda-backend`): GPU prover implementation, depends on `cuda-common`.
 
+When changing CUDA fractional-GKR buffer layout, scheduling, or scratch allocations, update the interaction memory estimate in `crates/stark-backend/src/memory_metering.rs` and the accounting in `docs/cuda-backend/gkr-prover.md`.
+
 Plonky3 is a git dependency — find it via `Cargo.toml` or check `../Plonky3`.
 
 ## Code Conventions

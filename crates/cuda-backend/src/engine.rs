@@ -1,5 +1,7 @@
 use getset::MutGetters;
-use openvm_stark_backend::{prover::Coordinator, StarkEngine, SystemParams};
+use openvm_stark_backend::{
+    memory_metering::ProvingMemoryConfig, prover::Coordinator, StarkEngine, SystemParams,
+};
 #[cfg(feature = "baby-bear-bn254-poseidon2")]
 use openvm_stark_sdk::config::baby_bear_bn254_poseidon2::BabyBearBn254Poseidon2Config;
 
@@ -61,6 +63,12 @@ impl StarkEngine for GpuEngine<DefaultHashScheme> {
         &self.device
     }
 
+    fn proving_memory_config(&self) -> ProvingMemoryConfig {
+        self.device
+            .prover_config()
+            .proving_memory_config(self.config())
+    }
+
     fn initial_transcript(&self) -> Self::TS {
         DuplexSpongeGpu::default()
     }
@@ -90,6 +98,12 @@ impl StarkEngine for GpuEngine<BabyBearBn254Poseidon2HashScheme> {
 
     fn device(&self) -> &Self::PD {
         &self.device
+    }
+
+    fn proving_memory_config(&self) -> ProvingMemoryConfig {
+        self.device
+            .prover_config()
+            .proving_memory_config(self.config())
     }
 
     fn initial_transcript(&self) -> Self::TS {

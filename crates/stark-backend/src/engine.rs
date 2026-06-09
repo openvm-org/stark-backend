@@ -8,6 +8,7 @@ use crate::{
         types::{MultiStarkProvingKey, MultiStarkVerifyingKey},
         MultiStarkKeygenBuilder,
     },
+    memory_metering::ProvingMemoryConfig,
     proof::*,
     prover::{
         AirProvingContext, ColMajorMatrix, Coordinator, DeviceDataTransporter,
@@ -62,6 +63,10 @@ where
 
     fn params(&self) -> &SystemParams {
         self.config().params()
+    }
+
+    fn proving_memory_config(&self) -> ProvingMemoryConfig {
+        ProvingMemoryConfig::from_protocol_config(self.config(), true)
     }
 
     fn device(&self) -> &Self::PD;

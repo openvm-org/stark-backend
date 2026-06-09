@@ -64,7 +64,8 @@ impl FractionalInputSize {
     /// This must stay in sync with `max_work_size` in `fractional_sumcheck_gpu` and the
     /// precompute-M EF auxiliary allocations. If the sumcheck implementation changes, this
     /// method must be updated as well — it is the source of truth for batching budgets that
-    /// depend on the fractional-GKR peak.
+    /// depend on the fractional-GKR peak. Also update the conservative interaction memory
+    /// estimate in `openvm_stark_backend::memory_metering`.
     ///
     /// ## Formula (FoldEval path, dominates for large inputs)
     ///

@@ -26,6 +26,8 @@ pub mod hasher;
 pub mod interaction;
 /// Proving and verifying key generation
 pub mod keygen;
+/// Memory estimates for segmented proving.
+pub mod memory_metering;
 /// Common polynomial utilities shared by prover and verifier
 pub mod poly_common;
 /// Definition of the STARK proof struct.
