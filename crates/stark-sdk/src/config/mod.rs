@@ -21,7 +21,7 @@ pub mod log_up_params;
 // base field and BabyBear^4 as the extension field.
 
 const WHIR_MAX_LOG_FINAL_POLY_LEN: usize = 10;
-const SECURITY_BITS_TARGET: usize = 100;
+pub const SECURITY_BITS_TARGET: usize = 100;
 
 pub const DEFAULT_APP_L_SKIP: usize = 4;
 pub const DEFAULT_APP_LOG_BLOWUP: usize = 1;
