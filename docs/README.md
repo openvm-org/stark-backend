@@ -3,6 +3,8 @@
 - [STARK Backend](./stark-backend.md)
   - [AIR Interactions](./interactions.md)
   - [Metrics](./metrics.md): Guide to metrics collected by the prover.
+- [GPU Memory Manager with Virtual Pool (VPMM)](./vpmm_spec.md): Spec for the GPU memory manager used by the CUDA backend.
+- [GKR Fractional Sumcheck Prover](./cuda-backend/gkr-prover.md): Protocol and CUDA implementation of the GKR prover for logup.
 
 ## Development without CUDA
 
