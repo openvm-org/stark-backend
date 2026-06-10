@@ -29,7 +29,7 @@ use p3_baby_bear::BabyBear;
 // NOTE: plonky3's Bn254 is the type for scalar field of the BN254 curve. It is not the type
 // for the curve itself.
 pub use p3_bn254::Bn254 as Bn254Scalar;
-use p3_field::{extension::BinomialExtensionField, PrimeField};
+use p3_field::{extension::BinomialExtensionField, Field, PrimeField};
 
 use super::bn254_poseidon2::{
     default_bn254_poseidon2_width2, default_bn254_poseidon2_width3, Poseidon2Bn254Width2,
@@ -127,6 +127,10 @@ impl DecodableConfig for BabyBearBn254Poseidon2Config {
             let mut buf = [0u8; 32];
             reader.read_exact(&mut buf)?;
             let big = BigUint::from_bytes_be(&buf);
+            // Reject non-canonical encodings to keep encodings unique.
+            if big >= Bn254Scalar::order() {
+                return Err(io::Error::other("non-canonical Bn254 element >= modulus"));
+            }
             *val = Bn254Scalar::from_biguint(big)
                 .ok_or_else(|| io::Error::other("invalid Bn254 element"))?;
         }
