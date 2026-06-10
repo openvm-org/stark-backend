@@ -463,6 +463,10 @@ impl<SC: DecodableConfig> Decode for Proof<SC> {
         for byte in bitmap {
             for i in 0u8..8 {
                 if trace_vdata.len() >= num_airs {
+                    // Padding bits must be zero for the encoding to be canonical.
+                    if byte >> i != 0 {
+                        return Err(Error::other("trace_vdata bitmap padding bits set"));
+                    }
                     break;
                 }
                 if byte & (1u8 << i) != 0 {
