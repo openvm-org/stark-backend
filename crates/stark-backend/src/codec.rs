@@ -8,6 +8,16 @@ use p3_field::{BasedVectorSpace, PrimeField32};
 
 use crate::StarkProtocolConfig;
 
+/// Upper bound on the capacity eagerly reserved while decoding untrusted
+/// length-prefixed collections.
+pub(crate) const DECODE_PREALLOC_CAP: usize = 1024;
+
+/// Allocates a `Vec` for decoding, capped to avoid attacker-controlled
+/// preallocation from length prefixes.
+pub(crate) fn vec_with_capped_capacity<T>(len: usize) -> Vec<T> {
+    Vec::with_capacity(len.min(DECODE_PREALLOC_CAP))
+}
+
 /// Hardware and language independent encoding.
 /// Uses the Writer pattern for more efficient encoding without intermediate buffers.
 // @dev Trait just for implementation sanity
@@ -119,7 +129,7 @@ pub trait DecodableConfig: StarkProtocolConfig {
 
     /// Decode `n` base field elements (known length, no length prefix).
     fn decode_base_field_n<R: Read>(reader: &mut R, n: usize) -> Result<Vec<Self::F>> {
-        let mut vec = Vec::with_capacity(n);
+        let mut vec = vec_with_capped_capacity(n);
         for _ in 0..n {
             vec.push(Self::decode_base_field(reader)?);
         }
@@ -128,7 +138,7 @@ pub trait DecodableConfig: StarkProtocolConfig {
 
     /// Decode `n` extension field elements (known length, no length prefix).
     fn decode_extension_field_n<R: Read>(reader: &mut R, n: usize) -> Result<Vec<Self::EF>> {
-        let mut vec = Vec::with_capacity(n);
+        let mut vec = vec_with_capped_capacity(n);
         for _ in 0..n {
             vec.push(Self::decode_extension_field(reader)?);
         }
@@ -137,7 +147,7 @@ pub trait DecodableConfig: StarkProtocolConfig {
 
     /// Decode `n` digests (known length, no length prefix).
     fn decode_digest_n<R: Read>(reader: &mut R, n: usize) -> Result<Vec<Self::Digest>> {
-        let mut vec = Vec::with_capacity(n);
+        let mut vec = vec_with_capped_capacity(n);
         for _ in 0..n {
             vec.push(Self::decode_digest(reader)?);
         }
@@ -343,7 +353,7 @@ impl Decode for String {
 
 /// Decodes into a vector given preset length
 pub fn decode_into_vec<T: Decode, R: Read>(reader: &mut R, len: usize) -> Result<Vec<T>> {
-    let mut vec = Vec::with_capacity(len);
+    let mut vec = vec_with_capped_capacity(len);
     for _ in 0..len {
         vec.push(T::decode(reader)?);
     }
@@ -363,7 +373,7 @@ impl<T: Decode + Default, const N: usize> Decode for [T; N] {
 impl<T: Decode> Decode for Vec<T> {
     fn decode<R: Read>(reader: &mut R) -> Result<Self> {
         let len = usize::decode(reader)?;
-        let mut vec = Vec::with_capacity(len);
+        let mut vec = vec_with_capped_capacity(len);
         for _ in 0..len {
             vec.push(T::decode(reader)?);
         }
