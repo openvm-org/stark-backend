@@ -70,6 +70,9 @@ impl SoundnessCalculator {
     ///
     /// # Arguments
     /// * `params` - System parameters including WHIR config and LogUp parameters.
+    /// * `base_field_order` - Order `p` of the base field that `sample_bits` reduces. For BabyBear:
+    ///   `2^31 - 2^27 + 1`. Used to charge the `sample_bits` sampling bias (query bad-set argument
+    ///   and proof-of-work).
     /// * `challenge_field_bits` - Bits in the challenge field. For BabyBear4: ~124 bits.
     /// * `max_num_constraints_per_air` - Maximum constraints in any single AIR.
     /// * `num_airs` - Number of AIRs being batched.
@@ -82,6 +85,7 @@ impl SoundnessCalculator {
     #[allow(clippy::too_many_arguments)]
     pub fn calculate(
         params: &SystemParams,
+        base_field_order: f64,
         challenge_field_bits: f64,
         max_num_constraints_per_air: usize,
         num_airs: usize,
@@ -101,8 +105,12 @@ impl SoundnessCalculator {
         // log2_list_size is log2(L_{PCS}) where L_{PCS} is the list size with respect to the
         // proximity radius of the _initial_ WHIR round.
         let log2_list_size = init_prox_gap.log2_list_size;
-        let logup_bits =
-            Self::calculate_logup_soundness(params, challenge_field_bits, log2_list_size);
+        let logup_bits = Self::logup_soundness(
+            params.logup.max_interaction_count,
+            params.logup.log_max_message_length,
+            challenge_field_bits,
+            log2_list_size,
+        ) + Self::effective_pow_bits(params.logup.pow_bits, base_field_order);
 
         let gkr_sumcheck_bits =
             Self::calculate_gkr_sumcheck_soundness(challenge_field_bits, params.l_skip, n_logup);
@@ -137,6 +145,7 @@ impl SoundnessCalculator {
 
         let (whir_bits, whir_details) = Self::calculate_whir_soundness(
             params,
+            base_field_order,
             challenge_field_bits,
             num_stacked_columns,
             params.whir.proximity,
@@ -163,7 +172,7 @@ impl SoundnessCalculator {
         }
     }
 
-    /// LogUp soundness from α/β sampling.
+    /// LogUp soundness from α/β sampling (before proof-of-work grinding).
     ///
     /// - α: Random evaluation point to test whether Σ p(y)/q(y) = 0. If interactions are
     ///   unbalanced, the sum is a non-zero rational function with a bounded number of roots. By
@@ -171,23 +180,23 @@ impl SoundnessCalculator {
     /// - β: Random challenge for compressing interaction messages into field elements. Degeneracy
     ///   would allow distinct message tuples to collide.
     ///
-    /// Security = |F_ext| - log₂(2 × max_interaction_count) - log_max_message_length
-    ///            - log₂(L_PCS) + pow_bits
+    /// Security = |F_ext| - log₂(2 × max_interaction_count) - log_max_message_length - log₂(L_PCS)
+    ///
+    /// Proof-of-work grinding is an orthogonal amplification that callers add on top via
+    /// [`Self::effective_pow_bits`]. This is the single source of truth for the formula; SDK
+    /// parameter selection calibrates against it.
     ///
     /// Reference: Section 4 of docs/Soundness_of_Interactions_via_LogUp.pdf
-    fn calculate_logup_soundness(
-        params: &SystemParams,
+    pub fn logup_soundness(
+        max_interaction_count: u32,
+        log_max_message_length: u32,
         challenge_field_bits: f64,
         log2_list_size: f64,
     ) -> f64 {
-        let logup = &params.logup;
-        let max_interaction_count_bits = (2.0 * logup.max_interaction_count as f64).log2();
-
         challenge_field_bits
-            - max_interaction_count_bits
-            - logup.log_max_message_length as f64
+            - (2.0 * max_interaction_count as f64).log2()
+            - log_max_message_length as f64
             - log2_list_size
-            + logup.pow_bits as f64
     }
 
     /// Ordinary GKR sumcheck soundness (per-round).
@@ -333,6 +342,7 @@ impl SoundnessCalculator {
     /// 5. **Initial μ batching**
     fn calculate_whir_soundness(
         params: &SystemParams,
+        base_field_order: f64,
         challenge_field_bits: f64,
         num_stacked_columns: usize,
         proximity: WhirProximityStrategy,
@@ -361,7 +371,8 @@ impl SoundnessCalculator {
             params.log_blowup,
             num_stacked_columns,
         );
-        let mu_batching_bits = mu_security.log2_err + whir.mu_pow_bits as f64;
+        let mu_batching_bits =
+            mu_security.log2_err + Self::effective_pow_bits(whir.mu_pow_bits, base_field_order);
         let mut min_rbr_bits = mu_batching_bits;
 
         let mut log_inv_rate = params.log_blowup;
@@ -390,10 +401,12 @@ impl SoundnessCalculator {
                 } else {
                     log2_list_size = Some(prox_gaps.log2_list_size);
                 }
-                let prox_gaps_bits = prox_gaps.log2_err + whir.folding_pow_bits as f64;
+                let prox_gaps_bits = prox_gaps.log2_err
+                    + Self::effective_pow_bits(whir.folding_pow_bits, base_field_order);
                 min_prox_gaps_bits = min_prox_gaps_bits.min(prox_gaps_bits);
 
                 let sumcheck_bits = Self::whir_sumcheck_security(
+                    base_field_order,
                     challenge_field_bits,
                     whir.folding_pow_bits,
                     log2_list_size.unwrap(),
@@ -407,9 +420,20 @@ impl SoundnessCalculator {
             }
 
             // Query error (all rounds), protected by query_phase_pow_bits.
-            let query_bits = proximity_regime
-                .whir_query_security_bits(round_config.num_queries, log_inv_rate)
-                + whir.query_phase_pow_bits as f64;
+            //
+            // Query indices are drawn with `sample_bits(log_query_domain)` over the folded RS
+            // domain, whose log-size matches `log_rs_domain_size - k_whir` in the prover, i.e.
+            // `current_log_degree + log_inv_rate` here. `whir_query_security_biased` folds the
+            // `sample_bits` bias into the agreement-set bound.
+            let log_query_domain = current_log_degree + log_inv_rate;
+            let query_bits =
+                Self::whir_query_security_biased(
+                    proximity_regime,
+                    round_config.num_queries,
+                    log_inv_rate,
+                    log_query_domain,
+                    base_field_order,
+                ) + Self::effective_pow_bits(whir.query_phase_pow_bits, base_field_order);
             min_query_bits = min_query_bits.min(query_bits);
 
             // ε_shift and ε_out reference m_i, ℓ_{i,0} where `i = round + 1` refers to the *next*
@@ -565,6 +589,64 @@ impl SoundnessCalculator {
         -Self::log2_add(-bits_a, -bits_b)
     }
 
+    /// The bias of `sample_bits(n)`, the reduction `x mod 2^n` of a uniform `x ∈ {0, ..., p - 1}`.
+    ///
+    /// Writing `p = c·2^n + r` with `0 ≤ r < 2^n`, the `2^n` residues are not equiprobable: the
+    /// `r` "heavy" residues `0..r` occur with probability `(c+1)/p`, the `2^n - r` "light" ones
+    /// with `c/p`. Returns `(c+1)/p` (heavy), `c/p` (light), and `r` (the number of heavy
+    /// residues). `p` is the order of the field `sample_bits` reduces (the base field, BabyBear).
+    ///
+    /// Note for BabyBear `p - 1 = 2^27 · 15`, so `p ≡ 1 (mod 2^n)` and thus `r = 1` for every
+    /// `n ≤ 27` — there is a single heavy residue (the all-zero one).
+    #[inline]
+    fn sample_bits_residue_probs(num_sampled_bits: f64, base_field_order: f64) -> (f64, f64, f64) {
+        let two_pow_n = num_sampled_bits.exp2();
+        let c = (base_field_order / two_pow_n).floor();
+        let r = base_field_order - c * two_pow_n; // p mod 2^n, exact for integers < 2^53.
+        ((c + 1.0) / base_field_order, c / base_field_order, r)
+    }
+
+    /// Security bits from `num_queries` WHIR query draws of `sample_bits(log_query_domain)`,
+    /// charging the sampling bias via the agreement-set argument.
+    ///
+    /// Under ideal uniform sampling a far word evades one query with prob `≤ α` (the max
+    /// agreement). The adversary aligns its size-`g = α·N` agreement set (`N = 2^log_query_domain`)
+    /// with the heavy residues, but only `r` of those exist, so the worst-case single-query hit is
+    ///   `(g·c + min(g, r))/p = α + min(α N, r)·(1 - α)/p`   (using `Nc = p - r`).
+    /// For BabyBear `r = 1` on every query domain, so the penalty is ~`2^-31` per query
+    /// (negligible).
+    fn whir_query_security_biased(
+        proximity_regime: ProximityRegime,
+        num_queries: usize,
+        log_inv_rate: usize,
+        log_query_domain: usize,
+        base_field_order: f64,
+    ) -> f64 {
+        let alpha = proximity_regime.max_agreement(log_inv_rate);
+        let (_p_hi, _p_lo, r) =
+            Self::sample_bits_residue_probs(log_query_domain as f64, base_field_order);
+        let big_n = (log_query_domain as f64).exp2();
+        let heavy_used = (alpha * big_n).min(r);
+        // mass = α·(Nc/p) + heavy_used/p = α·(1 - r/p) + heavy_used/p.
+        let mass = (alpha * (1.0 - r / base_field_order) + heavy_used / base_field_order)
+            .clamp(f64::MIN_POSITIVE, 1.0);
+        -(num_queries as f64) * mass.log2()
+    }
+
+    /// Effective security bits of a `pow_bits` proof-of-work grind, accounting for the bias of
+    /// `sample_bits` towards its all-zero target. A random witness passes `sample_bits(pow_bits)
+    /// == 0` with probability `(c+1)/p` (residue 0 is always heavy), not `2^{-pow_bits}`, so the
+    /// grind is worth `-log2((c+1)/p)` bits — slightly under its nominal `pow_bits`.
+    #[inline]
+    fn effective_pow_bits(pow_bits: usize, base_field_order: f64) -> f64 {
+        if pow_bits == 0 {
+            // `check_witness` short-circuits to `true` without sampling, so there is no bias.
+            return 0.0;
+        }
+        let (p_hi, _p_lo, _r) = Self::sample_bits_residue_probs(pow_bits as f64, base_field_order);
+        -p_hi.log2()
+    }
+
     #[inline]
     fn bchks25_log2_a_from_log2_degrees(
         log2_d_x: f64,
@@ -706,13 +788,15 @@ impl SoundnessCalculator {
     ///
     /// Security bits = |F_ext| - log₂(d) - log2(ℓ_{i,s-1}) + folding_pow_bits
     fn whir_sumcheck_security(
+        base_field_order: f64,
         challenge_field_bits: f64,
         folding_pow_bits: usize,
         log2_list_size: f64,
     ) -> f64 {
         // For our use case, w0 has degree 1 in each variable, so d = 3.
         let sumcheck_degree: f64 = 3.0;
-        challenge_field_bits - sumcheck_degree.log2() - log2_list_size + folding_pow_bits as f64
+        challenge_field_bits - sumcheck_degree.log2() - log2_list_size
+            + Self::effective_pow_bits(folding_pow_bits, base_field_order)
     }
 
     /// Computes WHIR out-of-domain (OOD) security bits.
@@ -748,6 +832,7 @@ impl SoundnessCalculator {
 #[allow(clippy::too_many_arguments)]
 pub fn print_soundness_report(
     params: &SystemParams,
+    base_field_order: f64,
     challenge_field_bits: f64,
     max_num_constraints_per_air: usize,
     num_airs: usize,
@@ -760,6 +845,7 @@ pub fn print_soundness_report(
 ) {
     let soundness = SoundnessCalculator::calculate(
         params,
+        base_field_order,
         challenge_field_bits,
         max_num_constraints_per_air,
         num_airs,
@@ -797,6 +883,7 @@ pub fn print_soundness_report(
     println!();
     println!("Proving Context:");
     println!("  challenge_field_bits: {:.0}", challenge_field_bits);
+    println!("  base_field_order: {:.0}", base_field_order);
     println!(
         "  max_num_constraints_per_air: {}",
         max_num_constraints_per_air
@@ -895,6 +982,10 @@ mod tests {
     fn babybear_quartic_extension_bits() -> f64 {
         4.0 * (BabyBear::ORDER_U64 as f64).log2()
     }
+
+    fn babybear_base_field_order() -> f64 {
+        BabyBear::ORDER_U64 as f64
+    }
     // ==========================================================================
     // Test fixtures
     // ==========================================================================
@@ -935,6 +1026,7 @@ mod tests {
         let params = test_params();
         let soundness = SoundnessCalculator::calculate(
             &params,
+            babybear_base_field_order(),
             babybear_quartic_extension_bits(),
             1000,
             50,
@@ -973,26 +1065,32 @@ mod tests {
 
     #[test]
     fn test_logup_soundness() {
-        let params = test_params();
-        let security = SoundnessCalculator::calculate_logup_soundness(
-            &params,
+        let logup = test_params().logup;
+        let security = SoundnessCalculator::logup_soundness(
+            logup.max_interaction_count,
+            logup.log_max_message_length,
             babybear_quartic_extension_bits(),
             0.0,
+        ) + SoundnessCalculator::effective_pow_bits(
+            logup.pow_bits,
+            babybear_base_field_order(),
         );
         assert!(security > TARGET_SECURITY_BITS as f64);
     }
 
     #[test]
     fn test_logup_list_size_is_security_penalty() {
-        let params = test_params();
-        let no_list = SoundnessCalculator::calculate_logup_soundness(
-            &params,
+        let logup = test_params().logup;
+        let no_list = SoundnessCalculator::logup_soundness(
+            logup.max_interaction_count,
+            logup.log_max_message_length,
             babybear_quartic_extension_bits(),
             0.0,
         );
         let list_size_bits = 5.0;
-        let with_list = SoundnessCalculator::calculate_logup_soundness(
-            &params,
+        let with_list = SoundnessCalculator::logup_soundness(
+            logup.max_interaction_count,
+            logup.log_max_message_length,
             babybear_quartic_extension_bits(),
             list_size_bits,
         );

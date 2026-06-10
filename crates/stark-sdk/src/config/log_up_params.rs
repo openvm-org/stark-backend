@@ -1,6 +1,7 @@
 use openvm_stark_backend::{
     interaction::LogUpSecurityParameters,
     p3_field::{PrimeField32, PrimeField64},
+    soundness::SoundnessCalculator,
 };
 use p3_baby_bear::BabyBear;
 
@@ -19,34 +20,29 @@ pub fn log_up_security_params_baby_bear_100_bits(
         "log2_pcs_list_size must be finite and nonnegative"
     );
 
-    let mut params = LogUpSecurityParameters {
-        max_interaction_count: BabyBear::ORDER_U32,
-        log_max_message_length: 7,
-        pow_bits: 0,
-    };
-
-    // Security is linear in `pow_bits`, so the grinding needed to reach the target after the
-    // list-size penalty is exact. Floor at `MIN_BABY_BEAR_LOGUP_POW_BITS` to keep the historical
-    // baseline margin for the unique-decoding configs.
-    let security_without_pow = baby_bear_logup_security_bits(&params, log2_pcs_list_size);
-    let required_pow = (TARGET_LOGUP_SECURITY_BITS - security_without_pow)
-        .ceil()
-        .max(0.0) as usize;
-    params.pow_bits = required_pow.max(MIN_BABY_BEAR_LOGUP_POW_BITS);
-
-    assert!(
-        baby_bear_logup_security_bits(&params, log2_pcs_list_size) >= TARGET_LOGUP_SECURITY_BITS
-    );
-    params
-}
-
-/// LogUp security bits with grinding, after the PCS list-size union bound. Matches
-/// `SoundnessCalculator::calculate_logup_soundness` in the backend soundness module.
-fn baby_bear_logup_security_bits(params: &LogUpSecurityParameters, log2_pcs_list_size: f64) -> f64 {
     let challenge_field_bits = 4.0 * (BabyBear::ORDER_U64 as f64).log2();
-    challenge_field_bits
-        - (2.0 * params.max_interaction_count as f64).log2()
-        - params.log_max_message_length as f64
-        - log2_pcs_list_size
-        + params.pow_bits as f64
+    let max_interaction_count = BabyBear::ORDER_U32;
+    let log_max_message_length = 7;
+
+    // Pre-grinding LogUp security via the backend (the single source of truth). Security is linear
+    // in `pow_bits` with unit slope, so the grinding needed to reach the target is exactly the
+    // remaining gap. Floor at `MIN_BABY_BEAR_LOGUP_POW_BITS` to keep the historical baseline margin
+    // for the unique-decoding configs. The authoritative check that the resulting params clear the
+    // target is `test_all_production_configs` in the backend's soundness tests.
+    let security_without_pow = SoundnessCalculator::logup_soundness(
+        max_interaction_count,
+        log_max_message_length,
+        challenge_field_bits,
+        log2_pcs_list_size,
+    );
+    let pow_bits = ((TARGET_LOGUP_SECURITY_BITS - security_without_pow)
+        .ceil()
+        .max(0.0) as usize)
+        .max(MIN_BABY_BEAR_LOGUP_POW_BITS);
+
+    LogUpSecurityParameters {
+        max_interaction_count,
+        log_max_message_length,
+        pow_bits,
+    }
 }

@@ -64,6 +64,10 @@ fn babybear_quartic_extension_bits() -> f64 {
     4.0 * (BabyBear::ORDER_U64 as f64).log2()
 }
 
+fn babybear_base_field_order() -> f64 {
+    BabyBear::ORDER_U64 as f64
+}
+
 fn app_params() -> SystemParams {
     app_params_with_100_bits_security(MAX_APP_LOG_STACKED_HEIGHT)
 }
@@ -79,6 +83,7 @@ fn check_soundness(
 ) -> SoundnessCalculator {
     let soundness = SoundnessCalculator::calculate(
         params,
+        babybear_base_field_order(),
         babybear_quartic_extension_bits(),
         max_constraints,
         num_airs,
