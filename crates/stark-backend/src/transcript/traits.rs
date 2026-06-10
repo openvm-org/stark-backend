@@ -30,6 +30,19 @@ where
         SC::EF::from_basis_coefficients_fn(|_| self.sample())
     }
 
+    /// Samples and returns an integer in the range [0, 2^bits).
+    ///
+    /// # Sampling bias
+    ///
+    /// The sampling is not uniform over `[0, 2^bits)`; it works by sampling a random field element,
+    /// using its canonical embedding, and then reducing it mod 2^bits. Writing the field order as
+    /// `p = c * 2^bits + r` with `0 <= r < 2^bits`, the `r` "heavy" residues `0..r` each occur with
+    /// probability `(c + 1) / p` while the remaining `2^bits - r` "light" residues occur with
+    /// probability `c / p`. Equivalently, residues `0..r` are favored by a factor of `(c + 1) / c`.
+    /// Note residue `0` is always heavy.
+    ///
+    /// For BabyBear, `p - 1 = 2^27 * 15`, so `p ≡ 1 (mod 2^bits)` and thus `r = 1` for every
+    /// `bits <= 27`—exactly one heavy residue (the all-zero one).
     fn sample_bits(&mut self, bits: usize) -> u64 {
         assert!(bits < (u32::BITS as usize));
         assert!((1 << bits) < SC::F::ORDER_U64);
