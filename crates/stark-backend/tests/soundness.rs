@@ -118,7 +118,7 @@ fn check_soundness(
         soundness.zerocheck_sumcheck_bits
     );
     println!(
-        "Constraint batching: {:.1} bits",
+        "Fused boundary/batching: {:.1} bits",
         soundness.constraint_batching_bits
     );
     println!(

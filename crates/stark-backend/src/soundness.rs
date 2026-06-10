@@ -20,13 +20,13 @@ use crate::{
 pub struct SoundnessCalculator {
     /// Security bits from LogUp α/β sampling and PoW.
     pub logup_bits: f64,
-    /// Security bits from GKR sumcheck rounds.
+    /// Security bits from ordinary GKR sumcheck rounds.
     pub gkr_sumcheck_bits: f64,
     /// Security bits from GKR μ/λ batching per layer.
     pub gkr_batching_bits: f64,
-    /// Security bits from ZeroCheck sumcheck (univariate and multilinear rounds).
+    /// Security bits from ZeroCheck sumcheck after the fused input-layer boundary.
     pub zerocheck_sumcheck_bits: f64,
-    /// Security bits from constraint batching (λ and μ via Schwartz-Zippel).
+    /// Security bits from the fused GKR/ZeroCheck input boundary and constraint batching.
     pub constraint_batching_bits: f64,
     /// Security bits from stacked reduction sumcheck.
     pub stacked_reduction_bits: f64,
@@ -114,7 +114,6 @@ impl SoundnessCalculator {
             challenge_field_bits,
             max_constraint_degree,
             params.l_skip,
-            max_log_trace_height,
             log2_list_size,
         );
 
@@ -122,6 +121,9 @@ impl SoundnessCalculator {
             challenge_field_bits,
             max_num_constraints_per_air,
             num_airs,
+            params.l_skip,
+            max_log_trace_height,
+            n_logup,
             log2_list_size,
         );
 
@@ -169,7 +171,8 @@ impl SoundnessCalculator {
     /// - β: Random challenge for compressing interaction messages into field elements. Degeneracy
     ///   would allow distinct message tuples to collide.
     ///
-    /// Security = |F_ext| - log₂(2 × max_interaction_count) - log_max_message_length + pow_bits
+    /// Security = |F_ext| - log₂(2 × max_interaction_count) - log_max_message_length
+    ///            - log₂(L_PCS) + pow_bits
     ///
     /// Reference: Section 4 of docs/Soundness_of_Interactions_via_LogUp.pdf
     fn calculate_logup_soundness(
@@ -180,16 +183,19 @@ impl SoundnessCalculator {
         let logup = &params.logup;
         let max_interaction_count_bits = (2.0 * logup.max_interaction_count as f64).log2();
 
-        log2_list_size + challenge_field_bits
+        challenge_field_bits
             - max_interaction_count_bits
             - logup.log_max_message_length as f64
+            - log2_list_size
             + logup.pow_bits as f64
     }
 
-    /// GKR sumcheck soundness (per-round).
+    /// Ordinary GKR sumcheck soundness (per-round).
     ///
     /// The GKR protocol has a triangular sumcheck structure where round j has j sub-rounds.
     /// Each sub-round uses degree-3 interpolation, giving per-round error = 3 / |F_ext|.
+    /// The final input-layer boundary shared with ZeroCheck is accounted for in
+    /// [`Self::calculate_constraint_batching_soundness`].
     ///
     /// Security is determined by the worst round: |F_ext| - log₂(3)
     fn calculate_gkr_sumcheck_soundness(
@@ -222,9 +228,12 @@ impl SoundnessCalculator {
         challenge_field_bits - (degree as f64).log2()
     }
 
-    /// ZeroCheck sumcheck soundness (per-round).
+    /// ZeroCheck sumcheck soundness after the fused input-layer boundary.
     ///
-    /// Two phases with different per-round degrees:
+    /// The input-point identity test is fused with the last LogUp-GKR input-layer challenge and
+    /// the first ZeroCheck batching challenges in
+    /// [`Self::calculate_constraint_batching_soundness`]. After that boundary, the remaining
+    /// batch sumcheck has two per-round degree sources:
     ///
     /// 1. **Univariate round** over coset domain (size 2^l_skip):
     ///    - Degree: (max_constraint_degree + 1) × (2^l_skip - 1)
@@ -232,53 +241,58 @@ impl SoundnessCalculator {
     /// 2. **Multilinear rounds** (n_max = max_log_trace_height - l_skip):
     ///    - Per-round degree: max_constraint_degree + 1
     ///
-    /// 3. **Polynomial identity testing at r**: After sumcheck completes, trace polynomials are
-    ///    evaluated at random r. If the prover's trace differs from the committed trace, this is
-    ///    caught by Schwartz-Zippel. Trace polynomials have deg_Z ≤ 2^l_skip - 1 and deg_{X_i} ≤ 1.
-    ///    Error ≤ (2^l_skip - 1 + n_max) / |F_ext|
+    /// The full-protocol bound applies the list-size union bound over `L_PCS` candidate traces.
     fn calculate_zerocheck_sumcheck_soundness(
         challenge_field_bits: f64,
         max_constraint_degree: usize,
         l_skip: usize,
-        max_log_trace_height: usize,
         log2_list_size: f64,
     ) -> f64 {
         let univariate_degree = (max_constraint_degree + 1) * ((1 << l_skip) - 1);
         let multilinear_degree = max_constraint_degree + 1;
 
         let worst_degree = univariate_degree.max(multilinear_degree);
-        let sumcheck_bits = challenge_field_bits - (worst_degree as f64).log2();
-
-        // Polynomial identity testing: trace polynomial has deg_Z ≤ 2^l_skip - 1, deg_{X_i} ≤ 1
-        // n_max = max_log_trace_height - l_skip multilinear variables
-        let n_max = max_log_trace_height.saturating_sub(l_skip);
-        let poly_degree_sum = (1 << l_skip) - 1 + n_max;
-        let poly_identity_bits = challenge_field_bits - (poly_degree_sum as f64).log2();
-
-        log2_list_size + sumcheck_bits.min(poly_identity_bits)
+        challenge_field_bits - (worst_degree as f64).log2() - log2_list_size
     }
 
-    /// Constraint batching soundness via Schwartz-Zippel.
+    /// Fused batch-constraint boundary soundness via Schwartz-Zippel.
     ///
-    /// Two batching levels:
-    /// - λ: Within each AIR, batching n constraints. Error ≤ n / |F_ext|
-    /// - μ: Across AIRs, batching 3k sum claims (ZeroCheck + LogUp numerator + LogUp denominator
-    ///   per AIR). Error ≤ 3k / |F_ext|
+    /// This is the first term of the batch-constraint theorem after fusing the last LogUp-GKR
+    /// input-layer challenge with ZeroCheck's input-point and batching challenges:
+    ///
+    /// `max(3, n_extra) + (2^l_skip - 1) + (N_C - 1) + (3|T| - 1)`.
+    ///
+    /// The full-protocol bound applies the list-size union bound over `L_PCS` candidate traces.
     fn calculate_constraint_batching_soundness(
         challenge_field_bits: f64,
         max_num_constraints_per_air: usize,
         num_airs: usize,
+        l_skip: usize,
+        max_log_trace_height: usize,
+        n_logup: usize,
         log2_list_size: f64,
     ) -> f64 {
-        let lambda_batching_bits =
-            challenge_field_bits - (max_num_constraints_per_air as f64).log2();
+        assert!(
+            max_num_constraints_per_air > 0,
+            "batch-constraint soundness requires at least one constraint"
+        );
+        assert!(
+            num_airs > 0,
+            "batch-constraint soundness requires at least one nonempty AIR"
+        );
+
+        let n_trace = max_log_trace_height.saturating_sub(l_skip);
+        let n_extra = n_trace.saturating_sub(n_logup);
+        let skip_degree = (1 << l_skip) - 1;
+
         // Each AIR contributes 3 sum claims to the batch sumcheck:
         // 1. ZeroCheck (constraint satisfaction)
         // 2. LogUp numerator (p̂(ξ) input layer)
         // 3. LogUp denominator (q̂(ξ) input layer)
-        let mu_batching_bits = challenge_field_bits - (3.0 * num_airs as f64).log2();
+        let fused_boundary_degree =
+            n_extra.max(3) + skip_degree + (max_num_constraints_per_air - 1) + (3 * num_airs - 1);
 
-        log2_list_size + lambda_batching_bits.min(mu_batching_bits)
+        challenge_field_bits - (fused_boundary_degree as f64).log2() - log2_list_size
     }
 
     /// Stacked reduction soundness.
@@ -307,7 +321,7 @@ impl SoundnessCalculator {
         // Degree 2 per round => log2(2) = 1.
         let multilinear_bits = challenge_field_bits - 1.0;
 
-        log2_list_size + batching_bits.min(univariate_bits).min(multilinear_bits)
+        batching_bits.min(univariate_bits).min(multilinear_bits) - log2_list_size
     }
 
     /// WHIR soundness analysis based on the WHIR paper (ePrint 2024/1586).
@@ -809,7 +823,7 @@ pub fn print_soundness_report(
         soundness.zerocheck_sumcheck_bits
     );
     println!(
-        "  Constraint batching:         {:.1}",
+        "  Fused boundary/batching:     {:.1}",
         soundness.constraint_batching_bits
     );
     println!(
@@ -966,6 +980,39 @@ mod tests {
             0.0,
         );
         assert!(security > TARGET_SECURITY_BITS as f64);
+    }
+
+    #[test]
+    fn test_logup_list_size_is_security_penalty() {
+        let params = test_params();
+        let no_list = SoundnessCalculator::calculate_logup_soundness(
+            &params,
+            babybear_quartic_extension_bits(),
+            0.0,
+        );
+        let list_size_bits = 5.0;
+        let with_list = SoundnessCalculator::calculate_logup_soundness(
+            &params,
+            babybear_quartic_extension_bits(),
+            list_size_bits,
+        );
+        assert!((no_list - with_list - list_size_bits).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_fused_batch_constraint_boundary_soundness() {
+        let security = SoundnessCalculator::calculate_constraint_batching_soundness(
+            100.0, // challenge field bits
+            11,    // N_C
+            7,     // |T|
+            3,     // l_skip, so 2^l_skip - 1 = 7
+            10,    // max_log_trace_height, so n_T = 7
+            4,     // n_logup, so n_extra = 3
+            2.0,   // log2(L_PCS)
+        );
+        let expected_degree: f64 = 3.0 + 7.0 + 10.0 + 20.0;
+        let expected = 100.0 - expected_degree.log2() - 2.0;
+        assert!((security - expected).abs() < 1e-9);
     }
 
     #[test]

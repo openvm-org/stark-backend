@@ -229,7 +229,7 @@ pub struct LogUpSecurityParameters {
 }
 
 impl LogUpSecurityParameters {
-    /// The number of bits of security with grinding.
+    /// The number of LogUp bits of security with grinding, before any PCS list-size union bound.
     pub fn bits_of_security<F: Field>(&self) -> u32 {
         // See Section 4 of [docs/Soundness_of_Interactions_via_LogUp.pdf].
         let log_order = u32::try_from(F::order().bits() - 1).unwrap();

@@ -741,7 +741,7 @@ mod tests {
             w_stack,
             log_blowup,
             whir,
-            logup: log_up_security_params_baby_bear_100_bits(),
+            logup: log_up_security_params_baby_bear_100_bits(0.0),
             max_constraint_degree: 3,
         };
         run_whir_fib_test_gpu(params)

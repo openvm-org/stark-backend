@@ -1,4 +1,8 @@
-use openvm_stark_backend::{SystemParams, WhirProximityStrategy};
+use openvm_stark_backend::{
+    interaction::LogUpSecurityParameters, p3_field::PrimeField64, soundness::SoundnessCalculator,
+    SystemParams, WhirProximityStrategy,
+};
+use p3_baby_bear::BabyBear;
 
 use crate::config::log_up_params::log_up_security_params_baby_bear_100_bits;
 
@@ -35,6 +39,25 @@ pub const RECURSION_MAX_CONSTRAINT_DEGREE: usize = 4;
 
 pub const MAX_APP_LOG_STACKED_HEIGHT: usize = 24;
 
+fn babybear_quartic_extension_bits() -> f64 {
+    4.0 * (BabyBear::ORDER_U64 as f64).log2()
+}
+
+/// LogUp grinding sufficient for 100-bit security, accounting for the PCS list-size union bound of
+/// `params`' initial WHIR proximity regime (`log2_pcs_list_size` is 0 for unique decoding). Reads
+/// the inputs directly from `params` so they cannot diverge from the configured values.
+fn log_up_params_for_whir(params: &SystemParams) -> LogUpSecurityParameters {
+    let log2_pcs_list_size = SoundnessCalculator::whir_proximity_gap_security(
+        params.whir.proximity.initial_round(),
+        babybear_quartic_extension_bits(),
+        params.log_stacked_height(),
+        params.log_blowup,
+        params.w_stack,
+    )
+    .log2_list_size;
+    log_up_security_params_baby_bear_100_bits(log2_pcs_list_size)
+}
+
 /// Returns `SystemParams` targeting 100 bits of proven RBR security for App VM circuits.
 ///
 /// # Assumptions for 100-bit security
@@ -52,7 +75,7 @@ pub fn app_params_with_100_bits_security(log_stacked_height: usize) -> SystemPar
         log_stacked_height <= MAX_APP_LOG_STACKED_HEIGHT,
         "log_stacked_height must be <= {MAX_APP_LOG_STACKED_HEIGHT}",
     );
-    SystemParams::new(
+    let mut params = SystemParams::new(
         DEFAULT_APP_LOG_BLOWUP,
         DEFAULT_APP_L_SKIP,
         log_stacked_height.saturating_sub(DEFAULT_APP_L_SKIP), // n_stack
@@ -62,9 +85,11 @@ pub fn app_params_with_100_bits_security(log_stacked_height: usize) -> SystemPar
         15, // mu pow
         WhirProximityStrategy::UniqueDecoding,
         SECURITY_BITS_TARGET,
-        log_up_security_params_baby_bear_100_bits(),
+        log_up_security_params_baby_bear_100_bits(0.0),
         APP_MAX_CONSTRAINT_DEGREE,
-    )
+    );
+    params.logup = log_up_params_for_whir(&params);
+    params
 }
 
 /// Returns `SystemParams` targeting 100 bits of proven RBR security for leaf aggregation circuits.
@@ -83,7 +108,7 @@ pub fn app_params_with_100_bits_security(log_stacked_height: usize) -> SystemPar
 // See `test_all_production_configs` in `crates/stark-backend/tests/soundness.rs` for the
 // full soundness analysis.
 pub fn leaf_params_with_100_bits_security() -> SystemParams {
-    SystemParams::new(
+    let mut params = SystemParams::new(
         DEFAULT_LEAF_LOG_BLOWUP,
         4,    // l_skip
         17,   // n_stack
@@ -93,9 +118,11 @@ pub fn leaf_params_with_100_bits_security() -> SystemParams {
         13, // mu pow
         WhirProximityStrategy::UniqueDecoding,
         SECURITY_BITS_TARGET,
-        log_up_security_params_baby_bear_100_bits(),
+        log_up_security_params_baby_bear_100_bits(0.0),
         RECURSION_MAX_CONSTRAINT_DEGREE,
-    )
+    );
+    params.logup = log_up_params_for_whir(&params);
+    params
 }
 
 /// Returns `SystemParams` targeting 100 bits of proven RBR security for internal aggregation
@@ -114,7 +141,7 @@ pub fn leaf_params_with_100_bits_security() -> SystemParams {
 // See `test_all_production_configs` in `crates/stark-backend/tests/soundness.rs` for the
 // full soundness analysis.
 pub fn internal_params_with_100_bits_security() -> SystemParams {
-    SystemParams::new(
+    let mut params = SystemParams::new(
         DEFAULT_INTERNAL_LOG_BLOWUP,
         2,   // l_skip
         17,  // n_stack
@@ -124,9 +151,11 @@ pub fn internal_params_with_100_bits_security() -> SystemParams {
         20, // mu pow
         WhirProximityStrategy::ListDecoding { m: 2 },
         SECURITY_BITS_TARGET,
-        log_up_security_params_baby_bear_100_bits(),
+        log_up_security_params_baby_bear_100_bits(0.0),
         RECURSION_MAX_CONSTRAINT_DEGREE,
-    )
+    );
+    params.logup = log_up_params_for_whir(&params);
+    params
 }
 
 /// Returns `SystemParams` targeting 100 bits of proven RBR security for root circuits.
@@ -144,7 +173,7 @@ pub fn internal_params_with_100_bits_security() -> SystemParams {
 // See `test_all_production_configs` in `crates/stark-backend/tests/soundness.rs` for the
 // full soundness analysis.
 pub fn root_params_with_100_bits_security() -> SystemParams {
-    SystemParams::new(
+    let mut params = SystemParams::new(
         DEFAULT_ROOT_LOG_BLOWUP,
         2,  // l_skip
         18, // n_stack
@@ -154,9 +183,11 @@ pub fn root_params_with_100_bits_security() -> SystemParams {
         20, // mu pow
         WhirProximityStrategy::ListDecoding { m: 1 },
         SECURITY_BITS_TARGET,
-        log_up_security_params_baby_bear_100_bits(),
+        log_up_security_params_baby_bear_100_bits(0.0),
         RECURSION_MAX_CONSTRAINT_DEGREE,
-    )
+    );
+    params.logup = log_up_params_for_whir(&params);
+    params
 }
 
 /// Returns `SystemParams` targeting 100 bits of proven RBR security for deferral hook circuits.
@@ -174,7 +205,7 @@ pub fn root_params_with_100_bits_security() -> SystemParams {
 // See `test_all_production_configs` in `crates/stark-backend/tests/soundness.rs` for the
 // full soundness analysis.
 pub fn hook_params_with_100_bits_security() -> SystemParams {
-    SystemParams::new(
+    let mut params = SystemParams::new(
         DEFAULT_HOOK_LOG_BLOWUP,
         2,  // l_skip
         18, // n_stack
@@ -184,7 +215,9 @@ pub fn hook_params_with_100_bits_security() -> SystemParams {
         11, // mu pow
         WhirProximityStrategy::ListDecoding { m: 1 },
         SECURITY_BITS_TARGET,
-        log_up_security_params_baby_bear_100_bits(),
+        log_up_security_params_baby_bear_100_bits(0.0),
         RECURSION_MAX_CONSTRAINT_DEGREE,
-    )
+    );
+    params.logup = log_up_params_for_whir(&params);
+    params
 }
