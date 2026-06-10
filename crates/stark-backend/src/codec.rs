@@ -30,7 +30,11 @@ pub trait Decode: Sized {
     fn decode<R: Read>(reader: &mut R) -> Result<Self>;
     fn decode_from_bytes(bytes: &[u8]) -> Result<Self> {
         let mut reader = Cursor::new(bytes);
-        Self::decode(&mut reader)
+        let value = Self::decode(&mut reader)?;
+        if reader.position() != bytes.len() as u64 {
+            return Err(io::Error::other("trailing bytes after decoded value"));
+        }
+        Ok(value)
     }
 }
 
