@@ -8,6 +8,11 @@
 //!
 //! Each component contributes to the overall soundness error, and the total security
 //! is the minimum across all components.
+//!
+//! Components add proof-of-work grinding (`*_pow_bits`) on top of their statistical soundness.
+//! Grinding bits count hash evaluations, so the attacker's cost for `g` grinding bits is
+//! `≈ 2^g · cost(H)` for the grinding hash `H` (the transcript hash). Bit totals are thus
+//! comparable only across configs that share a grinding hash.
 
 use std::f64;
 
@@ -636,7 +641,8 @@ impl SoundnessCalculator {
     /// Effective security bits of a `pow_bits` proof-of-work grind, accounting for the bias of
     /// `sample_bits` towards its all-zero target. A random witness passes `sample_bits(pow_bits)
     /// == 0` with probability `(c+1)/p` (residue 0 is always heavy), not `2^{-pow_bits}`, so the
-    /// grind is worth `-log2((c+1)/p)` bits — slightly under its nominal `pow_bits`.
+    /// grind is worth `-log2((c+1)/p)` bits — slightly under its nominal `pow_bits`. These count
+    /// hash evaluations; see the module-level note on the grinding hash.
     #[inline]
     fn effective_pow_bits(pow_bits: usize, base_field_order: f64) -> f64 {
         if pow_bits == 0 {

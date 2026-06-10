@@ -51,6 +51,14 @@ where
         rand_u64 & ((1 << bits) - 1)
     }
 
+    /// Checks a proof-of-work witness: observes `witness` into the transcript and accepts iff the
+    /// next [`Self::sample_bits`] is zero (probability `≈ 2^{-bits}` for a random witness, so
+    /// [`Self::grind`] tries `≈ 2^bits` witnesses to find one).
+    ///
+    /// The work is done with the transcript hash (the `observe`/`sample_bits` sponge permutation),
+    /// so `bits` counts hash evaluations; the attacker's wall-clock cost is `≈ 2^bits · cost(H)`
+    /// for that hash `H`. Soundness targets in bits are therefore comparable only across configs
+    /// that share a grinding hash.
     #[must_use]
     fn check_witness(&mut self, bits: usize, witness: SC::F) -> bool {
         if bits == 0 {
@@ -60,6 +68,8 @@ where
         self.sample_bits(bits) == 0
     }
 
+    /// Finds a proof-of-work witness `w` such that [`Self::check_witness`]`(bits, w)` holds, by
+    /// brute force over the base field.
     #[instrument(name = "grind_pow", skip_all)]
     fn grind(&mut self, bits: usize) -> SC::F {
         assert!(bits < (u32::BITS as usize));
