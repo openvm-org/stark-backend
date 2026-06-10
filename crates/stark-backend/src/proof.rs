@@ -635,10 +635,10 @@ impl<SC: DecodableConfig> Decode for WhirProof<SC> {
 
         let decoded_widths = widths.len();
         let mut initial_round_opened_rows = vec_with_capped_capacity(num_commits);
-        for width in widths
-            .into_iter()
-            .chain(std::iter::repeat_n(0, num_commits.saturating_sub(decoded_widths)))
-        {
+        for width in widths.into_iter().chain(std::iter::repeat_n(
+            0,
+            num_commits.saturating_sub(decoded_widths),
+        )) {
             let mut opened_rows = vec_with_capped_capacity(initial_num_whir_queries);
             for _ in 0..initial_num_whir_queries {
                 // Each query has k_whir_exp rows. Each row is a fixed-width list of F elements.
