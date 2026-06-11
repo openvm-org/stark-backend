@@ -149,6 +149,12 @@ impl SystemParams {
 }
 
 /// Configurable parameters that are used to determine the [WhirConfig] for a target security level.
+///
+/// The `*_pow_bits` fields set proof-of-work grinding difficulty in *bits*, i.e. hash evaluations.
+/// The security those bits provide depends on the cost of the grinding hash (the transcript hash):
+/// cheaper hashes make each grinding attempt cheaper for an attacker. When changing the
+/// configuration—especially the hash function—revisit the PoW difficulty so it still meets the
+/// intended security against an attacker grinding with that hash. See [`crate::soundness`].
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WhirParams {
     pub k: usize,

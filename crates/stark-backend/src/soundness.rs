@@ -979,17 +979,19 @@ pub fn min_whir_queries(
 
 #[cfg(test)]
 mod tests {
+    use openvm_stark_sdk::config::baby_bear_poseidon2::EF;
     use p3_baby_bear::BabyBear;
-    use p3_field::PrimeField64;
+    use p3_field::{BasedVectorSpace, PrimeField64};
 
     use super::*;
     use crate::{config::WhirRoundConfig, interaction::LogUpSecurityParameters};
 
-    fn babybear_quartic_extension_bits() -> f64 {
-        4.0 * (BabyBear::ORDER_U64 as f64).log2()
+    fn challenge_field_bits() -> f64 {
+        const D_EF: usize = <EF as BasedVectorSpace<BabyBear>>::DIMENSION;
+        D_EF as f64 * (BabyBear::ORDER_U64 as f64).log2()
     }
 
-    fn babybear_base_field_order() -> f64 {
+    fn base_field_order() -> f64 {
         BabyBear::ORDER_U64 as f64
     }
     // ==========================================================================
@@ -1032,8 +1034,8 @@ mod tests {
         let params = test_params();
         let soundness = SoundnessCalculator::calculate(
             &params,
-            babybear_base_field_order(),
-            babybear_quartic_extension_bits(),
+            base_field_order(),
+            challenge_field_bits(),
             1000,
             50,
             4,
@@ -1072,15 +1074,13 @@ mod tests {
     #[test]
     fn test_logup_soundness() {
         let logup = test_params().logup;
-        let security = SoundnessCalculator::logup_soundness(
-            logup.max_interaction_count,
-            logup.log_max_message_length,
-            babybear_quartic_extension_bits(),
-            0.0,
-        ) + SoundnessCalculator::effective_pow_bits(
-            logup.pow_bits,
-            babybear_base_field_order(),
-        );
+        let security =
+            SoundnessCalculator::logup_soundness(
+                logup.max_interaction_count,
+                logup.log_max_message_length,
+                challenge_field_bits(),
+                0.0,
+            ) + SoundnessCalculator::effective_pow_bits(logup.pow_bits, base_field_order());
         assert!(security > TARGET_SECURITY_BITS as f64);
     }
 
@@ -1090,14 +1090,14 @@ mod tests {
         let no_list = SoundnessCalculator::logup_soundness(
             logup.max_interaction_count,
             logup.log_max_message_length,
-            babybear_quartic_extension_bits(),
+            challenge_field_bits(),
             0.0,
         );
         let list_size_bits = 5.0;
         let with_list = SoundnessCalculator::logup_soundness(
             logup.max_interaction_count,
             logup.log_max_message_length,
-            babybear_quartic_extension_bits(),
+            challenge_field_bits(),
             list_size_bits,
         );
         assert!((no_list - with_list - list_size_bits).abs() < 1e-9);
