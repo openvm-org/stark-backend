@@ -986,21 +986,11 @@ pub fn min_whir_queries(
 
 #[cfg(test)]
 mod tests {
-    use openvm_stark_sdk::config::baby_bear_poseidon2::EF;
-    use p3_baby_bear::BabyBear;
-    use p3_field::{BasedVectorSpace, PrimeField64};
+    use openvm_stark_sdk::config::{base_field_order, challenge_field_bits};
 
     use super::*;
     use crate::{config::WhirRoundConfig, interaction::LogUpSecurityParameters};
 
-    fn challenge_field_bits() -> f64 {
-        const D_EF: usize = <EF as BasedVectorSpace<BabyBear>>::DIMENSION;
-        D_EF as f64 * (BabyBear::ORDER_U64 as f64).log2()
-    }
-
-    fn base_field_order() -> f64 {
-        BabyBear::ORDER_U64 as f64
-    }
     // ==========================================================================
     // Test fixtures
     // ==========================================================================

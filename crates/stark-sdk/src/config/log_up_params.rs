@@ -1,9 +1,9 @@
 use openvm_stark_backend::{
-    interaction::LogUpSecurityParameters,
-    p3_field::{PrimeField32, PrimeField64},
-    soundness::SoundnessCalculator,
+    interaction::LogUpSecurityParameters, p3_field::PrimeField32, soundness::SoundnessCalculator,
 };
 use p3_baby_bear::BabyBear;
+
+use crate::config::challenge_field_bits;
 
 const TARGET_LOGUP_SECURITY_BITS: f64 = 100.0;
 const MIN_BABY_BEAR_LOGUP_POW_BITS: usize = 18;
@@ -20,7 +20,7 @@ pub fn log_up_security_params_baby_bear_100_bits(
         "log2_pcs_list_size must be finite and nonnegative"
     );
 
-    let challenge_field_bits = 4.0 * (BabyBear::ORDER_U64 as f64).log2();
+    let challenge_field_bits = challenge_field_bits();
     let max_interaction_count = BabyBear::ORDER_U32;
     let log_max_message_length = 7;
 

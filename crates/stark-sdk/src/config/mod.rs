@@ -1,10 +1,14 @@
 use openvm_stark_backend::{
-    interaction::LogUpSecurityParameters, p3_field::PrimeField64, soundness::SoundnessCalculator,
+    interaction::LogUpSecurityParameters,
+    p3_field::{BasedVectorSpace, PrimeField64},
+    soundness::SoundnessCalculator,
     SystemParams, WhirProximityStrategy,
 };
-use p3_baby_bear::BabyBear;
 
-use crate::config::log_up_params::log_up_security_params_baby_bear_100_bits;
+use crate::config::{
+    baby_bear_poseidon2::{EF, F},
+    log_up_params::log_up_security_params_baby_bear_100_bits,
+};
 
 /// STARK config where the base field is BabyBear, extension field is BabyBear^4, and the hasher is
 /// `Poseidon2<Bn254>`.
@@ -39,8 +43,18 @@ pub const RECURSION_MAX_CONSTRAINT_DEGREE: usize = 4;
 
 pub const MAX_APP_LOG_STACKED_HEIGHT: usize = 24;
 
-fn babybear_quartic_extension_bits() -> f64 {
-    4.0 * (BabyBear::ORDER_U64 as f64).log2()
+/// Order `p` of the configured base field.
+pub fn base_field_order() -> f64 {
+    F::ORDER_U64 as f64
+}
+
+/// Number of bits in the challenge (extension) field: `D_EF * log2(|F|)`.
+///
+/// Derived from the configured extension degree (matching `StarkProtocolConfig::D_EF`), so it
+/// tracks automatically if the extension field changes.
+pub fn challenge_field_bits() -> f64 {
+    const D_EF: usize = <EF as BasedVectorSpace<F>>::DIMENSION;
+    D_EF as f64 * base_field_order().log2()
 }
 
 /// LogUp grinding sufficient for 100-bit security, accounting for the PCS list-size union bound of
@@ -53,7 +67,7 @@ fn log_up_params_for_whir(
 ) -> LogUpSecurityParameters {
     let log2_pcs_list_size = SoundnessCalculator::whir_proximity_gap_security(
         proximity.initial_round(),
-        babybear_quartic_extension_bits(),
+        challenge_field_bits(),
         log_stacked_height,
         log_blowup,
         w_stack,
