@@ -274,7 +274,9 @@ impl SoundnessCalculator {
     /// This is the first term of the batch-constraint theorem after fusing the last LogUp-GKR
     /// input-layer challenge with ZeroCheck's input-point and batching challenges:
     ///
-    /// `max(3, n_extra) + (2^l_skip - 1) + (N_C - 1) + (3|T| - 1)`.
+    /// `max(3, n_extra) + (2^l_skip - 1) + (N_C - 1)`.
+    ///
+    /// The remaining batch-sumcheck batching round contributes a separate `3|T| - 1` term.
     ///
     /// The full-protocol bound applies the list-size union bound over `L_PCS` candidate traces.
     fn calculate_constraint_batching_soundness(
@@ -304,9 +306,14 @@ impl SoundnessCalculator {
         // 2. LogUp numerator (p̂(ξ) input layer)
         // 3. LogUp denominator (q̂(ξ) input layer)
         let fused_boundary_degree =
-            n_extra.max(3) + skip_degree + (max_num_constraints_per_air - 1) + (3 * num_airs - 1);
+            n_extra.max(3) + skip_degree + (max_num_constraints_per_air - 1);
+        let batch_sumcheck_batching_degree = 3 * num_airs - 1;
 
-        challenge_field_bits - (fused_boundary_degree as f64).log2() - log2_list_size
+        let fused_boundary_bits = challenge_field_bits - (fused_boundary_degree as f64).log2();
+        let batch_sumcheck_batching_bits =
+            challenge_field_bits - (batch_sumcheck_batching_degree as f64).log2();
+
+        fused_boundary_bits.min(batch_sumcheck_batching_bits) - log2_list_size
     }
 
     /// Stacked reduction soundness.
@@ -1114,7 +1121,7 @@ mod tests {
             4,     // n_logup, so n_extra = 3
             2.0,   // log2(L_PCS)
         );
-        let expected_degree: f64 = 3.0 + 7.0 + 10.0 + 20.0;
+        let expected_degree: f64 = (3.0_f64 + 7.0 + 10.0).max(20.0);
         let expected = 100.0 - expected_degree.log2() - 2.0;
         assert!((security - expected).abs() < 1e-9);
     }
