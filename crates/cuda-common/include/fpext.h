@@ -142,27 +142,6 @@ __device__ inline FpExt inv(FpExt in) {
     return result;
 }
 
-// TODO: find the difference between binomial_inversion and inv
-__device__ __inline__ FpExt binomial_inversion(const FpExt &in) {
-    constexpr uint32_t dth_root_u32 = 1728404513;
-    constexpr uint32_t w = 11;
-    Fp D(dth_root_u32);
-    Fp W(w);
-
-    FpExt f(1);
-    Fp D2 = D * D;
-    Fp D3 = D2 * D;
-    for (int i = 1; i < 4; ++i) {
-        f = f * in;
-        f.elems[1] *= D;
-        f.elems[2] *= D2;
-        f.elems[3] *= D3;
-    }
-    Fp g = (in.elems[1] * f.elems[3] + in.elems[2] * f.elems[2] + in.elems[3] * f.elems[1]) * W +
-           in.elems[0] * f.elems[0];
-    return f * FpExt(inv(g));
-}
-
 static_assert(sizeof(FpExt) == 16, "FpExt must be 16 bytes");
 static_assert(sizeof(FpExt) == sizeof(bb31_4_t), "FpExt and bb31_4_t sizes must match");
 static_assert(alignof(FpExt) == alignof(bb31_4_t), "FpExt and bb31_4_t align must match");
