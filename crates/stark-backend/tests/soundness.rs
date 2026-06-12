@@ -4,13 +4,12 @@
 
 use openvm_stark_backend::{soundness::*, SystemParams};
 use openvm_stark_sdk::config::{
-    app_params_with_100_bits_security, hook_params_with_100_bits_security as hook_params,
+    app_params_with_100_bits_security, base_field_order, challenge_field_bits,
+    hook_params_with_100_bits_security as hook_params,
     internal_params_with_100_bits_security as internal_params,
     leaf_params_with_100_bits_security as leaf_params,
     root_params_with_100_bits_security as root_params, MAX_APP_LOG_STACKED_HEIGHT,
 };
-use p3_baby_bear::BabyBear;
-use p3_field::PrimeField64;
 
 // ==========================================================================
 // Circuit parameter upper bounds for soundness analysis
@@ -60,10 +59,6 @@ const RECURSION_MAX_INTERACTIONS_PER_AIR: usize = 100; // estimate, needs verifi
 
 const TARGET_SECURITY_BITS: usize = 100;
 
-fn babybear_quartic_extension_bits() -> f64 {
-    4.0 * (BabyBear::ORDER_U64 as f64).log2()
-}
-
 fn app_params() -> SystemParams {
     app_params_with_100_bits_security(MAX_APP_LOG_STACKED_HEIGHT)
 }
@@ -79,7 +74,8 @@ fn check_soundness(
 ) -> SoundnessCalculator {
     let soundness = SoundnessCalculator::calculate(
         params,
-        babybear_quartic_extension_bits(),
+        base_field_order(),
+        challenge_field_bits(),
         max_constraints,
         num_airs,
         params.max_constraint_degree,
@@ -118,7 +114,7 @@ fn check_soundness(
         soundness.zerocheck_sumcheck_bits
     );
     println!(
-        "Constraint batching: {:.1} bits",
+        "Fused boundary/batching: {:.1} bits",
         soundness.constraint_batching_bits
     );
     println!(

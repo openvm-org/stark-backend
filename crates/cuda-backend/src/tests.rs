@@ -116,7 +116,7 @@ fn test_bn254_fib_air_roundtrip(l_skip: usize, log_trace_degree: usize) {
         w_stack,
         log_blowup,
         whir,
-        logup: log_up_security_params_baby_bear_100_bits(),
+        logup: log_up_security_params_baby_bear_100_bits(0.0),
         max_constraint_degree: 3,
     };
 

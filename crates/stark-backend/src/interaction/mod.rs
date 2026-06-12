@@ -2,7 +2,6 @@ use std::fmt::Debug;
 
 use p3_air::AirBuilder;
 use p3_field::{Field, PrimeCharacteristicRing};
-use p3_util::log2_ceil_usize;
 use serde::{Deserialize, Serialize};
 
 use crate::air_builders::symbolic::symbolic_expression::SymbolicExpression;
@@ -229,15 +228,6 @@ pub struct LogUpSecurityParameters {
 }
 
 impl LogUpSecurityParameters {
-    /// The number of bits of security with grinding.
-    pub fn bits_of_security<F: Field>(&self) -> u32 {
-        // See Section 4 of [docs/Soundness_of_Interactions_via_LogUp.pdf].
-        let log_order = u32::try_from(F::order().bits() - 1).unwrap();
-        log_order
-            - log2_ceil_usize(2 * self.max_interaction_count as usize) as u32  // multiply by two to account for the poles as well
-            - self.log_max_message_length
-            + u32::try_from(self.pow_bits).unwrap()
-    }
     pub fn max_message_length(&self) -> usize {
         2usize
             .checked_pow(self.log_max_message_length)

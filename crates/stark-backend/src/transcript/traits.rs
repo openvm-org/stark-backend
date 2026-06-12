@@ -30,6 +30,19 @@ where
         SC::EF::from_basis_coefficients_fn(|_| self.sample())
     }
 
+    /// Samples and returns an integer in the range [0, 2^bits).
+    ///
+    /// # Sampling bias
+    ///
+    /// The sampling is not uniform over `[0, 2^bits)`; it works by sampling a random field element,
+    /// using its canonical embedding, and then reducing it mod 2^bits. Writing the field order as
+    /// `p = c * 2^bits + r` with `0 <= r < 2^bits`, the `r` "heavy" residues `0..r` each occur with
+    /// probability `(c + 1) / p` while the remaining `2^bits - r` "light" residues occur with
+    /// probability `c / p`. Equivalently, residues `0..r` are favored by a factor of `(c + 1) / c`.
+    /// Note residue `0` is always heavy.
+    ///
+    /// For BabyBear, `p - 1 = 2^27 * 15`, so `p ≡ 1 (mod 2^bits)` and thus `r = 1` for every
+    /// `bits <= 27`—exactly one heavy residue (the all-zero one).
     fn sample_bits(&mut self, bits: usize) -> u64 {
         assert!(bits < (u32::BITS as usize));
         assert!((1 << bits) < SC::F::ORDER_U64);
@@ -38,6 +51,14 @@ where
         rand_u64 & ((1 << bits) - 1)
     }
 
+    /// Checks a proof-of-work witness: observes `witness` into the transcript and accepts iff the
+    /// next [`Self::sample_bits`] is zero (probability `≈ 2^{-bits}` for a random witness, so
+    /// [`Self::grind`] tries `≈ 2^bits` witnesses to find one).
+    ///
+    /// The work is done with the transcript hash (the `observe`/`sample_bits` sponge permutation),
+    /// so `bits` counts hash evaluations; the attacker's wall-clock cost is `≈ 2^bits · cost(H)`
+    /// for that hash `H`. Soundness targets in bits are therefore comparable only across configs
+    /// that share a grinding hash.
     #[must_use]
     fn check_witness(&mut self, bits: usize, witness: SC::F) -> bool {
         if bits == 0 {
@@ -47,6 +68,8 @@ where
         self.sample_bits(bits) == 0
     }
 
+    /// Finds a proof-of-work witness `w` such that [`Self::check_witness`]`(bits, w)` holds, by
+    /// brute force over the base field.
     #[instrument(name = "grind_pow", skip_all)]
     fn grind(&mut self, bits: usize) -> SC::F {
         assert!(bits < (u32::BITS as usize));

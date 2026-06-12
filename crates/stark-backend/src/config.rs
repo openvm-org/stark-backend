@@ -149,6 +149,12 @@ impl SystemParams {
 }
 
 /// Configurable parameters that are used to determine the [WhirConfig] for a target security level.
+///
+/// The `*_pow_bits` fields set proof-of-work grinding difficulty in *bits*, i.e. hash evaluations.
+/// The security those bits provide depends on the cost of the grinding hash (the transcript hash):
+/// cheaper hashes make each grinding attempt cheaper for an attacker. When changing the
+/// configuration—especially the hash function—revisit the PoW difficulty so it still meets the
+/// intended security against an attacker grinding with that hash. See [`crate::soundness`].
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WhirParams {
     pub k: usize,
@@ -242,14 +248,13 @@ pub enum ProximityRegime {
 }
 
 impl ProximityRegime {
-    /// Returns total security bits for `num_queries` WHIR queries.
+    /// Maximum fraction of the RS domain on which a far word can agree with a codeword (the
+    /// per-query evasion probability under ideal uniform query sampling).
     ///
-    /// This treats the per-query error as an upper bound on the maximum agreement.
-    ///
-    /// - `UniqueDecoding`: max agreement is `(1 + ρ) / 2`.
+    /// - `UniqueDecoding`: `(1 + ρ) / 2`.
     /// - `ListDecoding { m }`: finite-multiplicity Guruswami-Sudan threshold, `sqrt(ρ) (1 +
-    ///   1/(2m)).
-    pub fn whir_query_security_bits(&self, num_queries: usize, log_inv_rate: usize) -> f64 {
+    ///   1/(2m))`.
+    pub fn max_agreement(&self, log_inv_rate: usize) -> f64 {
         let rho = 2.0_f64.powf(-(log_inv_rate as f64));
         let max_agreement = match *self {
             ProximityRegime::UniqueDecoding => (1.0 + rho) / 2.0,
@@ -261,10 +266,15 @@ impl ProximityRegime {
                 rho.sqrt() * (1.0 + 1.0 / (2.0 * m))
             }
         };
-
         // Keep the `log2` well-defined.
-        let max_agreement = max_agreement.clamp(f64::MIN_POSITIVE, 1.0);
-        -(num_queries as f64) * max_agreement.log2()
+        max_agreement.clamp(f64::MIN_POSITIVE, 1.0)
+    }
+
+    /// Returns total security bits for `num_queries` WHIR queries under ideal (uniform) query
+    /// sampling. See [`crate::soundness::SoundnessCalculator`] for the variant that additionally
+    /// charges the `sample_bits` sampling bias.
+    pub fn whir_query_security_bits(&self, num_queries: usize, log_inv_rate: usize) -> f64 {
+        -(num_queries as f64) * self.max_agreement(log_inv_rate).log2()
     }
 
     /// Returns the per-query security bits for WHIR query sampling.
