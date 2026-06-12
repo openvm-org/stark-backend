@@ -12,16 +12,21 @@ The backend is designed to be modular and compatible with different proof system
 ## Crates
 
 - [`openvm-stark-backend`](crates/stark-backend): General purpose STARK proving system with multi-trace and logup support, using the SWIRL proof system.
+- [`openvm-codec-derive`](crates/stark-backend/codec-derive): Procedural macros for encoding and decoding of proof types.
 - [`openvm-stark-sdk`](crates/stark-sdk): Low-level SDK for use with STARK backend to generate proofs for specific STARK configurations.
+- [`openvm-cpu-backend`](crates/cpu-backend): Optimized row-major CPU prover backend for the SWIRL proof system.
 - [`openvm-cuda-builder`](crates/cuda-builder): Build utilities and CUDA detection crate, meant to be imported as a build dependency in crates that use CUDA.
 - [`openvm-cuda-common`](crates/cuda-common): Shared headers (`.cuh/.h` files) and CUDA utilities library.
 - [`openvm-cuda-backend`](crates/cuda-backend): CUDA implementation of a STARK prover backend using all of the previous crates.
+- [`openvm-backend-tests`](crates/backend-tests): Shared backend-generic test suite for the SWIRL proof system.
 
 Contributors should read [Development without CUDA](./docs/README.md#development-without-cuda) and [Development with CUDA](./docs/README.md#development-with-cuda) for instructions on how to set up their development environments.
 
 ## Status
 
 As of May 2026, STARK Backend v1.4.0 and later are recommended for production use. STARK Backend completed external [audits](https://github.com/openvm-org/openvm/blob/main/audits/) on [Cantina](https://cantina.xyz/) as well as an internal [audit](https://github.com/openvm-org/openvm/blob/main/audits/v1-internal/README.md) by members of the [Axiom](https://axiom.xyz/) team.
+
+This branch contains STARK Backend v2 (`2.0.0-alpha`), a rewrite of the proof system using the SWIRL protocol. v2 is under active development, has not been audited, and is not yet recommended for production use.
 
 ## Security
 

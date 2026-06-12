@@ -107,9 +107,15 @@ Similar to Case C, except `+4` in step 4 cannot fit the third region, so layout 
 /// Metadata for a free region in the virtual address space.
 struct FreeRegionMeta {
     size: usize,
-    event: Arc<CudaEvent>,   // Event marking when this region was freed
-    stream_id: CudaStreamId, // Stream that freed this region
-    id: usize,               // Creation order for temporal tracking
+    event: Arc<CudaEvent>, // Event marking when this region was freed
+    stream: StreamGuard,   // Stream that freed this region
+    id: usize,             // Creation order for temporal tracking
+}
+
+/// Allocation record for the VPMM path.
+struct VpmmRecord {
+    size: usize,
+    stream: StreamGuard,
 }
 
 /// Remapped region that will be unmapped when the event completes.
@@ -123,7 +129,7 @@ pub(super) struct VirtualMemoryPool {
     roots: Vec<CUdeviceptr>,     // Every reserved VA chunk
     active_pages: HashMap<CUdeviceptr, CUmemGenericAllocationHandle>,
     free_regions: BTreeMap<CUdeviceptr, FreeRegionMeta>,
-    malloc_regions: HashMap<CUdeviceptr, usize>,
+    malloc_regions: HashMap<CUdeviceptr, VpmmRecord>,
     unmapped_regions: BTreeMap<CUdeviceptr, usize>,
     zombie_regions: Vec<ZombieRegion>,  // Old VAs awaiting async unmap
     free_num: usize,
@@ -139,7 +145,7 @@ pub(super) struct VirtualMemoryPool {
 * `active_pages` tracks the current virtual address for every mapped page; keys move when we remap.
 * `free_regions`, `malloc_regions`, `unmapped_regions`, and `zombie_regions` partition the reserved VA space. Note that zombie regions are temporarily **double-mapped** (the same physical pages are accessible via both old and new VAs until the zombie is cleaned up).
 * `free_regions` are coalesced by stream/event when possible.
-* Each `FreeRegionMeta` retains the CUDA event recorded at free time plus the originating `CudaStreamId`.
+* Each `FreeRegionMeta` retains the CUDA event recorded at free time plus a guard on the originating stream.
 
 ## Initialization
 
@@ -210,7 +216,7 @@ Additional rules:
 
 ## free(ptr)
 
-* Look up `ptr` in `malloc_regions` to obtain the aligned size.
+* Look up `ptr` in `malloc_regions` to obtain its `VpmmRecord` (the aligned size plus the owning stream).
 * Record a CUDA event on the calling stream (always `cudaStreamPerThread`) and store the stream id/event pair in `free_regions`.
 * Attempt to coalesce with adjacent regions from the same stream that have matching completion guarantees.
 * Remove the entry from `malloc_regions`.
@@ -221,7 +227,7 @@ Additional rules:
 
 * **Total GPU memory mapped:** `pool.active_pages.len() * pool.page_size`
 * **Reserved VA:** `pool.roots.len() * pool.va_size`
-* **Currently allocated (live) bytes:** `sum(pool.malloc_regions.values())`
+* **Currently allocated (live) bytes:** `sum(pool.malloc_regions.values().map(|r| r.size))`
 * **Currently reusable bytes:** `sum(pool.free_regions.values().map(|r| r.size))`
 * **Holes:** `sum(pool.unmapped_regions.values())`
 * **Pending unmap (zombies):** `sum(pool.zombie_regions.iter().map(|z| z.size))`
