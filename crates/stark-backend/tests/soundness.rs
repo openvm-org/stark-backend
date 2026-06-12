@@ -2,13 +2,17 @@
 //! Production configuration soundness tests
 //! ==========================================================================
 
-use openvm_stark_backend::{soundness::*, SystemParams};
+use openvm_stark_backend::{
+    soundness::*, SystemParams, WhirConfig, WhirParams, WhirProximityStrategy,
+};
 use openvm_stark_sdk::config::{
     app_params_with_100_bits_security, base_field_order, challenge_field_bits,
     hook_params_with_100_bits_security as hook_params,
     internal_params_with_100_bits_security as internal_params,
-    leaf_params_with_100_bits_security as leaf_params,
-    root_params_with_100_bits_security as root_params, MAX_APP_LOG_STACKED_HEIGHT,
+    leaf_params_with_100_bits_security as leaf_params, log_up_params_for_whir,
+    params_with_100_bits_security, root_params_with_100_bits_security as root_params,
+    APP_MAX_CONSTRAINT_DEGREE, MAX_APP_LOG_STACKED_HEIGHT, RECURSION_MAX_CONSTRAINT_DEGREE,
+    SECURITY_BITS_TARGET, WHIR_MAX_LOG_FINAL_POLY_LEN,
 };
 
 // ==========================================================================
@@ -61,6 +65,79 @@ const TARGET_SECURITY_BITS: usize = 100;
 
 fn app_params() -> SystemParams {
     app_params_with_100_bits_security(MAX_APP_LOG_STACKED_HEIGHT)
+}
+
+fn limiting_soundness_component(soundness: &SoundnessCalculator) -> &'static str {
+    [
+        ("logup", soundness.logup_bits),
+        ("gkr_sumcheck", soundness.gkr_sumcheck_bits),
+        ("gkr_batching", soundness.gkr_batching_bits),
+        ("zerocheck_sumcheck", soundness.zerocheck_sumcheck_bits),
+        ("constraint_batching", soundness.constraint_batching_bits),
+        ("stacked_reduction", soundness.stacked_reduction_bits),
+        ("whir", soundness.whir_bits),
+    ]
+    .into_iter()
+    .min_by(|(_, lhs), (_, rhs)| lhs.total_cmp(rhs))
+    .map(|(component, _)| component)
+    .expect("soundness has at least one component")
+}
+
+fn interesting_configs() -> Vec<SystemParams> {
+    vec![
+        // Production anchors outside the internal-params sweep shape.
+        app_params_with_100_bits_security(MAX_APP_LOG_STACKED_HEIGHT),
+        leaf_params(),
+        root_params(),
+        hook_params(),
+        // Low blowup, maximum app stacked height, and minimal skip.
+        params_with_100_bits_security(
+            1,
+            1,
+            23,
+            2048,
+            8,
+            20,
+            WhirProximityStrategy::UniqueDecoding,
+            APP_MAX_CONSTRAINT_DEGREE,
+        ),
+        // Large skip factor, where ZeroCheck and stacked reduction degree terms are stressed.
+        params_with_100_bits_security(
+            2,
+            18,
+            2,
+            256,
+            12,
+            20,
+            WhirProximityStrategy::UniqueDecoding,
+            RECURSION_MAX_CONSTRAINT_DEGREE,
+        ),
+        // Transition from unique decoding into list decoding after the first WHIR round.
+        params_with_100_bits_security(
+            3,
+            4,
+            15,
+            512,
+            20,
+            22,
+            WhirProximityStrategy::SplitUniqueList {
+                m: 2,
+                list_start_round: 1,
+            },
+            RECURSION_MAX_CONSTRAINT_DEGREE,
+        ),
+        // Small list-decoding multiplicity with a high blowup and very small stacked width.
+        params_with_100_bits_security(
+            4,
+            3,
+            16,
+            32,
+            22,
+            22,
+            WhirProximityStrategy::ListDecoding { m: 1 },
+            RECURSION_MAX_CONSTRAINT_DEGREE,
+        ),
+    ]
 }
 
 fn check_soundness(
@@ -194,6 +271,253 @@ fn test_leaf_aggregation_security() {
         soundness.total_bits >= TARGET_SECURITY_BITS as f64,
         "Leaf: got {:.1} bits",
         soundness.total_bits
+    );
+}
+
+#[test]
+fn generate_root_params() {
+    let max_log_height = 20;
+    let log_blowups = vec![2, 3, 4, 5, 6];
+    let k_whirs = (1..=7).step_by(2);
+    let l_skips = vec![2, 4, 8, 14, 18];
+    let mut good_params = vec![];
+    for k_whir in k_whirs.clone() {
+        for log_blowup in log_blowups.clone() {
+            for l_skip in l_skips.clone() {
+                let n_stack = max_log_height - l_skip;
+                let w_stack = 18;
+                let folding_pow_bits = 20;
+                let mu_pow_bits = 20;
+                let proximity = WhirProximityStrategy::ListDecoding { m: 1 };
+                let log_final_poly_len = WHIR_MAX_LOG_FINAL_POLY_LEN;
+                let security_bits = SECURITY_BITS_TARGET;
+                let max_constraint_degree = RECURSION_MAX_CONSTRAINT_DEGREE;
+
+                let log_stacked_height = l_skip + n_stack;
+                const WHIR_QUERY_PHASE_POW_BITS: usize = 20;
+                let logup =
+                    log_up_params_for_whir(proximity, l_skip + n_stack, log_blowup, w_stack);
+
+                let params = SystemParams {
+                    l_skip,
+                    n_stack,
+                    w_stack,
+                    log_blowup,
+                    whir: WhirConfig::new(
+                        log_blowup,
+                        log_stacked_height,
+                        WhirParams {
+                            k: k_whir,
+                            log_final_poly_len,
+                            query_phase_pow_bits: WHIR_QUERY_PHASE_POW_BITS,
+                            proximity,
+                            folding_pow_bits,
+                            mu_pow_bits,
+                        },
+                        security_bits,
+                    ),
+                    logup,
+                    max_constraint_degree,
+                };
+
+                let n_logup = n_logup_bound(
+                    params.l_skip,
+                    RECURSION_NUM_AIRS,
+                    RECURSION_MAX_INTERACTIONS_PER_AIR,
+                    max_log_height,
+                    params.logup.max_interaction_count as usize,
+                );
+
+                let soundness = SoundnessCalculator::calculate(
+                    &params,
+                    base_field_order(),
+                    challenge_field_bits(),
+                    RECURSION_MAX_CONSTRAINTS,
+                    RECURSION_NUM_AIRS,
+                    params.max_constraint_degree,
+                    max_log_height,
+                    RECURSION_NUM_COLUMNS,
+                    params.w_stack,
+                    n_logup,
+                );
+                if soundness.total_bits >= 100.0 {
+                    let limiting_component = limiting_soundness_component(&soundness);
+                    println!(
+                        "k_whir {k_whir}, log_blogup {log_blowup}, l_skip {l_skip}, n_stack {n_stack}, limiting_component: {limiting_component}, soundness: {}",
+                        soundness.total_bits
+                    );
+                    good_params.push(params);
+                }
+            }
+        }
+    }
+
+    let output_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("root_params.json");
+    let file = std::fs::File::create(&output_path).expect("failed to create good_params.json");
+    serde_json::to_writer_pretty(file, &good_params).expect("failed to write good_params.json");
+    println!(
+        "wrote {} good params to {}",
+        good_params.len(),
+        output_path.display()
+    );
+}
+
+#[test]
+fn generate_internal_params() {
+    let max_log_height = 19;
+    let log_blowups = (1..=7);
+    let k_whirs = (1..=7).step_by(2);
+    let l_skips = (1..=18).step_by(4);
+    let mut good_params = vec![];
+    for k_whir in k_whirs.clone() {
+        for log_blowup in log_blowups.clone() {
+            for l_skip in l_skips.clone() {
+                let n_stack = max_log_height - l_skip;
+                let w_stack = 512;
+                let folding_pow_bits = 18;
+                let mu_pow_bits = 20;
+                let proximity = WhirProximityStrategy::ListDecoding { m: 2 };
+                let log_final_poly_len = WHIR_MAX_LOG_FINAL_POLY_LEN;
+                let security_bits = SECURITY_BITS_TARGET;
+                let max_constraint_degree = RECURSION_MAX_CONSTRAINT_DEGREE;
+
+                let log_stacked_height = l_skip + n_stack;
+                const WHIR_QUERY_PHASE_POW_BITS: usize = 20;
+                let logup =
+                    log_up_params_for_whir(proximity, l_skip + n_stack, log_blowup, w_stack);
+
+                let params = SystemParams {
+                    l_skip,
+                    n_stack,
+                    w_stack,
+                    log_blowup,
+                    whir: WhirConfig::new(
+                        log_blowup,
+                        log_stacked_height,
+                        WhirParams {
+                            k: k_whir,
+                            log_final_poly_len,
+                            query_phase_pow_bits: WHIR_QUERY_PHASE_POW_BITS,
+                            proximity,
+                            folding_pow_bits,
+                            mu_pow_bits,
+                        },
+                        security_bits,
+                    ),
+                    logup,
+                    max_constraint_degree,
+                };
+
+                let n_logup = n_logup_bound(
+                    params.l_skip,
+                    RECURSION_NUM_AIRS,
+                    RECURSION_MAX_INTERACTIONS_PER_AIR,
+                    max_log_height,
+                    params.logup.max_interaction_count as usize,
+                );
+
+                let soundness = SoundnessCalculator::calculate(
+                    &params,
+                    base_field_order(),
+                    challenge_field_bits(),
+                    RECURSION_MAX_CONSTRAINTS,
+                    RECURSION_NUM_AIRS,
+                    params.max_constraint_degree,
+                    max_log_height,
+                    RECURSION_NUM_COLUMNS,
+                    params.w_stack,
+                    n_logup,
+                );
+                if soundness.total_bits >= 100.0 {
+                    let limiting_component = limiting_soundness_component(&soundness);
+                    println!(
+                        "k_whir {k_whir}, log_blogup {log_blowup}, l_skip {l_skip}, n_stack {n_stack}, limiting_component: {limiting_component}, soundness: {}",
+                        soundness.total_bits
+                    );
+                    good_params.push(params);
+                }
+            }
+        }
+    }
+
+    let output_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("good_params.json");
+    let file = std::fs::File::create(&output_path).expect("failed to create good_params.json");
+    serde_json::to_writer_pretty(file, &good_params).expect("failed to write good_params.json");
+    println!(
+        "wrote {} good params to {}",
+        good_params.len(),
+        output_path.display()
+    );
+}
+
+#[test]
+fn test_interesting_configs_security_and_dump() {
+    let configs = interesting_configs();
+    assert!(!configs.is_empty(), "expected interesting configs");
+
+    for (index, params) in configs.iter().enumerate() {
+        let max_log_height = params.log_stacked_height();
+        let (max_constraints, num_airs, num_columns, max_interactions_per_air) =
+            if params.max_constraint_degree == APP_MAX_CONSTRAINT_DEGREE {
+                (
+                    APP_MAX_CONSTRAINTS,
+                    APP_NUM_AIRS,
+                    APP_NUM_COLUMNS,
+                    APP_MAX_INTERACTIONS_PER_AIR,
+                )
+            } else {
+                (
+                    RECURSION_MAX_CONSTRAINTS,
+                    RECURSION_NUM_AIRS,
+                    RECURSION_NUM_COLUMNS,
+                    RECURSION_MAX_INTERACTIONS_PER_AIR,
+                )
+            };
+        let n_logup = n_logup_bound(
+            params.l_skip,
+            num_airs,
+            max_interactions_per_air,
+            max_log_height,
+            params.logup.max_interaction_count as usize,
+        );
+        let soundness = SoundnessCalculator::calculate(
+            params,
+            base_field_order(),
+            challenge_field_bits(),
+            max_constraints,
+            num_airs,
+            params.max_constraint_degree,
+            max_log_height,
+            num_columns,
+            params.w_stack,
+            n_logup,
+        );
+        let limiting_component = limiting_soundness_component(&soundness);
+        println!(
+            "interesting_config #{index}: l_skip={}, n_stack={}, w_stack={}, log_blowup={}, k_whir={}, limiting_component={limiting_component}, soundness={}",
+            params.l_skip,
+            params.n_stack,
+            params.w_stack,
+            params.log_blowup,
+            params.whir.k,
+            soundness.total_bits
+        );
+        assert!(
+            soundness.total_bits >= TARGET_SECURITY_BITS as f64,
+            "interesting config #{index}: limiting_component={limiting_component}, got {:.1} bits",
+            soundness.total_bits
+        );
+    }
+
+    let output_path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("interesting_configs.json");
+    let file =
+        std::fs::File::create(&output_path).expect("failed to create interesting_configs.json");
+    serde_json::to_writer_pretty(file, &configs).expect("failed to write interesting_configs.json");
+    println!(
+        "wrote {} interesting configs to {}",
+        configs.len(),
+        output_path.display()
     );
 }
 

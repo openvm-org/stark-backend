@@ -26,7 +26,7 @@ pub mod log_up_params;
 // These configurations target 100-bits of proven round-by-round (RBR) security with BabyBear as the
 // base field and BabyBear^4 as the extension field.
 
-const WHIR_MAX_LOG_FINAL_POLY_LEN: usize = 10;
+pub const WHIR_MAX_LOG_FINAL_POLY_LEN: usize = 10;
 pub const SECURITY_BITS_TARGET: usize = 100;
 
 pub const DEFAULT_APP_L_SKIP: usize = 4;
@@ -53,7 +53,7 @@ pub fn challenge_field_bits() -> f64 {
 
 /// LogUp grinding sufficient for 100-bit security, accounting for the PCS list-size union bound of
 /// the initial WHIR proximity regime (`log2_pcs_list_size` is 0 for unique decoding).
-fn log_up_params_for_whir(
+pub fn log_up_params_for_whir(
     proximity: WhirProximityStrategy,
     log_stacked_height: usize,
     log_blowup: usize,
@@ -74,7 +74,7 @@ fn log_up_params_for_whir(
 /// proximity regime's PCS list size. The LogUp params are derived up front (from the same inputs
 /// `SystemParams::new` uses to build the WHIR config) so they can be passed straight in.
 #[allow(clippy::too_many_arguments)]
-fn params_with_100_bits_security(
+pub fn params_with_100_bits_security(
     log_blowup: usize,
     l_skip: usize,
     n_stack: usize,
