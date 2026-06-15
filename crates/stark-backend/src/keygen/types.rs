@@ -66,6 +66,15 @@ impl LinearConstraint {
 
 #[derive(Error, Debug)]
 pub enum KeygenError {
+    #[error("AIR {name} has zero main trace width")]
+    AirWidthZero { name: String },
+    #[error("AIR {name} must have at least one constraint or interaction")]
+    AirNoConstraintsOrInteractions { name: String },
+    #[error("AIR {name} interaction {interaction_index} has a zero-length message")]
+    InteractionMessageEmpty {
+        name: String,
+        interaction_index: usize,
+    },
     #[error("Max constraint degree exceeded for AIR {name}: {degree} > {max_degree}")]
     MaxConstraintDegreeExceeded {
         name: String,
