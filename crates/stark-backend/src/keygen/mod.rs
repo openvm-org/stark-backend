@@ -10,7 +10,7 @@ use crate::{
     air_builders::symbolic::{
         get_symbolic_builder,
         symbolic_variable::{Entry, SymbolicVariable},
-        SymbolicConstraintsDag, SymbolicExpressionNode, SymbolicRapBuilder,
+        SymbolicConstraintsDag, SymbolicExpressionNode,
     },
     hasher::MerkleHasher,
     keygen::types::{
@@ -243,11 +243,30 @@ impl<SC: StarkProtocolConfig> AirKeygenBuilder<SC> {
     ) -> Result<StarkProvingKey<SC>, KeygenError> {
         let air_name = self.air.name();
 
-        let symbolic_builder = self.get_symbolic_builder();
-        let width = symbolic_builder.width();
+        let width = self.trace_width();
+        if width.main_width() == 0 {
+            return Err(KeygenError::AirWidthZero { name: air_name });
+        }
+
+        let symbolic_builder = get_symbolic_builder(self.air.as_ref(), &width);
         let num_public_values = symbolic_builder.num_public_values();
 
         let symbolic_constraints = symbolic_builder.constraints();
+        if symbolic_constraints.constraints.is_empty()
+            && symbolic_constraints.interactions.is_empty()
+        {
+            return Err(KeygenError::AirNoConstraintsOrInteractions { name: air_name });
+        }
+        if let Some(interaction_index) = symbolic_constraints
+            .interactions
+            .iter()
+            .position(|interaction| interaction.message.is_empty())
+        {
+            return Err(KeygenError::InteractionMessageEmpty {
+                name: air_name,
+                interaction_index,
+            });
+        }
         let constraint_degree = symbolic_constraints.max_constraint_degree();
         if constraint_degree > max_constraint_degree {
             return Err(KeygenError::MaxConstraintDegreeExceeded {
@@ -294,13 +313,12 @@ impl<SC: StarkProtocolConfig> AirKeygenBuilder<SC> {
         })
     }
 
-    pub fn get_symbolic_builder(&self) -> SymbolicRapBuilder<SC::F> {
-        let width = TraceWidth {
+    fn trace_width(&self) -> TraceWidth {
+        TraceWidth {
             preprocessed: self.prep_keygen_data.width(),
             cached_mains: self.air.cached_main_widths(),
             common_main: self.air.common_main_width(),
-        };
-        get_symbolic_builder(self.air.as_ref(), &width)
+        }
     }
 }
 
