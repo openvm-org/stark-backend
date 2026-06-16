@@ -81,7 +81,6 @@ pub fn evaluate_round0_constraints_gpu<HS: GpuHashScheme>(
             num_x,
             num_cosets,
             max_temp_bytes,
-            stream,
         )
     };
     let mut intermediates = if intermed_capacity > 0 {
@@ -98,7 +97,6 @@ pub fn evaluate_round0_constraints_gpu<HS: GpuHashScheme>(
             num_x,
             num_cosets,
             max_temp_bytes,
-            stream,
         )
     };
     debug!("zerocheck:temp_sums_buffer_capacity={temp_sums_buffer_capacity}");
@@ -249,7 +247,6 @@ pub fn evaluate_round0_interactions_gpu<HS: GpuHashScheme>(
             num_x,
             num_cosets,
             max_temp_bytes,
-            stream,
         )
     };
     let mut intermediates = if intermed_capacity > 0 {
@@ -260,14 +257,7 @@ pub fn evaluate_round0_interactions_gpu<HS: GpuHashScheme>(
     };
 
     let temp_sums_buffer_capacity = unsafe {
-        _logup_r0_temp_sums_buffer_size(
-            buffer_size,
-            skip_domain,
-            num_x,
-            num_cosets,
-            max_temp_bytes,
-            stream,
-        )
+        _logup_r0_temp_sums_buffer_size(buffer_size, skip_domain, num_x, num_cosets, max_temp_bytes)
     };
     debug!("logup_r0:tmp_sums_buffer_capacity={temp_sums_buffer_capacity}");
     let mut temp_sums_buffer =

@@ -18,7 +18,6 @@ extern "C" {
         trace_height: u32,
         trace_width: u32,
         l_skip: u32,
-        stream: cudaStream_t,
     ) -> u32;
 
     // SP_DEG=1: no z_packets needed, outputs [NUM_G * skip_domain] to be ADDed

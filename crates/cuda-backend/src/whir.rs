@@ -224,12 +224,8 @@ where
             );
             debug_assert!(w_moments.len() >= f_height);
             let output_height = f_height / 2;
-            let tmp_buffer_capacity = unsafe {
-                _whir_sumcheck_coeff_moments_required_temp_buffer_size(
-                    f_height as u32,
-                    device_ctx.stream.as_raw(),
-                )
-            };
+            let tmp_buffer_capacity =
+                unsafe { _whir_sumcheck_coeff_moments_required_temp_buffer_size(f_height as u32) };
             if d_sumcheck_tmp.len() < tmp_buffer_capacity as usize {
                 d_sumcheck_tmp =
                     DeviceBuffer::<EF>::with_capacity_on(tmp_buffer_capacity as usize, device_ctx);

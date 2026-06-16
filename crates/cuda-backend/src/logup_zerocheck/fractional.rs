@@ -859,8 +859,7 @@ where
         DeviceBuffer::new()
     };
     let max_tmp_buffer_capacity = if total_rounds > 1 {
-        (unsafe { _frac_compute_round_temp_buffer_size((1 << (total_rounds - 1)) as u32, stream) })
-            as usize
+        (unsafe { _frac_compute_round_temp_buffer_size((1 << (total_rounds - 1)) as u32) }) as usize
     } else {
         0
     };
@@ -898,7 +897,7 @@ where
         let lambda = transcript.sample_ext();
 
         let tmp_buffer_capacity =
-            unsafe { _frac_compute_round_temp_buffer_size((1 << round) as u32, stream) } as usize;
+            unsafe { _frac_compute_round_temp_buffer_size((1 << round) as u32) } as usize;
         if tmp_buffer_capacity > tmp_block_sums.len() {
             tmp_block_sums = DeviceBuffer::<EF>::with_capacity_on(tmp_buffer_capacity, device_ctx);
         }

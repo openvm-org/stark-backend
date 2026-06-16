@@ -358,8 +358,7 @@ __global__ void logup_batch_mle_kernel(
 extern "C" size_t _zerocheck_batch_mle_intermediates_buffer_size(
     uint32_t buffer_size,
     uint32_t num_x,
-    uint32_t num_y,
-    cudaStream_t stream
+    uint32_t num_y
 ) {
     size_t height = static_cast<size_t>(num_x) * num_y;
     return height * buffer_size;
@@ -369,8 +368,7 @@ extern "C" size_t _zerocheck_batch_mle_intermediates_buffer_size(
 extern "C" size_t _logup_batch_mle_intermediates_buffer_size(
     uint32_t buffer_size,
     uint32_t num_x,
-    uint32_t num_y,
-    cudaStream_t stream
+    uint32_t num_y
 ) {
     size_t height = static_cast<size_t>(num_x) * num_y;
     return height * buffer_size;

@@ -20,10 +20,7 @@ extern "C" {
         stream: cudaStream_t,
     ) -> i32;
 
-    pub fn _whir_sumcheck_coeff_moments_required_temp_buffer_size(
-        height: u32,
-        stream: cudaStream_t,
-    ) -> u32;
+    pub fn _whir_sumcheck_coeff_moments_required_temp_buffer_size(height: u32) -> u32;
 
     fn _whir_sumcheck_coeff_moments_round(
         f_coeffs: *const EF,
@@ -100,7 +97,7 @@ pub unsafe fn whir_sumcheck_coeff_moments_round(
     #[cfg(debug_assertions)]
     {
         let len = tmp_block_sums.len();
-        let required = _whir_sumcheck_coeff_moments_required_temp_buffer_size(height, stream);
+        let required = _whir_sumcheck_coeff_moments_required_temp_buffer_size(height);
         assert!(
             len >= required as usize,
             "tmp_block_sums len={len} < required={required}"

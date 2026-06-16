@@ -149,7 +149,7 @@ extern "C" {
         stream: cudaStream_t,
     ) -> i32;
 
-    pub fn _frac_compute_round_temp_buffer_size(stride: u32, stream: cudaStream_t) -> u32;
+    pub fn _frac_compute_round_temp_buffer_size(stride: u32) -> u32;
 
     fn _frac_compute_round(
         eq_xi_low: *const EF,
@@ -347,7 +347,6 @@ extern "C" {
         num_x: u32,
         num_cosets: u32,
         max_temp_bytes: usize,
-        stream: cudaStream_t,
     ) -> usize;
 
     pub fn _logup_r0_intermediates_buffer_size(
@@ -356,7 +355,6 @@ extern "C" {
         num_x: u32,
         num_cosets: u32,
         max_temp_bytes: usize,
-        stream: cudaStream_t,
     ) -> usize;
 
     fn _logup_bary_eval_interactions_round0(
@@ -390,7 +388,6 @@ extern "C" {
         num_x: u32,
         num_cosets: u32,
         max_temp_bytes: usize,
-        stream: cudaStream_t,
     ) -> usize;
 
     pub fn _zerocheck_r0_intermediates_buffer_size(
@@ -399,7 +396,6 @@ extern "C" {
         num_x: u32,
         num_cosets: u32,
         max_temp_bytes: usize,
-        stream: cudaStream_t,
     ) -> usize;
 
     fn _zerocheck_ntt_eval_constraints(
@@ -471,14 +467,8 @@ extern "C" {
         stream: cudaStream_t,
     ) -> i32;
 
-    pub fn _logup_mle_temp_sums_buffer_size(num_x: u32, num_y: u32, stream: cudaStream_t) -> usize;
-
-    pub fn _logup_mle_intermediates_buffer_size(
-        buffer_size: u32,
-        num_x: u32,
-        num_y: u32,
-        stream: cudaStream_t,
-    ) -> usize;
+    pub fn _logup_mle_temp_sums_buffer_size(num_x: u32, num_y: u32) -> usize;
+    pub fn _logup_mle_intermediates_buffer_size(buffer_size: u32, num_x: u32, num_y: u32) -> usize;
 
     fn _logup_eval_mle(
         tmp_sums_buffer: *mut Frac<EF>,
@@ -506,14 +496,12 @@ extern "C" {
         buffer_size: u32,
         num_x: u32,
         num_y: u32,
-        stream: cudaStream_t,
     ) -> usize;
 
     pub fn _logup_batch_mle_intermediates_buffer_size(
         buffer_size: u32,
         num_x: u32,
         num_y: u32,
-        stream: cudaStream_t,
     ) -> usize;
 
     fn _zerocheck_batch_eval_mle(
@@ -693,7 +681,7 @@ pub unsafe fn frac_compute_round(
     #[cfg(debug_assertions)]
     {
         let len = tmp_block_sums.len();
-        let required = _frac_compute_round_temp_buffer_size(num_x.try_into().unwrap(), stream);
+        let required = _frac_compute_round_temp_buffer_size(num_x.try_into().unwrap());
         assert!(
             len >= required as usize,
             "tmp_block_sums len={len} < required={required}"
@@ -737,7 +725,7 @@ pub unsafe fn frac_compute_round_and_revert(
     #[cfg(debug_assertions)]
     {
         let len = tmp_block_sums.len();
-        let required = _frac_compute_round_temp_buffer_size(num_x.try_into().unwrap(), stream);
+        let required = _frac_compute_round_temp_buffer_size(num_x.try_into().unwrap());
         assert!(
             len >= required as usize,
             "tmp_block_sums len={len} < required={required}"
@@ -877,7 +865,7 @@ pub unsafe fn frac_compute_round_and_fold(
             pq_size
         );
         let len = tmp_block_sums.len();
-        let required = _frac_compute_round_temp_buffer_size(num_x as u32, stream);
+        let required = _frac_compute_round_temp_buffer_size(num_x as u32);
         assert!(
             len >= required as usize,
             "tmp_block_sums len={len} < required={required}"
@@ -940,7 +928,7 @@ pub unsafe fn frac_compute_round_and_fold_inplace(
             src_pq_size
         );
         let len = tmp_block_sums.len();
-        let required = _frac_compute_round_temp_buffer_size(num_x as u32, stream);
+        let required = _frac_compute_round_temp_buffer_size(num_x as u32);
         assert!(
             len >= required as usize,
             "tmp_block_sums len={len} < required={required}"
