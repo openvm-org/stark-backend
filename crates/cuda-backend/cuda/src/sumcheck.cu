@@ -65,8 +65,9 @@ __global__ void sumcheck_mle_round_kernel(
 
     int half_height = height >> 1;
 
-    // Local accumulators for all (d, WD) pairs
-    constexpr int MAX_D = 5; // [TODO] Mark this in doc that it's max degree 4 + 1
+    // Local accumulators for all (d, WD) pairs. The maximum constraint degree this
+    // kernel supports is 4, which requires 4 + 1 evaluations.
+    constexpr int MAX_D = 5;
     FpExt local_sums[WD * MAX_D];
 
     // Initialize accumulators
@@ -300,7 +301,9 @@ extern "C" int _fold_mle(
     const uint16_t num_matrices,
     const uint32_t output_height,
     const uint32_t max_output_cells,
-    const FpExt r_val, cudaStream_t stream) {
+    const FpExt r_val,
+    cudaStream_t stream
+) {
     auto [grid, block] = fold_mle_launch_params(max_output_cells, num_matrices);
     uint8_t log_output_height = static_cast<uint8_t>(31 - __builtin_clz(output_height));
     fold_mle_kernel<<<grid, block, 0, stream>>>(
@@ -326,7 +329,9 @@ extern "C" int _batch_fold_mle(
     const uint16_t num_matrices,
     const uint8_t *log_output_heights,
     const uint32_t max_output_cells, // max(height * width)
-    const FpExt r_val, cudaStream_t stream) {
+    const FpExt r_val,
+    cudaStream_t stream
+) {
     auto [grid, block] = fold_mle_launch_params(max_output_cells, num_matrices);
     batch_fold_mle_kernel<<<grid, block, 0, stream>>>(
         input_matrices, output_matrices, widths, num_matrices, log_output_heights, r_val
@@ -340,7 +345,9 @@ extern "C" int _fold_ple_from_coeffs(
     const uint32_t num_x,
     const uint32_t width,
     const uint32_t domain_size,
-    const FpExt r_val, cudaStream_t stream) {
+    const FpExt r_val,
+    cudaStream_t stream
+) {
     int total_polys = num_x * width;
     auto [grid, block] = kernel_launch_params(total_polys);
 
@@ -356,7 +363,9 @@ extern "C" int _reduce_over_x_and_cols(
     Fp *output,
     uint32_t num_x,
     uint32_t num_cols,
-    uint32_t large_domain_size, cudaStream_t stream) {
+    uint32_t large_domain_size,
+    cudaStream_t stream
+) {
     auto [grid, block] = kernel_launch_params(large_domain_size);
     reduce_over_x_and_cols_kernel<<<grid, block, 0, stream>>>(
         input, output, num_x, num_cols, large_domain_size
@@ -372,7 +381,9 @@ extern "C" int _sumcheck_mle_round(
     const uint32_t *widths,
     const uint32_t num_matrices,
     const uint32_t height,
-    const uint32_t d, cudaStream_t stream) {
+    const uint32_t d,
+    cudaStream_t stream
+) {
     if (d == 0 || d > 5) {
         return cudaErrorInvalidValue;
     }
@@ -405,7 +416,9 @@ extern "C" int _triangular_fold_mle(
     FpExt *output,
     const FpExt *input,
     FpExt r,
-    uint32_t output_max_n, cudaStream_t stream) {
+    uint32_t output_max_n,
+    cudaStream_t stream
+) {
     auto [grid, block] = kernel_launch_params(1 << output_max_n);
     grid.y = output_max_n + 1;
 
