@@ -224,12 +224,8 @@ where
             );
             debug_assert!(w_moments.len() >= f_height);
             let output_height = f_height / 2;
-            let tmp_buffer_capacity = unsafe {
-                _whir_sumcheck_coeff_moments_required_temp_buffer_size(
-                    f_height as u32,
-                    device_ctx.stream.as_raw(),
-                )
-            };
+            let tmp_buffer_capacity =
+                unsafe { _whir_sumcheck_coeff_moments_required_temp_buffer_size(f_height as u32) };
             if d_sumcheck_tmp.len() < tmp_buffer_capacity as usize {
                 d_sumcheck_tmp =
                     DeviceBuffer::<EF>::with_capacity_on(tmp_buffer_capacity as usize, device_ctx);
@@ -573,7 +569,7 @@ mod tests {
         prover::{
             stacked_pcs::stacked_commit, CpuColMajorBackend, DeviceDataTransporter, ProvingContext,
         },
-        test_utils::{FibFixture, TestFixture},
+        test_utils::{CachedFixture11, FibFixture, TestFixture},
         verifier::whir::{verify_whir, VerifyWhirError},
         StarkEngine, StarkProtocolConfig, SystemParams, WhirConfig, WhirParams,
         WhirProximityStrategy,
@@ -694,11 +690,16 @@ mod tests {
         )
     }
 
-    fn run_whir_fib_test_gpu(params: SystemParams) -> Result<(), VerifyWhirError> {
-        let engine = BabyBearPoseidon2RefEngine::<DuplexSponge>::new(params.clone());
-        let fib = FibFixture::new(0, 1, 1 << params.log_stacked_height());
-        let (pk, _vk) = fib.keygen(&engine);
-        let ctx = fib.generate_proving_ctx();
+    fn run_whir_fixture_test_gpu<F>(
+        params: SystemParams,
+        engine: &BabyBearPoseidon2RefEngine<DuplexSponge>,
+        fx: F,
+    ) -> Result<(), VerifyWhirError>
+    where
+        F: TestFixture<SC>,
+    {
+        let (pk, _vk) = fx.keygen(engine);
+        let ctx = fx.generate_proving_ctx().into_sorted();
         run_whir_test_gpu(params, pk, ctx)
     }
 
@@ -710,6 +711,31 @@ mod tests {
             folding_pow_bits: 1,
             mu_pow_bits: 3,
             proximity: WhirProximityStrategy::UniqueDecoding,
+        }
+    }
+
+    fn whir_test_system_params(
+        n_stack: usize,
+        log_blowup: usize,
+        k_whir: usize,
+        log_final_poly_len: usize,
+    ) -> SystemParams {
+        let l_skip = 2;
+        let w_stack = 8;
+        let whir = WhirConfig::new(
+            log_blowup,
+            l_skip + n_stack,
+            whir_test_params(k_whir, log_final_poly_len),
+            10,
+        );
+        SystemParams {
+            l_skip: 2,
+            n_stack,
+            w_stack,
+            log_blowup,
+            whir,
+            logup: log_up_security_params_baby_bear_100_bits(0.0),
+            max_constraint_degree: 3,
         }
     }
 
@@ -727,25 +753,33 @@ mod tests {
     ) -> Result<(), VerifyWhirError> {
         setup_tracing_with_log_level(Level::DEBUG);
 
-        let l_skip = 2;
-        let w_stack = 8;
-        let whir = WhirConfig::new(
-            log_blowup,
-            l_skip + n_stack,
-            whir_test_params(k_whir, log_final_poly_len),
-            10,
-        );
-        let params = SystemParams {
-            l_skip: 2,
-            n_stack,
-            w_stack,
-            log_blowup,
-            whir,
-            logup: log_up_security_params_baby_bear_100_bits(0.0),
-            max_constraint_degree: 3,
-        };
-        run_whir_fib_test_gpu(params)
+        let params = whir_test_system_params(n_stack, log_blowup, k_whir, log_final_poly_len);
+        let engine = BabyBearPoseidon2RefEngine::<DuplexSponge>::new(params.clone());
+        let height = 1 << params.log_stacked_height();
+
+        run_whir_fixture_test_gpu(params, &engine, FibFixture::new(0, 1, height))
     }
 
-    // TODO: test multiple commitments with GPU prover
+    #[test_case(2, 1, 1, 2)]
+    #[test_case(2, 1, 2, 0)]
+    #[test_case(2, 1, 3, 1)]
+    #[test_case(2, 1, 4, 0)]
+    #[test_case(2, 2, 4, 0)]
+    fn test_whir_cached_gpu(
+        n_stack: usize,
+        log_blowup: usize,
+        k_whir: usize,
+        log_final_poly_len: usize,
+    ) -> Result<(), VerifyWhirError> {
+        setup_tracing_with_log_level(Level::DEBUG);
+
+        let params = whir_test_system_params(n_stack, log_blowup, k_whir, log_final_poly_len);
+        let engine = BabyBearPoseidon2RefEngine::<DuplexSponge>::new(params.clone());
+
+        run_whir_fixture_test_gpu(
+            params,
+            &engine,
+            CachedFixture11::new(engine.config().clone()),
+        )
+    }
 }

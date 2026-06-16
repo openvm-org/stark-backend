@@ -62,8 +62,7 @@ impl GpuDevice {
         };
         let id = get_device().unwrap() as u32;
         let device_ctx = GpuDeviceCtx::for_device(id)?;
-        let sm_count =
-            get_sm_count(id, device_ctx.stream.as_raw()).expect("failed to get SM count");
+        let sm_count = get_sm_count(id).expect("failed to get SM count");
         let config = GpuDeviceConfig {
             params,
             prover_config,

@@ -533,7 +533,6 @@ impl<D: Copy + Clone + Send + Sync + 'static> StackedReductionGpu<D> {
                     trace_height as u32,
                     trace_width as u32,
                     l_skip as u32,
-                    self.device_ctx.stream.as_raw(),
                 )
             } as usize;
 

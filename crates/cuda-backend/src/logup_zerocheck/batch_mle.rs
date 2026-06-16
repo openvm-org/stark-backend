@@ -39,25 +39,17 @@ fn zerocheck_batch_mle_intermediates_buffer_bytes(
     buffer_size: u32,
     num_x: u32,
     num_y: u32,
-    device_ctx: &GpuDeviceCtx,
 ) -> usize {
-    let stream = device_ctx.stream.as_raw();
     unsafe {
-        _zerocheck_batch_mle_intermediates_buffer_size(buffer_size, num_x, num_y, stream)
+        _zerocheck_batch_mle_intermediates_buffer_size(buffer_size, num_x, num_y)
             * std::mem::size_of::<EF>()
     }
 }
 
 /// Computes logup intermediate buffer memory in bytes for a trace.
-fn logup_batch_mle_intermediates_buffer_bytes(
-    buffer_size: u32,
-    num_x: u32,
-    num_y: u32,
-    device_ctx: &GpuDeviceCtx,
-) -> usize {
-    let stream = device_ctx.stream.as_raw();
+fn logup_batch_mle_intermediates_buffer_bytes(buffer_size: u32, num_x: u32, num_y: u32) -> usize {
     unsafe {
-        _logup_batch_mle_intermediates_buffer_size(buffer_size, num_x, num_y, stream)
+        _logup_batch_mle_intermediates_buffer_size(buffer_size, num_x, num_y)
             * std::mem::size_of::<EF>()
     }
 }
@@ -173,12 +165,7 @@ impl<'a> ZerocheckMleBatchBuilder<'a> {
 
             let d_intermediates = if buffer_size > 0 {
                 let intermediates_len = unsafe {
-                    _zerocheck_batch_mle_intermediates_buffer_size(
-                        buffer_size,
-                        num_x,
-                        t.num_y,
-                        device_ctx.stream.as_raw(),
-                    )
+                    _zerocheck_batch_mle_intermediates_buffer_size(buffer_size, num_x, t.num_y)
                 };
                 let buf = DeviceBuffer::<EF>::with_capacity_on(intermediates_len, device_ctx);
                 let ptr = buf.as_mut_ptr();
@@ -317,12 +304,7 @@ impl<'a> LogupMleBatchBuilder<'a> {
 
             let d_intermediates = if buffer_size > 0 {
                 let intermediates_len = unsafe {
-                    _logup_batch_mle_intermediates_buffer_size(
-                        buffer_size,
-                        num_x,
-                        t.num_y,
-                        device_ctx.stream.as_raw(),
-                    )
+                    _logup_batch_mle_intermediates_buffer_size(buffer_size, num_x, t.num_y)
                 };
                 let buf = DeviceBuffer::<EF>::with_capacity_on(intermediates_len, device_ctx);
                 let ptr = buf.as_mut_ptr();
@@ -436,12 +418,7 @@ pub(crate) fn evaluate_zerocheck_batched<'a, HS: GpuHashScheme>(
                 .zerocheck_mle
                 .inner
                 .buffer_size;
-            let mem = zerocheck_batch_mle_intermediates_buffer_bytes(
-                buffer_size,
-                num_x,
-                t.num_y,
-                device_ctx,
-            );
+            let mem = zerocheck_batch_mle_intermediates_buffer_bytes(buffer_size, num_x, t.num_y);
             (t, mem)
         })
         .collect();
@@ -572,8 +549,7 @@ pub(crate) fn evaluate_logup_batched<HS: GpuHashScheme>(
                 .interaction_rules
                 .inner
                 .buffer_size;
-            let mem =
-                logup_batch_mle_intermediates_buffer_bytes(buffer_size, num_x, t.num_y, device_ctx);
+            let mem = logup_batch_mle_intermediates_buffer_bytes(buffer_size, num_x, t.num_y);
             (t, mem)
         })
         .collect();
