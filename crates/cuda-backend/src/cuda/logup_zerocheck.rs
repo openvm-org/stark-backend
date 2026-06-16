@@ -433,17 +433,12 @@ extern "C" {
     ) -> i32;
 
     // mle.cu
-    pub fn _zerocheck_mle_temp_sums_buffer_size(
-        num_x: u32,
-        num_y: u32,
-        stream: cudaStream_t,
-    ) -> usize;
+    pub fn _zerocheck_mle_temp_sums_buffer_size(num_x: u32, num_y: u32) -> usize;
 
     pub fn _zerocheck_mle_intermediates_buffer_size(
         buffer_size: u32,
         num_x: u32,
         num_y: u32,
-        stream: cudaStream_t,
     ) -> usize;
 
     fn _zerocheck_eval_mle(

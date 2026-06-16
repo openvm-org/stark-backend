@@ -45,15 +45,14 @@ pub fn evaluate_mle_constraints_gpu(
     let stream = device_ctx.stream.as_raw();
     let buffer_size = rules.inner.buffer_size;
     let intermed_capacity =
-        unsafe { _zerocheck_mle_intermediates_buffer_size(buffer_size, num_x, num_y, stream) };
+        unsafe { _zerocheck_mle_intermediates_buffer_size(buffer_size, num_x, num_y) };
     let mut intermediates = if intermed_capacity > 0 {
         debug!("zerocheck:intermediates_capacity={intermed_capacity}");
         DeviceBuffer::<EF>::with_capacity_on(intermed_capacity, device_ctx)
     } else {
         DeviceBuffer::<EF>::new()
     };
-    let temp_sums_buffer_capacity =
-        unsafe { _zerocheck_mle_temp_sums_buffer_size(num_x, num_y, stream) };
+    let temp_sums_buffer_capacity = unsafe { _zerocheck_mle_temp_sums_buffer_size(num_x, num_y) };
     debug!("zerocheck:temp_sums_buffer_capacity={temp_sums_buffer_capacity}");
     let mut temp_sums_buffer =
         DeviceBuffer::<EF>::with_capacity_on(temp_sums_buffer_capacity, device_ctx);
