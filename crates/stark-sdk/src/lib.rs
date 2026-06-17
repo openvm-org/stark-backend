@@ -5,6 +5,7 @@ pub use p3_baby_bear;
 
 pub mod bench;
 pub mod config;
+pub mod verify_mono;
 #[cfg(feature = "metrics")]
 pub mod metrics_tracing;
 #[cfg(feature = "nvtx")]
