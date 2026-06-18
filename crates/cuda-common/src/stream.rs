@@ -2,7 +2,7 @@ use std::{
     borrow::Cow,
     ffi::c_void,
     ops::Deref,
-    sync::{Arc, Mutex},
+    sync::{Arc, LazyLock, Mutex},
 };
 
 use crate::error::{check, CudaError};
@@ -138,22 +138,38 @@ pub struct GpuDeviceCtx {
     pub stream: StreamGuard,
 }
 
+// introduce default stream so all memory
+pub(crate) static DEFAULT_STREAM: LazyLock<StreamGuard> = LazyLock::new(|| {
+    StreamGuard::new(CudaStream::new_non_blocking().expect("failed to construct default stream"))
+});
+
 impl GpuDeviceCtx {
     /// Creates a new `GpuDeviceCtx` for the given device.
     ///
     /// NOTE: This calls `set_device_by_id` as a side effect, changing the
     /// current CUDA device for the calling thread.
+    ///
+    /// Note that by default all work is launched on a per-process stream. This is fine as cuda
+    /// stream APIs are thread-safe. But for greater concurrency you can use .with_new_stream to
+    /// launch work on separate streams for each thread. Make sure that the the work is synchronized
+    /// with respect to the default stream though (with self.stream.wait(default_stream))
     pub fn for_device(device_id: u32) -> Result<Self, CudaError> {
         crate::common::set_device_by_id(device_id as i32)?;
         Ok(Self {
             device_id,
-            stream: StreamGuard::new(CudaStream::new_non_blocking()?),
+            stream: (*DEFAULT_STREAM).clone(),
         })
     }
 
     pub fn for_current_device() -> Result<Self, CudaError> {
         let device_id = crate::common::get_device()? as u32;
         Self::for_device(device_id)
+    }
+
+    /// Consumes self and returns self with new non default stream
+    pub fn with_new_stream(mut self) -> Result<Self, CudaError> {
+        self.stream = StreamGuard::new(CudaStream::new_non_blocking()?);
+        Ok(self)
     }
 }
 
@@ -164,6 +180,11 @@ impl GpuDeviceCtx {
 /// The caller must ensure that `stream` is a valid CUDA stream handle.
 pub unsafe fn sync_stream(stream: cudaStream_t) -> Result<(), CudaError> {
     check(cudaStreamSynchronize(stream))
+}
+
+/// get the per-process default stream
+pub fn default_stream() -> StreamGuard {
+    DEFAULT_STREAM.clone()
 }
 
 // ---------------------------------------------------------------------------

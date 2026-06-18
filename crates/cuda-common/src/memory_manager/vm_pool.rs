@@ -668,8 +668,10 @@ impl VirtualMemoryPool {
                 .expect("BUG: free region disappeared");
 
             if other_stream && !region.event.completed() {
-                // Make the caller's stream wait on the cross-stream event
-                stream.wait(&region.event)?;
+                // we need to synchronize the stream with the host as remap_regions is synchronous
+                // wrt. the host; it's undefined behavior if a kernel is using an address range that
+                // gets remapped on the host
+                stream.synchronize()?;
             }
 
             let take = remaining.min(region.size);

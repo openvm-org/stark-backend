@@ -10,7 +10,7 @@ use bytesize::ByteSize;
 
 use crate::{
     error::{check, MemoryError},
-    stream::{cudaStream_t, device_synchronize, StreamGuard},
+    stream::{cudaStream_t, default_stream, device_synchronize, StreamGuard},
 };
 
 mod cuda;
@@ -119,6 +119,11 @@ impl MemoryManager {
         let nn = NonNull::new(ptr).ok_or(MemoryError::NullPointer)?;
 
         if let Some(record) = self.allocated_ptrs.remove(&nn) {
+            if record.stream != default_stream() {
+                // we need to synchronize any memory allocated that is not on the default stream
+                // as work launched prior to drop might depend on this memory
+                record.stream.synchronize().map_err(MemoryError::Cuda)?;
+            }
             let size = record.size;
             self.current_size -= size;
             check(unsafe { cudaFreeAsync(ptr, record.stream.as_raw()) }).map_err(|e| {
@@ -129,6 +134,11 @@ impl MemoryManager {
         } else {
             let (freed_size, guard) = self.pool.free_internal(ptr)?;
             self.current_size -= freed_size;
+            if guard != default_stream() {
+                // same reasoning as above, work launched on other streams depend on this memory,
+                // when reusing only the stream on which this memory is allocated on is synced.
+                guard.synchronize().map_err(MemoryError::Cuda)?;
+            }
             Ok(guard)
         }
     }
