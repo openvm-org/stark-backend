@@ -671,7 +671,7 @@ impl VirtualMemoryPool {
                 // we need to synchronize the stream with the host as remap_regions is synchronous
                 // wrt. the host; it's undefined behavior if a kernel is using an address range that
                 // gets remapped on the host
-                stream.synchronize()?;
+                region.event.synchronize()?;
             }
 
             let take = remaining.min(region.size);
