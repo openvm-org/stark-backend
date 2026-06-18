@@ -118,15 +118,18 @@ impl MemoryManager {
     unsafe fn d_free_under_lock(&mut self, ptr: *mut c_void) -> Result<StreamGuard, MemoryError> {
         let nn = NonNull::new(ptr).ok_or(MemoryError::NullPointer)?;
 
+        let default_stream = default_stream();
         if let Some(record) = self.allocated_ptrs.remove(&nn) {
-            if record.stream != default_stream() {
+            if record.stream != default_stream {
                 // we need to synchronize any memory allocated that is not on the default stream
                 // as work launched prior to drop might depend on this memory
-                record.stream.synchronize().map_err(MemoryError::Cuda)?;
+                default_stream
+                    .wait_on(&record.stream)
+                    .map_err(MemoryError::Cuda)?;
             }
             let size = record.size;
             self.current_size -= size;
-            check(unsafe { cudaFreeAsync(ptr, record.stream.as_raw()) }).map_err(|e| {
+            check(unsafe { cudaFreeAsync(ptr, default_stream.as_raw()) }).map_err(|e| {
                 tracing::error!("cudaFreeAsync failed: ptr={:p}: {:?}", ptr, e);
                 MemoryError::from(e)
             })?;
@@ -134,10 +137,11 @@ impl MemoryManager {
         } else {
             let (freed_size, guard) = self.pool.free_internal(ptr)?;
             self.current_size -= freed_size;
-            if guard != default_stream() {
+            if guard != default_stream {
                 // same reasoning as above, work launched on other streams depend on this memory,
                 // when reusing only the stream on which this memory is allocated on is synced.
-                guard.synchronize().map_err(MemoryError::Cuda)?;
+                default_stream.wait_on(&guard).map_err(MemoryError::Cuda)?;
+                default_stream.synchronize().map_err(MemoryError::Cuda)?;
             }
             Ok(guard)
         }

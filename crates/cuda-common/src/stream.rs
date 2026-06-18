@@ -76,6 +76,13 @@ impl CudaStream {
         check(unsafe { cudaStreamWaitEvent(self.stream, event.event, 0) })
     }
 
+    /// Wait for other stream to complete before continuing the present stream
+    pub fn wait_on(&self, other: &CudaStream) -> Result<(), CudaError> {
+        let event = self.host_event.lock().unwrap();
+        unsafe { event.record(other.stream) }?;
+        self.wait(&event)
+    }
+
     /// Record a per-stream event and synchronize to complete all pending D2H copies.
     /// Uses event-based sync rather than cudaStreamSynchronize because this waits
     /// only for work up to the event point, allowing future selective sync patterns
