@@ -4,8 +4,8 @@
 //! `Fundamentals.Air` Lean library:
 //!
 //! - **Schema.lean** — width, layout, per-column `…Idx` / `…Ref` defs.
-//! - **Constraints.lean** — symbolic constraints as `Expr F (layout := layout)`, `constraintsList`, the `air :
-//!   AIR F` value, named-column accessors, and a `RawConstraintsAt` extractor. Shared
+//! - **Constraints.lean** — symbolic constraints as `Expr F (layout := layout)`, `constraintsList`,
+//!   the `air : AIR F` value, named-column accessors, and a `RawConstraintsAt` extractor. Shared
 //!   sub-expressions (`inter_K`) live here too — `Interactions.lean` can reference them via the
 //!   open namespace.
 //! - **Interactions.lean** — per-bus `…Interactions` lists referencing a hand-curated `BusIdx`

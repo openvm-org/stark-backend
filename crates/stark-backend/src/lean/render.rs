@@ -1,17 +1,16 @@
 //! Symbolic-DAG rendering for the native Lean dialect.
 //!
-//! The output is an `MvPolynomial (Var layout) F` body. Compound nodes are emitted in one of three forms,
-//! decided per-node by [`Decision`]:
+//! The output is an `MvPolynomial (Var layout) F` body. Compound nodes are emitted in one of three
+//! forms, decided per-node by [`Decision`]:
 //!
-//! - **Inline.** `(<lhs> op <rhs>)` is dropped into the parent expression
-//!   directly. Default for short / single-use subtrees.
-//! - **Local `let tN`.** Pushed onto the constraint's binding list and
-//!   referenced as `tN` from the parent. Used when a subtree is reused
-//!   ≥`SHARE_THRESHOLD` times within one constraint, is large enough to
-//!   be worth a name, and does not qualify for an AIR-wide helper.
-//! - **Global `inter_K`.** Hoisted to a top-level `noncomputable def inter_K : Expr F
-//!   layout := Expr.ofPolynomial <| …`. A pre-pass chooses these nodes before any
-//!   expression body is rendered.
+//! - **Inline.** `(<lhs> op <rhs>)` is dropped into the parent expression directly. Default for
+//!   short / single-use subtrees.
+//! - **Local `let tN`.** Pushed onto the constraint's binding list and referenced as `tN` from the
+//!   parent. Used when a subtree is reused ≥`SHARE_THRESHOLD` times within one constraint, is large
+//!   enough to be worth a name, and does not qualify for an AIR-wide helper.
+//! - **Global `inter_K`.** Hoisted to a top-level `noncomputable def inter_K : Expr F layout :=
+//!   Expr.ofPolynomial <| …`. A pre-pass chooses these nodes before any expression body is
+//!   rendered.
 //!
 //! The DAG walk is post-order via an explicit stack; pointer identity
 //! (`*const SymbolicExpression<F>`) keys the dedup, helper-name, and
