@@ -150,7 +150,8 @@ Provided the soundness assumptions above hold, if the bus is balanced, the verif
 
 ## Interaction API
 
-The lowest-level interface is controlled by the trait [`InteractionBuilder`](./mod.rs)
+The lowest-level interface is controlled by the trait
+[`InteractionBuilder`](../crates/stark-backend/src/interaction/mod.rs)
 
 ```rust
 pub trait InteractionBuilder: AirBuilder {
@@ -184,8 +185,8 @@ and `PermutationCheckBus`, this quantity is set to `1`.
 ### LookupBus
 
 For the common case of lookup tables, we provided a more tailored API. To define a lookup bus, one instantiates the
-`LookupBus` struct. This struct provides methods `perform_fields_lookup`, for AIRs that wish to perform a lookup, and
-`add_fields` for the _single_ AIR that serves as the lookup table. These methods are light wrappers around
+`LookupBus` struct. This struct provides methods `lookup_key`, for AIRs that wish to perform a lookup, and
+`add_key_with_lookups` for the _single_ AIR that serves as the lookup table. These methods are light wrappers around
 `push_interaction`.
 
 ```rust
@@ -311,10 +312,10 @@ height coefficients to be the number of interactions on the corresponding AIR an
 allows us to claim a certain number of bits of security. See [here](Soundness_of_Interactions_via_LogUp.pdf) for more
 details.
 
-## Backend implementation via logUp
+## Backend implementation via LogUp
 
-The backend implementation of the prover will constrain the computation of a cumulative sum _for just a single AIR_ with
-trace domain $\langle \omega \rangle$ and interactions $J$:
+The backend implementation proves the LogUp sum with a GKR fractional sumcheck. For an AIR with trace domain
+$\langle \omega \rangle$ and interactions $J$, the prover evaluates the LogUp leaf fractions
 
 $$
 \sum_{x \in \langle \omega \rangle} \sum_{(\sigma, m, b)} \frac{\hat{m}(x)}{\alpha + h_{\beta}(\hat{\sigma}(x) \circ b)}
@@ -330,45 +331,27 @@ Note that the bus index being nonzero and concatenated to the end of the message
 buses are mapped to distinct preimages of $h_\beta$. It also distinguishes between two different length messages with
 trailing zeroes.
 
-Globally, the verifier will sum this per-AIR cumulative sum over all AIRs and lastly constrain that the sum is $0$. This
-will enforce that the sends and receives are balanced globally across all AIRs.
+The prover stacks these fractions across all present AIRs, lifts them to the LogUp hypercube, and proves that their
+global sum is zero. Fraction addition is represented in projective coordinates $(p, q)$, and the layered fractional
+addition tree is checked with GKR.
 
-### Virtual columns and constraints
+See `crates/stark-backend/src/prover/logup_zerocheck/` for the CPU prover implementation and
+[`docs/cuda-backend/gkr-prover.md`](./cuda-backend/gkr-prover.md) for the CUDA implementation notes.
 
-The $\sigma_j, m$ can be any multivariate polynomial expression, which is expressed via the `AB::Expr` type within the
-`Air::eval` function.
+### GKR input evaluations and constraints
 
-For each interaction $\mu = (\sigma, m, b)$, we add one virtual column $q_\mu$ with row $x$ equal to
-
-$$
-q_\mu(x) = \frac{m}{\alpha + h_{\beta}(\hat{\sigma}(x) \circ b)}
-$$
-
-The constraint is
+The $\sigma_j$ and $m$ terms can be any multivariate polynomial expression expressed via the `AB::Expr` type within
+the `Air::eval` function. During proving, the backend evaluates those expressions on each relevant trace row and row
+rotation to form the LogUp input fractions
 
 $$
-q_\mu(x) \cdot \left(\alpha + h_{\beta}(\hat{\sigma}(x) \circ b) \right) = \hat{m}(x),
+\left(\hat{m}(x),\; \alpha + h_{\beta}(\hat{\sigma}(x) \circ b)\right).
 $$
 
-which has degree $\max(1 + \max_j \deg(\sigma_j), \deg(m))$.
+The fractional sumcheck proves that the stacked input fractions add to zero. Its final random evaluation point is then
+linked back to the committed trace data by the batched zerocheck/sumcheck over the AIR constraints and interaction
+expressions.
 
-Note: To optimize column usage, we sometimes combine several $q$ columns, though this increases the constraint degree.
-
-We need one more virtual column $\phi$ for the cumulative sum of all multiplicities. The row $x$ of $\phi$ contains the
-partial sum of all reciprocals up to row $x$.
-
-$$
-\phi(x) = \sum_{y \leq x} \left(\sum_\mu q_\mu(y)\right)
-$$
-
-The constraints are:
-
-- $sel_{first} \cdot \phi = sel_{first} \cdot \sum_\mu q_\mu$
-- $sel_{transition} \cdot (\phi' - \phi) = sel_{transition} \cdot \sum_\mu sign(\mu) q_\mu'$ where $\phi'$ and $q'$ mean the next row (rotation by $1$).
-- $sel_{last} \cdot \phi = sum$
-
-where $sum$ is exposed to the verifier.
-
-In summary, we need 1 additional virtual column for each multiplicities, and 1 additional virtual column to track the
-partial sum. These columns are all virtual in the sense that they are only materialized by the prover after the main
-trace has been committed, since a random challenge is needed.
+The GKR proof is over the fractional addition circuit itself. The batched zerocheck is responsible for enforcing that
+the LogUp input evaluations used by GKR are consistent with the committed traces and the symbolic interaction
+expressions.

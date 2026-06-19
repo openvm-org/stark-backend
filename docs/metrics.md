@@ -1,18 +1,40 @@
 # Metrics
 
-We use the [`metrics`](https://docs.rs/metrics/latest/metrics/) crate to collect metrics for the STARK prover. We refer to [reth docs](https://github.com/paradigmxyz/reth/blob/main/docs/design/metrics.md) for more guidelines on how to use metrics.
+We use the [`metrics`](https://docs.rs/metrics/latest/metrics/) crate to collect metrics for the STARK prover. We
+refer to [reth docs](https://github.com/paradigmxyz/reth/blob/main/docs/design/metrics.md) for more guidelines on how
+to use metrics.
 
-Timing metrics are collected by using a custom tracing layer [`TimingMetricsLayer`](../crates/stark-sdk/src/metrics_tracing.rs). This layer will emit a gauge metric with name `${name}_time_ms` for the timing of a tracing span with name `${name}` in milliseconds.
+Timing metrics are collected by using a custom tracing layer
+[`TimingMetricsLayer`](../crates/stark-sdk/src/metrics_tracing.rs). This layer emits a gauge metric named
+`${name}_time_ms` for the elapsed time of each `INFO` or higher tracing span named `${name}`, in milliseconds. String
+span fields are emitted as metric labels; for prover spans this commonly includes `phase = "prover"`.
 
-Each invocation of `MultiTraceStarkProver::prove` will collect the following metrics, all as `Gauge`s. We use gauge instead of histogram because these metrics are not frequently sampled and we care about the exact value. Any application that uses this backend is responsible for adding additional namespace labels if they wish to distinguish between different proof invocations.
+Each invocation of [`Coordinator::prove`](../crates/stark-backend/src/prover/mod.rs), the implementation of the
+[`Prover`](../crates/stark-backend/src/prover/mod.rs) trait, collects timing gauges. We use gauges instead of
+histograms because these metrics are not frequently sampled and we care about the exact value. Any application that uses
+this backend is responsible for adding additional namespace labels if it needs to distinguish proof invocations.
 
 - `stark_prove_excluding_trace_time_ms`: The total elapsed time in milliseconds of `prove`. This excludes the main trace generation because that is not done by `stark-backend`.
 
-The following metrics comprise the main breakdown of the components of `prove`. They are disjoint and _expected_ to sum up to almost `stark_prove_excluding_trace_time_ms` (if it does not, an issue should be opened as it means there is an unexpected source of slowdown).
+## Prover Breakdown
 
-- `main_trace_commit_time_ms`: The time to commit the main trace matrices, depending on the PCS.
-- `generate_perm_trace_time_ms`: When FRI is used for the log up argument, this is the time to generate the permutation trace.
-- `perm_trace_commit_time_ms`: When FRI is used for the log up argument, this is the time to commit the permutation trace.
-- `quotient_poly_compute_time_ms`: The time to compute the quotient polynomials from the trace matrices according to AIR constraints.
-- `quotient_poly_commit_time_ms`: The time to commit the quotient polynomials.
-- `pcs_opening_time_ms`: The time to compute all polynomial commitment scheme (PCS) opening proofs necessary for the proof. Currently the PCS is FRI over a base field with high `2`-adicity.
+The prover uses the stacked PCS and WHIR. LogUp is proved through the GKR fractional sumcheck and the batched
+zerocheck.
+
+The commonly useful prover metrics are:
+
+- `prover.main_trace_commit_time_ms`: Time to commit the common main trace matrices with the stacked PCS.
+- `prove_zerocheck_and_logup_time_ms` or `prove_zerocheck_and_logup_gpu_time_ms`: combined LogUp GKR and batched zerocheck proof.
+- `fractional_sumcheck_time_ms` and `prover.rap_constraints.logup_gkr_time_ms`: LogUp GKR fractional sumcheck spans.
+- `prover.batch_constraints.mle_rounds_time_ms` and `prover.rap_constraints.mle_rounds_time_ms`: batched constraint sumcheck MLE rounds.
+- `prove_stacked_opening_reduction_time_ms` and `prover.openings.stacked_reduction_time_ms`: stacked opening reduction.
+- `prove_whir_time_ms`, `prove_whir_opening_cpu_time_ms`, and `prover.openings.whir_time_ms`: WHIR opening proof generation.
+
+Backend implementations also expose nested spans such as `stacked_round0_time_ms`,
+`stacked_fold_mle_time_ms`, `whir_sumcheck_time_ms`, `whir_dft_merkle_time_ms`, and
+`whir_mle_conversion_time_ms`.
+
+These spans are nested and backend-dependent, so the metrics listed above are not disjoint and should not be summed as a
+flat decomposition of `stark_prove_excluding_trace_time_ms`. For example, `trace_commit_cpu_time_ms` or
+`prover.commit_time_ms` is nested inside `prover.main_trace_commit_time_ms`, and WHIR subspans are nested inside the
+backend's opening stage.

@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+### Added
+- Segment memory metering APIs for estimating segmented prover memory usage.
+- AIR rotation metadata used by LogUp and stacked-opening proving to skip unused rotation work.
+- Backend conformance test crate for shared prover/verifier behavior.
+- Row-major CPU backend crate as part of the prover implementation.
+
+### Changed
+- Updated the STARK protocol to SWIRL: LogUp interactions are now proven through the GKR fractional sumcheck, constraint checking uses the batched constraint sumcheck, and trace openings reduce through the stacked PCS opening reduction and WHIR.
+
 ## v1.4.0 (2026-05-15)
 
 ### Changed
