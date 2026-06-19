@@ -94,8 +94,9 @@ fn constraints_inline_short_subtrees() {
     assert!(!s.contains("inter_0"));
     assert!(!s.contains("let t0 :="));
     // Inlined form.
-    assert!(s.contains("def expr_0 : Expr F layout := fun va =>"));
-    assert!(s.contains("(va (.cell .local is_validRef) * (va (.cell .local is_validRef) - 1))"));
+    assert!(s.contains("noncomputable def expr_0 : Expr F (layout := layout) :="));
+    assert!(s.contains("Expr.ofPolynomial <|"));
+    assert!(s.contains("(MvPolynomial.X (.cell .local is_validRef) * (MvPolynomial.X (.cell .local is_validRef) - MvPolynomial.C (1 : F)))"));
     assert!(s.contains("def constraintsList"));
     // One generic `mem_constraintsList` helper used inline by
     // `of_satisfiesRow` for each sub-goal — no per-K helpers, no
@@ -150,11 +151,11 @@ fn constraints_hoist_subtree_shared_across_constraints() {
     let s = String::from_utf8(out).unwrap();
 
     assert!(s.contains("Shared sub-expressions"));
-    assert!(s.contains("def inter_0 : Expr F layout := fun va =>"));
+    assert!(s.contains("noncomputable def inter_0 : Expr F (layout := layout) :="));
     // Helper is tagged with the per-AIR simp attribute.
-    assert!(s.contains("@[TinyAir_inter]\ndef inter_0"));
+    assert!(s.contains("@[TinyAir_inter]\nnoncomputable def inter_0"));
     // Both constraints reference the helper.
-    assert_eq!(s.matches("inter_0 va").count(), 2);
+    assert_eq!(s.matches("inter_0.polynomial").count(), 2);
 }
 
 #[test]
@@ -251,15 +252,15 @@ fn helper_dependencies_are_emitted_before_parent_helpers() {
     let rendered = render_air(&dag, &names, &[], &opts).unwrap();
     let helpers = rendered.helper_defs.join("\n");
     let parent_0_def =
-        "def inter_1 : Expr F layout := fun va =>\n  (inter_0 va + va (.cell .local bRef))";
+        "noncomputable def inter_1 : Expr F (layout := layout) :=\n  Expr.ofPolynomial <|\n    (inter_0.polynomial + MvPolynomial.X (.cell .local bRef))";
     let parent_1_def =
-        "def inter_2 : Expr F layout := fun va =>\n  (inter_0 va + va (.cell .local cRef))";
+        "noncomputable def inter_2 : Expr F (layout := layout) :=\n  Expr.ofPolynomial <|\n    (inter_0.polynomial + MvPolynomial.X (.cell .local cRef))";
 
-    assert!(helpers.contains("def inter_0 : Expr F layout := fun va =>"));
-    assert!(helpers.contains("(va (.cell .local aRef) * (va (.cell .local aRef) - 1))"));
+    assert!(helpers.contains("noncomputable def inter_0 : Expr F (layout := layout) :="));
+    assert!(helpers.contains("(MvPolynomial.X (.cell .local aRef) * (MvPolynomial.X (.cell .local aRef) - MvPolynomial.C (1 : F)))"));
     assert!(helpers.contains(parent_0_def));
     assert!(helpers.contains(parent_1_def));
-    assert_eq!(helpers.matches("inter_0 va").count(), 2);
+    assert_eq!(helpers.matches("inter_0.polynomial").count(), 2);
     assert!(
         !helpers.contains("let t0 :="),
         "shared helper dependency should not be captured as a local let:\n{helpers}"
@@ -312,8 +313,8 @@ fn interactions_simp_uses_per_air_inter_attribute_when_helper_referenced() {
     // shared compound subtree gets hoisted to `inter_0`. The
     // constraints exist only to drive global use-count above the
     // share threshold; the interaction's count is a `Neg` of the
-    // same shared subtree, so its rendered multExpr is `-(inter_0
-    // va)` and the per-pick `_evalMultiplicityAt` simp arg list
+    // same shared subtree, so its rendered multExpr is `-inter_0.polynomial`
+    // and the per-pick `_evalMultiplicityAt` simp arg list
     // must include the per-AIR simp attribute (so transitive
     // `inter_K → inter_M` references can be unfolded by simp).
     let is_valid = Arc::new(main_var(0, 0, 0));
@@ -369,7 +370,7 @@ fn interactions_simp_uses_per_air_inter_attribute_when_helper_referenced() {
     write_constraints(&mut cout, "TinyAir", &names, &rendered, &opts).unwrap();
     let cs = String::from_utf8(cout).unwrap();
     assert!(
-        cs.contains("@[TinyAir_inter]\ndef inter_0"),
+        cs.contains("@[TinyAir_inter]\nnoncomputable def inter_0"),
         "expected `@[TinyAir_inter]` above hoisted helper, got:\n{cs}"
     );
 
