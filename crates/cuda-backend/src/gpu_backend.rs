@@ -58,6 +58,8 @@ where
 {
     type Error = ProverError;
 
+    #[allow(clippy::type_complexity)]
+    #[instrument(name = "prover.commit", skip_all, fields(phase = "prover"))]
     fn commit(
         &self,
         traces: &[&DeviceMatrix<F>],
