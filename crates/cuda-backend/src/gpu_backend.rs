@@ -58,6 +58,7 @@ where
 {
     type Error = ProverError;
 
+    #[instrument(name = "prover.commit", skip_all, fields(phase = "prover"))]
     fn commit(
         &self,
         traces: &[&DeviceMatrix<F>],
