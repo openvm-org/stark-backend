@@ -158,7 +158,6 @@ where
         *u_j = transcript.sample_ext();
         s_j_0 = claim - s_j_1;
         claim = interpolate_quadratic_at_012(&[s_j_0, s_j_1, s_j_2], *u_j);
-        debug!(round = %j, sum_claim = %claim);
     });
 
     /*
