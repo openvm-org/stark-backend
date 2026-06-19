@@ -1,0 +1,1706 @@
+[
+  {
+    "l_skip": 1,
+    "n_stack": 19,
+    "w_stack": 18,
+    "log_blowup": 2,
+    "whir": {
+      "k": 3,
+      "rounds": [
+        {
+          "num_queries": 193
+        },
+        {
+          "num_queries": 57
+        },
+        {
+          "num_queries": 34
+        },
+        {
+          "num_queries": 24
+        }
+      ],
+      "mu_pow_bits": 20,
+      "query_phase_pow_bits": 20,
+      "folding_pow_bits": 20,
+      "proximity": {
+        "ListDecoding": {
+          "m": 1
+        }
+      }
+    },
+    "logup": {
+      "max_interaction_count": 2013265921,
+      "log_max_message_length": 7,
+      "pow_bits": 18
+    },
+    "max_constraint_degree": 4
+  },
+  {
+    "l_skip": 2,
+    "n_stack": 18,
+    "w_stack": 18,
+    "log_blowup": 2,
+    "whir": {
+      "k": 3,
+      "rounds": [
+        {
+          "num_queries": 193
+        },
+        {
+          "num_queries": 57
+        },
+        {
+          "num_queries": 34
+        },
+        {
+          "num_queries": 24
+        }
+      ],
+      "mu_pow_bits": 20,
+      "query_phase_pow_bits": 20,
+      "folding_pow_bits": 20,
+      "proximity": {
+        "ListDecoding": {
+          "m": 1
+        }
+      }
+    },
+    "logup": {
+      "max_interaction_count": 2013265921,
+      "log_max_message_length": 7,
+      "pow_bits": 18
+    },
+    "max_constraint_degree": 4
+  },
+  {
+    "l_skip": 3,
+    "n_stack": 17,
+    "w_stack": 18,
+    "log_blowup": 2,
+    "whir": {
+      "k": 3,
+      "rounds": [
+        {
+          "num_queries": 193
+        },
+        {
+          "num_queries": 57
+        },
+        {
+          "num_queries": 34
+        },
+        {
+          "num_queries": 24
+        }
+      ],
+      "mu_pow_bits": 20,
+      "query_phase_pow_bits": 20,
+      "folding_pow_bits": 20,
+      "proximity": {
+        "ListDecoding": {
+          "m": 1
+        }
+      }
+    },
+    "logup": {
+      "max_interaction_count": 2013265921,
+      "log_max_message_length": 7,
+      "pow_bits": 18
+    },
+    "max_constraint_degree": 4
+  },
+  {
+    "l_skip": 4,
+    "n_stack": 16,
+    "w_stack": 18,
+    "log_blowup": 2,
+    "whir": {
+      "k": 3,
+      "rounds": [
+        {
+          "num_queries": 193
+        },
+        {
+          "num_queries": 57
+        },
+        {
+          "num_queries": 34
+        },
+        {
+          "num_queries": 24
+        }
+      ],
+      "mu_pow_bits": 20,
+      "query_phase_pow_bits": 20,
+      "folding_pow_bits": 20,
+      "proximity": {
+        "ListDecoding": {
+          "m": 1
+        }
+      }
+    },
+    "logup": {
+      "max_interaction_count": 2013265921,
+      "log_max_message_length": 7,
+      "pow_bits": 18
+    },
+    "max_constraint_degree": 4
+  },
+  {
+    "l_skip": 5,
+    "n_stack": 15,
+    "w_stack": 18,
+    "log_blowup": 2,
+    "whir": {
+      "k": 3,
+      "rounds": [
+        {
+          "num_queries": 193
+        },
+        {
+          "num_queries": 57
+        },
+        {
+          "num_queries": 34
+        },
+        {
+          "num_queries": 24
+        }
+      ],
+      "mu_pow_bits": 20,
+      "query_phase_pow_bits": 20,
+      "folding_pow_bits": 20,
+      "proximity": {
+        "ListDecoding": {
+          "m": 1
+        }
+      }
+    },
+    "logup": {
+      "max_interaction_count": 2013265921,
+      "log_max_message_length": 7,
+      "pow_bits": 18
+    },
+    "max_constraint_degree": 4
+  },
+  {
+    "l_skip": 6,
+    "n_stack": 14,
+    "w_stack": 18,
+    "log_blowup": 2,
+    "whir": {
+      "k": 3,
+      "rounds": [
+        {
+          "num_queries": 193
+        },
+        {
+          "num_queries": 57
+        },
+        {
+          "num_queries": 34
+        },
+        {
+          "num_queries": 24
+        }
+      ],
+      "mu_pow_bits": 20,
+      "query_phase_pow_bits": 20,
+      "folding_pow_bits": 20,
+      "proximity": {
+        "ListDecoding": {
+          "m": 1
+        }
+      }
+    },
+    "logup": {
+      "max_interaction_count": 2013265921,
+      "log_max_message_length": 7,
+      "pow_bits": 18
+    },
+    "max_constraint_degree": 4
+  },
+  {
+    "l_skip": 7,
+    "n_stack": 13,
+    "w_stack": 18,
+    "log_blowup": 2,
+    "whir": {
+      "k": 3,
+      "rounds": [
+        {
+          "num_queries": 193
+        },
+        {
+          "num_queries": 57
+        },
+        {
+          "num_queries": 34
+        },
+        {
+          "num_queries": 24
+        }
+      ],
+      "mu_pow_bits": 20,
+      "query_phase_pow_bits": 20,
+      "folding_pow_bits": 20,
+      "proximity": {
+        "ListDecoding": {
+          "m": 1
+        }
+      }
+    },
+    "logup": {
+      "max_interaction_count": 2013265921,
+      "log_max_message_length": 7,
+      "pow_bits": 18
+    },
+    "max_constraint_degree": 4
+  },
+  {
+    "l_skip": 8,
+    "n_stack": 12,
+    "w_stack": 18,
+    "log_blowup": 2,
+    "whir": {
+      "k": 3,
+      "rounds": [
+        {
+          "num_queries": 193
+        },
+        {
+          "num_queries": 57
+        },
+        {
+          "num_queries": 34
+        },
+        {
+          "num_queries": 24
+        }
+      ],
+      "mu_pow_bits": 20,
+      "query_phase_pow_bits": 20,
+      "folding_pow_bits": 20,
+      "proximity": {
+        "ListDecoding": {
+          "m": 1
+        }
+      }
+    },
+    "logup": {
+      "max_interaction_count": 2013265921,
+      "log_max_message_length": 7,
+      "pow_bits": 18
+    },
+    "max_constraint_degree": 4
+  },
+  {
+    "l_skip": 1,
+    "n_stack": 19,
+    "w_stack": 18,
+    "log_blowup": 3,
+    "whir": {
+      "k": 3,
+      "rounds": [
+        {
+          "num_queries": 88
+        },
+        {
+          "num_queries": 42
+        },
+        {
+          "num_queries": 28
+        },
+        {
+          "num_queries": 21
+        }
+      ],
+      "mu_pow_bits": 20,
+      "query_phase_pow_bits": 20,
+      "folding_pow_bits": 20,
+      "proximity": {
+        "ListDecoding": {
+          "m": 1
+        }
+      }
+    },
+    "logup": {
+      "max_interaction_count": 2013265921,
+      "log_max_message_length": 7,
+      "pow_bits": 18
+    },
+    "max_constraint_degree": 4
+  },
+  {
+    "l_skip": 2,
+    "n_stack": 18,
+    "w_stack": 18,
+    "log_blowup": 3,
+    "whir": {
+      "k": 3,
+      "rounds": [
+        {
+          "num_queries": 88
+        },
+        {
+          "num_queries": 42
+        },
+        {
+          "num_queries": 28
+        },
+        {
+          "num_queries": 21
+        }
+      ],
+      "mu_pow_bits": 20,
+      "query_phase_pow_bits": 20,
+      "folding_pow_bits": 20,
+      "proximity": {
+        "ListDecoding": {
+          "m": 1
+        }
+      }
+    },
+    "logup": {
+      "max_interaction_count": 2013265921,
+      "log_max_message_length": 7,
+      "pow_bits": 18
+    },
+    "max_constraint_degree": 4
+  },
+  {
+    "l_skip": 3,
+    "n_stack": 17,
+    "w_stack": 18,
+    "log_blowup": 3,
+    "whir": {
+      "k": 3,
+      "rounds": [
+        {
+          "num_queries": 88
+        },
+        {
+          "num_queries": 42
+        },
+        {
+          "num_queries": 28
+        },
+        {
+          "num_queries": 21
+        }
+      ],
+      "mu_pow_bits": 20,
+      "query_phase_pow_bits": 20,
+      "folding_pow_bits": 20,
+      "proximity": {
+        "ListDecoding": {
+          "m": 1
+        }
+      }
+    },
+    "logup": {
+      "max_interaction_count": 2013265921,
+      "log_max_message_length": 7,
+      "pow_bits": 18
+    },
+    "max_constraint_degree": 4
+  },
+  {
+    "l_skip": 4,
+    "n_stack": 16,
+    "w_stack": 18,
+    "log_blowup": 3,
+    "whir": {
+      "k": 3,
+      "rounds": [
+        {
+          "num_queries": 88
+        },
+        {
+          "num_queries": 42
+        },
+        {
+          "num_queries": 28
+        },
+        {
+          "num_queries": 21
+        }
+      ],
+      "mu_pow_bits": 20,
+      "query_phase_pow_bits": 20,
+      "folding_pow_bits": 20,
+      "proximity": {
+        "ListDecoding": {
+          "m": 1
+        }
+      }
+    },
+    "logup": {
+      "max_interaction_count": 2013265921,
+      "log_max_message_length": 7,
+      "pow_bits": 18
+    },
+    "max_constraint_degree": 4
+  },
+  {
+    "l_skip": 5,
+    "n_stack": 15,
+    "w_stack": 18,
+    "log_blowup": 3,
+    "whir": {
+      "k": 3,
+      "rounds": [
+        {
+          "num_queries": 88
+        },
+        {
+          "num_queries": 42
+        },
+        {
+          "num_queries": 28
+        },
+        {
+          "num_queries": 21
+        }
+      ],
+      "mu_pow_bits": 20,
+      "query_phase_pow_bits": 20,
+      "folding_pow_bits": 20,
+      "proximity": {
+        "ListDecoding": {
+          "m": 1
+        }
+      }
+    },
+    "logup": {
+      "max_interaction_count": 2013265921,
+      "log_max_message_length": 7,
+      "pow_bits": 18
+    },
+    "max_constraint_degree": 4
+  },
+  {
+    "l_skip": 6,
+    "n_stack": 14,
+    "w_stack": 18,
+    "log_blowup": 3,
+    "whir": {
+      "k": 3,
+      "rounds": [
+        {
+          "num_queries": 88
+        },
+        {
+          "num_queries": 42
+        },
+        {
+          "num_queries": 28
+        },
+        {
+          "num_queries": 21
+        }
+      ],
+      "mu_pow_bits": 20,
+      "query_phase_pow_bits": 20,
+      "folding_pow_bits": 20,
+      "proximity": {
+        "ListDecoding": {
+          "m": 1
+        }
+      }
+    },
+    "logup": {
+      "max_interaction_count": 2013265921,
+      "log_max_message_length": 7,
+      "pow_bits": 18
+    },
+    "max_constraint_degree": 4
+  },
+  {
+    "l_skip": 7,
+    "n_stack": 13,
+    "w_stack": 18,
+    "log_blowup": 3,
+    "whir": {
+      "k": 3,
+      "rounds": [
+        {
+          "num_queries": 88
+        },
+        {
+          "num_queries": 42
+        },
+        {
+          "num_queries": 28
+        },
+        {
+          "num_queries": 21
+        }
+      ],
+      "mu_pow_bits": 20,
+      "query_phase_pow_bits": 20,
+      "folding_pow_bits": 20,
+      "proximity": {
+        "ListDecoding": {
+          "m": 1
+        }
+      }
+    },
+    "logup": {
+      "max_interaction_count": 2013265921,
+      "log_max_message_length": 7,
+      "pow_bits": 18
+    },
+    "max_constraint_degree": 4
+  },
+  {
+    "l_skip": 8,
+    "n_stack": 12,
+    "w_stack": 18,
+    "log_blowup": 3,
+    "whir": {
+      "k": 3,
+      "rounds": [
+        {
+          "num_queries": 88
+        },
+        {
+          "num_queries": 42
+        },
+        {
+          "num_queries": 28
+        },
+        {
+          "num_queries": 21
+        }
+      ],
+      "mu_pow_bits": 20,
+      "query_phase_pow_bits": 20,
+      "folding_pow_bits": 20,
+      "proximity": {
+        "ListDecoding": {
+          "m": 1
+        }
+      }
+    },
+    "logup": {
+      "max_interaction_count": 2013265921,
+      "log_max_message_length": 7,
+      "pow_bits": 18
+    },
+    "max_constraint_degree": 4
+  },
+  {
+    "l_skip": 1,
+    "n_stack": 19,
+    "w_stack": 18,
+    "log_blowup": 4,
+    "whir": {
+      "k": 3,
+      "rounds": [
+        {
+          "num_queries": 57
+        },
+        {
+          "num_queries": 34
+        },
+        {
+          "num_queries": 24
+        },
+        {
+          "num_queries": 19
+        }
+      ],
+      "mu_pow_bits": 20,
+      "query_phase_pow_bits": 20,
+      "folding_pow_bits": 20,
+      "proximity": {
+        "ListDecoding": {
+          "m": 1
+        }
+      }
+    },
+    "logup": {
+      "max_interaction_count": 2013265921,
+      "log_max_message_length": 7,
+      "pow_bits": 18
+    },
+    "max_constraint_degree": 4
+  },
+  {
+    "l_skip": 2,
+    "n_stack": 18,
+    "w_stack": 18,
+    "log_blowup": 4,
+    "whir": {
+      "k": 3,
+      "rounds": [
+        {
+          "num_queries": 57
+        },
+        {
+          "num_queries": 34
+        },
+        {
+          "num_queries": 24
+        },
+        {
+          "num_queries": 19
+        }
+      ],
+      "mu_pow_bits": 20,
+      "query_phase_pow_bits": 20,
+      "folding_pow_bits": 20,
+      "proximity": {
+        "ListDecoding": {
+          "m": 1
+        }
+      }
+    },
+    "logup": {
+      "max_interaction_count": 2013265921,
+      "log_max_message_length": 7,
+      "pow_bits": 18
+    },
+    "max_constraint_degree": 4
+  },
+  {
+    "l_skip": 3,
+    "n_stack": 17,
+    "w_stack": 18,
+    "log_blowup": 4,
+    "whir": {
+      "k": 3,
+      "rounds": [
+        {
+          "num_queries": 57
+        },
+        {
+          "num_queries": 34
+        },
+        {
+          "num_queries": 24
+        },
+        {
+          "num_queries": 19
+        }
+      ],
+      "mu_pow_bits": 20,
+      "query_phase_pow_bits": 20,
+      "folding_pow_bits": 20,
+      "proximity": {
+        "ListDecoding": {
+          "m": 1
+        }
+      }
+    },
+    "logup": {
+      "max_interaction_count": 2013265921,
+      "log_max_message_length": 7,
+      "pow_bits": 18
+    },
+    "max_constraint_degree": 4
+  },
+  {
+    "l_skip": 4,
+    "n_stack": 16,
+    "w_stack": 18,
+    "log_blowup": 4,
+    "whir": {
+      "k": 3,
+      "rounds": [
+        {
+          "num_queries": 57
+        },
+        {
+          "num_queries": 34
+        },
+        {
+          "num_queries": 24
+        },
+        {
+          "num_queries": 19
+        }
+      ],
+      "mu_pow_bits": 20,
+      "query_phase_pow_bits": 20,
+      "folding_pow_bits": 20,
+      "proximity": {
+        "ListDecoding": {
+          "m": 1
+        }
+      }
+    },
+    "logup": {
+      "max_interaction_count": 2013265921,
+      "log_max_message_length": 7,
+      "pow_bits": 18
+    },
+    "max_constraint_degree": 4
+  },
+  {
+    "l_skip": 5,
+    "n_stack": 15,
+    "w_stack": 18,
+    "log_blowup": 4,
+    "whir": {
+      "k": 3,
+      "rounds": [
+        {
+          "num_queries": 57
+        },
+        {
+          "num_queries": 34
+        },
+        {
+          "num_queries": 24
+        },
+        {
+          "num_queries": 19
+        }
+      ],
+      "mu_pow_bits": 20,
+      "query_phase_pow_bits": 20,
+      "folding_pow_bits": 20,
+      "proximity": {
+        "ListDecoding": {
+          "m": 1
+        }
+      }
+    },
+    "logup": {
+      "max_interaction_count": 2013265921,
+      "log_max_message_length": 7,
+      "pow_bits": 18
+    },
+    "max_constraint_degree": 4
+  },
+  {
+    "l_skip": 6,
+    "n_stack": 14,
+    "w_stack": 18,
+    "log_blowup": 4,
+    "whir": {
+      "k": 3,
+      "rounds": [
+        {
+          "num_queries": 57
+        },
+        {
+          "num_queries": 34
+        },
+        {
+          "num_queries": 24
+        },
+        {
+          "num_queries": 19
+        }
+      ],
+      "mu_pow_bits": 20,
+      "query_phase_pow_bits": 20,
+      "folding_pow_bits": 20,
+      "proximity": {
+        "ListDecoding": {
+          "m": 1
+        }
+      }
+    },
+    "logup": {
+      "max_interaction_count": 2013265921,
+      "log_max_message_length": 7,
+      "pow_bits": 18
+    },
+    "max_constraint_degree": 4
+  },
+  {
+    "l_skip": 7,
+    "n_stack": 13,
+    "w_stack": 18,
+    "log_blowup": 4,
+    "whir": {
+      "k": 3,
+      "rounds": [
+        {
+          "num_queries": 57
+        },
+        {
+          "num_queries": 34
+        },
+        {
+          "num_queries": 24
+        },
+        {
+          "num_queries": 19
+        }
+      ],
+      "mu_pow_bits": 20,
+      "query_phase_pow_bits": 20,
+      "folding_pow_bits": 20,
+      "proximity": {
+        "ListDecoding": {
+          "m": 1
+        }
+      }
+    },
+    "logup": {
+      "max_interaction_count": 2013265921,
+      "log_max_message_length": 7,
+      "pow_bits": 18
+    },
+    "max_constraint_degree": 4
+  },
+  {
+    "l_skip": 8,
+    "n_stack": 12,
+    "w_stack": 18,
+    "log_blowup": 4,
+    "whir": {
+      "k": 3,
+      "rounds": [
+        {
+          "num_queries": 57
+        },
+        {
+          "num_queries": 34
+        },
+        {
+          "num_queries": 24
+        },
+        {
+          "num_queries": 19
+        }
+      ],
+      "mu_pow_bits": 20,
+      "query_phase_pow_bits": 20,
+      "folding_pow_bits": 20,
+      "proximity": {
+        "ListDecoding": {
+          "m": 1
+        }
+      }
+    },
+    "logup": {
+      "max_interaction_count": 2013265921,
+      "log_max_message_length": 7,
+      "pow_bits": 18
+    },
+    "max_constraint_degree": 4
+  },
+  {
+    "l_skip": 1,
+    "n_stack": 19,
+    "w_stack": 18,
+    "log_blowup": 2,
+    "whir": {
+      "k": 4,
+      "rounds": [
+        {
+          "num_queries": 193
+        },
+        {
+          "num_queries": 42
+        },
+        {
+          "num_queries": 24
+        }
+      ],
+      "mu_pow_bits": 20,
+      "query_phase_pow_bits": 20,
+      "folding_pow_bits": 20,
+      "proximity": {
+        "ListDecoding": {
+          "m": 1
+        }
+      }
+    },
+    "logup": {
+      "max_interaction_count": 2013265921,
+      "log_max_message_length": 7,
+      "pow_bits": 18
+    },
+    "max_constraint_degree": 4
+  },
+  {
+    "l_skip": 2,
+    "n_stack": 18,
+    "w_stack": 18,
+    "log_blowup": 2,
+    "whir": {
+      "k": 4,
+      "rounds": [
+        {
+          "num_queries": 193
+        },
+        {
+          "num_queries": 42
+        },
+        {
+          "num_queries": 24
+        }
+      ],
+      "mu_pow_bits": 20,
+      "query_phase_pow_bits": 20,
+      "folding_pow_bits": 20,
+      "proximity": {
+        "ListDecoding": {
+          "m": 1
+        }
+      }
+    },
+    "logup": {
+      "max_interaction_count": 2013265921,
+      "log_max_message_length": 7,
+      "pow_bits": 18
+    },
+    "max_constraint_degree": 4
+  },
+  {
+    "l_skip": 3,
+    "n_stack": 17,
+    "w_stack": 18,
+    "log_blowup": 2,
+    "whir": {
+      "k": 4,
+      "rounds": [
+        {
+          "num_queries": 193
+        },
+        {
+          "num_queries": 42
+        },
+        {
+          "num_queries": 24
+        }
+      ],
+      "mu_pow_bits": 20,
+      "query_phase_pow_bits": 20,
+      "folding_pow_bits": 20,
+      "proximity": {
+        "ListDecoding": {
+          "m": 1
+        }
+      }
+    },
+    "logup": {
+      "max_interaction_count": 2013265921,
+      "log_max_message_length": 7,
+      "pow_bits": 18
+    },
+    "max_constraint_degree": 4
+  },
+  {
+    "l_skip": 4,
+    "n_stack": 16,
+    "w_stack": 18,
+    "log_blowup": 2,
+    "whir": {
+      "k": 4,
+      "rounds": [
+        {
+          "num_queries": 193
+        },
+        {
+          "num_queries": 42
+        },
+        {
+          "num_queries": 24
+        }
+      ],
+      "mu_pow_bits": 20,
+      "query_phase_pow_bits": 20,
+      "folding_pow_bits": 20,
+      "proximity": {
+        "ListDecoding": {
+          "m": 1
+        }
+      }
+    },
+    "logup": {
+      "max_interaction_count": 2013265921,
+      "log_max_message_length": 7,
+      "pow_bits": 18
+    },
+    "max_constraint_degree": 4
+  },
+  {
+    "l_skip": 5,
+    "n_stack": 15,
+    "w_stack": 18,
+    "log_blowup": 2,
+    "whir": {
+      "k": 4,
+      "rounds": [
+        {
+          "num_queries": 193
+        },
+        {
+          "num_queries": 42
+        },
+        {
+          "num_queries": 24
+        }
+      ],
+      "mu_pow_bits": 20,
+      "query_phase_pow_bits": 20,
+      "folding_pow_bits": 20,
+      "proximity": {
+        "ListDecoding": {
+          "m": 1
+        }
+      }
+    },
+    "logup": {
+      "max_interaction_count": 2013265921,
+      "log_max_message_length": 7,
+      "pow_bits": 18
+    },
+    "max_constraint_degree": 4
+  },
+  {
+    "l_skip": 6,
+    "n_stack": 14,
+    "w_stack": 18,
+    "log_blowup": 2,
+    "whir": {
+      "k": 4,
+      "rounds": [
+        {
+          "num_queries": 193
+        },
+        {
+          "num_queries": 42
+        },
+        {
+          "num_queries": 24
+        }
+      ],
+      "mu_pow_bits": 20,
+      "query_phase_pow_bits": 20,
+      "folding_pow_bits": 20,
+      "proximity": {
+        "ListDecoding": {
+          "m": 1
+        }
+      }
+    },
+    "logup": {
+      "max_interaction_count": 2013265921,
+      "log_max_message_length": 7,
+      "pow_bits": 18
+    },
+    "max_constraint_degree": 4
+  },
+  {
+    "l_skip": 7,
+    "n_stack": 13,
+    "w_stack": 18,
+    "log_blowup": 2,
+    "whir": {
+      "k": 4,
+      "rounds": [
+        {
+          "num_queries": 193
+        },
+        {
+          "num_queries": 42
+        },
+        {
+          "num_queries": 24
+        }
+      ],
+      "mu_pow_bits": 20,
+      "query_phase_pow_bits": 20,
+      "folding_pow_bits": 20,
+      "proximity": {
+        "ListDecoding": {
+          "m": 1
+        }
+      }
+    },
+    "logup": {
+      "max_interaction_count": 2013265921,
+      "log_max_message_length": 7,
+      "pow_bits": 18
+    },
+    "max_constraint_degree": 4
+  },
+  {
+    "l_skip": 8,
+    "n_stack": 12,
+    "w_stack": 18,
+    "log_blowup": 2,
+    "whir": {
+      "k": 4,
+      "rounds": [
+        {
+          "num_queries": 193
+        },
+        {
+          "num_queries": 42
+        },
+        {
+          "num_queries": 24
+        }
+      ],
+      "mu_pow_bits": 20,
+      "query_phase_pow_bits": 20,
+      "folding_pow_bits": 20,
+      "proximity": {
+        "ListDecoding": {
+          "m": 1
+        }
+      }
+    },
+    "logup": {
+      "max_interaction_count": 2013265921,
+      "log_max_message_length": 7,
+      "pow_bits": 18
+    },
+    "max_constraint_degree": 4
+  },
+  {
+    "l_skip": 1,
+    "n_stack": 19,
+    "w_stack": 18,
+    "log_blowup": 3,
+    "whir": {
+      "k": 4,
+      "rounds": [
+        {
+          "num_queries": 88
+        },
+        {
+          "num_queries": 34
+        },
+        {
+          "num_queries": 21
+        }
+      ],
+      "mu_pow_bits": 20,
+      "query_phase_pow_bits": 20,
+      "folding_pow_bits": 20,
+      "proximity": {
+        "ListDecoding": {
+          "m": 1
+        }
+      }
+    },
+    "logup": {
+      "max_interaction_count": 2013265921,
+      "log_max_message_length": 7,
+      "pow_bits": 18
+    },
+    "max_constraint_degree": 4
+  },
+  {
+    "l_skip": 2,
+    "n_stack": 18,
+    "w_stack": 18,
+    "log_blowup": 3,
+    "whir": {
+      "k": 4,
+      "rounds": [
+        {
+          "num_queries": 88
+        },
+        {
+          "num_queries": 34
+        },
+        {
+          "num_queries": 21
+        }
+      ],
+      "mu_pow_bits": 20,
+      "query_phase_pow_bits": 20,
+      "folding_pow_bits": 20,
+      "proximity": {
+        "ListDecoding": {
+          "m": 1
+        }
+      }
+    },
+    "logup": {
+      "max_interaction_count": 2013265921,
+      "log_max_message_length": 7,
+      "pow_bits": 18
+    },
+    "max_constraint_degree": 4
+  },
+  {
+    "l_skip": 3,
+    "n_stack": 17,
+    "w_stack": 18,
+    "log_blowup": 3,
+    "whir": {
+      "k": 4,
+      "rounds": [
+        {
+          "num_queries": 88
+        },
+        {
+          "num_queries": 34
+        },
+        {
+          "num_queries": 21
+        }
+      ],
+      "mu_pow_bits": 20,
+      "query_phase_pow_bits": 20,
+      "folding_pow_bits": 20,
+      "proximity": {
+        "ListDecoding": {
+          "m": 1
+        }
+      }
+    },
+    "logup": {
+      "max_interaction_count": 2013265921,
+      "log_max_message_length": 7,
+      "pow_bits": 18
+    },
+    "max_constraint_degree": 4
+  },
+  {
+    "l_skip": 4,
+    "n_stack": 16,
+    "w_stack": 18,
+    "log_blowup": 3,
+    "whir": {
+      "k": 4,
+      "rounds": [
+        {
+          "num_queries": 88
+        },
+        {
+          "num_queries": 34
+        },
+        {
+          "num_queries": 21
+        }
+      ],
+      "mu_pow_bits": 20,
+      "query_phase_pow_bits": 20,
+      "folding_pow_bits": 20,
+      "proximity": {
+        "ListDecoding": {
+          "m": 1
+        }
+      }
+    },
+    "logup": {
+      "max_interaction_count": 2013265921,
+      "log_max_message_length": 7,
+      "pow_bits": 18
+    },
+    "max_constraint_degree": 4
+  },
+  {
+    "l_skip": 5,
+    "n_stack": 15,
+    "w_stack": 18,
+    "log_blowup": 3,
+    "whir": {
+      "k": 4,
+      "rounds": [
+        {
+          "num_queries": 88
+        },
+        {
+          "num_queries": 34
+        },
+        {
+          "num_queries": 21
+        }
+      ],
+      "mu_pow_bits": 20,
+      "query_phase_pow_bits": 20,
+      "folding_pow_bits": 20,
+      "proximity": {
+        "ListDecoding": {
+          "m": 1
+        }
+      }
+    },
+    "logup": {
+      "max_interaction_count": 2013265921,
+      "log_max_message_length": 7,
+      "pow_bits": 18
+    },
+    "max_constraint_degree": 4
+  },
+  {
+    "l_skip": 6,
+    "n_stack": 14,
+    "w_stack": 18,
+    "log_blowup": 3,
+    "whir": {
+      "k": 4,
+      "rounds": [
+        {
+          "num_queries": 88
+        },
+        {
+          "num_queries": 34
+        },
+        {
+          "num_queries": 21
+        }
+      ],
+      "mu_pow_bits": 20,
+      "query_phase_pow_bits": 20,
+      "folding_pow_bits": 20,
+      "proximity": {
+        "ListDecoding": {
+          "m": 1
+        }
+      }
+    },
+    "logup": {
+      "max_interaction_count": 2013265921,
+      "log_max_message_length": 7,
+      "pow_bits": 18
+    },
+    "max_constraint_degree": 4
+  },
+  {
+    "l_skip": 7,
+    "n_stack": 13,
+    "w_stack": 18,
+    "log_blowup": 3,
+    "whir": {
+      "k": 4,
+      "rounds": [
+        {
+          "num_queries": 88
+        },
+        {
+          "num_queries": 34
+        },
+        {
+          "num_queries": 21
+        }
+      ],
+      "mu_pow_bits": 20,
+      "query_phase_pow_bits": 20,
+      "folding_pow_bits": 20,
+      "proximity": {
+        "ListDecoding": {
+          "m": 1
+        }
+      }
+    },
+    "logup": {
+      "max_interaction_count": 2013265921,
+      "log_max_message_length": 7,
+      "pow_bits": 18
+    },
+    "max_constraint_degree": 4
+  },
+  {
+    "l_skip": 8,
+    "n_stack": 12,
+    "w_stack": 18,
+    "log_blowup": 3,
+    "whir": {
+      "k": 4,
+      "rounds": [
+        {
+          "num_queries": 88
+        },
+        {
+          "num_queries": 34
+        },
+        {
+          "num_queries": 21
+        }
+      ],
+      "mu_pow_bits": 20,
+      "query_phase_pow_bits": 20,
+      "folding_pow_bits": 20,
+      "proximity": {
+        "ListDecoding": {
+          "m": 1
+        }
+      }
+    },
+    "logup": {
+      "max_interaction_count": 2013265921,
+      "log_max_message_length": 7,
+      "pow_bits": 18
+    },
+    "max_constraint_degree": 4
+  },
+  {
+    "l_skip": 1,
+    "n_stack": 19,
+    "w_stack": 18,
+    "log_blowup": 4,
+    "whir": {
+      "k": 4,
+      "rounds": [
+        {
+          "num_queries": 57
+        },
+        {
+          "num_queries": 28
+        },
+        {
+          "num_queries": 19
+        }
+      ],
+      "mu_pow_bits": 20,
+      "query_phase_pow_bits": 20,
+      "folding_pow_bits": 20,
+      "proximity": {
+        "ListDecoding": {
+          "m": 1
+        }
+      }
+    },
+    "logup": {
+      "max_interaction_count": 2013265921,
+      "log_max_message_length": 7,
+      "pow_bits": 18
+    },
+    "max_constraint_degree": 4
+  },
+  {
+    "l_skip": 2,
+    "n_stack": 18,
+    "w_stack": 18,
+    "log_blowup": 4,
+    "whir": {
+      "k": 4,
+      "rounds": [
+        {
+          "num_queries": 57
+        },
+        {
+          "num_queries": 28
+        },
+        {
+          "num_queries": 19
+        }
+      ],
+      "mu_pow_bits": 20,
+      "query_phase_pow_bits": 20,
+      "folding_pow_bits": 20,
+      "proximity": {
+        "ListDecoding": {
+          "m": 1
+        }
+      }
+    },
+    "logup": {
+      "max_interaction_count": 2013265921,
+      "log_max_message_length": 7,
+      "pow_bits": 18
+    },
+    "max_constraint_degree": 4
+  },
+  {
+    "l_skip": 3,
+    "n_stack": 17,
+    "w_stack": 18,
+    "log_blowup": 4,
+    "whir": {
+      "k": 4,
+      "rounds": [
+        {
+          "num_queries": 57
+        },
+        {
+          "num_queries": 28
+        },
+        {
+          "num_queries": 19
+        }
+      ],
+      "mu_pow_bits": 20,
+      "query_phase_pow_bits": 20,
+      "folding_pow_bits": 20,
+      "proximity": {
+        "ListDecoding": {
+          "m": 1
+        }
+      }
+    },
+    "logup": {
+      "max_interaction_count": 2013265921,
+      "log_max_message_length": 7,
+      "pow_bits": 18
+    },
+    "max_constraint_degree": 4
+  },
+  {
+    "l_skip": 4,
+    "n_stack": 16,
+    "w_stack": 18,
+    "log_blowup": 4,
+    "whir": {
+      "k": 4,
+      "rounds": [
+        {
+          "num_queries": 57
+        },
+        {
+          "num_queries": 28
+        },
+        {
+          "num_queries": 19
+        }
+      ],
+      "mu_pow_bits": 20,
+      "query_phase_pow_bits": 20,
+      "folding_pow_bits": 20,
+      "proximity": {
+        "ListDecoding": {
+          "m": 1
+        }
+      }
+    },
+    "logup": {
+      "max_interaction_count": 2013265921,
+      "log_max_message_length": 7,
+      "pow_bits": 18
+    },
+    "max_constraint_degree": 4
+  },
+  {
+    "l_skip": 5,
+    "n_stack": 15,
+    "w_stack": 18,
+    "log_blowup": 4,
+    "whir": {
+      "k": 4,
+      "rounds": [
+        {
+          "num_queries": 57
+        },
+        {
+          "num_queries": 28
+        },
+        {
+          "num_queries": 19
+        }
+      ],
+      "mu_pow_bits": 20,
+      "query_phase_pow_bits": 20,
+      "folding_pow_bits": 20,
+      "proximity": {
+        "ListDecoding": {
+          "m": 1
+        }
+      }
+    },
+    "logup": {
+      "max_interaction_count": 2013265921,
+      "log_max_message_length": 7,
+      "pow_bits": 18
+    },
+    "max_constraint_degree": 4
+  },
+  {
+    "l_skip": 6,
+    "n_stack": 14,
+    "w_stack": 18,
+    "log_blowup": 4,
+    "whir": {
+      "k": 4,
+      "rounds": [
+        {
+          "num_queries": 57
+        },
+        {
+          "num_queries": 28
+        },
+        {
+          "num_queries": 19
+        }
+      ],
+      "mu_pow_bits": 20,
+      "query_phase_pow_bits": 20,
+      "folding_pow_bits": 20,
+      "proximity": {
+        "ListDecoding": {
+          "m": 1
+        }
+      }
+    },
+    "logup": {
+      "max_interaction_count": 2013265921,
+      "log_max_message_length": 7,
+      "pow_bits": 18
+    },
+    "max_constraint_degree": 4
+  },
+  {
+    "l_skip": 7,
+    "n_stack": 13,
+    "w_stack": 18,
+    "log_blowup": 4,
+    "whir": {
+      "k": 4,
+      "rounds": [
+        {
+          "num_queries": 57
+        },
+        {
+          "num_queries": 28
+        },
+        {
+          "num_queries": 19
+        }
+      ],
+      "mu_pow_bits": 20,
+      "query_phase_pow_bits": 20,
+      "folding_pow_bits": 20,
+      "proximity": {
+        "ListDecoding": {
+          "m": 1
+        }
+      }
+    },
+    "logup": {
+      "max_interaction_count": 2013265921,
+      "log_max_message_length": 7,
+      "pow_bits": 18
+    },
+    "max_constraint_degree": 4
+  },
+  {
+    "l_skip": 8,
+    "n_stack": 12,
+    "w_stack": 18,
+    "log_blowup": 4,
+    "whir": {
+      "k": 4,
+      "rounds": [
+        {
+          "num_queries": 57
+        },
+        {
+          "num_queries": 28
+        },
+        {
+          "num_queries": 19
+        }
+      ],
+      "mu_pow_bits": 20,
+      "query_phase_pow_bits": 20,
+      "folding_pow_bits": 20,
+      "proximity": {
+        "ListDecoding": {
+          "m": 1
+        }
+      }
+    },
+    "logup": {
+      "max_interaction_count": 2013265921,
+      "log_max_message_length": 7,
+      "pow_bits": 18
+    },
+    "max_constraint_degree": 4
+  }
+]

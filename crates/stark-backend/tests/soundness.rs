@@ -277,13 +277,14 @@ fn test_leaf_aggregation_security() {
 #[test]
 fn generate_root_params() {
     let max_log_height = 20;
-    let log_blowups = vec![2, 3, 4, 5, 6];
-    let k_whirs = (1..=7).step_by(2);
-    let l_skips = vec![2, 4, 8, 14, 18];
+    let log_blowups = (2..=5);
+    let k_whirs = vec![3, 4];
+    let l_skips = (1..=8);
     let mut good_params = vec![];
     for k_whir in k_whirs.clone() {
         for log_blowup in log_blowups.clone() {
             for l_skip in l_skips.clone() {
+                println!("k_whir {k_whir}, log_blowup {log_blowup}, l_skip {l_skip}");
                 let n_stack = max_log_height - l_skip;
                 let w_stack = 18;
                 let folding_pow_bits = 20;
@@ -365,9 +366,9 @@ fn generate_root_params() {
 #[test]
 fn generate_internal_params() {
     let max_log_height = 19;
-    let log_blowups = (1..=7);
-    let k_whirs = (1..=7).step_by(2);
-    let l_skips = (1..=18).step_by(4);
+    let log_blowups = (1..=5);
+    let k_whirs = vec![3, 4];
+    let l_skips = (1..=8);
     let mut good_params = vec![];
     for k_whir in k_whirs.clone() {
         for log_blowup in log_blowups.clone() {
@@ -440,7 +441,7 @@ fn generate_internal_params() {
         }
     }
 
-    let output_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("good_params.json");
+    let output_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("internal_params.json");
     let file = std::fs::File::create(&output_path).expect("failed to create good_params.json");
     serde_json::to_writer_pretty(file, &good_params).expect("failed to write good_params.json");
     println!(
