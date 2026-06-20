@@ -373,6 +373,12 @@ fn interactions_simp_uses_per_air_inter_attribute_when_helper_referenced() {
         cs.contains("@[TinyAir_inter]\nnoncomputable def inter_0"),
         "expected `@[TinyAir_inter]` above hoisted helper, got:\n{cs}"
     );
+    // Constraints.lean emits the `air.layout = layout` bridge lemma used by the
+    // per-pick eval lemmas.
+    assert!(
+        cs.contains("theorem air_layout_eq : (air (F := F)).layout = layout := rfl"),
+        "expected `air_layout_eq` bridge lemma, got:\n{cs}"
+    );
 
     // Interactions.lean uses the attribute name (not the helper name)
     // in the per-pick eval-lemma simp arg list.
@@ -402,6 +408,14 @@ fn interactions_simp_uses_per_air_inter_attribute_when_helper_referenced() {
     assert!(
         mult_simp_line.contains("TinyAir_inter"),
         "multiplicity simp line missing per-AIR attribute: {mult_simp_line}"
+    );
+    // Every eval lemma rewrites with `air_layout_eq` so that `air.layout`
+    // reduces to `layout` and `MvPolynomial.eval_C` / `eval_X` can fire on the
+    // polynomial's constants/variables (whether they come from an `inter_K`
+    // helper or are written inline). It is added unconditionally.
+    assert!(
+        mult_simp_line.contains(", air_layout_eq,") || mult_simp_line.contains(", air_layout_eq]"),
+        "multiplicity simp line missing `air_layout_eq` rewrite: {mult_simp_line}"
     );
     assert!(
         mult_simp_line.contains("Interaction.evalMultiplicity"),

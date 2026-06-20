@@ -1256,6 +1256,18 @@ pub fn write_constraints<W: Write>(
     )?;
     writeln!(writer)?;
 
+    // `air.layout` is definitionally `layout`, but `air` is a (non-reducible)
+    // `noncomputable def`, so `simp`/unification will not unfold it to discharge
+    // the layout index mismatch between `inter_K.polynomial` (typed with
+    // `layout`) and the interaction's `air.layout`. This `rfl` lemma is added to
+    // the per-pick eval-lemma `simp` sets so the constants/variables coming from
+    // `inter_K` reduce under `MvPolynomial.eval_C` / `eval_X`.
+    writeln!(
+        writer,
+        "theorem air_layout_eq : (air (F := F)).layout = layout := rfl"
+    )?;
+    writeln!(writer)?;
+
     writeln!(writer, "/-! ## Named-column accessors -/")?;
     writeln!(writer)?;
     for name in column_names {
@@ -1399,7 +1411,10 @@ pub fn write_interactions<W: Write>(
     writeln!(writer, "set_option linter.unusedVariables false")?;
     writeln!(writer, "set_option linter.unusedSectionVars false")?;
     writeln!(writer, "set_option linter.unusedSimpArgs false")?;
-    writeln!(writer, "set_option maxHeartbeats 800000")?;
+    // Per-pick message lemmas for wide buses with polynomial products (e.g. the
+    // batch-constraint AIRs) fully normalise their `MvPolynomial.eval` payloads
+    // through `simp`, which is heartbeat-hungry; give them generous headroom.
+    writeln!(writer, "set_option maxHeartbeats 6400000")?;
     writeln!(writer)?;
     writeln!(writer, "namespace {}", options.air_namespace)?;
     writeln!(writer)?;
@@ -1675,6 +1690,17 @@ fn write_per_pick_lemmas<W: Write>(
         if mult_uses_inter {
             simp_names.push(air_inter_attr_name(air_name));
         }
+        // The polynomial payload is typed with `layout`, but the interaction
+        // (and thus the `AIR.evalVar` assignment) is typed with `air.layout`.
+        // Because `air` is a noncomputable def, `simp` won't unfold `air.layout`
+        // to `layout`, so the layout-index mismatch stops `MvPolynomial.eval_C`
+        // / `eval_X` from firing on the polynomial's constants/variables
+        // (whether they come from an `inter_K` helper or are written inline,
+        // e.g. `MvPolynomial.C 2` in a public-values bus). `air_layout_eq`
+        // rewrites `air.layout` back to `layout` so those reductions fire. It is
+        // always sound (a `rfl` lemma) and harmless when unused, so we add it
+        // unconditionally rather than only when an `inter_K` helper is present.
+        simp_names.push("air_layout_eq".to_string());
         simp_names.extend(acc_list.iter().cloned());
         simp_names.extend(ctx_list.iter().cloned());
         simp_names.extend(ref_list.iter().cloned());
@@ -1756,6 +1782,17 @@ fn write_per_pick_lemmas<W: Write>(
         if msg_uses_inter {
             simp_names.push(air_inter_attr_name(air_name));
         }
+        // The polynomial payload is typed with `layout`, but the interaction
+        // (and thus the `AIR.evalVar` assignment) is typed with `air.layout`.
+        // Because `air` is a noncomputable def, `simp` won't unfold `air.layout`
+        // to `layout`, so the layout-index mismatch stops `MvPolynomial.eval_C`
+        // / `eval_X` from firing on the polynomial's constants/variables
+        // (whether they come from an `inter_K` helper or are written inline,
+        // e.g. `MvPolynomial.C 2` in a public-values bus). `air_layout_eq`
+        // rewrites `air.layout` back to `layout` so those reductions fire. It is
+        // always sound (a `rfl` lemma) and harmless when unused, so we add it
+        // unconditionally rather than only when an `inter_K` helper is present.
+        simp_names.push("air_layout_eq".to_string());
         simp_names.extend(msg_acc.iter().cloned());
         simp_names.extend(msg_ctx.iter().cloned());
         simp_names.extend(msg_ref.iter().cloned());
