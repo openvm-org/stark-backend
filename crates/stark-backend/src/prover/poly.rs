@@ -239,7 +239,7 @@ pub struct Ple<F> {
 }
 
 impl<F: TwoAdicField> Ple<F> {
-    /// Create PLE from evaluations on the hypercube with univariate skip.
+    /// Create PLE from evaluations on the hyperprism D x H_n for n >= 0.
     ///
     /// Takes evaluations at 2^{l_skip + n} points and converts them to coefficient form
     /// for a polynomial in n+1 variables: degree < 2^l_skip in the first variable,

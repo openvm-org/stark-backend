@@ -10,25 +10,31 @@ Proofs with the precise soundness guarantees justifying the below can be found [
 
 ## Formal Definition of an Interaction
 
+Throughout this page, $\mathbb{D}_n$ denotes the SWIRL trace domain: the hyperprism $D \times H_n$
+for $n \ge 0$, where $D$ is the univariate skip domain and $H_n = \{0,1\}^n$, and the subgroup
+$D^{(2^i)} \subseteq D$ for $n = -i < 0$.
+
 An interaction with **width** $w$ and **message length** $\ell$ on bus $b$ is a triple $(\sigma, m, b)$, where:
 
 - $\sigma \in \mathbb{F}[x_1, \dots, x_w, y_1, \dots, y_w]^\ell$ is a sequence of $\ell$ polynomials defining the **message**.
 - $m \in \mathbb{F}[x_1, \dots, x_w, y_1, \dots, y_w]$ is a polynomial that determines the **multiplicity** of the corresponding message.
 - $b \in \mathbb{F} \setminus \{0\}$ is the **bus index** specifying the bus. It must be nonzero.
 
-If the trace domain is $\langle \omega \rangle$ and the entry in row $i$ column $j$ of the trace matrix $\mathbf{T}$ is
-given by $T_j(\omega^i)$, then an interaction $(\sigma, m, b)$ defined on the AIR **sends** over bus $b$, for each
-row $i$, the message
+If the trace domain is $\mathbb{D}_n$ and the entry in column $j$ at point $x \in \mathbb{D}_n$ is
+given by $T_j(x)$, then an interaction $(\sigma, m, b)$ defined on the AIR **sends** over bus $b$, for each
+$x \in \mathbb{D}_n$, the message
 
 $$
-\sigma(T_1(\omega^i), \dots, T_w(\omega^i), T_1(\omega^{i+1}), \dots, T_w(\omega^{i+1})) \in \mathbb{F}^\ell
+\sigma(T_1(x), \dots, T_w(x), T_1(\operatorname{rot}(x)), \dots, T_w(\operatorname{rot}(x))) \in \mathbb{F}^\ell
 $$
 
 with multiplicity
 
 $$
-m(T_1(\omega^i), \dots, T_w(\omega^i), T_1(\omega^{i+1}), \dots, T_w(\omega^{i+1})) \in \mathbb{F}.
+m(T_1(x), \dots, T_w(x), T_1(\operatorname{rot}(x)), \dots, T_w(\operatorname{rot}(x))) \in \mathbb{F}.
 $$
+
+Here $\operatorname{rot}$ is the cyclic next-row map induced by the row ordering on $\mathbb{D}_n$.
 
 Each AIR of width $w$ can define multiple interactions of the same width $w$ (and each interaction can use a different
 message length and/or bus index). The combination of an AIR's definition and the prover-provided trace for that AIR
@@ -41,22 +47,24 @@ $(\sigma^{(i)}_k, m^{(i)}_k, b^{(i)}_k)$ for $k \in \{ 1, \dots, k_i \}$.
 
 The set of possible messages is denoted $\mathbb{F}^+ = \bigcup_{i\ge 1} \mathbb{F}^i$. An **$\mathbb{F}$-multiset**
 is a function $M : \mathbb{F}^+ \to \mathbb{F}$ that assigns an $\mathbb{F}$-valued "multiplicity" to each message
-$\mathbb{F}^+$.
+in $\mathbb{F}^+$.
 
 Given a set of traces ${\mathbf T}^{(1)}, \dots, {\mathbf T}^{(t)}$ with respective
-domains $\langle \omega_1 \rangle, \dots, \langle \omega_t \rangle$, these traces together define a multiset $M_b$ for
-each bus index $b$. To simplify notation, for $i \in \{1, \dots, t\}$ and $k \in \{1, \dots, k_t\}$,
-define $\hat{m}^{(i)}_k : \langle \omega_i \rangle \to \mathbb{F}$ by:
+domains $\mathbb{D}_{n_1}, \dots, \mathbb{D}_{n_t}$, these traces together define a multiset $M_b$ for
+each bus index $b$. Let $\operatorname{rot}_i$ be the cyclic next-row map on $\mathbb{D}_{n_i}$. To simplify notation,
+for $i \in \{1, \dots, t\}$ and $k \in \{1, \dots, k_i\}$, define
+$\hat{m}^{(i)}_k : \mathbb{D}_{n_i} \to \mathbb{F}$ by:
 
 $$
-\hat{m}^{(i)}_k(x) = m^{(i)}_k(T^{(i)}_1(x), \dots, T^{(i)}_w(x), T^{(i)}_1(\omega x), \dots, T^{(i)}_w(\omega x))
+\hat{m}^{(i)}_k(x) =
+m^{(i)}_k(T^{(i)}_1(x), \dots, T^{(i)}_{w_i}(x), T^{(i)}_1(\operatorname{rot}_i(x)), \dots, T^{(i)}_{w_i}(\operatorname{rot}_i(x)))
 $$
 
 and define $\hat{\sigma}^{(i)}_k$ analogously. The multiset defined by the traces is then given by:
 
 $$
-M_b(\sigma) = \sum_{i=1}^{t} \sum_{k=1}^{k_i} \sum_{x \in \langle \omega_i \rangle}
-\hat{m}^{(i)}_k(x) \mathbf{1}(b = b^{(i)}_k \wedge \sigma = \sigma^{(i)}_k)
+M_b(\tau) = \sum_{i=1}^{t} \sum_{k=1}^{k_i} \sum_{x \in \mathbb{D}_{n_i}}
+\hat{m}^{(i)}_k(x) \mathbf{1}(b = b^{(i)}_k \wedge \tau = \hat{\sigma}^{(i)}_k(x))
 $$
 
 We say that a bus $b$ is **balanced** if the $\mathbb{F}$-multiset $M_b$ satisfies $M_b(\tau) = 0$ for all messages
@@ -315,10 +323,10 @@ details.
 ## Backend implementation via LogUp
 
 The backend implementation proves the LogUp sum with a GKR fractional sumcheck. For an AIR with trace domain
-$\langle \omega \rangle$ and interactions $J$, the prover evaluates the LogUp leaf fractions
+$\mathbb{D}_n$ and interactions $J$, the prover evaluates the LogUp leaf fractions
 
 $$
-\sum_{x \in \langle \omega \rangle} \sum_{(\sigma, m, b)} \frac{\hat{m}(x)}{\alpha + h_{\beta}(\hat{\sigma}(x) \circ b)}
+\sum_{x \in \mathbb{D}_n} \sum_{(\sigma, m, b) \in J} \frac{\hat{m}(x)}{\alpha + h_{\beta}(\hat{\sigma}(x) \circ b)}
 $$
 
 where:
@@ -331,9 +339,9 @@ Note that the bus index being nonzero and concatenated to the end of the message
 buses are mapped to distinct preimages of $h_\beta$. It also distinguishes between two different length messages with
 trailing zeroes.
 
-The prover stacks these fractions across all present AIRs, lifts them to the LogUp hypercube, and proves that their
-global sum is zero. Fraction addition is represented in projective coordinates $(p, q)$, and the layered fractional
-addition tree is checked with GKR.
+The prover stacks these fractions across all present AIRs into the LogUp GKR input layer and proves that their global
+sum is zero. Fraction addition is represented in projective coordinates $(p, q)$, and the layered fractional addition
+tree is checked with GKR.
 
 See `crates/stark-backend/src/prover/logup_zerocheck/` for the CPU prover implementation and
 [`docs/cuda-backend/gkr-prover.md`](./cuda-backend/gkr-prover.md) for the CUDA implementation notes.
@@ -341,7 +349,7 @@ See `crates/stark-backend/src/prover/logup_zerocheck/` for the CPU prover implem
 ### GKR input evaluations and constraints
 
 The $\sigma_j$ and $m$ terms can be any multivariate polynomial expression expressed via the `AB::Expr` type within
-the `Air::eval` function. During proving, the backend evaluates those expressions on each relevant trace row and row
+the `Air::eval` function. During proving, the backend evaluates those expressions on each relevant trace point and
 rotation to form the LogUp input fractions
 
 $$
@@ -349,9 +357,10 @@ $$
 $$
 
 The fractional sumcheck proves that the stacked input fractions add to zero. Its final random evaluation point is then
-linked back to the committed trace data by the batched zerocheck/sumcheck over the AIR constraints and interaction
-expressions.
+reduced to opening claims about the trace polynomials by the batched zerocheck/sumcheck over the AIR constraints and
+interaction expressions.
 
 The GKR proof is over the fractional addition circuit itself. The batched zerocheck is responsible for enforcing that
-the LogUp input evaluations used by GKR are consistent with the committed traces and the symbolic interaction
-expressions.
+the LogUp input evaluations used by GKR are consistent with the symbolic interaction expressions over the trace
+polynomials. The resulting trace-polynomial opening claims are later reduced by the stacked opening reduction and
+checked against the commitments by WHIR.

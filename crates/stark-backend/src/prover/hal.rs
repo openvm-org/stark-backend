@@ -74,14 +74,11 @@ pub trait TraceCommitter<PB: ProverBackend> {
     fn commit(&self, traces: &[&PB::Matrix]) -> Result<(PB::Commitment, PB::PcsData), Self::Error>;
 }
 
-/// This trait is responsible for all proving steps to prove a collection of trace matrices
-/// satisfies all constraints of a Randomized AIR with Preprocessing. Such constraints include AIR
-/// constraints as well as bus balancing constraints for interactions between AIRs. These
-/// constraints may be grouped into challenge phases, where new randomness is sampled between phases
-/// via Fiat-Shamir (which would involve committing to more data).
+/// This trait is responsible for the proving steps that reduce AIR zerocheck constraints and
+/// interaction consistency claims to polynomial opening claims.
 ///
-/// This trait is _not_ responsible for committing to the trace matrices or for proving polynomial
-/// openings with respect to the committed trace matrices.
+/// This trait is _not_ responsible for committing to trace matrices or for checking polynomial
+/// openings against PCS commitments.
 pub trait MultiRapProver<PB: ProverBackend, TS> {
     /// The partial proof is the proof that the trace matrices satisfy all constraints assuming that
     /// certain polynomial opening claims are validated. In other words, it is a proof that reduces
