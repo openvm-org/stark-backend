@@ -49,7 +49,7 @@ pub fn eval_mle_evals_at_point<F: Field>(evals: &mut [F], x: &[F]) -> F {
     evals[0]
 }
 
-/// Let D be univariate skip domain, the subgroup of `F^*` of order `l_skip`.
+/// Let D be the univariate skip domain, the subgroup of `F^*` of order `2^l_skip`.
 ///
 /// Computes the polynomial ```text
 ///     eq_D(X, Y) = \sum_{z_1 \in D} \prod_{z_2 \in D, z_2 != z_1} (X - z_1)(Y - z_2) / (z_1 -
@@ -62,7 +62,7 @@ pub fn eval_eq_uni<F: Field>(l_skip: usize, x: F, y: F) -> F {
     res * F::ONE.halve().exp_u64(l_skip as u64)
 }
 
-/// Let D be univariate skip domain, the subgroup of `F^*` of order `l_skip`.
+/// Let D be the univariate skip domain, the subgroup of `F^*` of order `2^l_skip`.
 ///
 /// Computes the polynomial eq_D(X, 1); see `eval_eq_uni`.
 pub fn eval_eq_uni_at_one<F: Field>(l_skip: usize, x: F) -> F {
