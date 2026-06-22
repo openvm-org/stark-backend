@@ -1,16 +1,16 @@
 //! Symbolic-DAG rendering for the native Lean dialect.
 //!
-//! The output is a `Fundamentals.Air.Expr F layout` body — a function of a
-//! valuation `va`. Compound nodes are emitted in one of three forms,
-//! decided per-node by [`Decision`]:
+//! The output is an `MvPolynomial (Var layout) F` body. Compound nodes are emitted in one of three
+//! forms, decided per-node by [`Decision`]:
 //!
 //! - **Inline.** `(<lhs> op <rhs>)` is dropped into the parent expression directly. Default for
 //!   short / single-use subtrees.
 //! - **Local `let tN`.** Pushed onto the constraint's binding list and referenced as `tN` from the
 //!   parent. Used when a subtree is reused ≥`SHARE_THRESHOLD` times within one constraint, is large
 //!   enough to be worth a name, and does not qualify for an AIR-wide helper.
-//! - **Global `inter_K`.** Hoisted to a top-level `def inter_K : Expr F layout := fun va => …`. A
-//!   pre-pass chooses these nodes before any expression body is rendered.
+//! - **Global `inter_K`.** Hoisted to a top-level `noncomputable def inter_K : Expr F layout :=
+//!   Expr.ofPolynomial <| …`. A pre-pass chooses these nodes before any expression body is
+//!   rendered.
 //!
 //! The DAG walk is post-order via an explicit stack; pointer identity
 //! (`*const SymbolicExpression<F>`) keys the dedup, helper-name, and
@@ -72,9 +72,9 @@ pub struct LeanRenderContext<F> {
     /// `[0, cached_width]` (cached at part_index 0, common at part_index 1).
     pub partition_offsets: Vec<usize>,
     /// Names for public-value indices. When `Entry::Public { index }`
-    /// has a corresponding entry here, the va-form emits `va <name>PvVar`
+    /// has a corresponding entry here, the polynomial form emits `MvPolynomial.X <name>PvVar`
     /// (referencing the Schema-emitted ref); otherwise it falls back to
-    /// `va (.publicValue {index})`.
+    /// `MvPolynomial.X (.publicValue {index})`.
     pub public_value_names: Vec<String>,
     /// Lean expressions for main-column refs, indexed by flat column.
     /// Defaults to `<name>Ref`; shared-schema callers use qualified refs.
@@ -121,7 +121,7 @@ impl<F> LeanRenderContext<F> {
 struct Rendered {
     /// Local `let tN := …` lines (already in dependency order).
     bindings: Vec<(String, String)>,
-    /// Inlined expression text, or a `tN` / `inter_K va` reference.
+    /// Inlined expression text, or a `tN` / `inter_K.polynomial` reference.
     result: String,
     /// Number of compound operations in the subtree (used for the
     /// op-count threshold).
@@ -291,13 +291,13 @@ fn decide_and_emit<F: Field>(
             .clone();
         if ctx.emitted_helpers.insert(ptr) {
             ctx.helper_defs.push(format!(
-                "def {helper_name} : Expr F layout := fun va =>\n{}\n",
-                indent_block(&r.clone().into_block(|res| res), "  ")
+                "noncomputable def {helper_name} : Expr F (layout := layout) :=\n  Expr.ofPolynomial <|\n{}\n",
+                indent_block(&r.clone().into_block(|res| res), "    ")
             ));
         }
         return Rendered {
             bindings: vec![],
-            result: format!("{helper_name} va"),
+            result: format!("{helper_name}.polynomial"),
             op_count: r.op_count,
         };
     }
@@ -351,7 +351,7 @@ fn render_leaf<F: Field>(
                     .get(flat_idx)
                     .cloned()
                     .unwrap_or_else(|| format!("{name}Ref"));
-                format!("va (.cell .{rotation} {column_ref})")
+                format!("MvPolynomial.X (.cell .{rotation} {column_ref})")
             }
             Entry::Preprocessed { .. } => panic!("preprocessed columns not supported in v1"),
             Entry::Public => {
@@ -361,17 +361,20 @@ fn render_leaf<F: Field>(
                         .get(*index)
                         .cloned()
                         .unwrap_or_else(|| format!("{name}PvVar"));
-                    format!("va {pv_var}")
+                    format!("MvPolynomial.X {pv_var}")
                 } else {
-                    format!("va (.publicValue {index})")
+                    format!("MvPolynomial.X (.publicValue {index})")
                 }
             }
             Entry::Challenge => panic!("challenge columns not supported in v1"),
         },
-        SymbolicExpression::IsFirstRow => "va (.selector .isFirst)".to_string(),
-        SymbolicExpression::IsLastRow => "va (.selector .isLast)".to_string(),
-        SymbolicExpression::IsTransition => "va (.selector .isTransition)".to_string(),
-        SymbolicExpression::Constant(c) => render_constant(c, context.characteristic),
+        SymbolicExpression::IsFirstRow => "MvPolynomial.X (.selector .isFirst)".to_string(),
+        SymbolicExpression::IsLastRow => "MvPolynomial.X (.selector .isLast)".to_string(),
+        SymbolicExpression::IsTransition => "MvPolynomial.X (.selector .isTransition)".to_string(),
+        SymbolicExpression::Constant(c) => format!(
+            "MvPolynomial.C ({} : F)",
+            render_constant(c, context.characteristic)
+        ),
         _ => unreachable!("compound expressions handled by render_expression"),
     }
 }

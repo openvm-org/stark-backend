@@ -4,8 +4,8 @@
 //! `Fundamentals.Air` Lean library:
 //!
 //! - **Schema.lean** — width, layout, per-column `…Idx` / `…Ref` defs.
-//! - **Constraints.lean** — symbolic constraints as `Expr F layout`, `constraintsList`, the `air :
-//!   AIR F` value, named-column accessors, and a `RawConstraintsAt` extractor. Shared
+//! - **Constraints.lean** — symbolic constraints as `Expr F (layout := layout)`, `constraintsList`,
+//!   the `air : AIR F` value, named-column accessors, and a `RawConstraintsAt` extractor. Shared
 //!   sub-expressions (`inter_K`) live here too — `Interactions.lean` can reference them via the
 //!   open namespace.
 //! - **Interactions.lean** — per-bus `…Interactions` lists referencing a hand-curated `BusIdx`
@@ -1216,16 +1216,26 @@ pub fn write_constraints<W: Write>(
     writeln!(writer)?;
     for (idx, body) in rendered.constraint_bodies.iter().enumerate() {
         writeln!(writer, "/-- `constraint_{idx}`. -/")?;
-        writeln!(writer, "def expr_{idx} : Expr F layout := fun va =>")?;
-        writeln!(writer, "{}", indent_block(body, "  "))?;
+        writeln!(
+            writer,
+            "noncomputable def expr_{idx} : Expr F (layout := layout) :="
+        )?;
+        writeln!(writer, "  Expr.ofPolynomial <|")?;
+        writeln!(writer, "{}", indent_block(body, "    "))?;
         writeln!(writer)?;
     }
 
     writeln!(writer, "/-- Full constraint list. -/")?;
     if rendered.constraint_bodies.is_empty() {
-        writeln!(writer, "def constraintsList : List (Expr F layout) := []")?;
+        writeln!(
+            writer,
+            "noncomputable def constraintsList : List (Expr F (layout := layout)) := []"
+        )?;
     } else {
-        writeln!(writer, "def constraintsList : List (Expr F layout) :=")?;
+        writeln!(
+            writer,
+            "noncomputable def constraintsList : List (Expr F (layout := layout)) :="
+        )?;
         let names = (0..rendered.constraint_bodies.len())
             .map(|i| format!("expr_{i}"))
             .collect::<Vec<_>>();
@@ -1242,7 +1252,19 @@ pub fn write_constraints<W: Write>(
     )?;
     writeln!(
         writer,
-        "def air : AIR F := {{ layout := layout, constraints := constraintsList }}"
+        "noncomputable def air : AIR F := {{ layout := layout, constraints := constraintsList }}"
+    )?;
+    writeln!(writer)?;
+
+    // `air.layout` is definitionally `layout`, but `air` is a (non-reducible)
+    // `noncomputable def`, so `simp`/unification will not unfold it to discharge
+    // the layout index mismatch between `inter_K.polynomial` (typed with
+    // `layout`) and the interaction's `air.layout`. This `rfl` lemma is added to
+    // the per-pick eval-lemma `simp` sets so the constants/variables coming from
+    // `inter_K` reduce under `MvPolynomial.eval_C` / `eval_X`.
+    writeln!(
+        writer,
+        "theorem air_layout_eq : (air (F := F)).layout = layout := rfl"
     )?;
     writeln!(writer)?;
 
@@ -1252,7 +1274,7 @@ pub fn write_constraints<W: Write>(
         let column_ref = options.schema_column_ref_expr(name);
         writeln!(
             writer,
-            "abbrev {name} (t : (air (F := F)).Trace) (row : Fin t.height) : F :="
+            "abbrev {name} (t : AIR.Trace (air (F := F))) (row : Fin t.height) : F :="
         )?;
         writeln!(writer, "  t.col {column_ref} row")?;
     }
@@ -1261,7 +1283,7 @@ pub fn write_constraints<W: Write>(
         let column_ref = options.schema_column_ref_expr(name);
         writeln!(
             writer,
-            "abbrev {name}_next (t : (air (F := F)).Trace) (row : Fin t.height) : F :="
+            "abbrev {name}_next (t : AIR.Trace (air (F := F))) (row : Fin t.height) : F :="
         )?;
         writeln!(writer, "  t.colNext {column_ref} row")?;
     }
@@ -1295,7 +1317,7 @@ pub fn write_constraints<W: Write>(
     )?;
     writeln!(
         writer,
-        "structure RawConstraintsAt (trace : (air (F := F)).Trace) (row : Fin trace.height){pv_param} : Prop where"
+        "structure RawConstraintsAt (trace : AIR.Trace (air (F := F))) (row : Fin trace.height){pv_param} : Prop where"
     )?;
     for i in 0..n {
         writeln!(
@@ -1317,7 +1339,7 @@ pub fn write_constraints<W: Write>(
         )?;
         writeln!(
             writer,
-            "    (constraintsList : List (Expr F layout))[K]'h ∈ constraintsList :="
+            "    (constraintsList : List (Expr F (layout := layout)))[K]'h ∈ constraintsList :="
         )?;
         writeln!(writer, "  List.getElem_mem _")?;
         writeln!(writer)?;
@@ -1331,7 +1353,7 @@ pub fn write_constraints<W: Write>(
     )?;
     writeln!(
         writer,
-        "theorem of_satisfiesRow {{trace : (air (F := F)).Trace}} {{row : Fin trace.height}}"
+        "theorem of_satisfiesRow {{trace : AIR.Trace (air (F := F))}} {{row : Fin trace.height}}"
     )?;
     let (pv_binder, pv_arg, raw_args) = (
         "    {publicValues : List F}\n",
@@ -1388,7 +1410,11 @@ pub fn write_interactions<W: Write>(
     writeln!(writer)?;
     writeln!(writer, "set_option linter.unusedVariables false")?;
     writeln!(writer, "set_option linter.unusedSectionVars false")?;
-    writeln!(writer, "set_option maxHeartbeats 800000")?;
+    writeln!(writer, "set_option linter.unusedSimpArgs false")?;
+    // Per-pick message lemmas for wide buses with polynomial products (e.g. the
+    // batch-constraint AIRs) fully normalise their `MvPolynomial.eval` payloads
+    // through `simp`, which is heartbeat-hungry; give them generous headroom.
+    writeln!(writer, "set_option maxHeartbeats 6400000")?;
     writeln!(writer)?;
     writeln!(writer, "namespace {}", options.air_namespace)?;
     writeln!(writer)?;
@@ -1410,7 +1436,7 @@ pub fn write_interactions<W: Write>(
         writeln!(writer)?;
         writeln!(
             writer,
-            "def {lean_name}Interactions : List ({bus_def_ty}) :="
+            "noncomputable def {lean_name}Interactions : List ({bus_def_ty}) :="
         )?;
         if group.entries.is_empty() {
             writeln!(writer, "  []")?;
@@ -1420,11 +1446,10 @@ pub fn write_interactions<W: Write>(
         writeln!(writer, "  [")?;
         for (i, entry) in group.entries.iter().enumerate() {
             writeln!(writer, "    {{ bus := .{lean_name}")?;
-            writeln!(writer, "      multExpr := fun va =>")?;
+            writeln!(writer, "      multExpr := Expr.ofPolynomial <|")?;
             // Multi-line bodies (e.g. with `let t0 := …` bindings)
-            // need explicit parens to terminate the lambda cleanly
-            // before the next struct field — otherwise Lean's parser
-            // eats `msgExprs` as part of the lambda body.
+            // get explicit parens so the next struct field cannot be
+            // parsed as part of the polynomial term.
             let mult_body = if entry.multiplicity_body.contains('\n') {
                 format!("({})", entry.multiplicity_body)
             } else {
@@ -1438,8 +1463,13 @@ pub fn write_interactions<W: Write>(
                 } else {
                     ","
                 };
-                writeln!(writer, "        (fun va =>")?;
-                writeln!(writer, "{}){suffix}", indent_block(body, "          "))?;
+                let msg_body = if body.contains('\n') {
+                    format!("({body})")
+                } else {
+                    body.clone()
+                };
+                writeln!(writer, "        (Expr.ofPolynomial <|")?;
+                writeln!(writer, "{}){suffix}", indent_block(&msg_body, "          "))?;
             }
             let trailing = if i + 1 == group.entries.len() {
                 ""
@@ -1456,7 +1486,10 @@ pub fn write_interactions<W: Write>(
 
     if !rendered.interactions.is_empty() {
         writeln!(writer, "/-- All interactions for `{air_name}`. -/")?;
-        writeln!(writer, "def allInteractions : List ({bus_def_ty}) :=")?;
+        writeln!(
+            writer,
+            "noncomputable def allInteractions : List ({bus_def_ty}) :="
+        )?;
         let names = rendered
             .interactions
             .iter()
@@ -1576,7 +1609,7 @@ fn write_per_pick_lemmas<W: Write>(
             writer,
             "    (e.g. `Receive`, `Send`) by hand if applicable. -/"
         )?;
-        writeln!(writer, "def {bus}_{i} : {bus_def_ty} :=")?;
+        writeln!(writer, "noncomputable def {bus}_{i} : {bus_def_ty} :=")?;
         writeln!(writer, "  ({list_def}).get ⟨{i}, by simp [{list_def}]⟩")?;
         writeln!(writer)?;
     }
@@ -1637,7 +1670,7 @@ fn write_per_pick_lemmas<W: Write>(
         writeln!(writer, "lemma {bus}_{i}_evalMultiplicityAt")?;
         writeln!(
             writer,
-            "    (trace : (air (F := F)).Trace) (row : Fin trace.height){pv_param} :"
+            "    (trace : AIR.Trace (air (F := F))) (row : Fin trace.height){pv_param} :"
         )?;
         writeln!(
             writer,
@@ -1649,10 +1682,25 @@ fn write_per_pick_lemmas<W: Write>(
             list_def.clone(),
             "Interaction.evalMultiplicityAt".to_string(),
             "Interaction.evalMultiplicity".to_string(),
+            "Expr.eval".to_string(),
+            "Expr.ofPolynomial".to_string(),
+            "MvPolynomial.eval_C".to_string(),
+            "MvPolynomial.eval_X".to_string(),
         ];
         if mult_uses_inter {
             simp_names.push(air_inter_attr_name(air_name));
         }
+        // The polynomial payload is typed with `layout`, but the interaction
+        // (and thus the `AIR.evalVar` assignment) is typed with `air.layout`.
+        // Because `air` is a noncomputable def, `simp` won't unfold `air.layout`
+        // to `layout`, so the layout-index mismatch stops `MvPolynomial.eval_C`
+        // / `eval_X` from firing on the polynomial's constants/variables
+        // (whether they come from an `inter_K` helper or are written inline,
+        // e.g. `MvPolynomial.C 2` in a public-values bus). `air_layout_eq`
+        // rewrites `air.layout` back to `layout` so those reductions fire. It is
+        // always sound (a `rfl` lemma) and harmless when unused, so we add it
+        // unconditionally rather than only when an `inter_K` helper is present.
+        simp_names.push("air_layout_eq".to_string());
         simp_names.extend(acc_list.iter().cloned());
         simp_names.extend(ctx_list.iter().cloned());
         simp_names.extend(ref_list.iter().cloned());
@@ -1666,7 +1714,7 @@ fn write_per_pick_lemmas<W: Write>(
             writeln!(writer, "lemma {bus}_{i}_evalMessageAt")?;
             writeln!(
                 writer,
-                "    (trace : (air (F := F)).Trace) (row : Fin trace.height){pv_param} :"
+                "    (trace : AIR.Trace (air (F := F))) (row : Fin trace.height){pv_param} :"
             )?;
             writeln!(
                 writer,
@@ -1681,7 +1729,7 @@ fn write_per_pick_lemmas<W: Write>(
             writeln!(writer, "lemma {bus}_{i}_busEventAt")?;
             writeln!(
                 writer,
-                "    (trace : (air (F := F)).Trace) (row : Fin trace.height){pv_param} :"
+                "    (trace : AIR.Trace (air (F := F))) (row : Fin trace.height){pv_param} :"
             )?;
             writeln!(
                 writer,
@@ -1705,7 +1753,7 @@ fn write_per_pick_lemmas<W: Write>(
         writeln!(writer, "lemma {bus}_{i}_evalMessageAt")?;
         writeln!(
             writer,
-            "    (trace : (air (F := F)).Trace) (row : Fin trace.height){pv_param} :"
+            "    (trace : AIR.Trace (air (F := F))) (row : Fin trace.height){pv_param} :"
         )?;
         writeln!(
             writer,
@@ -1725,11 +1773,26 @@ fn write_per_pick_lemmas<W: Write>(
             list_def.clone(),
             "Interaction.evalMessageAt".to_string(),
             "Interaction.evalMessage".to_string(),
+            "Expr.eval".to_string(),
+            "Expr.ofPolynomial".to_string(),
+            "MvPolynomial.eval_C".to_string(),
+            "MvPolynomial.eval_X".to_string(),
         ];
         simp_names.push("AIR.evalVar".to_string());
         if msg_uses_inter {
             simp_names.push(air_inter_attr_name(air_name));
         }
+        // The polynomial payload is typed with `layout`, but the interaction
+        // (and thus the `AIR.evalVar` assignment) is typed with `air.layout`.
+        // Because `air` is a noncomputable def, `simp` won't unfold `air.layout`
+        // to `layout`, so the layout-index mismatch stops `MvPolynomial.eval_C`
+        // / `eval_X` from firing on the polynomial's constants/variables
+        // (whether they come from an `inter_K` helper or are written inline,
+        // e.g. `MvPolynomial.C 2` in a public-values bus). `air_layout_eq`
+        // rewrites `air.layout` back to `layout` so those reductions fire. It is
+        // always sound (a `rfl` lemma) and harmless when unused, so we add it
+        // unconditionally rather than only when an `inter_K` helper is present.
+        simp_names.push("air_layout_eq".to_string());
         simp_names.extend(msg_acc.iter().cloned());
         simp_names.extend(msg_ctx.iter().cloned());
         simp_names.extend(msg_ref.iter().cloned());
@@ -1744,7 +1807,7 @@ fn write_per_pick_lemmas<W: Write>(
         writeln!(writer, "lemma {bus}_{i}_busEventAt")?;
         writeln!(
             writer,
-            "    (trace : (air (F := F)).Trace) (row : Fin trace.height){pv_param} :"
+            "    (trace : AIR.Trace (air (F := F))) (row : Fin trace.height){pv_param} :"
         )?;
         writeln!(
             writer,
