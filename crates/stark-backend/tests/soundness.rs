@@ -14,6 +14,7 @@ use openvm_stark_sdk::config::{
     APP_MAX_CONSTRAINT_DEGREE, MAX_APP_LOG_STACKED_HEIGHT, RECURSION_MAX_CONSTRAINT_DEGREE,
     SECURITY_BITS_TARGET, WHIR_MAX_LOG_FINAL_POLY_LEN,
 };
+use serde::Serialize;
 
 // ==========================================================================
 // Circuit parameter upper bounds for soundness analysis
@@ -274,10 +275,18 @@ fn test_leaf_aggregation_security() {
     );
 }
 
+#[derive(Serialize, Default)]
+struct ParamList {
+    app: Option<SystemParams>,
+    leaf: Option<SystemParams>,
+    root: Option<SystemParams>,
+    internal: Option<SystemParams>,
+}
+
 #[test]
 fn generate_root_params() {
     let max_log_height = 20;
-    let log_blowups = (2..=5);
+    let log_blowups = (3..=4);
     let k_whirs = vec![3, 4];
     let l_skips = (1..=8);
     let mut good_params = vec![];
@@ -347,7 +356,10 @@ fn generate_root_params() {
                         "k_whir {k_whir}, log_blogup {log_blowup}, l_skip {l_skip}, n_stack {n_stack}, limiting_component: {limiting_component}, soundness: {}",
                         soundness.total_bits
                     );
-                    good_params.push(params);
+                    good_params.push(ParamList {
+                        root: Some(params),
+                        ..Default::default()
+                    });
                 }
             }
         }
@@ -365,7 +377,7 @@ fn generate_root_params() {
 
 #[test]
 fn generate_internal_params() {
-    let max_log_height = 19;
+    let max_log_height = 20;
     let log_blowups = (1..=5);
     let k_whirs = vec![3, 4];
     let l_skips = (1..=8);
@@ -430,12 +442,18 @@ fn generate_internal_params() {
                     n_logup,
                 );
                 if soundness.total_bits >= 100.0 {
+                    let mut root_params = app_params_with_100_bits_security(20);
+                    root_params.w_stack = 33;
                     let limiting_component = limiting_soundness_component(&soundness);
                     println!(
                         "k_whir {k_whir}, log_blogup {log_blowup}, l_skip {l_skip}, n_stack {n_stack}, limiting_component: {limiting_component}, soundness: {}",
                         soundness.total_bits
                     );
-                    good_params.push(params);
+                    good_params.push(ParamList {
+                        internal: Some(params),
+                        root: Some(root_params),
+                        ..Default::default()
+                    });
                 }
             }
         }
