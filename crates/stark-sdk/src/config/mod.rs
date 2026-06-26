@@ -26,7 +26,9 @@ pub mod log_up_params;
 // These configurations target 100-bits of proven round-by-round (RBR) security with BabyBear as the
 // base field and BabyBear^4 as the extension field.
 
-const WHIR_MAX_LOG_FINAL_POLY_LEN: usize = 10;
+pub const DEFAULT_K_WHIR: usize = 4;
+pub const DEFAULT_WHIR_QUERY_PHASE_POW_BITS: usize = 20;
+pub const WHIR_MAX_LOG_FINAL_POLY_LEN: usize = 10;
 pub const SECURITY_BITS_TARGET: usize = 100;
 
 pub const DEFAULT_APP_L_SKIP: usize = 4;
@@ -74,7 +76,7 @@ fn log_up_params_for_whir(
 /// proximity regime's PCS list size. The LogUp params are derived up front (from the same inputs
 /// `SystemParams::new` uses to build the WHIR config) so they can be passed straight in.
 #[allow(clippy::too_many_arguments)]
-fn params_with_100_bits_security(
+pub fn params_with_100_bits_security(
     log_blowup: usize,
     l_skip: usize,
     n_stack: usize,
@@ -83,6 +85,8 @@ fn params_with_100_bits_security(
     mu_pow_bits: usize,
     proximity: WhirProximityStrategy,
     max_constraint_degree: usize,
+    whir_query_phase_pow_bits: usize,
+    k_whir: usize,
 ) -> SystemParams {
     let logup = log_up_params_for_whir(proximity, l_skip + n_stack, log_blowup, w_stack);
     SystemParams::new(
@@ -97,6 +101,8 @@ fn params_with_100_bits_security(
         SECURITY_BITS_TARGET,
         logup,
         max_constraint_degree,
+        whir_query_phase_pow_bits,
+        k_whir,
     )
 }
 
@@ -126,6 +132,8 @@ pub fn app_params_with_100_bits_security(log_stacked_height: usize) -> SystemPar
         15,                                                    // mu pow
         WhirProximityStrategy::UniqueDecoding,
         APP_MAX_CONSTRAINT_DEGREE,
+        DEFAULT_WHIR_QUERY_PHASE_POW_BITS,
+        DEFAULT_K_WHIR,
     )
 }
 
@@ -154,6 +162,8 @@ pub fn leaf_params_with_100_bits_security() -> SystemParams {
         13,   // mu pow
         WhirProximityStrategy::UniqueDecoding,
         RECURSION_MAX_CONSTRAINT_DEGREE,
+        DEFAULT_WHIR_QUERY_PHASE_POW_BITS,
+        DEFAULT_K_WHIR,
     )
 }
 
@@ -182,6 +192,8 @@ pub fn internal_params_with_100_bits_security() -> SystemParams {
         20,  // mu pow
         WhirProximityStrategy::ListDecoding { m: 2 },
         RECURSION_MAX_CONSTRAINT_DEGREE,
+        DEFAULT_WHIR_QUERY_PHASE_POW_BITS,
+        DEFAULT_K_WHIR,
     )
 }
 
@@ -205,10 +217,12 @@ pub fn root_params_with_100_bits_security() -> SystemParams {
         2,  // l_skip
         18, // n_stack
         18, // w_stack
-        20, // folding pow
-        20, // mu pow
+        15, // folding pow
+        15, // mu pow
         WhirProximityStrategy::ListDecoding { m: 1 },
         RECURSION_MAX_CONSTRAINT_DEGREE,
+        15, // whir_query_pow
+        DEFAULT_K_WHIR,
     )
 }
 
@@ -236,5 +250,7 @@ pub fn hook_params_with_100_bits_security() -> SystemParams {
         11, // mu pow
         WhirProximityStrategy::ListDecoding { m: 1 },
         RECURSION_MAX_CONSTRAINT_DEGREE,
+        DEFAULT_WHIR_QUERY_PHASE_POW_BITS,
+        DEFAULT_K_WHIR,
     )
 }
