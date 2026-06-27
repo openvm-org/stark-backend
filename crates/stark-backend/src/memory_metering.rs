@@ -14,6 +14,9 @@ const FRACTIONAL_GKR_DEFAULT_BLOCK_SIZE: usize = 256;
 const FRACTIONAL_GKR_MIN_BLOCK_SIZE: usize = 64;
 const FRACTIONAL_GKR_WARP_SIZE: usize = 32;
 const FRACTIONAL_GKR_ROUND_COMPUTE_FALLBACK_BLOCKS: usize = 228;
+const FRACTIONAL_INPUT_EF_ELEMENTS_PER_INTERACTION: usize = 2;
+const INTERACTION_ESTIMATE_WORK_BUFFER_RATIO: f64 = 1.0 / 16.0;
+const INTERACTION_ESTIMATE_BLOCK_SUM_RATIO: f64 = 1.0 / 256.0;
 
 /// Cell counts for a proving memory estimate.
 ///
@@ -179,24 +182,6 @@ impl ProvingMemoryConfig {
     }
 
     #[inline]
-    pub fn main_persistent_memory_bytes(
-        &self,
-        main_cells: usize,
-        main_stacked_cells: usize,
-    ) -> usize {
-        if main_cells == 0 || main_stacked_cells == 0 {
-            return 0;
-        }
-
-        let common_digest_layers = if self.retained_opening_memory {
-            self.main_commitment_digest_layers_memory_bytes()
-        } else {
-            0
-        };
-        self.cached_stacked_matrix_memory_bytes(main_stacked_cells) + common_digest_layers
-    }
-
-    #[inline]
     fn cached_stacked_matrix_memory_bytes(&self, main_stacked_cells: usize) -> usize {
         if self.cache_stacked_matrix {
             self.main_memory_bytes(main_stacked_cells)
@@ -208,6 +193,13 @@ impl ProvingMemoryConfig {
     #[inline]
     fn main_commitment_digest_layers_memory_bytes(&self) -> usize {
         self.merkle_digest_layers_memory_bytes(self.log_stacked_height + self.log_blowup)
+    }
+
+    #[inline]
+    fn main_commitment_initial_digest_layer_memory_bytes(&self) -> usize {
+        let log_codeword_height = self.log_stacked_height + self.log_blowup;
+        let log_query_layer_height = log_codeword_height.saturating_sub(self.k_whir);
+        (1usize << log_query_layer_height) * self.digest_size
     }
 
     #[inline]
@@ -346,7 +338,8 @@ impl ProvingMemoryConfig {
     /// main_stacked_cells = stacked_width * 2^log_stacked_height
     /// main               = main_cells * sizeof(F)
     /// cached_stacked     = main_stacked_cells * sizeof(F), when cached
-    /// common_digest      = Merkle digest layers for the common-main commitment
+    /// common_digest      = retained Merkle digest layers for the common-main commitment
+    /// common_first_layer = first Merkle digest layer built from the RS code matrix
     /// rs_code_matrix     = main_stacked_cells * 2^log_blowup * sizeof(F)
     /// first_g_tree       = first WHIR folding codeword + Merkle digest layers
     /// second_g_tree      = second WHIR folding codeword + Merkle digest layers
@@ -356,8 +349,14 @@ impl ProvingMemoryConfig {
     /// interaction        = sizeof(F) * interaction_cell_weight * interaction_cells
     ///                      + max(INTERACTION_MEMORY_OVERHEAD, fractional_gkr_round_temp_buffer)
     ///
+    /// commit_peak = cached_stacked + if cache_rs_code_matrix {
+    ///     rs_code_matrix + common_digest
+    /// } else {
+    ///     max(rs_code_matrix + common_first_layer, common_digest)
+    /// }
+    ///
     /// total = main + max(
-    ///     cached_stacked + common_digest + rs_code_matrix,
+    ///     commit_peak,
     ///     cached_stacked + common_digest + cached_rs_code_matrix + max(main_secondary, interaction),
     ///     cached_stacked + common_digest + rs_code_matrix + first_g_tree,
     ///     first_g_tree + second_g_tree,
@@ -379,6 +378,11 @@ impl ProvingMemoryConfig {
             0
         };
         let rs_code_matrix = self.rs_code_matrix_memory_bytes(counts.main_stacked_cells);
+        let common_initial_digest_layer = if has_common_main && self.retained_opening_memory {
+            self.main_commitment_initial_digest_layer_memory_bytes()
+        } else {
+            0
+        };
         let main_secondary = self.main_secondary_memory_bytes(counts);
         let interaction = self.interaction_memory_bytes(counts.interaction_cells);
         let first_g_tree = if has_common_main && self.retained_opening_memory {
@@ -397,7 +401,15 @@ impl ProvingMemoryConfig {
             0
         };
         let retained_common_main = cached_stacked_matrix + common_digest_layers;
-        let commit_peak = retained_common_main + rs_code_matrix;
+        let commit_peak = cached_stacked_matrix
+            + if self.cache_rs_code_matrix {
+                rs_code_matrix + common_digest_layers
+            } else {
+                max(
+                    rs_code_matrix + common_initial_digest_layer,
+                    common_digest_layers,
+                )
+            };
         let constraint_peak =
             retained_common_main + cached_rs_code_matrix + max(main_secondary, interaction);
         let whir_first_round_peak = retained_common_main + rs_code_matrix + first_g_tree;
@@ -428,17 +440,18 @@ fn default_main_cell_secondary_weight(
     (1.0 + max_constraint_degree as f64 / 2.0) * extension_degree as f64 / (1usize << l_skip) as f64
 }
 
-/// ```
-/// leaf_weight = 2 * extension_degree
+/// Conservative per-cell weight for interaction memory when the segmenter only
+/// has an aggregate row-interaction slot count.
 ///
-/// work_buffer    <= logical_len / 16
-/// tmp_block_sums ~= logical_len / 256
-/// logical_len    <= 2 * real_len
-///
-/// interaction_weight = leaf_weight * (1 + 2 * (1 / 16 + 1 / 256))
-/// ```
+/// Each row-interaction slot contributes one `Frac<EF>` input, i.e.
+/// numerator and denominator in the extension field. The two ratios reserve a
+/// proportional budget for CUDA work buffers and block sums that scale with the
+/// same slot count. Fixed fractional-GKR scratch is added separately by
+/// `interaction_memory_bytes`.
 fn default_interaction_cell_weight(extension_degree: usize) -> f64 {
-    (2 * extension_degree) as f64 * (1.0 + 2.0 * (1.0 / 16.0 + 1.0 / 256.0))
+    (FRACTIONAL_INPUT_EF_ELEMENTS_PER_INTERACTION * extension_degree) as f64
+        * (1.0
+            + 2.0 * (INTERACTION_ESTIMATE_WORK_BUFFER_RATIO + INTERACTION_ESTIMATE_BLOCK_SUM_RATIO))
 }
 
 /// `ceil(cell_count * base_field_size * weight)`
@@ -481,6 +494,12 @@ mod tests {
     fn expected_secondary_peak(config: ProvingMemoryConfig, counts: ProvingMemoryCounts) -> usize {
         let retained_common_main = expected_retained_common_main(config, counts.main_stacked_cells);
         let rs_code_matrix = config.rs_code_matrix_memory_bytes(counts.main_stacked_cells);
+        let common_initial_digest_layer =
+            if counts.main_stacked_cells != 0 && config.retained_opening_memory {
+                config.main_commitment_initial_digest_layer_memory_bytes()
+            } else {
+                0
+            };
         let cached_rs_code_matrix = if config.cache_rs_code_matrix {
             rs_code_matrix
         } else {
@@ -499,7 +518,26 @@ mod tests {
         } else {
             0
         };
-        let commit_peak = retained_common_main + rs_code_matrix;
+        let cached_stacked_matrix = if config.cache_stacked_matrix {
+            config.main_memory_bytes(counts.main_stacked_cells)
+        } else {
+            0
+        };
+        let common_digest_layers =
+            if counts.main_stacked_cells != 0 && config.retained_opening_memory {
+                config.main_commitment_digest_layers_memory_bytes()
+            } else {
+                0
+            };
+        let commit_peak = cached_stacked_matrix
+            + if config.cache_rs_code_matrix {
+                rs_code_matrix + common_digest_layers
+            } else {
+                max(
+                    rs_code_matrix + common_initial_digest_layer,
+                    common_digest_layers,
+                )
+            };
         let constraint_peak =
             retained_common_main + cached_rs_code_matrix + max(main_secondary, interaction);
         let whir_first_round_peak = retained_common_main + rs_code_matrix + first_g_tree;
@@ -604,9 +642,11 @@ mod tests {
     #[test]
     fn persistent_main_memory_uses_retained_common_main() {
         let config = test_memory_config();
+        let counts = ProvingMemoryCounts::new_with_stacked_cells(1, 0, 1, 0);
+        let estimate = config.estimate(counts);
 
         assert_eq!(
-            config.main_persistent_memory_bytes(1, 1),
+            estimate.main_persistent,
             expected_retained_common_main(config, 1)
         );
     }
