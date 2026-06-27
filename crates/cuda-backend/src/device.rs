@@ -9,8 +9,7 @@ use crate::cuda::{
     device_info::get_sm_count,
 };
 
-/// Pure device configuration — no stream, no CUDA runtime state.
-/// Renamed from the old `GpuDevice`.
+/// Pure device configuration: no stream and no CUDA runtime state.
 #[derive(Clone, Getters, CopyGetters, MutGetters)]
 pub struct GpuDeviceConfig {
     #[getset(get = "pub")]
@@ -33,11 +32,17 @@ impl GpuProverConfig {
     pub fn proving_memory_config<SC: StarkProtocolConfig>(
         &self,
         config: &SC,
+        sm_count: u32,
     ) -> ProvingMemoryConfig {
         // Interaction memory is estimated from the CUDA fractional-GKR buffer model in
         // `openvm_stark_backend::memory_metering`. Update that estimate when changing GKR
         // input layout, work-buffer sizing, or scratch allocations.
-        ProvingMemoryConfig::from_protocol_config(config, self.cache_rs_code_matrix)
+        let mut memory_config =
+            ProvingMemoryConfig::from_protocol_config(config, self.cache_rs_code_matrix);
+        memory_config.cache_stacked_matrix = self.cache_stacked_matrix;
+        memory_config.retained_opening_memory = true;
+        memory_config.fractional_gkr_round_compute_min_blocks = sm_count as usize * 2;
+        memory_config
     }
 }
 
