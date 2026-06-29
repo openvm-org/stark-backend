@@ -9,7 +9,7 @@ use openvm_cuda_common::{
 use openvm_stark_backend::{
     poly_common::{eval_eq_mle, interpolate_linear_at_01, interpolate_quadratic_at_012},
     proof::GkrLayerClaims,
-    prover::fractional_sumcheck_gkr::{Frac, FracSumcheckProof},
+    prover::fractional_sumcheck_gkr::{Frac, FracSumcheckProof, FractionalGkrMemoryModel},
     FiatShamirTranscript, StarkProtocolConfig,
 };
 use p3_field::{Field, PrimeCharacteristicRing};
@@ -29,12 +29,12 @@ use crate::{
         ntt::{bit_rev_frac_ext, bit_rev_frac_ext_build_k2},
     },
     poly::SqrtEqLayers,
-    prelude::EF,
+    prelude::{D_EF, EF, F},
 };
 
 const GKR_S_DEG: usize = 3;
-const GKR_WINDOW_SIZE: usize = 3;
-const GKR_WINDOW_DEFAULT_MIN_N: usize = 22;
+const GKR_WINDOW_SIZE: usize = FractionalGkrMemoryModel::WINDOW_SIZE;
+const GKR_WINDOW_DEFAULT_MIN_N: usize = FractionalGkrMemoryModel::WINDOW_DEFAULT_MIN_N;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FractionalInputSize {
@@ -59,42 +59,10 @@ impl FractionalInputSize {
         }
     }
 
-    /// Peak work-buffer bytes (excluding the `S_frac * real_len` layer/input buffer).
-    ///
-    /// This must stay in sync with `max_work_size` in `fractional_sumcheck_gpu` and the
-    /// precompute-M EF auxiliary allocations. If the sumcheck implementation changes, this
-    /// method must be updated as well — it is the source of truth for batching budgets that
-    /// depend on the fractional-GKR peak. Also update the conservative interaction memory
-    /// estimate in `openvm_stark_backend::memory_metering`.
-    ///
-    /// ## Formula (FoldEval path, dominates for large inputs)
-    ///
-    /// ```text
-    /// work_buffer = logical_len / 4   Frac entries → S_frac * L/4 bytes
-    /// ```
-    ///
-    /// For the precompute-M path (`max_work_size` in `fractional_sumcheck_gpu`):
-    ///
-    /// ```text
-    /// work_buffer = max(L >> (1 + GKR_WINDOW_SIZE), 2^22)   Frac entries
-    /// + S_ef * (2^(2w) + max_window(m_partial) + 2^(w+1))  EF bytes
-    /// ```
-    ///
-    /// This method returns the maximum over both paths to give a conservative budget.
+    /// Peak work-buffer bytes, excluding the `S_frac * real_len` layer/input buffer.
     pub fn peak_work_buffer_bytes(&self) -> usize {
-        let s_frac = std::mem::size_of::<Frac<EF>>();
-        let fold_eval = (self.logical_len / 4) * s_frac;
-
-        let s_ef = std::mem::size_of::<EF>();
-        let w = GKR_WINDOW_SIZE;
-        let precompute_f =
-            (self.logical_len >> (1 + w)).max(1 << GKR_WINDOW_DEFAULT_MIN_N) * s_frac;
-        // Conservative estimate for M_precompute_EF: m_total + m_partial bound + eq_prefix/suffix.
-        // In practice the max_window term is ceil(2^(rem_n - w) / tail_tile) * 2^(2w) EF elems;
-        // use 2 * 2^(2w) as a safe floor (tail_tile >= 1, rem_n bounded by total_rounds).
-        let precompute_ef = ((1 << (2 * w + 1)) + (1 << (w + 1))) * s_ef;
-
-        fold_eval.max(precompute_f + precompute_ef)
+        FractionalGkrMemoryModel::new(std::mem::size_of::<F>(), D_EF)
+            .peak_work_buffer_memory_bytes(self.logical_len)
     }
 }
 
@@ -846,9 +814,9 @@ where
     // Fold-eval fallback rounds (rem_n < min_n) need at most 2^min_n elements.
     let max_work_size = if total_rounds > 2 {
         if precompute_m_env {
-            (total_leaves >> (1 + GKR_WINDOW_SIZE)).max(1 << GKR_WINDOW_DEFAULT_MIN_N)
+            FractionalGkrMemoryModel::precompute_m_work_buffer_elements(total_leaves)
         } else {
-            total_leaves >> 2
+            FractionalGkrMemoryModel::fold_eval_work_buffer_elements(total_leaves)
         }
     } else {
         0

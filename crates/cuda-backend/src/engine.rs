@@ -66,7 +66,7 @@ impl StarkEngine for GpuEngine<DefaultHashScheme> {
     fn proving_memory_config(&self) -> ProvingMemoryConfig {
         self.device
             .prover_config()
-            .proving_memory_config(self.config(), self.device.config.sm_count)
+            .proving_memory_config(self.config())
     }
 
     fn initial_transcript(&self) -> Self::TS {
@@ -103,7 +103,7 @@ impl StarkEngine for GpuEngine<BabyBearBn254Poseidon2HashScheme> {
     fn proving_memory_config(&self) -> ProvingMemoryConfig {
         self.device
             .prover_config()
-            .proving_memory_config(self.config(), self.device.config.sm_count)
+            .proving_memory_config(self.config())
     }
 
     fn initial_transcript(&self) -> Self::TS {
