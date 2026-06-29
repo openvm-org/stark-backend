@@ -87,7 +87,7 @@ pub struct ProvingMemoryEstimate {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ProvingMemoryConfig {
     /// Size of one base-field element in bytes.
-    pub base_field_size: usize,
+    pub base_field_bytes: usize,
     /// Degree of the extension field over the base field.
     pub extension_degree: usize,
     /// `-log_2` of the rate for the initial Reed-Solomon code.
@@ -109,7 +109,7 @@ pub struct ProvingMemoryConfig {
     /// Number of WHIR rounds.
     num_whir_rounds: usize,
     /// Size of one PCS digest in bytes.
-    digest_size: usize,
+    digest_bytes: usize,
 }
 
 impl ProvingMemoryConfig {
@@ -128,11 +128,11 @@ impl ProvingMemoryConfig {
     fn from_params<F>(
         params: &SystemParams,
         extension_degree: usize,
-        digest_size: usize,
+        digest_bytes: usize,
         cache_rs_code_matrix: bool,
     ) -> Self {
         Self {
-            base_field_size: size_of::<F>(),
+            base_field_bytes: size_of::<F>(),
             extension_degree,
             log_blowup: params.log_blowup,
             l_skip: params.l_skip,
@@ -143,7 +143,7 @@ impl ProvingMemoryConfig {
             log_stacked_height: params.log_stacked_height(),
             k_whir: params.k_whir(),
             num_whir_rounds: params.num_whir_rounds(),
-            digest_size,
+            digest_bytes,
         }
     }
 
@@ -157,12 +157,12 @@ impl ProvingMemoryConfig {
 
     #[inline]
     pub fn main_memory_bytes(&self, main_cells: usize) -> usize {
-        main_cells * self.base_field_size
+        main_cells * self.base_field_bytes
     }
 
     #[inline]
     pub fn rs_code_matrix_memory_bytes(&self, main_cells: usize) -> usize {
-        main_cells * (1usize << self.log_blowup) * self.base_field_size
+        main_cells * (1usize << self.log_blowup) * self.base_field_bytes
     }
 
     #[inline]
@@ -198,7 +198,7 @@ impl ProvingMemoryConfig {
     fn main_commitment_initial_digest_layer_memory_bytes(&self) -> usize {
         let log_codeword_height = self.log_stacked_height + self.log_blowup;
         let log_query_layer_height = log_codeword_height.saturating_sub(self.k_whir);
-        (1usize << log_query_layer_height) * self.digest_size
+        (1usize << log_query_layer_height) * self.digest_bytes
     }
 
     #[inline]
@@ -225,13 +225,13 @@ impl ProvingMemoryConfig {
         let height = 1usize << self.log_stacked_height;
         let ext_poly = height
             .saturating_mul(self.extension_degree)
-            .saturating_mul(self.base_field_size);
+            .saturating_mul(self.base_field_bytes);
         let first_sumcheck_tmp = height
             .div_ceil(2)
             .div_ceil(CUDA_KERNEL_DEFAULT_BLOCK_SIZE)
             .saturating_mul(WHIR_SUMCHECK_DEGREE)
             .saturating_mul(self.extension_degree)
-            .saturating_mul(self.base_field_size);
+            .saturating_mul(self.base_field_bytes);
 
         // First WHIR sumcheck round keeps f_coeffs and w_moments live while allocating folded
         // outputs. This is larger than the earlier f_ple_evals + f_coeffs conversion peak.
@@ -249,7 +249,7 @@ impl ProvingMemoryConfig {
 
     #[inline]
     fn whir_tree_memory_bytes(&self, log_codeword_height: usize) -> usize {
-        (1usize << log_codeword_height) * self.extension_degree * self.base_field_size
+        (1usize << log_codeword_height) * self.extension_degree * self.base_field_bytes
             + self.merkle_digest_layers_memory_bytes(log_codeword_height)
     }
 
@@ -257,7 +257,7 @@ impl ProvingMemoryConfig {
     fn merkle_digest_layers_memory_bytes(&self, log_codeword_height: usize) -> usize {
         let log_bottom_layer = log_codeword_height.saturating_sub(self.k_whir);
         let bottom_layer_len = 1usize << log_bottom_layer;
-        (2 * bottom_layer_len - 1) * self.digest_size
+        (2 * bottom_layer_len - 1) * self.digest_bytes
     }
 
     #[inline]
@@ -289,7 +289,7 @@ impl ProvingMemoryConfig {
         } else {
             main_cell_secondary_weight
         };
-        ceil_weighted_bytes(main_cells, self.base_field_size, weight)
+        ceil_weighted_bytes(main_cells, self.base_field_bytes, weight)
     }
 
     #[inline]
@@ -318,7 +318,7 @@ impl ProvingMemoryConfig {
 
     #[inline]
     fn fractional_gkr_memory_model(&self) -> FractionalGkrMemoryModel {
-        FractionalGkrMemoryModel::new(self.base_field_size, self.extension_degree)
+        FractionalGkrMemoryModel::new(self.base_field_bytes, self.extension_degree)
     }
 
     #[inline]
@@ -338,7 +338,7 @@ impl ProvingMemoryConfig {
             FractionalGkrMemoryModel::ROUND_COMPUTE_FALLBACK_BLOCKS,
         )
         .saturating_mul(self.extension_degree)
-        .saturating_mul(self.base_field_size)
+        .saturating_mul(self.base_field_bytes)
     }
 
     /// Interaction memory includes the fractional-GKR model plus the larger of fixed interaction
@@ -482,9 +482,9 @@ fn default_main_cell_secondary_weight(
     (1.0 + max_constraint_degree as f64 / 2.0) * extension_degree as f64 / (1usize << l_skip) as f64
 }
 
-/// `ceil(cell_count * base_field_size * weight)`
-fn ceil_weighted_bytes(cell_count: usize, base_field_size: usize, weight: f64) -> usize {
-    ((cell_count * base_field_size) as f64 * weight).ceil() as usize
+/// `ceil(cell_count * base_field_bytes * weight)`
+fn ceil_weighted_bytes(cell_count: usize, base_field_bytes: usize, weight: f64) -> usize {
+    ((cell_count * base_field_bytes) as f64 * weight).ceil() as usize
 }
 
 #[cfg(test)]
@@ -507,7 +507,7 @@ mod tests {
         main_stacked_cells: usize,
     ) -> usize {
         let cached_stacked_matrix = if config.cache_stacked_matrix {
-            main_stacked_cells * config.base_field_size
+            main_stacked_cells * config.base_field_bytes
         } else {
             0
         };
@@ -586,7 +586,7 @@ mod tests {
 
         let estimate = config.estimate(counts);
 
-        assert_eq!(estimate.main, 30 * config.base_field_size);
+        assert_eq!(estimate.main, 30 * config.base_field_bytes);
         assert_eq!(
             estimate.rs_code_matrix,
             config.rs_code_matrix_memory_bytes(64)
