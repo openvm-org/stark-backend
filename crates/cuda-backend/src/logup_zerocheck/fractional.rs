@@ -35,6 +35,18 @@ use crate::{
 const GKR_S_DEG: usize = 3;
 const GKR_WINDOW_SIZE: usize = FractionalGkrMemoryModel::WINDOW_SIZE;
 const GKR_WINDOW_DEFAULT_MIN_N: usize = FractionalGkrMemoryModel::WINDOW_DEFAULT_MIN_N;
+const PRECOMPUTE_M_MIN_TAIL_TILE: usize = FractionalGkrMemoryModel::PRECOMPUTE_M_MIN_TAIL_TILE;
+const PRECOMPUTE_M_TAIL_TILE: usize = FractionalGkrMemoryModel::PRECOMPUTE_M_DEFAULT_TAIL_TILE;
+const PRECOMPUTE_M_DEFAULT_MIN_BLOCKS: usize =
+    FractionalGkrMemoryModel::PRECOMPUTE_M_DEFAULT_MIN_BLOCKS;
+const PRECOMPUTE_M_DEFAULT_TARGET_BLOCKS: usize =
+    FractionalGkrMemoryModel::PRECOMPUTE_M_DEFAULT_TARGET_BLOCKS;
+const PRECOMPUTE_M_TUNING_ENV_VARS: [&str; 4] = [
+    "SWIRL_CUDA_GKR_PRECOMPUTE_M_MIN_BLOCKS",
+    "SWIRL_CUDA_GKR_PRECOMPUTE_M_TARGET_BLOCKS",
+    "SWIRL_CUDA_GKR_PRECOMPUTE_M_TAIL_TILE",
+    "SWIRL_CUDA_GKR_PRECOMPUTE_M_MIN_N",
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FractionalInputSize {
@@ -61,11 +73,15 @@ impl FractionalInputSize {
 
     /// Peak work-buffer bytes, excluding the `S_frac * real_len` layer/input buffer.
     pub fn peak_work_buffer_bytes(&self) -> usize {
-        FractionalGkrMemoryModel::new(std::mem::size_of::<F>(), D_EF)
-            .peak_work_buffer_memory_bytes_with_precompute_m(
+        let model = FractionalGkrMemoryModel::new(std::mem::size_of::<F>(), D_EF);
+        if let Some(precompute_m_enabled) = precompute_m_metering_mode() {
+            model.peak_work_buffer_memory_bytes_with_precompute_m(
                 self.logical_len,
-                precompute_m_enabled(),
+                precompute_m_enabled,
             )
+        } else {
+            model.peak_work_buffer_memory_bytes(self.logical_len)
+        }
     }
 }
 
@@ -98,11 +114,6 @@ enum GkrRoundStrategy {
     FoldEval,
     PrecomputeM,
 }
-
-const PRECOMPUTE_M_TAIL_TILE: usize = 4096;
-const PRECOMPUTE_M_MIN_TAIL_TILE: usize = 256;
-const PRECOMPUTE_M_DEFAULT_MIN_BLOCKS: usize = 64;
-const PRECOMPUTE_M_DEFAULT_TARGET_BLOCKS: usize = 1024;
 
 impl BufferScheduler {
     /// Creates a new scheduler with data initially in layer buffer.
@@ -175,11 +186,24 @@ impl BufferScheduler {
     }
 }
 
-pub(crate) fn precompute_m_enabled() -> bool {
+fn precompute_m_enabled() -> bool {
     !matches!(
         env::var("SWIRL_CUDA_GKR_PRECOMPUTE_M"),
         Ok(val) if matches!(val.as_str(), "0" | "false" | "FALSE" | "no" | "NO")
     )
+}
+
+pub(super) fn precompute_m_metering_mode() -> Option<bool> {
+    if !precompute_m_enabled() {
+        Some(false)
+    } else if PRECOMPUTE_M_TUNING_ENV_VARS
+        .iter()
+        .all(|key| env::var_os(key).is_none())
+    {
+        Some(true)
+    } else {
+        None
+    }
 }
 
 fn precompute_m_min_blocks_threshold() -> usize {

@@ -71,12 +71,15 @@ mod errors;
 pub(crate) mod fold_ple;
 /// Fraction sumcheck via GKR
 mod fractional;
-pub(crate) use fractional::precompute_m_enabled as fractional_gkr_precompute_m_enabled;
 /// Logup interaction evaluations for GKR input
 mod gkr_input;
 mod mle_round;
 mod round0;
 pub(crate) mod rules;
+
+pub(crate) fn fractional_gkr_precompute_m_metering_mode() -> Option<bool> {
+    fractional::precompute_m_metering_mode()
+}
 
 use batch_mle::{evaluate_logup_batched, TraceCtx};
 use batch_mle_monomial::{

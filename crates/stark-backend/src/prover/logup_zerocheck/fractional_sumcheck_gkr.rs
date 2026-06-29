@@ -51,6 +51,10 @@ impl FractionalGkrMemoryModel {
     const INPUT_EF_ELEMENTS_PER_INTERACTION: usize = 2;
     pub const WINDOW_SIZE: usize = 3;
     pub const WINDOW_DEFAULT_MIN_N: usize = 22;
+    pub const PRECOMPUTE_M_MIN_TAIL_TILE: usize = 256;
+    pub const PRECOMPUTE_M_DEFAULT_TAIL_TILE: usize = 4096;
+    pub const PRECOMPUTE_M_DEFAULT_MIN_BLOCKS: usize = 64;
+    pub const PRECOMPUTE_M_DEFAULT_TARGET_BLOCKS: usize = 1024;
     pub const ROUND_COMPUTE_FALLBACK_BLOCKS: usize = 228;
 
     #[inline]
@@ -112,9 +116,13 @@ impl FractionalGkrMemoryModel {
         let fold_eval = Self::fold_eval_work_buffer_elements(logical_len).saturating_mul(frac_size);
         let precompute_m = Self::precompute_m_work_buffer_elements(logical_len)
             .saturating_mul(frac_size)
-            .saturating_add(self.precompute_m_auxiliary_memory_bytes());
+            .saturating_add(self.precompute_m_auxiliary_memory_bytes(logical_len));
 
-        (fold_eval, precompute_m)
+        let common_aux = self.common_auxiliary_memory_bytes(logical_len);
+        (
+            fold_eval.saturating_add(common_aux),
+            precompute_m.saturating_add(common_aux),
+        )
     }
 
     #[inline]
@@ -132,11 +140,83 @@ impl FractionalGkrMemoryModel {
     }
 
     #[inline]
-    pub fn precompute_m_auxiliary_memory_bytes(&self) -> usize {
+    pub fn precompute_m_auxiliary_memory_bytes(&self, logical_len: usize) -> usize {
         let ext_size = self.extension_degree.saturating_mul(self.base_field_bytes);
+        // m_buffer has 4^w EF entries; prefix/suffix buffers each have 2^w EF entries.
+        // m_partial_buffer is retained across rounds and uses the same default tail tiling as CUDA.
         let precompute_ef_elements =
-            (1usize << (2 * Self::WINDOW_SIZE + 1)) + (1usize << (Self::WINDOW_SIZE + 1));
-        precompute_ef_elements.saturating_mul(ext_size)
+            (1usize << (2 * Self::WINDOW_SIZE)) + (1usize << (Self::WINDOW_SIZE + 1));
+        precompute_ef_elements
+            .saturating_add(Self::precompute_m_partial_buffer_elements(logical_len))
+            .saturating_mul(ext_size)
+    }
+
+    #[inline]
+    fn common_auxiliary_memory_bytes(&self, logical_len: usize) -> usize {
+        let ext_size = self.extension_degree.saturating_mul(self.base_field_bytes);
+        // SqrtEqLayers and the tiny d_sum_evals/copy_scratch buffers are live with both strategies.
+        Self::sqrt_eq_layers_elements(logical_len)
+            .saturating_add(4)
+            .saturating_mul(ext_size)
+    }
+
+    #[inline]
+    fn precompute_m_partial_buffer_elements(logical_len: usize) -> usize {
+        let Some(total_rounds) = Self::log2_len(logical_len) else {
+            return 0;
+        };
+
+        let mut max_partial_len = 0usize;
+        for round in 1..total_rounds {
+            let stop = round.div_ceil(2);
+            if stop <= 1 {
+                continue;
+            }
+
+            let rem_n = round - 1;
+            let rounds_left = stop - 1;
+            if rem_n < Self::WINDOW_DEFAULT_MIN_N || rounds_left < Self::WINDOW_SIZE {
+                continue;
+            }
+
+            let tail_n = rem_n - Self::WINDOW_SIZE;
+            let tail_points = 1usize << tail_n;
+            let target_blocks =
+                Self::PRECOMPUTE_M_DEFAULT_TARGET_BLOCKS.max(Self::PRECOMPUTE_M_DEFAULT_MIN_BLOCKS);
+            let tail_tile = tail_points.div_ceil(target_blocks).max(1).clamp(
+                Self::PRECOMPUTE_M_MIN_TAIL_TILE,
+                Self::PRECOMPUTE_M_DEFAULT_TAIL_TILE,
+            );
+            let num_blocks = tail_points.div_ceil(tail_tile);
+            if num_blocks < Self::PRECOMPUTE_M_DEFAULT_MIN_BLOCKS {
+                continue;
+            }
+
+            let m_len = 1usize << (2 * Self::WINDOW_SIZE);
+            max_partial_len = max(max_partial_len, num_blocks.saturating_mul(m_len));
+        }
+
+        max_partial_len
+    }
+
+    #[inline]
+    fn sqrt_eq_layers_elements(logical_len: usize) -> usize {
+        let Some(total_rounds) = Self::log2_len(logical_len) else {
+            return 0;
+        };
+
+        // In outer round `r`, CUDA builds layers for `xi_prev[1..]`, length `r - 1`.
+        // EqEvalLayers keeps every layer 1, 2, ..., 2^n; the shared length-1 seed is counted once.
+        let n = total_rounds - 2;
+        let low_n = n / 2;
+        let high_n = n - low_n;
+        ((1usize << (low_n + 1)) - 1).saturating_add((1usize << (high_n + 1)) - 2)
+    }
+
+    #[inline]
+    fn log2_len(logical_len: usize) -> Option<usize> {
+        (logical_len > 2 && logical_len.is_power_of_two())
+            .then_some(logical_len.trailing_zeros() as usize)
     }
 
     #[inline]
