@@ -81,22 +81,40 @@ impl FractionalGkrMemoryModel {
 
     #[inline]
     pub fn peak_work_buffer_memory_bytes(&self, logical_len: usize) -> usize {
+        let (fold_eval, precompute_m) = self.work_buffer_memory_candidates(logical_len);
+        max(fold_eval, precompute_m)
+    }
+
+    #[inline]
+    pub fn peak_work_buffer_memory_bytes_with_precompute_m(
+        &self,
+        logical_len: usize,
+        precompute_m_enabled: bool,
+    ) -> usize {
+        let (fold_eval, precompute_m) = self.work_buffer_memory_candidates(logical_len);
+        if precompute_m_enabled {
+            precompute_m
+        } else {
+            fold_eval
+        }
+    }
+
+    #[inline]
+    fn work_buffer_memory_candidates(&self, logical_len: usize) -> (usize, usize) {
         if logical_len <= 2 {
-            return 0;
+            return (0, 0);
         }
 
-        // Peak scratch is the larger of the fold-eval work buffer and the precompute-M path.
         // The input Frac layer is counted separately by `input_memory_bytes`.
         let frac_size = Self::INPUT_EF_ELEMENTS_PER_INTERACTION
             .saturating_mul(self.extension_degree)
             .saturating_mul(self.base_field_bytes);
         let fold_eval = Self::fold_eval_work_buffer_elements(logical_len).saturating_mul(frac_size);
+        let precompute_m = Self::precompute_m_work_buffer_elements(logical_len)
+            .saturating_mul(frac_size)
+            .saturating_add(self.precompute_m_auxiliary_memory_bytes());
 
-        let precompute_f =
-            Self::precompute_m_work_buffer_elements(logical_len).saturating_mul(frac_size);
-        let precompute_ef = self.precompute_m_auxiliary_memory_bytes();
-
-        max(fold_eval, precompute_f.saturating_add(precompute_ef))
+        (fold_eval, precompute_m)
     }
 
     #[inline]
@@ -125,6 +143,18 @@ impl FractionalGkrMemoryModel {
     pub fn peak_memory_bytes(&self, interaction_cells: usize, logical_len: usize) -> usize {
         self.input_memory_bytes(interaction_cells)
             .saturating_add(self.peak_work_buffer_memory_bytes(logical_len))
+    }
+
+    #[inline]
+    pub fn peak_memory_bytes_with_precompute_m(
+        &self,
+        interaction_cells: usize,
+        logical_len: usize,
+        precompute_m_enabled: bool,
+    ) -> usize {
+        self.input_memory_bytes(interaction_cells).saturating_add(
+            self.peak_work_buffer_memory_bytes_with_precompute_m(logical_len, precompute_m_enabled),
+        )
     }
 
     #[inline]

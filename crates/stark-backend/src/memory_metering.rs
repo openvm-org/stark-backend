@@ -102,6 +102,9 @@ pub struct ProvingMemoryConfig {
     pub cache_rs_code_matrix: bool,
     /// Whether to include CUDA retained opening state in the estimate.
     retained_opening_memory: bool,
+    /// CUDA fractional-GKR work-buffer allocation, when metering is configured by the CUDA
+    /// backend.
+    fractional_gkr_precompute_m: Option<bool>,
     /// `log_2` of the common-main stacked matrix height.
     log_stacked_height: usize,
     /// WHIR folding factor.
@@ -140,6 +143,7 @@ impl ProvingMemoryConfig {
             cache_stacked_matrix: false,
             cache_rs_code_matrix,
             retained_opening_memory: false,
+            fractional_gkr_precompute_m: None,
             log_stacked_height: params.log_stacked_height(),
             k_whir: params.k_whir(),
             num_whir_rounds: params.num_whir_rounds(),
@@ -152,6 +156,13 @@ impl ProvingMemoryConfig {
     pub fn with_cuda_backend(mut self, cache_stacked_matrix: bool) -> Self {
         self.cache_stacked_matrix = cache_stacked_matrix;
         self.retained_opening_memory = true;
+        self
+    }
+
+    /// Match the CUDA fractional-GKR work-buffer allocation selected by the backend.
+    #[inline]
+    pub fn with_fractional_gkr_precompute_m(mut self, enabled: bool) -> Self {
+        self.fractional_gkr_precompute_m = Some(enabled);
         self
     }
 
@@ -221,7 +232,7 @@ impl ProvingMemoryConfig {
     }
 
     #[inline]
-    fn whir_initial_workspace_memory_bytes(&self) -> usize {
+    fn whir_first_sumcheck_memory_bytes(&self) -> usize {
         let height = 1usize << self.log_stacked_height;
         let ext_poly = height
             .saturating_mul(self.extension_degree)
@@ -235,16 +246,30 @@ impl ProvingMemoryConfig {
 
         // First WHIR sumcheck round keeps f_coeffs and w_moments live while allocating folded
         // outputs. This is larger than the earlier f_ple_evals + f_coeffs conversion peak.
-        let first_sumcheck_peak = ext_poly
+        ext_poly
             .saturating_mul(3)
-            .saturating_add(first_sumcheck_tmp);
+            .saturating_add(first_sumcheck_tmp)
+    }
+
+    #[inline]
+    fn whir_folded_state_memory_bytes(&self) -> usize {
+        let height = 1usize << self.log_stacked_height;
+        let ext_poly = height
+            .saturating_mul(self.extension_degree)
+            .saturating_mul(self.base_field_bytes);
+        let first_sumcheck_tmp = height
+            .div_ceil(2)
+            .div_ceil(CUDA_KERNEL_DEFAULT_BLOCK_SIZE)
+            .saturating_mul(WHIR_SUMCHECK_DEGREE)
+            .saturating_mul(self.extension_degree)
+            .saturating_mul(self.base_field_bytes);
 
         // After k_whir folds, f_coeffs, w_moments, and the split base-field g_coeffs are live
         // while building the first folded codeword tree.
         let folded_ext_poly = ext_poly >> self.k_whir.min(usize::BITS as usize - 1);
-        let first_codeword_build_peak = folded_ext_poly.saturating_mul(3);
-
-        max(first_sumcheck_peak, first_codeword_build_peak)
+        folded_ext_poly
+            .saturating_mul(3)
+            .saturating_add(first_sumcheck_tmp)
     }
 
     #[inline]
@@ -307,13 +332,20 @@ impl ProvingMemoryConfig {
     /// ```
     ///
     /// Work-buffer sizing is delegated to the prover-owned fractional-GKR model so CUDA batching
-    /// and metering use the same fold-eval/precompute-M peak.
+    /// and metering use the same selected fold-eval/precompute-M strategy.
     #[inline]
     pub fn interaction_memory_bytes_without_overhead(&self, interaction_cells: usize) -> usize {
-        self.fractional_gkr_memory_model().peak_memory_bytes(
-            interaction_cells,
-            Self::fractional_gkr_logical_len(interaction_cells),
-        )
+        let logical_len = Self::fractional_gkr_logical_len(interaction_cells);
+        let model = self.fractional_gkr_memory_model();
+        if let Some(precompute_m_enabled) = self.fractional_gkr_precompute_m {
+            model.peak_memory_bytes_with_precompute_m(
+                interaction_cells,
+                logical_len,
+                precompute_m_enabled,
+            )
+        } else {
+            model.peak_memory_bytes(interaction_cells, logical_len)
+        }
     }
 
     #[inline]
@@ -380,7 +412,9 @@ impl ProvingMemoryConfig {
     ///
     /// first_g_tree       = first WHIR folding codeword + Merkle digest layers
     /// second_g_tree      = second WHIR folding codeword + Merkle digest layers
-    /// whir_workspace     = CUDA WHIR coefficient/moment buffers and sumcheck scratch
+    /// first_sumcheck     = full-height f/w sumcheck buffers and first-round sumcheck scratch
+    /// folded_state       = folded f/w/g buffers plus retained sumcheck scratch while opening the
+    ///                      first folded tree
     ///
     /// main_secondary     = sizeof(F) *
     ///                      (2 * main_cell_secondary_weight() * main_cells_with_rot
@@ -396,8 +430,11 @@ impl ProvingMemoryConfig {
     ///
     /// constraint_peak       = retained_common + cached_rs_code_matrix
     ///                         + max(main_secondary, interaction)
-    /// whir_first_round_peak = retained_common + rs_code_matrix
-    ///                         + max(whir_workspace, first_g_tree)
+    /// whir_first_round_peak = retained_common + if cache_rs_code_matrix {
+    ///     rs_code_matrix + max(first_sumcheck, first_g_tree + folded_state)
+    /// } else {
+    ///     max(first_sumcheck, rs_code_matrix + first_g_tree + folded_state)
+    /// }
     /// whir_later_round_peak = first_g_tree + second_g_tree
     ///
     /// secondary_peak = max(
@@ -424,17 +461,19 @@ impl ProvingMemoryConfig {
             common_initial_digest_layer,
             first_g_tree,
             second_g_tree,
-            whir_workspace,
+            first_sumcheck,
+            folded_state,
         ) = if retained_opening_memory {
             (
                 self.main_commitment_digest_layers_memory_bytes(),
                 self.main_commitment_initial_digest_layer_memory_bytes(),
                 self.first_whir_tree_memory_bytes(),
                 self.second_whir_tree_memory_bytes(),
-                self.whir_initial_workspace_memory_bytes(),
+                self.whir_first_sumcheck_memory_bytes(),
+                self.whir_folded_state_memory_bytes(),
             )
         } else {
-            (0, 0, 0, 0, 0)
+            (0, 0, 0, 0, 0, 0)
         };
         let cached_rs_code_matrix = if self.cache_rs_code_matrix {
             rs_code_matrix
@@ -453,8 +492,12 @@ impl ProvingMemoryConfig {
             };
         let constraint_peak =
             retained_common_main + cached_rs_code_matrix + max(main_secondary, interaction);
-        let whir_first_round_peak =
-            retained_common_main + rs_code_matrix + max(whir_workspace, first_g_tree);
+        let whir_first_round_peak = retained_common_main
+            + if self.cache_rs_code_matrix {
+                rs_code_matrix + max(first_sumcheck, first_g_tree + folded_state)
+            } else {
+                max(first_sumcheck, rs_code_matrix + first_g_tree + folded_state)
+            };
         let whir_later_round_peak = first_g_tree + second_g_tree;
         let secondary_peak = max(
             max(commit_peak, constraint_peak),
@@ -540,10 +583,11 @@ mod tests {
         let constraint_peak =
             estimate.main_persistent + max(estimate.main_secondary, estimate.interaction);
         let whir_first_round_peak = estimate.main_persistent
-            + estimate.rs_code_matrix
             + max(
-                config.whir_initial_workspace_memory_bytes(),
-                config.first_whir_tree_memory_bytes(),
+                config.whir_first_sumcheck_memory_bytes(),
+                estimate.rs_code_matrix
+                    + config.first_whir_tree_memory_bytes()
+                    + config.whir_folded_state_memory_bytes(),
             );
         let whir_later_round_peak =
             config.first_whir_tree_memory_bytes() + config.second_whir_tree_memory_bytes();
@@ -625,6 +669,18 @@ mod tests {
     }
 
     #[test]
+    fn fractional_gkr_strategy_changes_interaction_peak() {
+        let interaction_cells = 1 << 24;
+        let precompute_m = test_memory_config().with_fractional_gkr_precompute_m(true);
+        let fold_eval = test_memory_config().with_fractional_gkr_precompute_m(false);
+
+        assert!(
+            fold_eval.interaction_memory_bytes_without_overhead(interaction_cells)
+                > precompute_m.interaction_memory_bytes_without_overhead(interaction_cells)
+        );
+    }
+
+    #[test]
     fn cuda_whir_peak_includes_initial_workspace() {
         let config = test_memory_config();
         let counts = ProvingMemoryCounts::new_with_stacked_cells(1, 0, 1, 0);
@@ -634,7 +690,10 @@ mod tests {
             estimate.main_persistent + estimate.rs_code_matrix + estimate.main_secondary;
         let whir_first_round_peak = estimate.main_persistent
             + estimate.rs_code_matrix
-            + config.whir_initial_workspace_memory_bytes();
+            + max(
+                config.whir_first_sumcheck_memory_bytes(),
+                config.first_whir_tree_memory_bytes() + config.whir_folded_state_memory_bytes(),
+            );
         let whir_later_round_peak =
             config.first_whir_tree_memory_bytes() + config.second_whir_tree_memory_bytes();
 
@@ -662,10 +721,11 @@ mod tests {
         );
         let constraint_peak = estimate.main_persistent + estimate.main_secondary;
         let whir_first_round_peak = estimate.main_persistent
-            + estimate.rs_code_matrix
             + max(
-                config.whir_initial_workspace_memory_bytes(),
-                config.first_whir_tree_memory_bytes(),
+                config.whir_first_sumcheck_memory_bytes(),
+                estimate.rs_code_matrix
+                    + config.first_whir_tree_memory_bytes()
+                    + config.whir_folded_state_memory_bytes(),
             );
         let whir_later_round_peak =
             config.first_whir_tree_memory_bytes() + config.second_whir_tree_memory_bytes();

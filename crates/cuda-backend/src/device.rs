@@ -4,9 +4,12 @@ use openvm_stark_backend::{
     memory_metering::ProvingMemoryConfig, StarkProtocolConfig, SystemParams,
 };
 
-use crate::cuda::{
-    batch_ntt_small::{ensure_device_ntt_twiddles_initialized, validate_gpu_l_skip},
-    device_info::get_sm_count,
+use crate::{
+    cuda::{
+        batch_ntt_small::{ensure_device_ntt_twiddles_initialized, validate_gpu_l_skip},
+        device_info::get_sm_count,
+    },
+    logup_zerocheck::fractional_gkr_precompute_m_enabled,
 };
 
 /// Pure device configuration — no stream, no CUDA runtime state.
@@ -36,6 +39,7 @@ impl GpuProverConfig {
     ) -> ProvingMemoryConfig {
         ProvingMemoryConfig::from_protocol_config(config, self.cache_rs_code_matrix)
             .with_cuda_backend(self.cache_stacked_matrix)
+            .with_fractional_gkr_precompute_m(fractional_gkr_precompute_m_enabled())
     }
 }
 

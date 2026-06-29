@@ -62,7 +62,10 @@ impl FractionalInputSize {
     /// Peak work-buffer bytes, excluding the `S_frac * real_len` layer/input buffer.
     pub fn peak_work_buffer_bytes(&self) -> usize {
         FractionalGkrMemoryModel::new(std::mem::size_of::<F>(), D_EF)
-            .peak_work_buffer_memory_bytes(self.logical_len)
+            .peak_work_buffer_memory_bytes_with_precompute_m(
+                self.logical_len,
+                precompute_m_enabled(),
+            )
     }
 }
 
@@ -172,7 +175,7 @@ impl BufferScheduler {
     }
 }
 
-fn precompute_m_enabled() -> bool {
+pub(crate) fn precompute_m_enabled() -> bool {
     !matches!(
         env::var("SWIRL_CUDA_GKR_PRECOMPUTE_M"),
         Ok(val) if matches!(val.as_str(), "0" | "false" | "FALSE" | "no" | "NO")

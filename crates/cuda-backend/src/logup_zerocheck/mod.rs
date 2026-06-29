@@ -71,6 +71,7 @@ mod errors;
 pub(crate) mod fold_ple;
 /// Fraction sumcheck via GKR
 mod fractional;
+pub(crate) use fractional::precompute_m_enabled as fractional_gkr_precompute_m_enabled;
 /// Logup interaction evaluations for GKR input
 mod gkr_input;
 mod mle_round;
