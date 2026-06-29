@@ -52,7 +52,7 @@ pub struct GpuDevice {
 impl GpuDevice {
     pub fn new(params: SystemParams) -> Result<Self, openvm_cuda_common::error::CudaError> {
         validate_gpu_l_skip(params.l_skip)
-            .expect("GPU backend requires l_skip <= 10 for current CUDA kernels");
+            .expect("GPU backend requires l_skip <= MAX_SMALL_NTT_LEVEL for current CUDA kernels");
         ensure_device_ntt_twiddles_initialized()
             .expect("failed to initialize small-NTT twiddles for current CUDA device");
 

@@ -13,8 +13,8 @@ use openvm_cuda_common::{
 
 use crate::prelude::F;
 
-/// Maximum `l_skip` supported by the small-NTT CUDA kernel.
-pub const MAX_SMALL_NTT_LEVEL: usize = 10;
+/// Maximum supported `l_skip`. Larger values are not supported by the GPU prover.
+pub const MAX_SMALL_NTT_LEVEL: usize = 5;
 
 /// Validate the GPU small-NTT domain size.
 ///

@@ -58,7 +58,7 @@ impl PleMatrix<F> {
         width: usize,
         device_ctx: &GpuDeviceCtx,
     ) -> Self {
-        validate_gpu_l_skip(l_skip).expect("GPU PleMatrix requires l_skip <= 10");
+        validate_gpu_l_skip(l_skip).expect("GPU PleMatrix requires l_skip <= MAX_SMALL_NTT_LEVEL");
         let mut mixed = evals;
         if l_skip > 0 {
             // For univariate coordinate, perform inverse NTT for each 2^l_skip chunk per column:
