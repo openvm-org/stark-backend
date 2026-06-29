@@ -16,9 +16,9 @@ namespace device_ntt {
 // Twiddles for level L (1 <= L <= MAX_NTT_LEVEL) start at offset (2^L - 2).
 // Total size: sum(2^i for i=1..MAX_NTT_LEVEL) = 2^(MAX_NTT_LEVEL+1) - 2
 //
-// For MAX_NTT_LEVEL=10: 2^11 - 2 = 2046 elements * 4 bytes = ~8KB
+// For MAX_NTT_LEVEL=9: 2^10 - 2 = 1022 elements * 4 bytes = ~4KB
 
-constexpr uint32_t MAX_NTT_LEVEL = 10;
+constexpr uint32_t MAX_NTT_LEVEL = 9;
 constexpr uint32_t DEVICE_NTT_TWIDDLES_SIZE = (1u << (MAX_NTT_LEVEL + 1)) - 2;
 
 // Constant memory for precomputed twiddles
@@ -79,7 +79,7 @@ template <bool intt> __device__ __forceinline__ Fp sum_or_semi_sum(Fp &&x) {
 template <bool intt, bool needs_shmem>
 __device__ __forceinline__ void ntt_natural_to_bitrev(
     Fp &this_thread_value,
-    Fp *__restrict__ sbuf, // shared memory buffer for this thread's NTT (size 1 << l_skip)
+    Fp *sbuf, // shared memory buffer for this thread's NTT (size 1 << l_skip)
     uint32_t const i,      // thread index within NTT [0, 1 << l_skip)
     uint32_t const l_skip, // log2 of NTT size
     bool const active_thread = true
@@ -143,7 +143,7 @@ __device__ __forceinline__ void ntt_natural_to_bitrev(
 template <bool intt, bool needs_shmem>
 __device__ __forceinline__ void ntt_bitrev_to_natural(
     Fp &this_thread_value,
-    Fp *__restrict__ sbuf,
+    Fp *sbuf,
     uint32_t const i,
     uint32_t const l_skip
 ) {

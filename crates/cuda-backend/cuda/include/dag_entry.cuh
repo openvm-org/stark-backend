@@ -18,7 +18,7 @@ template <uint32_t NUM_COSETS> struct NttEvalContext {
     const Fp *const *__restrict__ main_parts;
     const Fp *__restrict__ public_values;
     Fp *__restrict__ inter_buffer; // [buffer_size][NUM_COSETS] per thread
-    Fp *__restrict__ ntt_buffer;   // shared memory for NTT scratch (only when NEEDS_SHMEM)
+    Fp *ntt_buffer;   // shared memory for NTT scratch (only when NEEDS_SHMEM)
     Fp omega_shifts[NUM_COSETS]; // precomputed: g^((c+1)*ntt_idx_rev)
     uint32_t skip_domain;        // 2^l_skip
     uint32_t height;             // trace height (could be < num_x * skip_domain in lifted case)
@@ -53,7 +53,7 @@ __device__ __forceinline__ void ntt_coset_interpolate(
     Fp *__restrict__ results,     // output [NUM_COSETS]
     const Fp *__restrict__ evals, // must have length height = num_x * skip_domain
     const Fp *omega_shifts,       // [NUM_COSETS] precomputed shifts
-    Fp *__restrict__ ntt_buffer,  // shared memory for NTT scratch (unused when !NEEDS_SHMEM)
+    Fp *ntt_buffer,  // shared memory for NTT scratch (unused when !NEEDS_SHMEM)
     uint32_t ntt_idx,
     uint32_t x_int,
     uint32_t skip_domain,
