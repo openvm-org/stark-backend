@@ -43,7 +43,7 @@ const FRACTIONAL_GKR_WARP_SIZE: usize = 32;
 #[doc(hidden)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FractionalGkrMemoryModel {
-    base_field_size: usize,
+    base_field_bytes: usize,
     extension_degree: usize,
 }
 
@@ -54,9 +54,9 @@ impl FractionalGkrMemoryModel {
     pub const ROUND_COMPUTE_FALLBACK_BLOCKS: usize = 228;
 
     #[inline]
-    pub const fn new(base_field_size: usize, extension_degree: usize) -> Self {
+    pub const fn new(base_field_bytes: usize, extension_degree: usize) -> Self {
         Self {
-            base_field_size,
+            base_field_bytes,
             extension_degree,
         }
     }
@@ -76,7 +76,7 @@ impl FractionalGkrMemoryModel {
         interaction_cells
             .saturating_mul(Self::INPUT_EF_ELEMENTS_PER_INTERACTION)
             .saturating_mul(self.extension_degree)
-            .saturating_mul(self.base_field_size)
+            .saturating_mul(self.base_field_bytes)
     }
 
     #[inline]
@@ -89,7 +89,7 @@ impl FractionalGkrMemoryModel {
         // The input Frac layer is counted separately by `input_memory_bytes`.
         let frac_size = Self::INPUT_EF_ELEMENTS_PER_INTERACTION
             .saturating_mul(self.extension_degree)
-            .saturating_mul(self.base_field_size);
+            .saturating_mul(self.base_field_bytes);
         let fold_eval = Self::fold_eval_work_buffer_elements(logical_len).saturating_mul(frac_size);
 
         let precompute_f =
@@ -115,7 +115,7 @@ impl FractionalGkrMemoryModel {
 
     #[inline]
     pub fn precompute_m_auxiliary_memory_bytes(&self) -> usize {
-        let ext_size = self.extension_degree.saturating_mul(self.base_field_size);
+        let ext_size = self.extension_degree.saturating_mul(self.base_field_bytes);
         let precompute_ef_elements =
             (1usize << (2 * Self::WINDOW_SIZE + 1)) + (1usize << (Self::WINDOW_SIZE + 1));
         precompute_ef_elements.saturating_mul(ext_size)
