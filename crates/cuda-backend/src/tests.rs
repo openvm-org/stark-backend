@@ -22,6 +22,7 @@ use openvm_stark_backend::{
 };
 use openvm_stark_backend::{
     prover::{
+        fractional_sumcheck_gkr::FractionalGkrMemoryModel,
         stacked_pcs::stacked_commit,
         stacked_reduction::{prove_stacked_opening_reduction, StackedReductionCpu},
         DeviceDataTransporter, MatrixDimensions, MultiRapProver,
@@ -54,7 +55,11 @@ use tracing::{debug, Level};
 use crate::cuda::bn254_merkle_tree::Bn254Digest;
 use crate::{
     base::DeviceMatrix,
-    cuda::{batch_ntt_small::batch_ntt_small, logup_zerocheck::frac_matrix_vertically_repeat},
+    cuda::{
+        batch_ntt_small::batch_ntt_small,
+        device_info::get_sm_count,
+        logup_zerocheck::{_frac_compute_round_temp_buffer_size, frac_matrix_vertically_repeat},
+    },
     merkle_tree::MerkleTreeGpu,
     prelude::{EF, F, SC},
     sponge::DuplexSpongeGpu,
@@ -76,6 +81,21 @@ fn test_ctx() -> GpuDeviceCtx {
 // ===========================================================================
 
 openvm_backend_tests::backend_test_suite!(Engine);
+
+#[test]
+fn fractional_gkr_round_temp_sizing_matches_cuda_ffi() {
+    let device_id = get_device().unwrap() as u32;
+    let min_blocks = get_sm_count(device_id).unwrap() as usize * 2;
+
+    for num_x in [2usize, 32, 4096, 1 << 20] {
+        let cuda_elements = unsafe { _frac_compute_round_temp_buffer_size(num_x as u32) } as usize;
+
+        assert_eq!(
+            cuda_elements,
+            FractionalGkrMemoryModel::round_temp_buffer_elements(num_x, min_blocks)
+        );
+    }
+}
 
 // ===========================================================================
 // BN254 Poseidon2 engine end-to-end test

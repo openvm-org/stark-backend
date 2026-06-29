@@ -1,4 +1,4 @@
-use std::ops::Add;
+use std::{cmp::max, ops::Add};
 
 use p3_field::{Field, PrimeCharacteristicRing};
 use p3_util::log2_strict_usize;
@@ -32,6 +32,119 @@ pub struct Frac<EF> {
     // PERF[jpw]: in the initial round, we can keep `p` in base field
     pub p: EF,
     pub q: EF,
+}
+
+const FRACTIONAL_GKR_SP_DEG: usize = 2;
+const FRACTIONAL_GKR_DEFAULT_BLOCK_SIZE: usize = 256;
+const FRACTIONAL_GKR_MIN_BLOCK_SIZE: usize = 64;
+const FRACTIONAL_GKR_WARP_SIZE: usize = 32;
+
+/// Fractional-GKR sizing model used by CUDA batching and memory metering.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FractionalGkrMemoryModel {
+    base_field_bytes: usize,
+    extension_degree: usize,
+}
+
+impl FractionalGkrMemoryModel {
+    const INPUT_EF_ELEMENTS_PER_INTERACTION: usize = 2;
+    pub const WINDOW_SIZE: usize = 3;
+    pub const WINDOW_DEFAULT_MIN_N: usize = 22;
+    pub const ROUND_COMPUTE_FALLBACK_BLOCKS: usize = 228;
+
+    #[inline]
+    pub const fn new(base_field_bytes: usize, extension_degree: usize) -> Self {
+        Self {
+            base_field_bytes,
+            extension_degree,
+        }
+    }
+
+    #[inline]
+    pub fn logical_len(interaction_cells: usize) -> usize {
+        if interaction_cells == 0 {
+            return 0;
+        }
+
+        let log_len = usize::BITS - interaction_cells.leading_zeros();
+        1usize.checked_shl(log_len).unwrap_or(usize::MAX)
+    }
+
+    #[inline]
+    pub fn input_memory_bytes(&self, interaction_cells: usize) -> usize {
+        interaction_cells
+            .saturating_mul(Self::INPUT_EF_ELEMENTS_PER_INTERACTION)
+            .saturating_mul(self.extension_degree)
+            .saturating_mul(self.base_field_bytes)
+    }
+
+    #[inline]
+    pub fn peak_work_buffer_memory_bytes(&self, logical_len: usize) -> usize {
+        if logical_len <= 2 {
+            return 0;
+        }
+
+        // Peak scratch is the larger of the fold-eval work buffer and the precompute-M path.
+        // The input Frac layer is counted separately by `input_memory_bytes`.
+        let frac_size = Self::INPUT_EF_ELEMENTS_PER_INTERACTION
+            .saturating_mul(self.extension_degree)
+            .saturating_mul(self.base_field_bytes);
+        let fold_eval = Self::fold_eval_work_buffer_elements(logical_len).saturating_mul(frac_size);
+
+        let precompute_f =
+            Self::precompute_m_work_buffer_elements(logical_len).saturating_mul(frac_size);
+        let precompute_ef = self.precompute_m_auxiliary_memory_bytes();
+
+        max(fold_eval, precompute_f.saturating_add(precompute_ef))
+    }
+
+    #[inline]
+    pub fn fold_eval_work_buffer_elements(logical_len: usize) -> usize {
+        logical_len / 4
+    }
+
+    #[inline]
+    pub fn precompute_m_work_buffer_elements(logical_len: usize) -> usize {
+        if logical_len <= 2 {
+            return 0;
+        }
+
+        (logical_len >> (1 + Self::WINDOW_SIZE)).max(1usize << Self::WINDOW_DEFAULT_MIN_N)
+    }
+
+    #[inline]
+    pub fn precompute_m_auxiliary_memory_bytes(&self) -> usize {
+        let ext_size = self.extension_degree.saturating_mul(self.base_field_bytes);
+        let precompute_ef_elements =
+            (1usize << (2 * Self::WINDOW_SIZE + 1)) + (1usize << (Self::WINDOW_SIZE + 1));
+        precompute_ef_elements.saturating_mul(ext_size)
+    }
+
+    #[inline]
+    pub fn peak_memory_bytes(&self, interaction_cells: usize, logical_len: usize) -> usize {
+        self.input_memory_bytes(interaction_cells)
+            .saturating_add(self.peak_work_buffer_memory_bytes(logical_len))
+    }
+
+    #[inline]
+    pub fn round_temp_buffer_elements(num_x: usize, min_blocks: usize) -> usize {
+        // Mirrors CUDA round-compute launch sizing for `_frac_compute_round_temp_buffer_size`.
+        let elements = num_x >> 1;
+        let min_blocks = min_blocks.max(1);
+        let mut block_size = FRACTIONAL_GKR_DEFAULT_BLOCK_SIZE;
+        let mut blocks_needed = elements.div_ceil(block_size);
+        if blocks_needed < min_blocks && elements >= FRACTIONAL_GKR_MIN_BLOCK_SIZE {
+            block_size = elements.div_ceil(min_blocks);
+            block_size = block_size
+                .div_ceil(FRACTIONAL_GKR_WARP_SIZE)
+                .saturating_mul(FRACTIONAL_GKR_WARP_SIZE)
+                .max(FRACTIONAL_GKR_MIN_BLOCK_SIZE);
+            blocks_needed = elements.div_ceil(block_size);
+        }
+
+        blocks_needed.saturating_mul(FRACTIONAL_GKR_SP_DEG)
+    }
 }
 
 impl<EF: Field> Add<Frac<EF>> for Frac<EF> {
