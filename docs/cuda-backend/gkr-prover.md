@@ -346,8 +346,8 @@ Total GPU memory required (workspace + input leaves `2^n * |Frac| = 2^(n+1) * |E
   - `n = 30`: `< 33.25 GiB`
 
 If precompute-M is disabled, `work_buffer = 2^(n-2) * |Frac|`. If non-default precompute-M
-tuning env vars are set, CUDA reserves the larger of the fold-eval and default precompute-M work
-buffers because tuned thresholds can make non-last rounds fall back to fold-eval. Metering also
-adds a worst-case precompute-M auxiliary buffer using the minimum clamped `tail_tile = 256`.
+tuning env vars are set, metering uses the larger of the fold-eval and default precompute-M work
+buffers because tuned thresholds can make non-last rounds fall back to fold-eval. It also adds a
+worst-case precompute-M auxiliary buffer using the minimum clamped `tail_tile = 256`.
 
 Dominant term is the input leaves (`2^(n+1) * |EF|`). With default precompute-M, workspace overhead is ~3%.

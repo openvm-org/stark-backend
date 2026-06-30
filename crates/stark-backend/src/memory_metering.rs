@@ -337,8 +337,8 @@ impl ProvingMemoryConfig {
     /// input = 2 * interaction_cells * D_EF * sizeof(F)
     /// ```
     ///
-    /// Work-buffer sizing is delegated to the prover-owned fractional-GKR model so CUDA batching
-    /// and metering use the same budget model for the selected fold-eval/precompute-M mode.
+    /// Work-buffer sizing is delegated to the prover-owned fractional-GKR model so metering follows
+    /// the selected fold-eval/precompute-M mode without duplicating the CUDA sizing formulas.
     #[inline]
     pub fn interaction_memory_bytes_without_overhead(&self, interaction_cells: usize) -> usize {
         let logical_len = Self::fractional_gkr_logical_len(interaction_cells);
