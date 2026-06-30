@@ -1,5 +1,4 @@
 use getset::MutGetters;
-use openvm_cuda_common::memory_manager::tracked_memory_used;
 use openvm_stark_backend::{
     memory_metering::ProvingMemoryConfig, prover::Coordinator, StarkEngine, SystemParams,
 };
@@ -68,7 +67,6 @@ impl StarkEngine for GpuEngine<DefaultHashScheme> {
         self.device
             .prover_config()
             .proving_memory_config(self.config())
-            .with_retained_backend_memory_bytes(tracked_memory_used())
     }
 
     fn initial_transcript(&self) -> Self::TS {
@@ -106,7 +104,6 @@ impl StarkEngine for GpuEngine<BabyBearBn254Poseidon2HashScheme> {
         self.device
             .prover_config()
             .proving_memory_config(self.config())
-            .with_retained_backend_memory_bytes(tracked_memory_used())
     }
 
     fn initial_transcript(&self) -> Self::TS {

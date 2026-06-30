@@ -36,16 +36,14 @@ pub fn device_memory_used() -> usize {
     total - free
 }
 
-pub fn vpmm_page_size_bytes() -> Option<usize> {
-    let manager = MEMORY_MANAGER.get().and_then(|m| m.lock().ok())?;
-    (manager.pool.page_size != usize::MAX).then_some(manager.pool.page_size)
-}
+pub const DEFAULT_VPMM_PAGE_SIZE_BYTES: usize = 2 << 20;
 
-pub fn tracked_memory_used() -> usize {
-    MEMORY_MANAGER
-        .get()
-        .and_then(|m| m.lock().ok())
-        .map_or(0, |manager| manager.current_size)
+pub fn vpmm_allocation_granularity_bytes() -> usize {
+    std::env::var("VPMM_PAGE_SIZE").map_or(DEFAULT_VPMM_PAGE_SIZE_BYTES, |val| {
+        let size: usize = val.parse().expect("VPMM_PAGE_SIZE must be a valid number");
+        assert!(size > 0, "VPMM_PAGE_SIZE must be > 0");
+        size
+    })
 }
 
 #[ctor::ctor]
