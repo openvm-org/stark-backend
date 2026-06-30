@@ -13,10 +13,17 @@ use openvm_cuda_common::{
 
 use crate::prelude::F;
 
-/// Maximum `l_skip` supported by the small-NTT CUDA kernel.
-pub const MAX_SMALL_NTT_LEVEL: usize = 10;
+/// Maximum `l_skip` supported by the CUDA backend.
+///
+/// The small-NTT kernels can fit `l_skip = 10` in one 1024-thread block, but the full
+/// GPU proving path also uses `stacked_reduction_round0_block_sum_kernel`. At l_skip=10,
+/// that kernel requests `(1024 + 1) * 3 * sizeof(FpExt)` bytes of dynamic shared memory:
+/// `1025 * 3 * 16 = 49_200` bytes, which exceeds the common 48 KiB per-block dynamic
+/// shared-memory limit. Keep the backend-wide limit at 9 unless that round0 path is
+/// redesigned or explicitly opts into larger dynamic shared memory.
+pub const MAX_SMALL_NTT_LEVEL: usize = 9;
 
-/// Validate the GPU small-NTT domain size.
+/// Validate the current CUDA backend `l_skip` support boundary.
 ///
 /// `l_skip == 0` is explicitly allowed and means the caller can take the size-1 no-op path
 /// without launching the small-NTT kernel.
@@ -27,8 +34,8 @@ pub fn validate_gpu_l_skip(l_skip: usize) -> Result<(), CudaError> {
     Ok(())
 }
 
-/// Size of the device NTT twiddle table (2^11 - 2 = 2046 elements for MAX_NTT_LEVEL=10)
-pub const DEVICE_NTT_TWIDDLES_SIZE: usize = (1 << 11) - 2;
+/// Size of the device NTT twiddle table.
+pub const DEVICE_NTT_TWIDDLES_SIZE: usize = (1 << (MAX_SMALL_NTT_LEVEL + 1)) - 2;
 
 extern "C" {
     pub fn _batch_ntt_small(

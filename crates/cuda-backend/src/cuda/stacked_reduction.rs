@@ -145,7 +145,7 @@ pub unsafe fn stacked_reduction_sumcheck_round0(
 /// - `src` and `dst` memory regions must not overlap.
 /// - `omega_skip_pows` must have length `>= 2^l_skip`.
 /// - `inv_lagrange_denoms` must have length `>= 2^l_skip`.
-/// - `l_skip` must be in range [0, 10] (skip_domain = 2^l_skip must be in [1, 1024]).
+/// - `l_skip` must be in range [0, 9] (skip_domain = 2^l_skip must be in [1, 512]).
 #[allow(clippy::too_many_arguments)]
 pub unsafe fn stacked_reduction_fold_ple(
     src: *const F,
