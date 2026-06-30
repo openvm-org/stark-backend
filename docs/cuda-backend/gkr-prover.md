@@ -345,7 +345,7 @@ Total GPU memory required (workspace + input leaves `2^n * |Frac| = 2^(n+1) * |E
   - `n = 29`: `< 16.63 GiB`
   - `n = 30`: `< 33.25 GiB`
 
-If precompute-M is disabled, `work_buffer = 2^(n-2) * |Frac|`. If hidden precompute-M
+If precompute-M is disabled, `work_buffer = 2^(n-2) * |Frac|`. If non-default precompute-M
 tuning env vars are set, batching uses the larger of the fold-eval and default precompute-M work
 buffer estimates, plus a worst-case precompute-M auxiliary buffer using the minimum clamped
 `tail_tile = 256`.

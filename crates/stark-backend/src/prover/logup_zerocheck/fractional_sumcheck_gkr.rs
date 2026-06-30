@@ -47,6 +47,15 @@ pub struct FractionalGkrMemoryModel {
     extension_degree: usize,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct WorkBufferMemoryCandidates {
+    fold_eval: usize,
+    precompute_m: usize,
+    default_precompute_aux: usize,
+    max_tuned_precompute_aux: usize,
+    common_aux: usize,
+}
+
 /// Fractional-GKR work-buffer strategy selected by the CUDA backend.
 #[doc(hidden)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -110,26 +119,26 @@ impl FractionalGkrMemoryModel {
         logical_len: usize,
         strategy: FractionalGkrWorkBufferStrategy,
     ) -> usize {
-        let (fold_eval, precompute_m, default_precompute_aux, max_tuned_precompute_aux, common_aux) =
-            self.work_buffer_memory_candidates(logical_len);
+        let candidates = self.work_buffer_memory_candidates(logical_len);
         match strategy {
-            FractionalGkrWorkBufferStrategy::Conservative => common_aux
-                .saturating_add(max(fold_eval, precompute_m))
-                .saturating_add(max_tuned_precompute_aux),
-            FractionalGkrWorkBufferStrategy::FoldEval => common_aux.saturating_add(fold_eval),
-            FractionalGkrWorkBufferStrategy::PrecomputeM => common_aux
-                .saturating_add(precompute_m)
-                .saturating_add(default_precompute_aux),
+            FractionalGkrWorkBufferStrategy::Conservative => candidates
+                .common_aux
+                .saturating_add(max(candidates.fold_eval, candidates.precompute_m))
+                .saturating_add(candidates.max_tuned_precompute_aux),
+            FractionalGkrWorkBufferStrategy::FoldEval => {
+                candidates.common_aux.saturating_add(candidates.fold_eval)
+            }
+            FractionalGkrWorkBufferStrategy::PrecomputeM => candidates
+                .common_aux
+                .saturating_add(candidates.precompute_m)
+                .saturating_add(candidates.default_precompute_aux),
         }
     }
 
     #[inline]
-    fn work_buffer_memory_candidates(
-        &self,
-        logical_len: usize,
-    ) -> (usize, usize, usize, usize, usize) {
+    fn work_buffer_memory_candidates(&self, logical_len: usize) -> WorkBufferMemoryCandidates {
         if logical_len <= 2 {
-            return (0, 0, 0, 0, 0);
+            return WorkBufferMemoryCandidates::default();
         }
 
         // The input Frac layer is counted separately by `input_memory_bytes`.
@@ -143,13 +152,13 @@ impl FractionalGkrMemoryModel {
         let max_tuned_precompute_aux =
             self.max_tuned_precompute_m_auxiliary_memory_bytes(logical_len);
         let common_aux = self.common_auxiliary_memory_bytes(logical_len);
-        (
+        WorkBufferMemoryCandidates {
             fold_eval,
             precompute_m,
             default_precompute_aux,
             max_tuned_precompute_aux,
             common_aux,
-        )
+        }
     }
 
     #[inline]
