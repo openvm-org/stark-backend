@@ -17,6 +17,12 @@ pub const INTERACTION_MEMORY_OVERHEAD: usize = 2 << 20;
 
 const WHIR_SUMCHECK_DEGREE: usize = 2;
 const CUDA_KERNEL_DEFAULT_BLOCK_SIZE: usize = 256;
+const CUDA_MEMORY_CHUNK_CELLS: usize = 8;
+const CUDA_MEMORY_BLOCK_CELLS: usize = 4;
+const CUDA_BOUNDARY_RECORD_BYTES: usize =
+    (2 + CUDA_MEMORY_CHUNK_CELLS / CUDA_MEMORY_BLOCK_CELLS + CUDA_MEMORY_CHUNK_CELLS)
+        * size_of::<u32>();
+const CUDA_MERKLE_RECORD_BYTES: usize = (3 + CUDA_MEMORY_CHUNK_CELLS) * size_of::<u32>();
 
 /// Cell counts for a proving memory estimate.
 ///
@@ -242,6 +248,20 @@ impl ProvingMemoryConfig {
             Some(granularity) if bytes >= granularity => bytes.next_multiple_of(granularity),
             _ => bytes,
         }
+    }
+
+    /// CUDA memory-boundary records are retained until the segment trace is generated.
+    ///
+    /// `boundary_records` is the final boundary AIR record count. The CUDA pre-merge input can
+    /// contain at most two four-cell records for each output record.
+    #[inline]
+    pub fn retained_boundary_memory_bytes(&self, boundary_records: usize) -> usize {
+        if boundary_records == 0 {
+            return 0;
+        }
+
+        self.tracked_allocation_bytes(2 * boundary_records * CUDA_BOUNDARY_RECORD_BYTES)
+            + self.tracked_allocation_bytes(boundary_records * CUDA_MERKLE_RECORD_BYTES)
     }
 
     #[inline]
