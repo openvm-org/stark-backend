@@ -105,7 +105,8 @@ pub struct ProvingMemoryConfig {
     pub cache_rs_code_matrix: bool,
     /// Whether to include CUDA retained opening state in the estimate.
     retained_opening_memory: bool,
-    /// CUDA fractional-GKR work-buffer allocation strategy.
+    /// CUDA fractional-GKR work-buffer strategy.
+    #[serde(default)]
     fractional_gkr_work_buffer_strategy: FractionalGkrWorkBufferStrategy,
     /// `log_2` of the common-main stacked matrix height.
     log_stacked_height: usize,
@@ -337,7 +338,7 @@ impl ProvingMemoryConfig {
     /// ```
     ///
     /// Work-buffer sizing is delegated to the prover-owned fractional-GKR model so CUDA batching
-    /// and metering use the same selected fold-eval/precompute-M strategy.
+    /// and metering use the same budget model for the selected fold-eval/precompute-M mode.
     #[inline]
     pub fn interaction_memory_bytes_without_overhead(&self, interaction_cells: usize) -> usize {
         let logical_len = Self::fractional_gkr_logical_len(interaction_cells);
@@ -420,7 +421,7 @@ impl ProvingMemoryConfig {
     /// main_secondary     = sizeof(F) *
     ///                      (2 * main_cell_secondary_weight() * main_cells_with_rot
     ///                       + main_cell_secondary_weight() * main_cells_without_rot)
-    /// interaction        = fractional-GKR inputs + max supported work buffer
+    /// interaction        = fractional-GKR inputs + selected work-buffer/auxiliary budget
     ///                      + max(INTERACTION_MEMORY_OVERHEAD, fractional_gkr_round_temp_buffer)
     ///
     /// commit_peak = cached_stacked + if cache_rs_code_matrix {

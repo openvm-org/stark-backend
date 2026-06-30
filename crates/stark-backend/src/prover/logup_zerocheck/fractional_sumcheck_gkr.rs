@@ -61,7 +61,7 @@ struct WorkBufferMemoryCandidates {
 #[doc(hidden)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FractionalGkrWorkBufferStrategy {
-    /// Use the larger of the fold-eval and default precompute-M allocations.
+    /// Non-default CUDA tuning can select either work-buffer shape, so reserve and meter both.
     #[default]
     Conservative,
     /// Precompute-M is disabled, so CUDA allocates the fold-eval work buffer.

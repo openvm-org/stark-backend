@@ -194,14 +194,17 @@ fn precompute_m_enabled() -> bool {
 pub(crate) fn precompute_m_work_buffer_strategy() -> FractionalGkrWorkBufferStrategy {
     if !precompute_m_enabled() {
         FractionalGkrWorkBufferStrategy::FoldEval
-    } else if PRECOMPUTE_M_TUNING_ENV_VARS
-        .iter()
-        .all(|key| env::var_os(key).is_none())
-    {
-        FractionalGkrWorkBufferStrategy::PrecomputeM
-    } else {
+    } else if precompute_m_tuning_env_vars_present() {
         FractionalGkrWorkBufferStrategy::Conservative
+    } else {
+        FractionalGkrWorkBufferStrategy::PrecomputeM
     }
+}
+
+fn precompute_m_tuning_env_vars_present() -> bool {
+    PRECOMPUTE_M_TUNING_ENV_VARS
+        .iter()
+        .any(|key| env::var_os(key).is_some())
 }
 
 fn precompute_m_min_blocks_threshold() -> usize {
@@ -836,7 +839,8 @@ where
     // When precompute-M is active, the first multifold folds w+1 variables at once
     // (pending r_prev + w window challenges). The largest case is the last outer round:
     // input pq_size = total_leaves, output pq_size = total_leaves >> (1 + w).
-    // Fold-eval fallback rounds (rem_n < min_n) need at most 2^min_n elements.
+    // Non-default precompute-M tuning can force non-last rounds onto the fold-eval path, so
+    // tuned configs reserve enough capacity for either selected path.
     let max_work_size = if total_rounds > 2 {
         let fold_eval = FractionalGkrMemoryModel::fold_eval_work_buffer_elements(total_leaves);
         let precompute_m =
