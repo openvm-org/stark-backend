@@ -36,6 +36,18 @@ pub fn device_memory_used() -> usize {
     total - free
 }
 
+pub fn vpmm_page_size_bytes() -> Option<usize> {
+    let manager = MEMORY_MANAGER.get().and_then(|m| m.lock().ok())?;
+    (manager.pool.page_size != usize::MAX).then_some(manager.pool.page_size)
+}
+
+pub fn tracked_memory_used() -> usize {
+    MEMORY_MANAGER
+        .get()
+        .and_then(|m| m.lock().ok())
+        .map_or(0, |manager| manager.current_size)
+}
+
 #[ctor::ctor]
 fn init() {
     let _ = MEMORY_MANAGER.set(Mutex::new(MemoryManager::new()));
@@ -229,16 +241,22 @@ impl MemTracker {
         let peak = manager.max_used_size;
         let used = current as isize - self.current as isize;
         let sign = if used >= 0 { "+" } else { "-" };
+        let used_abs = used.unsigned_abs();
         let pool_usage = manager.pool.memory_usage();
         tracing::info!(
-            "GPU mem: used={}{}, current={}, peak={}, in pool={} ({})",
+            "GPU mem: used={}{}, current={}, peak={}, in pool={} ({}) | bytes used={}{} current={} peak={} pool={}",
             sign,
-            ByteSize::b(used.unsigned_abs() as u64),
+            ByteSize::b(used_abs as u64),
             ByteSize::b(current as u64),
             ByteSize::b(peak as u64),
             ByteSize::b(pool_usage as u64),
             msg.into()
-                .map_or(self.label.to_string(), |m| format!("{}:{}", self.label, m))
+                .map_or(self.label.to_string(), |m| format!("{}:{}", self.label, m)),
+            sign,
+            used_abs,
+            current,
+            peak,
+            pool_usage,
         );
     }
 

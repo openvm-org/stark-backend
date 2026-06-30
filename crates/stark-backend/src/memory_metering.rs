@@ -21,6 +21,8 @@ const CUDA_KERNEL_DEFAULT_BLOCK_SIZE: usize = 256;
 /// constraint and opening phases, split by whether a trace opens next-row rotations.
 /// `interaction_cells` is the metered row-interaction slot count after power-of-two trace padding.
 /// `main_stacked_cells` is the common-main stacked matrix size before Reed-Solomon blowup.
+/// `main_memory_bytes`, when set, is the resident allocation size for opened trace matrices.
+/// `retained_auxiliary_bytes` is extra caller-owned memory retained during proving.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ProvingMemoryCounts {
     /// Opened trace cells for AIRs that open next-row rotations after power-of-two padding.
@@ -31,6 +33,10 @@ pub struct ProvingMemoryCounts {
     pub main_stacked_cells: usize,
     /// Metered row-interaction slots after power-of-two padding.
     pub interaction_cells: usize,
+    /// Resident opened-trace allocation bytes, if different from `main_cells * sizeof(F)`.
+    pub main_memory_bytes: Option<usize>,
+    /// Additional resident caller-owned bytes live during secondary proving phases.
+    pub retained_auxiliary_bytes: usize,
 }
 
 impl ProvingMemoryCounts {
@@ -58,12 +64,26 @@ impl ProvingMemoryCounts {
             main_cells_without_rot,
             main_stacked_cells,
             interaction_cells,
+            main_memory_bytes: None,
+            retained_auxiliary_bytes: 0,
         }
     }
 
     #[inline]
     pub const fn main_cells(&self) -> usize {
         self.main_cells_with_rot + self.main_cells_without_rot
+    }
+
+    #[inline]
+    pub const fn with_main_memory_bytes(mut self, main_memory_bytes: usize) -> Self {
+        self.main_memory_bytes = Some(main_memory_bytes);
+        self
+    }
+
+    #[inline]
+    pub const fn with_retained_auxiliary_bytes(mut self, retained_auxiliary_bytes: usize) -> Self {
+        self.retained_auxiliary_bytes = retained_auxiliary_bytes;
+        self
     }
 }
 
@@ -74,15 +94,17 @@ pub struct ProvingMemoryEstimate {
     pub total: usize,
     /// Resident opened trace data.
     pub main: usize,
-    /// Retained common-main PCS data used by the selected secondary phase.
+    /// Retained common-main PCS data used by secondary phases.
     pub main_persistent: usize,
+    /// Caller/backend-owned auxiliary memory retained during secondary proving phases.
+    pub retained_auxiliary: usize,
     /// Reed-Solomon code matrix for main traces.
     pub rs_code_matrix: usize,
     /// Secondary main-trace buffers after PCS opening.
     pub main_secondary: usize,
     /// Interaction GKR buffers plus fractional-GKR scratch.
     pub interaction: usize,
-    /// Peak among secondary phases, excluding resident opened trace data.
+    /// Peak among secondary phases, excluding resident main and retained auxiliary bytes.
     pub secondary_peak: usize,
 }
 
@@ -116,6 +138,11 @@ pub struct ProvingMemoryConfig {
     num_whir_rounds: usize,
     /// Size of one PCS digest in bytes.
     digest_bytes: usize,
+    /// Backend-owned resident memory not represented by per-segment trace/protocol counts.
+    retained_backend_memory_bytes: usize,
+    /// CUDA VPMM page size for large allocation accounting.
+    #[serde(default)]
+    large_allocation_granularity_bytes: Option<usize>,
 }
 
 impl ProvingMemoryConfig {
@@ -151,6 +178,8 @@ impl ProvingMemoryConfig {
             k_whir: params.k_whir(),
             num_whir_rounds: params.num_whir_rounds(),
             digest_bytes,
+            retained_backend_memory_bytes: 0,
+            large_allocation_granularity_bytes: None,
         }
     }
 
@@ -159,6 +188,28 @@ impl ProvingMemoryConfig {
     pub fn with_cuda_backend(mut self, cache_stacked_matrix: bool) -> Self {
         self.cache_stacked_matrix = cache_stacked_matrix;
         self.retained_opening_memory = true;
+        self
+    }
+
+    /// Calibrate CUDA allocation accounting.
+    #[inline]
+    #[doc(hidden)]
+    pub fn with_large_allocation_granularity_bytes(
+        mut self,
+        allocation_granularity: usize,
+    ) -> Self {
+        assert!(allocation_granularity > 0);
+        self.large_allocation_granularity_bytes = Some(allocation_granularity);
+        self
+    }
+
+    #[inline]
+    #[doc(hidden)]
+    pub const fn with_retained_backend_memory_bytes(
+        mut self,
+        retained_backend_memory: usize,
+    ) -> Self {
+        self.retained_backend_memory_bytes = retained_backend_memory;
         self
     }
 
@@ -175,6 +226,15 @@ impl ProvingMemoryConfig {
     #[inline]
     pub fn main_memory_bytes(&self, main_cells: usize) -> usize {
         main_cells * self.base_field_bytes
+    }
+
+    /// Bytes tracked by the CUDA memory manager for one allocation of `bytes`.
+    #[inline]
+    pub fn tracked_allocation_bytes(&self, bytes: usize) -> usize {
+        match self.large_allocation_granularity_bytes {
+            Some(granularity) if bytes >= granularity => bytes.next_multiple_of(granularity),
+            _ => bytes,
+        }
     }
 
     #[inline]
@@ -343,10 +403,11 @@ impl ProvingMemoryConfig {
     pub fn interaction_memory_bytes_without_overhead(&self, interaction_cells: usize) -> usize {
         let logical_len = Self::fractional_gkr_logical_len(interaction_cells);
         let model = self.fractional_gkr_memory_model();
-        model.peak_memory_bytes_with_strategy(
+        model.peak_memory_bytes_with_allocator(
             interaction_cells,
             logical_len,
             self.fractional_gkr_work_buffer_strategy,
+            |bytes| self.tracked_allocation_bytes(bytes),
         )
     }
 
@@ -367,12 +428,13 @@ impl ProvingMemoryConfig {
             return 0;
         }
 
-        FractionalGkrMemoryModel::round_temp_buffer_elements(
+        let bytes = FractionalGkrMemoryModel::round_temp_buffer_elements(
             logical_len >> 1,
             FractionalGkrMemoryModel::ROUND_COMPUTE_FALLBACK_BLOCKS,
         )
         .saturating_mul(self.extension_degree)
-        .saturating_mul(self.base_field_bytes)
+        .saturating_mul(self.base_field_bytes);
+        self.tracked_allocation_bytes(bytes)
     }
 
     /// Interaction memory includes the fractional-GKR model plus the larger of fixed interaction
@@ -397,13 +459,15 @@ impl ProvingMemoryConfig {
     /// Convert opened trace cells, common-main stacked cells, and interaction cells to memory
     /// bytes.
     ///
-    /// `main` is resident across the whole proving segment. `secondary_peak` is the maximum of the
-    /// secondary phases that can overlap with that resident main memory.
+    /// `main` is resident across the whole proving segment. `retained_auxiliary` is caller/backend
+    /// memory that remains live while proving. `secondary_peak` is the maximum of the secondary
+    /// phases that can overlap with both resident components.
     ///
     /// ```text
     /// main_cells         = main_cells_with_rot + main_cells_without_rot
     /// main_stacked_cells = stacked_width * 2^log_stacked_height
-    /// main               = main_cells * sizeof(F)
+    /// main               = main_memory_bytes, or main_cells * sizeof(F)
+    /// retained_auxiliary = caller/backend retained allocation bytes
     ///
     /// retained_common    = cached_stacked + common_digest
     ///
@@ -445,12 +509,17 @@ impl ProvingMemoryConfig {
     ///     whir_first_round_peak,
     ///     whir_later_round_peak,
     /// )
-    /// total = main + secondary_peak
+    /// total = main + retained_auxiliary + secondary_peak
     /// ```
     #[inline]
     pub fn estimate(&self, counts: ProvingMemoryCounts) -> ProvingMemoryEstimate {
         let main_cells = counts.main_cells();
-        let main = self.main_memory_bytes(main_cells);
+        let main = counts
+            .main_memory_bytes
+            .unwrap_or_else(|| self.main_memory_bytes(main_cells));
+        let retained_auxiliary = counts
+            .retained_auxiliary_bytes
+            .saturating_add(self.retained_backend_memory_bytes);
         let has_common_main = counts.main_stacked_cells != 0;
         let retained_opening_memory = has_common_main && self.retained_opening_memory;
         let cached_stacked_matrix =
@@ -508,9 +577,10 @@ impl ProvingMemoryConfig {
         let main_persistent = retained_common_main;
 
         ProvingMemoryEstimate {
-            total: main + secondary_peak,
+            total: main + retained_auxiliary + secondary_peak,
             main,
             main_persistent,
+            retained_auxiliary,
             rs_code_matrix,
             main_secondary,
             interaction,
@@ -643,6 +713,80 @@ mod tests {
                 10, 20, 5,
             ))
         );
+    }
+
+    #[test]
+    fn main_memory_can_use_caller_allocation_sum() {
+        let mut config = test_memory_config();
+        config.large_allocation_granularity_bytes = Some(16);
+        let main_memory_bytes = config.tracked_allocation_bytes(17)
+            + config.tracked_allocation_bytes(17)
+            + config.tracked_allocation_bytes(15);
+        let counts = ProvingMemoryCounts::new_with_unstacked_cells(10, 20, 5)
+            .with_main_memory_bytes(main_memory_bytes);
+
+        let estimate = config.estimate(counts);
+
+        assert_eq!(main_memory_bytes, 32 + 32 + 15);
+        assert_ne!(
+            main_memory_bytes,
+            config.tracked_allocation_bytes(17 + 17 + 15)
+        );
+        assert_eq!(estimate.main, main_memory_bytes);
+        assert_eq!(estimate.total, main_memory_bytes + estimate.secondary_peak);
+    }
+
+    #[test]
+    fn retained_auxiliary_memory_is_resident() {
+        let config = test_memory_config();
+        let base_counts = ProvingMemoryCounts::new_with_unstacked_cells(10, 20, 5);
+        let with_aux = base_counts.with_retained_auxiliary_bytes(123);
+
+        let base = config.estimate(base_counts);
+        let estimate = config.estimate(with_aux);
+
+        assert_eq!(estimate.secondary_peak, base.secondary_peak);
+        assert_eq!(estimate.retained_auxiliary, 123);
+        assert_eq!(estimate.main_persistent, base.main_persistent);
+        assert_eq!(estimate.total, base.total + 123);
+    }
+
+    #[test]
+    fn retained_backend_memory_is_resident() {
+        let config = test_memory_config().with_retained_backend_memory_bytes(456);
+        let counts = ProvingMemoryCounts::new_with_unstacked_cells(10, 20, 5);
+
+        let estimate = config.estimate(counts);
+
+        assert_eq!(estimate.retained_auxiliary, 456);
+        assert_eq!(
+            estimate.total,
+            estimate.main + estimate.secondary_peak + estimate.retained_auxiliary
+        );
+    }
+
+    #[test]
+    fn tracked_allocation_bytes_uses_cuda_granularity() {
+        let mut config = test_memory_config();
+        config.large_allocation_granularity_bytes = Some(16);
+
+        assert_eq!(config.tracked_allocation_bytes(0), 0);
+        assert_eq!(config.tracked_allocation_bytes(15), 15);
+        assert_eq!(config.tracked_allocation_bytes(16), 16);
+        assert_eq!(config.tracked_allocation_bytes(17), 32);
+    }
+
+    #[test]
+    fn interaction_memory_uses_cuda_allocation_granularity() {
+        let interaction_cells = (1 << 24) + 1;
+        let raw = test_memory_config()
+            .with_fractional_gkr_work_buffer_strategy(FractionalGkrWorkBufferStrategy::PrecomputeM)
+            .interaction_memory_bytes_without_overhead(interaction_cells);
+        let mut rounded = test_memory_config()
+            .with_fractional_gkr_work_buffer_strategy(FractionalGkrWorkBufferStrategy::PrecomputeM);
+        rounded.large_allocation_granularity_bytes = Some(1 << 27);
+
+        assert!(rounded.interaction_memory_bytes_without_overhead(interaction_cells) > raw);
     }
 
     #[test]

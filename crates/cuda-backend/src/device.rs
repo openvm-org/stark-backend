@@ -1,5 +1,7 @@
 use getset::{CopyGetters, Getters, MutGetters};
-use openvm_cuda_common::{common::get_device, stream::GpuDeviceCtx};
+use openvm_cuda_common::{
+    common::get_device, memory_manager::vpmm_page_size_bytes, stream::GpuDeviceCtx,
+};
 use openvm_stark_backend::{
     memory_metering::ProvingMemoryConfig, StarkProtocolConfig, SystemParams,
 };
@@ -40,6 +42,10 @@ impl GpuProverConfig {
         let memory_config =
             ProvingMemoryConfig::from_protocol_config(config, self.cache_rs_code_matrix)
                 .with_cuda_backend(self.cache_stacked_matrix);
+
+        let memory_config = vpmm_page_size_bytes().map_or(memory_config, |page_size| {
+            memory_config.with_large_allocation_granularity_bytes(page_size)
+        });
 
         memory_config.with_fractional_gkr_work_buffer_strategy(
             fractional_gkr_work_buffer_metering_strategy(),

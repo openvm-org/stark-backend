@@ -120,20 +120,49 @@ impl FractionalGkrMemoryModel {
         logical_len: usize,
         strategy: FractionalGkrWorkBufferStrategy,
     ) -> usize {
+        self.peak_work_buffer_memory_bytes_with_allocator(logical_len, strategy, |bytes| bytes)
+    }
+
+    #[inline]
+    pub(crate) fn peak_work_buffer_memory_bytes_with_allocator(
+        &self,
+        logical_len: usize,
+        strategy: FractionalGkrWorkBufferStrategy,
+        mut allocation_bytes: impl FnMut(usize) -> usize,
+    ) -> usize {
         let candidates = self.work_buffer_memory_candidates(logical_len);
         match strategy {
-            FractionalGkrWorkBufferStrategy::Conservative => candidates
-                .common_aux
-                .saturating_add(max(candidates.fold_eval, candidates.precompute_m))
-                .saturating_add(candidates.max_tuned_precompute_aux),
-            FractionalGkrWorkBufferStrategy::FoldEval => {
-                candidates.common_aux.saturating_add(candidates.fold_eval)
+            FractionalGkrWorkBufferStrategy::Conservative => {
+                allocation_bytes(candidates.common_aux)
+                    .saturating_add(allocation_bytes(max(
+                        candidates.fold_eval,
+                        candidates.precompute_m,
+                    )))
+                    .saturating_add(allocation_bytes(candidates.max_tuned_precompute_aux))
             }
-            FractionalGkrWorkBufferStrategy::PrecomputeM => candidates
-                .common_aux
-                .saturating_add(candidates.precompute_m)
-                .saturating_add(candidates.default_precompute_aux),
+            FractionalGkrWorkBufferStrategy::FoldEval => allocation_bytes(candidates.common_aux)
+                .saturating_add(allocation_bytes(candidates.fold_eval)),
+            FractionalGkrWorkBufferStrategy::PrecomputeM => allocation_bytes(candidates.common_aux)
+                .saturating_add(allocation_bytes(candidates.precompute_m))
+                .saturating_add(allocation_bytes(candidates.default_precompute_aux)),
         }
+    }
+
+    #[inline]
+    pub(crate) fn peak_memory_bytes_with_allocator(
+        &self,
+        interaction_cells: usize,
+        logical_len: usize,
+        strategy: FractionalGkrWorkBufferStrategy,
+        mut allocation_bytes: impl FnMut(usize) -> usize,
+    ) -> usize {
+        allocation_bytes(self.input_memory_bytes(interaction_cells)).saturating_add(
+            self.peak_work_buffer_memory_bytes_with_allocator(
+                logical_len,
+                strategy,
+                allocation_bytes,
+            ),
+        )
     }
 
     #[inline]
@@ -311,17 +340,6 @@ impl FractionalGkrMemoryModel {
     fn log2_len(logical_len: usize) -> Option<usize> {
         (logical_len > 2 && logical_len.is_power_of_two())
             .then_some(logical_len.trailing_zeros() as usize)
-    }
-
-    #[inline]
-    pub(crate) fn peak_memory_bytes_with_strategy(
-        &self,
-        interaction_cells: usize,
-        logical_len: usize,
-        strategy: FractionalGkrWorkBufferStrategy,
-    ) -> usize {
-        self.input_memory_bytes(interaction_cells)
-            .saturating_add(self.peak_work_buffer_memory_bytes_with_strategy(logical_len, strategy))
     }
 
     #[inline]
