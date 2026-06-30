@@ -160,6 +160,7 @@ impl ProvingMemoryConfig {
     }
 
     #[inline]
+    #[doc(hidden)]
     pub fn with_fractional_gkr_work_buffer_strategy(
         mut self,
         strategy: FractionalGkrWorkBufferStrategy,
@@ -677,11 +678,14 @@ mod tests {
         // precompute aux:
         //   m_buffer + prefix/suffix = (4^3 + 2 * 2^3) EF
         //   m_partial_buffer         = 1024 * 4^3 EF
+        // conservative tuned aux:
+        //   m_partial_buffer         = ceil(2^20 / 256) * 4^3 EF
         // common aux:
         //   SqrtEqLayers for 23 challenges = (2^12 - 1) + (2^13 - 2) EF
         //   d_sum_evals + copy_scratch     = 4 EF
         let precompute_expected = 672_335_120;
         let fold_eval_expected = 805_502_992;
+        let conservative_expected = 809_698_576;
         let precompute_m = test_memory_config()
             .with_fractional_gkr_work_buffer_strategy(FractionalGkrWorkBufferStrategy::PrecomputeM);
         let fold_eval = test_memory_config()
@@ -698,7 +702,7 @@ mod tests {
         );
         assert_eq!(
             conservative.interaction_memory_bytes_without_overhead(interaction_cells),
-            fold_eval_expected
+            conservative_expected
         );
     }
 

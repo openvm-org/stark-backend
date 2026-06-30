@@ -98,8 +98,10 @@ impl FractionalGkrMemoryModel {
 
     #[inline]
     pub fn peak_work_buffer_memory_bytes(&self, logical_len: usize) -> usize {
-        let (fold_eval, precompute_m) = self.work_buffer_memory_candidates(logical_len);
-        max(fold_eval, precompute_m)
+        self.peak_work_buffer_memory_bytes_with_strategy(
+            logical_len,
+            FractionalGkrWorkBufferStrategy::Conservative,
+        )
     }
 
     #[inline]
@@ -108,18 +110,26 @@ impl FractionalGkrMemoryModel {
         logical_len: usize,
         strategy: FractionalGkrWorkBufferStrategy,
     ) -> usize {
-        let (fold_eval, precompute_m) = self.work_buffer_memory_candidates(logical_len);
+        let (fold_eval, precompute_m, default_precompute_aux, max_tuned_precompute_aux, common_aux) =
+            self.work_buffer_memory_candidates(logical_len);
         match strategy {
-            FractionalGkrWorkBufferStrategy::Conservative => max(fold_eval, precompute_m),
-            FractionalGkrWorkBufferStrategy::FoldEval => fold_eval,
-            FractionalGkrWorkBufferStrategy::PrecomputeM => precompute_m,
+            FractionalGkrWorkBufferStrategy::Conservative => common_aux
+                .saturating_add(max(fold_eval, precompute_m))
+                .saturating_add(max_tuned_precompute_aux),
+            FractionalGkrWorkBufferStrategy::FoldEval => common_aux.saturating_add(fold_eval),
+            FractionalGkrWorkBufferStrategy::PrecomputeM => common_aux
+                .saturating_add(precompute_m)
+                .saturating_add(default_precompute_aux),
         }
     }
 
     #[inline]
-    fn work_buffer_memory_candidates(&self, logical_len: usize) -> (usize, usize) {
+    fn work_buffer_memory_candidates(
+        &self,
+        logical_len: usize,
+    ) -> (usize, usize, usize, usize, usize) {
         if logical_len <= 2 {
-            return (0, 0);
+            return (0, 0, 0, 0, 0);
         }
 
         // The input Frac layer is counted separately by `input_memory_bytes`.
@@ -127,14 +137,18 @@ impl FractionalGkrMemoryModel {
             .saturating_mul(self.extension_degree)
             .saturating_mul(self.base_field_bytes);
         let fold_eval = Self::fold_eval_work_buffer_elements(logical_len).saturating_mul(frac_size);
-        let precompute_m = Self::precompute_m_work_buffer_elements(logical_len)
-            .saturating_mul(frac_size)
-            .saturating_add(self.precompute_m_auxiliary_memory_bytes(logical_len));
-
+        let precompute_m =
+            Self::precompute_m_work_buffer_elements(logical_len).saturating_mul(frac_size);
+        let default_precompute_aux = self.precompute_m_auxiliary_memory_bytes(logical_len);
+        let max_tuned_precompute_aux =
+            self.max_tuned_precompute_m_auxiliary_memory_bytes(logical_len);
         let common_aux = self.common_auxiliary_memory_bytes(logical_len);
         (
-            fold_eval.saturating_add(common_aux),
-            precompute_m.saturating_add(common_aux),
+            fold_eval,
+            precompute_m,
+            default_precompute_aux,
+            max_tuned_precompute_aux,
+            common_aux,
         )
     }
 
@@ -213,6 +227,50 @@ impl FractionalGkrMemoryModel {
                 continue;
             }
 
+            let m_len = 1usize << (2 * Self::WINDOW_SIZE);
+            max_partial_len = max(max_partial_len, num_blocks.saturating_mul(m_len));
+        }
+
+        max_partial_len
+    }
+
+    #[inline]
+    fn max_tuned_precompute_m_auxiliary_memory_bytes(&self, logical_len: usize) -> usize {
+        let ext_size = self.extension_degree.saturating_mul(self.base_field_bytes);
+        let max_partial_len = Self::max_tuned_precompute_m_partial_buffer_elements(logical_len);
+        if max_partial_len == 0 {
+            return 0;
+        }
+
+        let precompute_ef_elements =
+            (1usize << (2 * Self::WINDOW_SIZE)) + (1usize << (Self::WINDOW_SIZE + 1));
+        precompute_ef_elements
+            .saturating_add(max_partial_len)
+            .saturating_mul(ext_size)
+    }
+
+    #[inline]
+    fn max_tuned_precompute_m_partial_buffer_elements(logical_len: usize) -> usize {
+        let Some(total_rounds) = Self::log2_len(logical_len) else {
+            return 0;
+        };
+
+        let mut max_partial_len = 0usize;
+        for round in 1..total_rounds {
+            let stop = round.div_ceil(2);
+            if stop <= 1 {
+                continue;
+            }
+
+            let rem_n = round - 1;
+            let rounds_left = stop - 1;
+            if rem_n < Self::WINDOW_SIZE || rounds_left < Self::WINDOW_SIZE {
+                continue;
+            }
+
+            let tail_n = rem_n - Self::WINDOW_SIZE;
+            let tail_points = 1usize << tail_n;
+            let num_blocks = tail_points.div_ceil(Self::PRECOMPUTE_M_MIN_TAIL_TILE);
             let m_len = 1usize << (2 * Self::WINDOW_SIZE);
             max_partial_len = max(max_partial_len, num_blocks.saturating_mul(m_len));
         }

@@ -318,29 +318,36 @@ Let:
 - `w = GKR_WINDOW_SIZE` (default `w = 3`)
 - `|EF| = sizeof(EF)` bytes
 - `|Frac| = sizeof(Frac<EF>) = 2 * |EF|`
-- Assume `n` is large
-- Assume precompute-M is active
+- Assume `n` is large and default precompute-M tuning is active
 
 Buffers used at peak (workspace only; excludes input `layer`/leaves):
 - `work_buffer`: `2^(n-w-2) * |Frac|` (precompute-M defers `w+1` folds before first write)
 - `copy_scratch`: `1 * |Frac|`
 - `d_sum_evals`: `2 * |EF|`
-- `tmp_block_sums`: `< 2^(n-7) * |EF|`
 - `eq_buffer` (`SqrtEqLayers`): `(2^floor(n/2) + 2^ceil(n/2) - 2) * |EF|`
 - `m_buffer`: `4^w * |EF|` (default `w=3` gives `64 * |EF|`)
 - `m_partial_buffer`: `num_blocks * 4^w * |EF|`, with `num_blocks <= 2^(n-w-10)` for large `n`, so `< 2^(n+w-10) * |EF|`
 - `eq_r_prefix_buffer` + `eq_suffix_buffer`: `2^(w+1) * |EF|` (default `w=3` gives `16 * |EF|`)
 
 Workspace upper bound (sum of the buffers above), using `|Frac| = 2 * |EF|`:
-- `W < (2^(n-w-1) + 2^(n-7) + 2^(n+w-10) + 2^floor(n/2) + 2^ceil(n/2) + 4^w + 2^(w+1) + 2) * |EF|`
+- `W < (2^(n-w-1) + 2^(n+w-10) + 2^floor(n/2) + 2^ceil(n/2) + 4^w + 2^(w+1) + 2) * |EF|`
+
+The metering code adds the round-reduction scratch separately:
+- `round_temp_buffer = _frac_compute_round_temp_buffer_size(2^(n-1)) * |EF|`
+- `interaction_overhead = max(2 MiB, round_temp_buffer)`
 
 Total GPU memory required (workspace + input leaves `2^n * |Frac| = 2^(n+1) * |EF|`):
-- `M_total < (2^(n+1) + 2^(n-w-1) + 2^(n-7) + 2^(n+w-10) + 2^floor(n/2) + 2^ceil(n/2) + 4^w + 2^(w+1) + 2) * |EF|`
+- `M_total < 2^(n+1) * |EF| + W + interaction_overhead`
 - With default `w = 3` and `|EF| = 16` bytes:
-  - `M_total < (2^(n+1) + 2^(n-4) + 2^(n-6) + 2^floor(n/2) + 2^ceil(n/2) + 82) / 2^26 GiB`
+  - excluding `interaction_overhead`, `2^(n+1) * |EF| + W < (2^(n+1) + 2^(n-4) + 2^(n-7) + 2^floor(n/2) + 2^ceil(n/2) + 82) / 2^26 GiB`
   - `n = 27`: `M_total < 4.16 GiB`
   - `n = 28`: `M_total < 8.31 GiB`
   - `n = 29`: `M_total < 16.63 GiB`
   - `n = 30`: `M_total < 33.25 GiB`
 
-Dominant term is the input leaves (`2^(n+1) * |EF|`). Workspace overhead is ~4%.
+If precompute-M is disabled, `work_buffer = 2^(n-2) * |Frac|`. If hidden precompute-M
+tuning env vars are set, batching uses the larger of the fold-eval and default precompute-M work
+buffer estimates, plus a worst-case precompute-M auxiliary buffer using the minimum clamped
+`tail_tile = 256`.
+
+Dominant term is the input leaves (`2^(n+1) * |EF|`). With default precompute-M, workspace overhead is ~3%.
