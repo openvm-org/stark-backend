@@ -1,14 +1,13 @@
-use std::marker::PhantomData;
+use std::{marker::PhantomData, mem::size_of};
 
 use itertools::Itertools;
 use openvm_cuda_common::{d_buffer::DeviceBuffer, memory_manager::MemTracker};
 use openvm_stark_backend::{
-    memory_metering::ProvingMemoryConfig,
     poly_common::Squarable,
     proof::*,
     prover::{
-        CommittedTraceData, DeviceMultiStarkProvingKey, MultiRapProver, OpeningProver,
-        ProverBackend, ProverDevice, ProvingContext, TraceCommitter,
+        DeviceMultiStarkProvingKey, MultiRapProver, OpeningProver, ProverBackend, ProverDevice,
+        ProvingContext, TraceCommitter,
     },
 };
 use tracing::instrument;
@@ -57,129 +56,99 @@ impl<HS: GpuHashScheme> ProverBackend for GenericGpuBackend<HS> {
     type PcsData = StackedPcsDataGpu<F, HS::Digest>;
     type OtherAirData = AirDataGpu;
 
-    fn retained_proving_key_memory_bytes(
-        mpk: &DeviceMultiStarkProvingKey<Self>,
-        config: &ProvingMemoryConfig,
-    ) -> usize {
-        sum_memory(mpk.per_air.iter().map(|air| {
-            option_memory_bytes(air.preprocessed_data.as_ref(), |data| {
-                committed_trace_memory_bytes::<HS>(data, config)
-            })
-            .saturating_add(air_data_memory_bytes(&air.other_data, config))
-        }))
+    fn retained_proving_key_allocation_bytes(mpk: &DeviceMultiStarkProvingKey<Self>) -> Vec<usize> {
+        let mut allocations = Vec::new();
+        for air in &mpk.per_air {
+            if let Some(data) = &air.preprocessed_data {
+                push_pcs_data_allocations(&mut allocations, data.data.as_ref());
+            }
+            push_air_data_allocations(&mut allocations, &air.other_data);
+        }
+        allocations
     }
 }
 
-fn sum_memory(bytes: impl IntoIterator<Item = usize>) -> usize {
-    bytes
-        .into_iter()
-        .fold(0usize, |total, bytes| total.saturating_add(bytes))
-}
-
-fn option_memory_bytes<T>(value: Option<&T>, memory_bytes: impl FnOnce(&T) -> usize) -> usize {
-    value.map_or(0, memory_bytes)
-}
-
-fn buffer_memory_bytes<T>(buffer: &DeviceBuffer<T>, config: &ProvingMemoryConfig) -> usize {
-    if buffer.is_empty() {
-        return 0;
+fn push_buffer_allocation<T>(allocations: &mut Vec<usize>, buffer: &DeviceBuffer<T>) {
+    if !buffer.is_empty() {
+        allocations.push(buffer.len().saturating_mul(size_of::<T>()));
     }
-    config.tracked_allocation_bytes(buffer.len().saturating_mul(size_of::<T>()))
 }
 
-fn matrix_memory_bytes<T>(matrix: &DeviceMatrix<T>, config: &ProvingMemoryConfig) -> usize {
-    buffer_memory_bytes(matrix.buffer(), config)
+fn push_matrix_allocations<T>(allocations: &mut Vec<usize>, matrix: &DeviceMatrix<T>) {
+    push_buffer_allocation(allocations, matrix.buffer());
 }
 
-fn ple_matrix_memory_bytes(matrix: &PleMatrix<F>, config: &ProvingMemoryConfig) -> usize {
-    buffer_memory_bytes(matrix.mixed(), config)
+fn push_ple_matrix_allocations(allocations: &mut Vec<usize>, matrix: &PleMatrix<F>) {
+    push_buffer_allocation(allocations, matrix.mixed());
 }
 
-fn committed_trace_memory_bytes<HS: GpuHashScheme>(
-    trace_data: &CommittedTraceData<GenericGpuBackend<HS>>,
-    config: &ProvingMemoryConfig,
-) -> usize {
-    matrix_memory_bytes(&trace_data.trace, config)
-        .saturating_add(pcs_data_memory_bytes(trace_data.data.as_ref(), config))
+fn push_pcs_data_allocations<D>(allocations: &mut Vec<usize>, pcs_data: &StackedPcsDataGpu<F, D>) {
+    if let Some(matrix) = &pcs_data.matrix {
+        push_ple_matrix_allocations(allocations, matrix);
+    }
+    push_merkle_tree_allocations(allocations, &pcs_data.tree);
 }
 
-fn pcs_data_memory_bytes<D>(
-    pcs_data: &StackedPcsDataGpu<F, D>,
-    config: &ProvingMemoryConfig,
-) -> usize {
-    option_memory_bytes(pcs_data.matrix.as_ref(), |matrix| {
-        ple_matrix_memory_bytes(matrix, config)
-    })
-    .saturating_add(merkle_tree_memory_bytes(&pcs_data.tree, config))
+fn push_merkle_tree_allocations<D>(allocations: &mut Vec<usize>, tree: &MerkleTreeGpu<F, D>) {
+    if let Some(matrix) = &tree.backing_matrix {
+        push_matrix_allocations(allocations, matrix);
+    }
+    for layer in &tree.digest_layers {
+        push_buffer_allocation(allocations, layer);
+    }
 }
 
-fn merkle_tree_memory_bytes<D>(tree: &MerkleTreeGpu<F, D>, config: &ProvingMemoryConfig) -> usize {
-    option_memory_bytes(tree.backing_matrix.as_ref(), |matrix| {
-        matrix_memory_bytes(matrix, config)
-    })
-    .saturating_add(sum_memory(
-        tree.digest_layers
-            .iter()
-            .map(|layer| buffer_memory_bytes(layer, config)),
-    ))
+fn push_air_data_allocations(allocations: &mut Vec<usize>, data: &AirDataGpu) {
+    push_interaction_eval_rules_allocations(allocations, &data.interaction_rules);
+    push_constraint_rules_allocations(allocations, &data.zerocheck_round0);
+    push_constraint_rules_allocations(allocations, &data.zerocheck_mle);
+    if let Some(monomials) = &data.zerocheck_monomials {
+        push_zerocheck_monomial_allocations(allocations, monomials);
+    }
+    if let Some(monomials) = &data.interaction_monomials {
+        push_interaction_monomial_allocations(allocations, monomials);
+    }
 }
 
-fn air_data_memory_bytes(data: &AirDataGpu, config: &ProvingMemoryConfig) -> usize {
-    interaction_eval_rules_memory_bytes(&data.interaction_rules, config)
-        .saturating_add(constraint_rules_memory_bytes(
-            &data.zerocheck_round0,
-            config,
-        ))
-        .saturating_add(constraint_rules_memory_bytes(&data.zerocheck_mle, config))
-        .saturating_add(option_memory_bytes(
-            data.zerocheck_monomials.as_ref(),
-            |monomials| zerocheck_monomials_memory_bytes(monomials, config),
-        ))
-        .saturating_add(option_memory_bytes(
-            data.interaction_monomials.as_ref(),
-            |monomials| interaction_monomials_memory_bytes(monomials, config),
-        ))
+fn push_eval_rules_allocations(allocations: &mut Vec<usize>, rules: &EvalRules) {
+    push_buffer_allocation(allocations, &rules.d_rules);
+    push_buffer_allocation(allocations, &rules.d_used_nodes);
 }
 
-fn eval_rules_memory_bytes(rules: &EvalRules, config: &ProvingMemoryConfig) -> usize {
-    buffer_memory_bytes(&rules.d_rules, config)
-        .saturating_add(buffer_memory_bytes(&rules.d_used_nodes, config))
-}
-
-fn interaction_eval_rules_memory_bytes(
+fn push_interaction_eval_rules_allocations(
+    allocations: &mut Vec<usize>,
     rules: &InteractionEvalRules,
-    config: &ProvingMemoryConfig,
-) -> usize {
-    eval_rules_memory_bytes(&rules.inner, config)
-        .saturating_add(buffer_memory_bytes(&rules.d_pair_idxs, config))
+) {
+    push_eval_rules_allocations(allocations, &rules.inner);
+    push_buffer_allocation(allocations, &rules.d_pair_idxs);
 }
 
-fn constraint_rules_memory_bytes<const BUFFER_VARS: bool>(
+fn push_constraint_rules_allocations<const BUFFER_VARS: bool>(
+    allocations: &mut Vec<usize>,
     rules: &ConstraintOnlyRules<BUFFER_VARS>,
-    config: &ProvingMemoryConfig,
-) -> usize {
-    eval_rules_memory_bytes(&rules.inner, config)
+) {
+    push_eval_rules_allocations(allocations, &rules.inner);
 }
 
-fn zerocheck_monomials_memory_bytes(
+fn push_zerocheck_monomial_allocations(
+    allocations: &mut Vec<usize>,
     monomials: &ZerocheckMonomials,
-    config: &ProvingMemoryConfig,
-) -> usize {
-    buffer_memory_bytes(&monomials.d_headers, config)
-        .saturating_add(buffer_memory_bytes(&monomials.d_variables, config))
-        .saturating_add(buffer_memory_bytes(&monomials.d_lambda_terms, config))
+) {
+    push_buffer_allocation(allocations, &monomials.d_headers);
+    push_buffer_allocation(allocations, &monomials.d_variables);
+    push_buffer_allocation(allocations, &monomials.d_lambda_terms);
 }
 
-fn interaction_monomials_memory_bytes(
+fn push_interaction_monomial_allocations(
+    allocations: &mut Vec<usize>,
     monomials: &InteractionMonomials,
-    config: &ProvingMemoryConfig,
-) -> usize {
-    buffer_memory_bytes(&monomials.d_numer_headers, config)
-        .saturating_add(buffer_memory_bytes(&monomials.d_numer_variables, config))
-        .saturating_add(buffer_memory_bytes(&monomials.d_numer_terms, config))
-        .saturating_add(buffer_memory_bytes(&monomials.d_denom_headers, config))
-        .saturating_add(buffer_memory_bytes(&monomials.d_denom_variables, config))
-        .saturating_add(buffer_memory_bytes(&monomials.d_denom_terms, config))
+) {
+    push_buffer_allocation(allocations, &monomials.d_numer_headers);
+    push_buffer_allocation(allocations, &monomials.d_numer_variables);
+    push_buffer_allocation(allocations, &monomials.d_numer_terms);
+    push_buffer_allocation(allocations, &monomials.d_denom_headers);
+    push_buffer_allocation(allocations, &monomials.d_denom_variables);
+    push_buffer_allocation(allocations, &monomials.d_denom_terms);
 }
 
 impl<HS: GpuHashScheme> TraceCommitter<GenericGpuBackend<HS>> for GpuDevice

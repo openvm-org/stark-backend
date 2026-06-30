@@ -4,7 +4,6 @@ use serde::{de::DeserializeOwned, Serialize};
 
 use crate::{
     keygen::types::MultiStarkProvingKey,
-    memory_metering::ProvingMemoryConfig,
     prover::{
         stacked_pcs::StackedPcsData, AirProvingContext, ColMajorMatrix, CommittedTraceData,
         CpuColMajorBackend, DeviceMultiStarkProvingKey, ProvingContext,
@@ -50,15 +49,12 @@ pub trait ProverBackend {
     /// mixed merkle tree.
     type PcsData: Send + Sync;
 
-    /// Backend-owned proving-key memory retained while proving a segment.
-    fn retained_proving_key_memory_bytes(
-        _mpk: &DeviceMultiStarkProvingKey<Self>,
-        _config: &ProvingMemoryConfig,
-    ) -> usize
+    /// Backend-owned proving-key allocations retained while proving a segment.
+    fn retained_proving_key_allocation_bytes(_mpk: &DeviceMultiStarkProvingKey<Self>) -> Vec<usize>
     where
         Self: Sized,
     {
-        0
+        Vec::new()
     }
 }
 

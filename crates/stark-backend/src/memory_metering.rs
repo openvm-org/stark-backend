@@ -5,7 +5,10 @@ use std::{cmp::max, mem::size_of};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    prover::fractional_sumcheck_gkr::{FractionalGkrMemoryModel, FractionalGkrWorkBufferStrategy},
+    prover::{
+        fractional_sumcheck_gkr::{FractionalGkrMemoryModel, FractionalGkrWorkBufferStrategy},
+        DeviceMultiStarkProvingKey, ProverBackend,
+    },
     StarkProtocolConfig, SystemParams,
 };
 
@@ -205,11 +208,15 @@ impl ProvingMemoryConfig {
 
     #[inline]
     #[doc(hidden)]
-    pub const fn with_retained_backend_memory_bytes(
+    pub fn with_retained_proving_key_allocations<PB: ProverBackend>(
         mut self,
-        retained_backend_memory: usize,
+        mpk: &DeviceMultiStarkProvingKey<PB>,
     ) -> Self {
-        self.retained_backend_memory_bytes = retained_backend_memory;
+        self.retained_backend_memory_bytes = PB::retained_proving_key_allocation_bytes(mpk)
+            .into_iter()
+            .fold(0usize, |total, bytes| {
+                total.saturating_add(self.tracked_allocation_bytes(bytes))
+            });
         self
     }
 
@@ -749,20 +756,6 @@ mod tests {
         assert_eq!(estimate.retained_auxiliary, 123);
         assert_eq!(estimate.main_persistent, base.main_persistent);
         assert_eq!(estimate.total, base.total + 123);
-    }
-
-    #[test]
-    fn retained_backend_memory_is_resident() {
-        let config = test_memory_config().with_retained_backend_memory_bytes(456);
-        let counts = ProvingMemoryCounts::new_with_unstacked_cells(10, 20, 5);
-
-        let estimate = config.estimate(counts);
-
-        assert_eq!(estimate.retained_auxiliary, 456);
-        assert_eq!(
-            estimate.total,
-            estimate.main + estimate.secondary_peak + estimate.retained_auxiliary
-        );
     }
 
     #[test]
