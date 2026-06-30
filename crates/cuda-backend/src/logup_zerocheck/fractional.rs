@@ -9,7 +9,9 @@ use openvm_cuda_common::{
 use openvm_stark_backend::{
     poly_common::{eval_eq_mle, interpolate_linear_at_01, interpolate_quadratic_at_012},
     proof::GkrLayerClaims,
-    prover::fractional_sumcheck_gkr::{Frac, FracSumcheckProof, FractionalGkrMemoryModel},
+    prover::fractional_sumcheck_gkr::{
+        Frac, FracSumcheckProof, FractionalGkrMemoryModel, FractionalGkrWorkBufferStrategy,
+    },
     FiatShamirTranscript, StarkProtocolConfig,
 };
 use p3_field::{Field, PrimeCharacteristicRing};
@@ -74,14 +76,10 @@ impl FractionalInputSize {
     /// Peak work-buffer bytes, excluding the `S_frac * real_len` layer/input buffer.
     pub fn peak_work_buffer_bytes(&self) -> usize {
         let model = FractionalGkrMemoryModel::new(std::mem::size_of::<F>(), D_EF);
-        if let Some(precompute_m_enabled) = precompute_m_metering_mode() {
-            model.peak_work_buffer_memory_bytes_with_precompute_m(
-                self.logical_len,
-                precompute_m_enabled,
-            )
-        } else {
-            model.peak_work_buffer_memory_bytes(self.logical_len)
-        }
+        model.peak_work_buffer_memory_bytes_with_strategy(
+            self.logical_len,
+            precompute_m_work_buffer_strategy(),
+        )
     }
 }
 
@@ -193,16 +191,16 @@ fn precompute_m_enabled() -> bool {
     )
 }
 
-pub(super) fn precompute_m_metering_mode() -> Option<bool> {
+pub(crate) fn precompute_m_work_buffer_strategy() -> FractionalGkrWorkBufferStrategy {
     if !precompute_m_enabled() {
-        Some(false)
+        FractionalGkrWorkBufferStrategy::FoldEval
     } else if PRECOMPUTE_M_TUNING_ENV_VARS
         .iter()
         .all(|key| env::var_os(key).is_none())
     {
-        Some(true)
+        FractionalGkrWorkBufferStrategy::PrecomputeM
     } else {
-        None
+        FractionalGkrWorkBufferStrategy::Conservative
     }
 }
 
@@ -840,10 +838,13 @@ where
     // input pq_size = total_leaves, output pq_size = total_leaves >> (1 + w).
     // Fold-eval fallback rounds (rem_n < min_n) need at most 2^min_n elements.
     let max_work_size = if total_rounds > 2 {
-        if precompute_m_env {
-            FractionalGkrMemoryModel::precompute_m_work_buffer_elements(total_leaves)
-        } else {
-            FractionalGkrMemoryModel::fold_eval_work_buffer_elements(total_leaves)
+        let fold_eval = FractionalGkrMemoryModel::fold_eval_work_buffer_elements(total_leaves);
+        let precompute_m =
+            FractionalGkrMemoryModel::precompute_m_work_buffer_elements(total_leaves);
+        match precompute_m_work_buffer_strategy() {
+            FractionalGkrWorkBufferStrategy::Conservative => fold_eval.max(precompute_m),
+            FractionalGkrWorkBufferStrategy::FoldEval => fold_eval,
+            FractionalGkrWorkBufferStrategy::PrecomputeM => precompute_m,
         }
     } else {
         0

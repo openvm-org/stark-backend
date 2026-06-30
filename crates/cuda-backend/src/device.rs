@@ -9,7 +9,7 @@ use crate::{
         batch_ntt_small::{ensure_device_ntt_twiddles_initialized, validate_gpu_l_skip},
         device_info::get_sm_count,
     },
-    logup_zerocheck::fractional_gkr_precompute_m_metering_mode,
+    logup_zerocheck::fractional_gkr_work_buffer_strategy,
 };
 
 /// Pure device configuration — no stream, no CUDA runtime state.
@@ -41,11 +41,8 @@ impl GpuProverConfig {
             ProvingMemoryConfig::from_protocol_config(config, self.cache_rs_code_matrix)
                 .with_cuda_backend(self.cache_stacked_matrix);
 
-        if let Some(precompute_m_enabled) = fractional_gkr_precompute_m_metering_mode() {
-            memory_config.with_fractional_gkr_precompute_m(precompute_m_enabled)
-        } else {
-            memory_config
-        }
+        memory_config
+            .with_fractional_gkr_work_buffer_strategy(fractional_gkr_work_buffer_strategy())
     }
 }
 

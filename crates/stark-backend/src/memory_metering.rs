@@ -3,7 +3,8 @@
 use std::{cmp::max, mem::size_of};
 
 use crate::{
-    prover::fractional_sumcheck_gkr::FractionalGkrMemoryModel, StarkProtocolConfig, SystemParams,
+    prover::fractional_sumcheck_gkr::{FractionalGkrMemoryModel, FractionalGkrWorkBufferStrategy},
+    StarkProtocolConfig, SystemParams,
 };
 
 /// Fixed interaction scratch not proportional to interaction cells.
@@ -102,9 +103,8 @@ pub struct ProvingMemoryConfig {
     pub cache_rs_code_matrix: bool,
     /// Whether to include CUDA retained opening state in the estimate.
     retained_opening_memory: bool,
-    /// CUDA fractional-GKR work-buffer allocation, when metering is configured by the CUDA
-    /// backend.
-    fractional_gkr_precompute_m: Option<bool>,
+    /// CUDA fractional-GKR work-buffer allocation strategy.
+    fractional_gkr_work_buffer_strategy: FractionalGkrWorkBufferStrategy,
     /// `log_2` of the common-main stacked matrix height.
     log_stacked_height: usize,
     /// WHIR folding factor.
@@ -143,7 +143,7 @@ impl ProvingMemoryConfig {
             cache_stacked_matrix: false,
             cache_rs_code_matrix,
             retained_opening_memory: false,
-            fractional_gkr_precompute_m: None,
+            fractional_gkr_work_buffer_strategy: FractionalGkrWorkBufferStrategy::Conservative,
             log_stacked_height: params.log_stacked_height(),
             k_whir: params.k_whir(),
             num_whir_rounds: params.num_whir_rounds(),
@@ -159,10 +159,12 @@ impl ProvingMemoryConfig {
         self
     }
 
-    /// Match the CUDA fractional-GKR work-buffer allocation selected by the backend.
     #[inline]
-    pub fn with_fractional_gkr_precompute_m(mut self, enabled: bool) -> Self {
-        self.fractional_gkr_precompute_m = Some(enabled);
+    pub fn with_fractional_gkr_work_buffer_strategy(
+        mut self,
+        strategy: FractionalGkrWorkBufferStrategy,
+    ) -> Self {
+        self.fractional_gkr_work_buffer_strategy = strategy;
         self
     }
 
@@ -337,15 +339,11 @@ impl ProvingMemoryConfig {
     pub fn interaction_memory_bytes_without_overhead(&self, interaction_cells: usize) -> usize {
         let logical_len = Self::fractional_gkr_logical_len(interaction_cells);
         let model = self.fractional_gkr_memory_model();
-        if let Some(precompute_m_enabled) = self.fractional_gkr_precompute_m {
-            model.peak_memory_bytes_with_precompute_m(
-                interaction_cells,
-                logical_len,
-                precompute_m_enabled,
-            )
-        } else {
-            model.peak_memory_bytes(interaction_cells, logical_len)
-        }
+        model.peak_memory_bytes_with_strategy(
+            interaction_cells,
+            logical_len,
+            self.fractional_gkr_work_buffer_strategy,
+        )
     }
 
     #[inline]
@@ -669,14 +667,38 @@ mod tests {
     }
 
     #[test]
-    fn fractional_gkr_strategy_changes_interaction_peak() {
+    fn fractional_gkr_strategy_selects_default_cuda_peak() {
         let interaction_cells = 1 << 24;
-        let precompute_m = test_memory_config().with_fractional_gkr_precompute_m(true);
-        let fold_eval = test_memory_config().with_fractional_gkr_precompute_m(false);
+        // logical_len = 2^25, sizeof(Frac<EF>) = 32, sizeof(EF) = 16.
+        //
+        // input         = 2^24 * 32
+        // fold_eval     = 2^23 * 32
+        // precompute-M  = 2^22 * 32
+        // precompute aux:
+        //   m_buffer + prefix/suffix = (4^3 + 2 * 2^3) EF
+        //   m_partial_buffer         = 1024 * 4^3 EF
+        // common aux:
+        //   SqrtEqLayers for 23 challenges = (2^12 - 1) + (2^13 - 2) EF
+        //   d_sum_evals + copy_scratch     = 4 EF
+        let precompute_expected = 672_335_120;
+        let fold_eval_expected = 805_502_992;
+        let precompute_m = test_memory_config()
+            .with_fractional_gkr_work_buffer_strategy(FractionalGkrWorkBufferStrategy::PrecomputeM);
+        let fold_eval = test_memory_config()
+            .with_fractional_gkr_work_buffer_strategy(FractionalGkrWorkBufferStrategy::FoldEval);
+        let conservative = test_memory_config();
 
-        assert!(
-            fold_eval.interaction_memory_bytes_without_overhead(interaction_cells)
-                > precompute_m.interaction_memory_bytes_without_overhead(interaction_cells)
+        assert_eq!(
+            precompute_m.interaction_memory_bytes_without_overhead(interaction_cells),
+            precompute_expected
+        );
+        assert_eq!(
+            fold_eval.interaction_memory_bytes_without_overhead(interaction_cells),
+            fold_eval_expected
+        );
+        assert_eq!(
+            conservative.interaction_memory_bytes_without_overhead(interaction_cells),
+            fold_eval_expected
         );
     }
 

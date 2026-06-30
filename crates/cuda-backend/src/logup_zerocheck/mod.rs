@@ -77,10 +77,6 @@ mod mle_round;
 mod round0;
 pub(crate) mod rules;
 
-pub(crate) fn fractional_gkr_precompute_m_metering_mode() -> Option<bool> {
-    fractional::precompute_m_metering_mode()
-}
-
 use batch_mle::{evaluate_logup_batched, TraceCtx};
 use batch_mle_monomial::{
     compute_lambda_combinations, compute_logup_combinations, get_num_monomials,
@@ -88,6 +84,7 @@ use batch_mle_monomial::{
     ZerocheckMonomialBatch, ZerocheckMonomialParYBatch,
 };
 pub use errors::*;
+pub(crate) use fractional::precompute_m_work_buffer_strategy as fractional_gkr_work_buffer_strategy;
 pub use fractional::{fractional_sumcheck_gpu, make_synthetic_leaves, FractionalInputSize};
 use gkr_input::{collect_trace_interactions, log_gkr_input_evals};
 use round0::evaluate_round0_constraints_gpu;

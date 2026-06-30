@@ -47,6 +47,19 @@ pub struct FractionalGkrMemoryModel {
     extension_degree: usize,
 }
 
+/// Fractional-GKR work-buffer strategy selected by the CUDA backend.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FractionalGkrWorkBufferStrategy {
+    /// Use the larger of the fold-eval and default precompute-M allocations.
+    #[default]
+    Conservative,
+    /// Precompute-M is disabled, so CUDA allocates the fold-eval work buffer.
+    FoldEval,
+    /// Precompute-M is enabled with default tuning.
+    PrecomputeM,
+}
+
 impl FractionalGkrMemoryModel {
     const INPUT_EF_ELEMENTS_PER_INTERACTION: usize = 2;
     pub const WINDOW_SIZE: usize = 3;
@@ -66,7 +79,7 @@ impl FractionalGkrMemoryModel {
     }
 
     #[inline]
-    pub fn logical_len(interaction_cells: usize) -> usize {
+    pub(crate) fn logical_len(interaction_cells: usize) -> usize {
         if interaction_cells == 0 {
             return 0;
         }
@@ -76,7 +89,7 @@ impl FractionalGkrMemoryModel {
     }
 
     #[inline]
-    pub fn input_memory_bytes(&self, interaction_cells: usize) -> usize {
+    pub(crate) fn input_memory_bytes(&self, interaction_cells: usize) -> usize {
         interaction_cells
             .saturating_mul(Self::INPUT_EF_ELEMENTS_PER_INTERACTION)
             .saturating_mul(self.extension_degree)
@@ -90,16 +103,16 @@ impl FractionalGkrMemoryModel {
     }
 
     #[inline]
-    pub fn peak_work_buffer_memory_bytes_with_precompute_m(
+    pub fn peak_work_buffer_memory_bytes_with_strategy(
         &self,
         logical_len: usize,
-        precompute_m_enabled: bool,
+        strategy: FractionalGkrWorkBufferStrategy,
     ) -> usize {
         let (fold_eval, precompute_m) = self.work_buffer_memory_candidates(logical_len);
-        if precompute_m_enabled {
-            precompute_m
-        } else {
-            fold_eval
+        match strategy {
+            FractionalGkrWorkBufferStrategy::Conservative => max(fold_eval, precompute_m),
+            FractionalGkrWorkBufferStrategy::FoldEval => fold_eval,
+            FractionalGkrWorkBufferStrategy::PrecomputeM => precompute_m,
         }
     }
 
@@ -127,12 +140,16 @@ impl FractionalGkrMemoryModel {
 
     #[inline]
     pub fn fold_eval_work_buffer_elements(logical_len: usize) -> usize {
+        if logical_len <= 4 {
+            return 0;
+        }
+
         logical_len / 4
     }
 
     #[inline]
     pub fn precompute_m_work_buffer_elements(logical_len: usize) -> usize {
-        if logical_len <= 2 {
+        if logical_len <= 4 {
             return 0;
         }
 
@@ -140,8 +157,12 @@ impl FractionalGkrMemoryModel {
     }
 
     #[inline]
-    pub fn precompute_m_auxiliary_memory_bytes(&self, logical_len: usize) -> usize {
+    fn precompute_m_auxiliary_memory_bytes(&self, logical_len: usize) -> usize {
         let ext_size = self.extension_degree.saturating_mul(self.base_field_bytes);
+        if !Self::has_default_precompute_m_window(logical_len) {
+            return 0;
+        }
+
         // m_buffer has 4^w EF entries; prefix/suffix buffers each have 2^w EF entries.
         // m_partial_buffer is retained across rounds and uses the same default tail tiling as CUDA.
         let precompute_ef_elements =
@@ -200,6 +221,11 @@ impl FractionalGkrMemoryModel {
     }
 
     #[inline]
+    fn has_default_precompute_m_window(logical_len: usize) -> bool {
+        Self::precompute_m_partial_buffer_elements(logical_len) != 0
+    }
+
+    #[inline]
     fn sqrt_eq_layers_elements(logical_len: usize) -> usize {
         let Some(total_rounds) = Self::log2_len(logical_len) else {
             return 0;
@@ -220,21 +246,14 @@ impl FractionalGkrMemoryModel {
     }
 
     #[inline]
-    pub fn peak_memory_bytes(&self, interaction_cells: usize, logical_len: usize) -> usize {
-        self.input_memory_bytes(interaction_cells)
-            .saturating_add(self.peak_work_buffer_memory_bytes(logical_len))
-    }
-
-    #[inline]
-    pub fn peak_memory_bytes_with_precompute_m(
+    pub(crate) fn peak_memory_bytes_with_strategy(
         &self,
         interaction_cells: usize,
         logical_len: usize,
-        precompute_m_enabled: bool,
+        strategy: FractionalGkrWorkBufferStrategy,
     ) -> usize {
-        self.input_memory_bytes(interaction_cells).saturating_add(
-            self.peak_work_buffer_memory_bytes_with_precompute_m(logical_len, precompute_m_enabled),
-        )
+        self.input_memory_bytes(interaction_cells)
+            .saturating_add(self.peak_work_buffer_memory_bytes_with_strategy(logical_len, strategy))
     }
 
     #[inline]
