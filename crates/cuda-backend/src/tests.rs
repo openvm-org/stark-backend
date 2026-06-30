@@ -592,8 +592,17 @@ fn test_interactions_roundtrip_with_l_skip_zero() {
         .expect("l_skip=0 interactions roundtrip should verify");
 }
 
+#[test]
+fn test_gpu_l_skip_10_is_rejected() {
+    use crate::cuda::batch_ntt_small::validate_gpu_l_skip;
+
+    assert!(validate_gpu_l_skip(9).is_ok());
+    assert!(validate_gpu_l_skip(10).is_err());
+}
+
 #[test_case(1 ; "l_skip_1")]
 #[test_case(4 ; "l_skip_4")]
+#[test_case(9 ; "l_skip_9")]
 fn test_batch_ntt_small_partial_last_block_roundtrip(l_skip: usize) {
     use openvm_cuda_common::copy::{MemCopyD2H, MemCopyH2D};
 
@@ -627,6 +636,28 @@ fn test_batch_ntt_small_partial_last_block_roundtrip(l_skip: usize) {
     }
 
     assert_eq!(d_values.to_host_on(&gpu_ctx).unwrap(), original);
+}
+
+/// GPU integration regression for multi-warp skip-domain sizes.
+///
+/// These cases exercise `ntt_coset_interpolate` through the normal proving path with
+/// a mixture of cached, preprocessed, interaction, and regular traces. `l_skip = 6`
+/// is the first shared-memory NTT size; `l_skip = 9` exercises a larger supported
+/// skip domain while staying under the current round0 CUDA resource limit.
+#[test_case(6 ; "l_skip_6")]
+#[test_case(9 ; "l_skip_9")]
+fn test_mixture_fixture_gpu_roundtrip_large_l_skip(l_skip: usize) {
+    use openvm_stark_backend::test_utils::{test_system_params_small, MixtureFixture};
+
+    setup_tracing_with_log_level(Level::DEBUG);
+
+    let n_stack = 13 - l_skip;
+    let engine = BabyBearPoseidon2GpuEngine::new(test_system_params_small(l_skip, n_stack, 3));
+    let fixture = MixtureFixture::standard(10, engine.config().clone());
+    let (vk, proof) = fixture.keygen_and_prove(&engine);
+    engine.verify(&vk, &proof).unwrap_or_else(|err| {
+        panic!("l_skip={l_skip} MixtureFixture proof should verify on the GPU backend: {err:?}")
+    });
 }
 
 #[test]

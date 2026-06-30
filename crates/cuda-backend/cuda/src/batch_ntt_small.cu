@@ -146,7 +146,7 @@ extern "C" int _batch_ntt_small(
     }
 
     bool const needs_shmem = l_skip > LOG_WARP_SIZE;
-    assert((1 << l_skip) <= 1024);
+    assert((1 << l_skip) <= (1 << MAX_NTT_LEVEL));
     return DISPATCH_BOOL_PAIR(
         launch_batch_ntt_small, is_intt, needs_shmem, buffer, l_skip, cnt_blocks, stream
     );
