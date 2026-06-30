@@ -2,6 +2,7 @@ use std::{cmp::max, ops::Add};
 
 use p3_field::{Field, PrimeCharacteristicRing};
 use p3_util::log2_strict_usize;
+use serde::{Deserialize, Serialize};
 use tracing::{debug, instrument};
 
 use crate::{
@@ -58,7 +59,7 @@ struct WorkBufferMemoryCandidates {
 
 /// Fractional-GKR work-buffer strategy selected by the CUDA backend.
 #[doc(hidden)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FractionalGkrWorkBufferStrategy {
     /// Use the larger of the fold-eval and default precompute-M allocations.
     #[default]

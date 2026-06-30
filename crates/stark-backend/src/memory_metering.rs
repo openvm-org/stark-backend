@@ -2,6 +2,8 @@
 
 use std::{cmp::max, mem::size_of};
 
+use serde::{Deserialize, Serialize};
+
 use crate::{
     prover::fractional_sumcheck_gkr::{FractionalGkrMemoryModel, FractionalGkrWorkBufferStrategy},
     StarkProtocolConfig, SystemParams,
@@ -85,7 +87,7 @@ pub struct ProvingMemoryEstimate {
 }
 
 /// Configuration for proving memory estimates.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ProvingMemoryConfig {
     /// Size of one base-field element in bytes.
     pub base_field_bytes: usize,
