@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+## v2.0.0 (2026-07-06)
+
 ### Added
 - Segment memory metering APIs for estimating segmented prover memory usage.
 - AIR rotation metadata used by LogUp and stacked-opening proving to skip unused rotation work.
