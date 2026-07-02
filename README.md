@@ -24,9 +24,7 @@ Contributors should read [Development without CUDA](./docs/README.md#development
 
 ## Status
 
-As of May 2026, STARK Backend v1.4.0 and later are recommended for production use. STARK Backend completed external [audits](https://github.com/openvm-org/openvm/blob/main/audits/) on [Cantina](https://cantina.xyz/) as well as an internal [audit](https://github.com/openvm-org/openvm/blob/main/audits/v1-internal/README.md) by members of the [Axiom](https://axiom.xyz/) team.
-
-This branch contains STARK Backend v2 (`2.0.0-alpha`), a rewrite of the proof system using the SWIRL protocol. v2 is under active development, has not been audited, and is not yet recommended for production use.
+As of July 2026, STARK Backend v2.0.0 and later are recommended for production use. STARK Backend uses the SWIRL proof system and completed an external [audit](https://github.com/openvm-org/openvm/tree/v2.0.0/audits/v2) by [zkSecurity](https://zksecurity.xyz/).
 
 ## Security
 
