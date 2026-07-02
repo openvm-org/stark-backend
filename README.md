@@ -24,7 +24,7 @@ Contributors should read [Development without CUDA](./docs/README.md#development
 
 ## Status
 
-As of July 2026, STARK Backend v2.0.0 and later are recommended for production use. STARK Backend uses the SWIRL proof system and completed an external audit by [zkSecurity](https://zksecurity.xyz/).
+As of July 2026, STARK Backend v2.0.0 and later are recommended for production use. STARK Backend uses the SWIRL proof system and completed an external [audit](https://github.com/openvm-org/openvm/tree/v2.0.0/audits/v2) by [zkSecurity](https://zksecurity.xyz/).
 
 ## Security
 
