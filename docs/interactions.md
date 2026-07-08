@@ -182,13 +182,12 @@ want to send the tuple $(\sigma_1(\mathbf T),\dotsc,\sigma_{\ell}(\mathbf T))$ t
 multiplicity $m(\mathbf T)$, where $\mathbf T$ refers to the trace (including preprocessed columns) as polynomials (as
 well as rotations).
 
-The `InteractionBuilder` keeps track of all interactions pushed and their corresponding buses. The buses used must be
-consistent, or keygen will fail. More specifically, if `push_interaction` is called twice with two buses that have the
-same bus index, the constraint type must also match.
+The `InteractionBuilder` keeps track of all interactions pushed and their corresponding buses. Interactions with the same
+bus index are combined into the same balance check, so each bus index should identify a single logical bus.
 
-The quantity `count_weight` must be set correctly for the interactions to be sound. See
-the [Ensuring Interaction Soundness](#ensuring-interaction-soundness) section below. If using the standard `LookupBus`
-and `PermutationCheckBus`, this quantity is set to `1`.
+The quantity `count_weight` must be set correctly for the interactions to be sound. See the
+[Trace Height Constraints for Interaction Soundness](#trace-height-constraints-for-interaction-soundness) section below.
+If using the standard `LookupBus` and `PermutationCheckBus`, this quantity is set to `1`.
 
 ### LookupBus
 
