@@ -7,7 +7,10 @@ use openvm_cuda_common::{
     stream::GpuDeviceCtx,
 };
 use openvm_stark_backend::{
-    poly_common::{eval_eq_mle, interpolate_linear_at_01, interpolate_quadratic_at_012},
+    poly_common::{
+        eval_eq_mle, evals_eq_hypercube_serial, interpolate_linear_at_01,
+        interpolate_quadratic_at_012,
+    },
     proof::GkrLayerClaims,
     prover::fractional_sumcheck_gkr::{Frac, FracSumcheckProof},
     FiatShamirTranscript, StarkProtocolConfig,
@@ -38,6 +41,7 @@ use crate::{
 const GKR_S_DEG: usize = 3;
 const GKR_WINDOW_SIZE: usize = 3;
 const GKR_WINDOW_DEFAULT_MIN_N: usize = 22;
+const GKR_CPU_TAIL_DEFAULT_MAX_PQ_SIZE: usize = 512;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FractionalInputSize {
@@ -261,6 +265,13 @@ fn precompute_m_min_n() -> usize {
         .ok()
         .and_then(|val| val.parse::<usize>().ok())
         .unwrap_or(GKR_WINDOW_DEFAULT_MIN_N)
+}
+
+fn cpu_tail_max_pq_size() -> usize {
+    env::var("SWIRL_CUDA_GKR_CPU_TAIL_MAX_PQ_SIZE")
+        .ok()
+        .and_then(|val| val.parse::<usize>().ok())
+        .unwrap_or(GKR_CPU_TAIL_DEFAULT_MAX_PQ_SIZE)
 }
 
 fn precompute_m_build_tail_tile(
@@ -488,6 +499,37 @@ where
     Ok(r)
 }
 
+#[allow(clippy::too_many_arguments)]
+fn observe_and_update_host<SC, TS>(
+    sp_evals_at_1_2: [EF; 2],
+    transcript: &mut TS,
+    round_polys_eval: &mut Vec<[EF; GKR_S_DEG]>,
+    r_vec: &mut Vec<EF>,
+    prev_s_eval: &mut EF,
+    xi_j: EF,
+    eq_r_acc: &mut EF,
+) -> EF
+where
+    SC: StarkProtocolConfig<EF = EF>,
+    TS: FiatShamirTranscript<SC>,
+{
+    let (s_evals, sp_evals) =
+        reconstruct_s_evals_from_sp(sp_evals_at_1_2, *prev_s_eval, xi_j, *eq_r_acc);
+
+    for &eval in &s_evals {
+        transcript.observe_ext(eval);
+    }
+    round_polys_eval.push(s_evals);
+
+    let r = transcript.sample_ext();
+    r_vec.push(r);
+
+    let eq_r = eval_eq_mle(&[xi_j], &[r]);
+    *eq_r_acc *= eq_r;
+    *prev_s_eval = eq_r * interpolate_quadratic_at_012(&sp_evals, r);
+    r
+}
+
 /// Fused revert + compute round: reverts the tree layer and computes s'_0(1) and s'_0(2).
 ///
 /// See `docs/cuda-backend/gkr-prover.md` § "Sumcheck round strategies" for context.
@@ -658,6 +700,174 @@ where
         eq_r_acc,
         device_ctx,
     )
+}
+
+fn fold_frac_columns_host(pq: &mut [Frac<EF>], size: usize, r: EF) {
+    debug_assert!(size >= 4 && size.is_power_of_two());
+    debug_assert!(pq.len() >= size);
+    let quarter = size >> 2;
+    let half = size >> 1;
+    for idx in 0..quarter {
+        let a = pq[idx];
+        let b = pq[idx + quarter];
+        pq[idx] = Frac {
+            p: a.p + r * (b.p - a.p),
+            q: a.q + r * (b.q - a.q),
+        };
+
+        let c = pq[idx + half];
+        let d = pq[idx + half + quarter];
+        pq[idx + quarter] = Frac {
+            p: c.p + r * (d.p - c.p),
+            q: c.q + r * (d.q - c.q),
+        };
+    }
+}
+
+fn compute_round_host(pq: &[Frac<EF>], size: usize, eq_evals: &[EF], lambda: EF) -> [EF; 2] {
+    debug_assert!(size >= 4 && size.is_power_of_two());
+    debug_assert!(pq.len() >= size);
+    let quarter = size >> 2;
+    let half = size >> 1;
+    debug_assert_eq!(eq_evals.len(), quarter);
+
+    let mut out = [EF::ZERO; 2];
+    for idx in 0..quarter {
+        let p0_even = pq[idx].p;
+        let q0_even = pq[idx].q;
+        let p0_odd = pq[idx + quarter].p;
+        let q0_odd = pq[idx + quarter].q;
+        let p1_even = pq[idx + half].p;
+        let q1_even = pq[idx + half].q;
+        let p1_odd = pq[idx + half + quarter].p;
+        let q1_odd = pq[idx + half + quarter].q;
+
+        let weight = eq_evals[idx];
+        out[0] += weight * ((p0_odd + lambda * q0_odd) * q1_odd + p1_odd * q0_odd);
+
+        // The four columns are linear in x. At x=2 their values are 2*odd-even, so avoid
+        // eight extension-field multiplications by the constant evaluation points x=1,2.
+        let p0_at_2 = p0_odd + p0_odd - p0_even;
+        let q0_at_2 = q0_odd + q0_odd - q0_even;
+        let p1_at_2 = p1_odd + p1_odd - p1_even;
+        let q1_at_2 = q1_odd + q1_odd - q1_even;
+        out[1] += weight * ((p0_at_2 + lambda * q0_at_2) * q1_at_2 + p1_at_2 * q0_at_2);
+    }
+    out
+}
+
+fn virtual_node_value_host(
+    layer: &[Frac<EF>],
+    dense_idx: usize,
+    active_size: usize,
+    real_len: usize,
+    logical_len: usize,
+    alpha: EF,
+) -> Frac<EF> {
+    let subtree_len = logical_len / active_size;
+    let start = bit_reverse_usize(dense_idx, log2_strict_usize(active_size)) * subtree_len;
+    if start >= real_len {
+        Frac {
+            p: EF::ZERO,
+            q: virtual_padding_q(alpha, subtree_len),
+        }
+    } else if dense_idx < real_len {
+        layer[dense_idx]
+    } else {
+        layer[start]
+    }
+}
+
+fn copy_fractional_tail_from_device(
+    src: &DeviceBuffer<Frac<EF>>,
+    size: usize,
+    real_len: usize,
+    logical_len: usize,
+    alpha: EF,
+    device_ctx: &GpuDeviceCtx,
+) -> Result<Vec<Frac<EF>>, FractionalSumcheckError> {
+    let physical_len = real_len.min(size);
+    debug_assert!(src.len() >= physical_len);
+    let physical = unsafe {
+        let view = std::mem::ManuallyDrop::new(DeviceBuffer::<Frac<EF>>::from_raw_parts(
+            src.as_ptr() as *mut Frac<EF>,
+            physical_len,
+        ));
+        (*view).to_host_on(device_ctx)?
+    };
+
+    if real_len >= logical_len {
+        debug_assert_eq!(physical.len(), size);
+        Ok(physical)
+    } else {
+        Ok((0..size)
+            .map(|idx| virtual_node_value_host(&physical, idx, size, real_len, logical_len, alpha))
+            .collect())
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn finish_sumcheck_cpu_tail<SC, TS>(
+    src: &DeviceBuffer<Frac<EF>>,
+    src_pq_size: usize,
+    src_real_len: usize,
+    src_logical_len: usize,
+    alpha: EF,
+    pending_fold: bool,
+    remaining_xi: &[EF],
+    lambda: EF,
+    mut prev_r: EF,
+    transcript: &mut TS,
+    round_polys_eval: &mut Vec<[EF; GKR_S_DEG]>,
+    r_vec: &mut Vec<EF>,
+    prev_s_eval: &mut EF,
+    eq_r_acc: &mut EF,
+    device_ctx: &GpuDeviceCtx,
+) -> Result<[Frac<EF>; 2], FractionalSumcheckError>
+where
+    SC: StarkProtocolConfig<EF = EF>,
+    TS: FiatShamirTranscript<SC>,
+{
+    debug_assert!(!remaining_xi.is_empty());
+    let mut pq = copy_fractional_tail_from_device(
+        src,
+        src_pq_size,
+        src_real_len,
+        src_logical_len,
+        alpha,
+        device_ctx,
+    )?;
+    let mut pq_size = src_pq_size;
+
+    for (round_idx, &xi_j) in remaining_xi.iter().enumerate() {
+        if pending_fold || round_idx > 0 {
+            fold_frac_columns_host(&mut pq, pq_size, prev_r);
+            pq_size >>= 1;
+        }
+
+        let eq_evals = evals_eq_hypercube_serial(
+            &remaining_xi[round_idx + 1..]
+                .iter()
+                .rev()
+                .copied()
+                .collect::<Vec<_>>(),
+        );
+        let sp_evals = compute_round_host(&pq, pq_size, &eq_evals, lambda);
+        prev_r = observe_and_update_host(
+            sp_evals,
+            transcript,
+            round_polys_eval,
+            r_vec,
+            prev_s_eval,
+            xi_j,
+            eq_r_acc,
+        );
+    }
+
+    fold_frac_columns_host(&mut pq, pq_size, prev_r);
+    pq_size >>= 1;
+    debug_assert_eq!(pq_size, 2);
+    Ok([pq[0], pq[1]])
 }
 
 /// GKR fractional sumcheck prover. See `docs/cuda-backend/gkr-prover.md` (repo root) for the
@@ -868,6 +1078,7 @@ where
     let mut d_sum_evals = DeviceBuffer::<EF>::with_capacity_on(2, device_ctx);
 
     let precompute_m_env = precompute_m_enabled();
+    let cpu_tail_max_pq_size = cpu_tail_max_pq_size();
 
     // Work buffer to avoid revert operations on layer. Only needed for non-last rounds.
     // For the last round (round == total_rounds - 1), we fold in-place on layer.
@@ -889,11 +1100,16 @@ where
     } else {
         DeviceBuffer::new()
     };
-    let max_tmp_buffer_capacity = if total_rounds > 1 {
+    let mut max_tmp_buffer_capacity = if total_rounds > 1 {
         (unsafe { _frac_compute_round_temp_buffer_size((1 << (total_rounds - 1)) as u32) }) as usize
     } else {
         0
     };
+    if precompute_m_env {
+        // Precompute-M temporarily reuses this allocation to upload eq(r_window). At small
+        // problem sizes the reduction scratch can be smaller than that fixed-size window.
+        max_tmp_buffer_capacity = max_tmp_buffer_capacity.max(1usize << (GKR_WINDOW_SIZE + 1));
+    }
     let mut tmp_block_sums = if max_tmp_buffer_capacity > 0 {
         DeviceBuffer::<EF>::with_capacity_on(max_tmp_buffer_capacity, device_ctx)
     } else {
@@ -973,7 +1189,8 @@ where
 
         // Fused rounds 1..(round-1): compute + fold using prev_r.
         let mut prev_r = r0;
-        let active: &mut DeviceBuffer<Frac<EF>>;
+        let mut active = None;
+        let mut cpu_tail_claims = None;
 
         match backend {
             GkrRoundStrategy::FoldEval => {
@@ -981,8 +1198,34 @@ where
                 let mut scheduler = BufferScheduler::new(max_work_size);
                 let mut source_real_len = real_len;
                 let mut source_logical_len = total_leaves;
-                for &xi_j in xi_prev.iter().skip(1) {
+                for (xi_idx, &xi_j) in xi_prev.iter().enumerate().skip(1) {
                     let src_pq_size = pq_size;
+                    if cpu_tail_max_pq_size > 0 && src_pq_size <= cpu_tail_max_pq_size {
+                        let src = if scheduler.data_in_work_buffer {
+                            &work_buffer
+                        } else {
+                            &layer
+                        };
+                        cpu_tail_claims = Some(finish_sumcheck_cpu_tail(
+                            src,
+                            src_pq_size,
+                            source_real_len,
+                            source_logical_len,
+                            alpha,
+                            true,
+                            &xi_prev[xi_idx..],
+                            lambda,
+                            prev_r,
+                            transcript,
+                            &mut round_polys_eval,
+                            &mut r_vec,
+                            &mut prev_s_eval,
+                            &mut eq_r_acc,
+                            device_ctx,
+                        )?);
+                        pq_size = 2;
+                        break;
+                    }
                     let post_fold_size = pq_size >> 1;
                     let target = scheduler.next_target(post_fold_size, last_outer_round);
                     let source_support_len = if source_logical_len == total_leaves && virtual_input
@@ -1093,100 +1336,105 @@ where
                     source_logical_len = dst_logical_len;
                 }
 
-                // Final fold after last r (no next compute to fuse with).
-                let compact_virtual_final_fold = source_real_len < source_logical_len;
-                active = match scheduler.final_fold_target(last_outer_round) {
-                    BufferTarget::InPlaceWork if compact_virtual_final_fold => {
-                        let output_len = pq_size / 2;
-                        if final_fold_buffer.len() < output_len {
-                            final_fold_buffer =
-                                DeviceBuffer::<Frac<EF>>::with_capacity_on(output_len, device_ctx);
+                // Final fold after last r (no next compute to fuse with). The CPU-tail path
+                // already performed this fold and materialized the two claims on the host.
+                if cpu_tail_claims.is_none() {
+                    let compact_virtual_final_fold = source_real_len < source_logical_len;
+                    active = Some(match scheduler.final_fold_target(last_outer_round) {
+                        BufferTarget::InPlaceWork if compact_virtual_final_fold => {
+                            let output_len = pq_size / 2;
+                            if final_fold_buffer.len() < output_len {
+                                final_fold_buffer = DeviceBuffer::<Frac<EF>>::with_capacity_on(
+                                    output_len, device_ctx,
+                                );
+                            }
+                            unsafe {
+                                fold_ef_frac_columns(
+                                    &work_buffer,
+                                    &mut final_fold_buffer,
+                                    pq_size,
+                                    source_real_len,
+                                    source_logical_len,
+                                    prev_r,
+                                    alpha,
+                                    stream,
+                                )
+                                .map_err(FractionalSumcheckError::FoldColumns)?;
+                            }
+                            &mut final_fold_buffer
                         }
-                        unsafe {
-                            fold_ef_frac_columns(
-                                &work_buffer,
-                                &mut final_fold_buffer,
-                                pq_size,
-                                source_real_len,
-                                source_logical_len,
-                                prev_r,
-                                alpha,
-                                stream,
-                            )
-                            .map_err(FractionalSumcheckError::FoldColumns)?;
+                        BufferTarget::InPlaceLayer if compact_virtual_final_fold => {
+                            let output_len = pq_size / 2;
+                            if final_fold_buffer.len() < output_len {
+                                final_fold_buffer = DeviceBuffer::<Frac<EF>>::with_capacity_on(
+                                    output_len, device_ctx,
+                                );
+                            }
+                            unsafe {
+                                fold_ef_frac_columns(
+                                    &layer,
+                                    &mut final_fold_buffer,
+                                    pq_size,
+                                    source_real_len,
+                                    source_logical_len,
+                                    prev_r,
+                                    alpha,
+                                    stream,
+                                )
+                                .map_err(FractionalSumcheckError::FoldColumns)?;
+                            }
+                            &mut final_fold_buffer
                         }
-                        &mut final_fold_buffer
-                    }
-                    BufferTarget::InPlaceLayer if compact_virtual_final_fold => {
-                        let output_len = pq_size / 2;
-                        if final_fold_buffer.len() < output_len {
-                            final_fold_buffer =
-                                DeviceBuffer::<Frac<EF>>::with_capacity_on(output_len, device_ctx);
+                        BufferTarget::InPlaceWork => {
+                            unsafe {
+                                fold_ef_frac_columns_inplace(
+                                    &mut work_buffer,
+                                    pq_size,
+                                    source_real_len,
+                                    source_logical_len,
+                                    prev_r,
+                                    alpha,
+                                    stream,
+                                )
+                                .map_err(FractionalSumcheckError::FoldColumns)?;
+                            }
+                            &mut work_buffer
                         }
-                        unsafe {
-                            fold_ef_frac_columns(
-                                &layer,
-                                &mut final_fold_buffer,
-                                pq_size,
-                                source_real_len,
-                                source_logical_len,
-                                prev_r,
-                                alpha,
-                                stream,
-                            )
-                            .map_err(FractionalSumcheckError::FoldColumns)?;
+                        BufferTarget::InPlaceLayer => {
+                            unsafe {
+                                fold_ef_frac_columns_inplace(
+                                    &mut layer,
+                                    pq_size,
+                                    source_real_len,
+                                    source_logical_len,
+                                    prev_r,
+                                    alpha,
+                                    stream,
+                                )
+                                .map_err(FractionalSumcheckError::FoldColumns)?;
+                            }
+                            &mut layer
                         }
-                        &mut final_fold_buffer
-                    }
-                    BufferTarget::InPlaceWork => {
-                        unsafe {
-                            fold_ef_frac_columns_inplace(
-                                &mut work_buffer,
-                                pq_size,
-                                source_real_len,
-                                source_logical_len,
-                                prev_r,
-                                alpha,
-                                stream,
-                            )
-                            .map_err(FractionalSumcheckError::FoldColumns)?;
+                        BufferTarget::LayerToWork => {
+                            unsafe {
+                                fold_ef_frac_columns(
+                                    &layer,
+                                    &mut work_buffer,
+                                    pq_size,
+                                    source_real_len,
+                                    source_logical_len,
+                                    prev_r,
+                                    alpha,
+                                    stream,
+                                )
+                                .map_err(FractionalSumcheckError::FoldColumns)?;
+                            }
+                            &mut work_buffer
                         }
-                        &mut work_buffer
-                    }
-                    BufferTarget::InPlaceLayer => {
-                        unsafe {
-                            fold_ef_frac_columns_inplace(
-                                &mut layer,
-                                pq_size,
-                                source_real_len,
-                                source_logical_len,
-                                prev_r,
-                                alpha,
-                                stream,
-                            )
-                            .map_err(FractionalSumcheckError::FoldColumns)?;
-                        }
-                        &mut layer
-                    }
-                    BufferTarget::LayerToWork => {
-                        unsafe {
-                            fold_ef_frac_columns(
-                                &layer,
-                                &mut work_buffer,
-                                pq_size,
-                                source_real_len,
-                                source_logical_len,
-                                prev_r,
-                                alpha,
-                                stream,
-                            )
-                            .map_err(FractionalSumcheckError::FoldColumns)?;
-                        }
-                        &mut work_buffer
-                    }
-                    BufferTarget::WorkToLayer => unreachable!(),
-                };
-                pq_size >>= 1;
+                        BufferTarget::WorkToLayer => unreachable!(),
+                    });
+                    pq_size >>= 1;
+                }
             }
             GkrRoundStrategy::PrecomputeM => {
                 let base = 1usize;
@@ -1426,74 +1674,123 @@ where
                 }
 
                 if base < round {
-                    // First tail round is standalone compute,
-                    // subsequent rounds are fold+compute.
-                    unsafe {
-                        frac_compute_round(
-                            &eq_buffer,
+                    if cpu_tail_max_pq_size > 0 && pq_size <= cpu_tail_max_pq_size {
+                        cpu_tail_claims = Some(finish_sumcheck_cpu_tail(
                             active_pq,
-                            pq_size / 2,
-                            lambda,
-                            &mut d_sum_evals,
-                            &mut tmp_block_sums,
-                            stream,
-                        )
-                        .map_err(FractionalSumcheckError::ComputeRound)?;
-                    }
-                    eq_buffer.drop_layer();
-                    prev_r = observe_and_update(
-                        &d_sum_evals,
-                        transcript,
-                        &mut round_polys_eval,
-                        &mut r_vec,
-                        &mut prev_s_eval,
-                        xi_prev[base],
-                        &mut eq_r_acc,
-                        device_ctx,
-                    )?;
-
-                    for &xi_j in xi_prev.iter().skip(base + 1) {
-                        let src_pq_size = pq_size;
-                        prev_r = do_fused_sumcheck_round_inplace(
-                            &mut eq_buffer,
-                            active_pq,
-                            src_pq_size,
                             pq_size,
-                            pq_size,
-                            pq_size >> 1,
-                            pq_size >> 1,
+                            active_real_len,
+                            active_logical_len,
+                            alpha,
+                            false,
+                            &xi_prev[base..],
                             lambda,
                             prev_r,
-                            alpha,
                             transcript,
-                            &mut d_sum_evals,
-                            &mut tmp_block_sums,
                             &mut round_polys_eval,
                             &mut r_vec,
                             &mut prev_s_eval,
-                            xi_j,
+                            &mut eq_r_acc,
+                            device_ctx,
+                        )?);
+                        pq_size = 2;
+                    } else {
+                        // First tail round is standalone compute,
+                        // subsequent rounds are fold+compute.
+                        unsafe {
+                            frac_compute_round(
+                                &eq_buffer,
+                                active_pq,
+                                pq_size / 2,
+                                lambda,
+                                &mut d_sum_evals,
+                                &mut tmp_block_sums,
+                                stream,
+                            )
+                            .map_err(FractionalSumcheckError::ComputeRound)?;
+                        }
+                        eq_buffer.drop_layer();
+                        prev_r = observe_and_update(
+                            &d_sum_evals,
+                            transcript,
+                            &mut round_polys_eval,
+                            &mut r_vec,
+                            &mut prev_s_eval,
+                            xi_prev[base],
                             &mut eq_r_acc,
                             device_ctx,
                         )?;
-                        pq_size >>= 1;
+
+                        for (xi_idx, &xi_j) in xi_prev.iter().enumerate().skip(base + 1) {
+                            let src_pq_size = pq_size;
+                            if cpu_tail_max_pq_size > 0 && src_pq_size <= cpu_tail_max_pq_size {
+                                cpu_tail_claims = Some(finish_sumcheck_cpu_tail(
+                                    active_pq,
+                                    src_pq_size,
+                                    src_pq_size,
+                                    src_pq_size,
+                                    alpha,
+                                    true,
+                                    &xi_prev[xi_idx..],
+                                    lambda,
+                                    prev_r,
+                                    transcript,
+                                    &mut round_polys_eval,
+                                    &mut r_vec,
+                                    &mut prev_s_eval,
+                                    &mut eq_r_acc,
+                                    device_ctx,
+                                )?);
+                                pq_size = 2;
+                                break;
+                            }
+                            prev_r = do_fused_sumcheck_round_inplace(
+                                &mut eq_buffer,
+                                active_pq,
+                                src_pq_size,
+                                pq_size,
+                                pq_size,
+                                pq_size >> 1,
+                                pq_size >> 1,
+                                lambda,
+                                prev_r,
+                                alpha,
+                                transcript,
+                                &mut d_sum_evals,
+                                &mut tmp_block_sums,
+                                &mut round_polys_eval,
+                                &mut r_vec,
+                                &mut prev_s_eval,
+                                xi_j,
+                                &mut eq_r_acc,
+                                device_ctx,
+                            )?;
+                            pq_size >>= 1;
+                        }
                     }
                 }
 
-                unsafe {
-                    fold_ef_frac_columns_inplace(
-                        active_pq, pq_size, pq_size, pq_size, prev_r, alpha, stream,
-                    )
-                    .map_err(FractionalSumcheckError::FoldColumns)?;
+                if cpu_tail_claims.is_none() {
+                    unsafe {
+                        fold_ef_frac_columns_inplace(
+                            active_pq, pq_size, pq_size, pq_size, prev_r, alpha, stream,
+                        )
+                        .map_err(FractionalSumcheckError::FoldColumns)?;
+                    }
+                    active = Some(active_pq);
+                    pq_size >>= 1;
                 }
-                active = active_pq;
-                pq_size >>= 1;
             }
         }
 
-        let pq_host = [
-            copy_from_device(active, 0, &mut copy_scratch, device_ctx)?,
-            copy_from_device(active, pq_size / 2, &mut copy_scratch, device_ctx)?,
-        ];
+        let pq_host = if let Some(claims) = cpu_tail_claims {
+            claims
+        } else {
+            let active = active.expect("GPU GKR path must set active buffer");
+            [
+                copy_from_device(active, 0, &mut copy_scratch, device_ctx)?,
+                copy_from_device(active, pq_size / 2, &mut copy_scratch, device_ctx)?,
+            ]
+        };
 
         claims_per_layer.push(GkrLayerClaims {
             p_xi_0: pq_host[0].p,
@@ -1571,10 +1868,24 @@ fn reconstruct_s_evals(
     let sp_vec = d_sum_evals.to_host_on(device_ctx)?;
     debug_assert_eq!(sp_vec.len(), GKR_S_DEG - 1);
 
+    Ok(reconstruct_s_evals_from_sp(
+        [sp_vec[0], sp_vec[1]],
+        prev_s_eval,
+        xi_j,
+        eq_r_acc,
+    ))
+}
+
+fn reconstruct_s_evals_from_sp(
+    sp_evals_at_1_2: [EF; 2],
+    prev_s_eval: EF,
+    xi_j: EF,
+    eq_r_acc: EF,
+) -> ([EF; GKR_S_DEG], [EF; GKR_S_DEG]) {
     // sp_evals holds evaluations of degree 2 poly `eq(xi_{j+1..}, r_{j+1..}) * s'(X)` at {0,1,2}
     let mut sp_evals = [EF::ZERO; GKR_S_DEG];
-    sp_evals[1] = sp_vec[0] * eq_r_acc;
-    sp_evals[2] = sp_vec[1] * eq_r_acc;
+    sp_evals[1] = sp_evals_at_1_2[0] * eq_r_acc;
+    sp_evals[2] = sp_evals_at_1_2[1] * eq_r_acc;
 
     // We use that s_j(0) + s_j(1) = s_{j-1}(r_{j-1})
     // s_j(X) = eq(xi_j, X) * sp_j(X)
@@ -1598,7 +1909,7 @@ fn reconstruct_s_evals(
         eval_eq_mle(&[xi_j], &[x]) * sp_eval
     });
 
-    Ok((s_evals, sp_evals))
+    (s_evals, sp_evals)
 }
 
 /// Generate random fractional leaves on device for benchmarking.
@@ -1644,7 +1955,7 @@ mod tests {
 
     use super::{
         fractional_sumcheck_gpu, make_synthetic_leaves, Frac, FractionalInputSize,
-        FractionalSumcheckError, GkrRoundStrategy, EF,
+        FractionalSumcheckError, GkrRoundStrategy, EF, GKR_CPU_TAIL_DEFAULT_MAX_PQ_SIZE,
     };
     use crate::{prelude::SC, sponge::DuplexSpongeGpu};
 
@@ -1655,6 +1966,7 @@ mod tests {
         "SWIRL_CUDA_GKR_PRECOMPUTE_M_MIN_N",
         "SWIRL_CUDA_GKR_BITREV_Z_COUNT",
         "SWIRL_CUDA_GKR_BITREV_Z4_SHUFFLE",
+        "SWIRL_CUDA_GKR_CPU_TAIL_MAX_PQ_SIZE",
     ];
 
     struct TestEnvGuard(Vec<(&'static str, Option<OsString>)>);
@@ -1797,6 +2109,13 @@ mod tests {
         EF::from_u32(7)
     }
 
+    fn set_cpu_tail_threshold(threshold: usize) {
+        // SAFETY: callers hold TEST_ENV_LOCK while this helper mutates process-global state.
+        unsafe {
+            std::env::set_var("SWIRL_CUDA_GKR_CPU_TAIL_MAX_PQ_SIZE", threshold.to_string());
+        }
+    }
+
     fn run_from_host(
         host: &[Frac<EF>],
         real_len: usize,
@@ -1926,6 +2245,7 @@ mod tests {
         let _env = lock_test_env();
         for (real_len, logical_len) in [(2048, 2048), (1500, 2048)] {
             let host = make_host_leaves(real_len);
+            // SAFETY: test sets process env; run with --test-threads=1.
             unsafe {
                 std::env::set_var("SWIRL_CUDA_GKR_BITREV_Z_COUNT", "8");
                 std::env::remove_var("SWIRL_CUDA_GKR_BITREV_Z4_SHUFFLE");
@@ -1937,7 +2257,6 @@ mod tests {
                 virtual_padding_test_alpha(),
                 GkrRoundStrategy::FoldEval,
             )?;
-
             unsafe {
                 std::env::set_var("SWIRL_CUDA_GKR_BITREV_Z_COUNT", "4");
                 std::env::set_var("SWIRL_CUDA_GKR_BITREV_Z4_SHUFFLE", "0");
@@ -1970,6 +2289,60 @@ mod tests {
                 &shared_z4,
                 &format!("shuffle Z=4, real_len={real_len}, logical_len={logical_len}"),
             );
+        }
+        unsafe {
+            std::env::remove_var("SWIRL_CUDA_GKR_BITREV_Z_COUNT");
+            std::env::remove_var("SWIRL_CUDA_GKR_BITREV_Z4_SHUFFLE");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_cpu_tail_matches_gpu_tail() -> Result<(), FractionalSumcheckError> {
+        let _env = lock_test_env();
+        let logical_len = 1 << 10;
+        let dense = make_host_leaves(logical_len);
+        let virtual_real_len = 777;
+
+        for strategy in [GkrRoundStrategy::FoldEval, GkrRoundStrategy::PrecomputeM] {
+            let cpu_tail_thresholds: &[usize] = match strategy {
+                GkrRoundStrategy::FoldEval => &[GKR_CPU_TAIL_DEFAULT_MAX_PQ_SIZE],
+                // 16 forces the PrecomputeM fallback to begin on the GPU and hand off only
+                // after two additional fused rounds have crossed the cutoff.
+                GkrRoundStrategy::PrecomputeM => &[GKR_CPU_TAIL_DEFAULT_MAX_PQ_SIZE, 16],
+            };
+            for (host, real_len, context) in [
+                (dense.as_slice(), logical_len, "dense"),
+                (&dense[..virtual_real_len], virtual_real_len, "virtual"),
+            ] {
+                set_cpu_tail_threshold(0);
+                let gpu_tail = run_from_host(
+                    host,
+                    real_len,
+                    logical_len,
+                    virtual_padding_test_alpha(),
+                    strategy,
+                )?;
+                for &threshold in cpu_tail_thresholds {
+                    set_cpu_tail_threshold(threshold);
+                    let cpu_tail = run_from_host(
+                        host,
+                        real_len,
+                        logical_len,
+                        virtual_padding_test_alpha(),
+                        strategy,
+                    )?;
+                    assert_proofs_equal_with_context(
+                        &gpu_tail,
+                        &cpu_tail,
+                        &format!("strategy={strategy:?}, layout={context}, threshold={threshold}"),
+                    );
+                }
+            }
+        }
+
+        unsafe {
+            std::env::remove_var("SWIRL_CUDA_GKR_CPU_TAIL_MAX_PQ_SIZE");
         }
         Ok(())
     }
