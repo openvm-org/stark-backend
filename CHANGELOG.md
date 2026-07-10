@@ -16,6 +16,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Changed
 - Updated the STARK protocol to SWIRL: LogUp interactions are now proven through the GKR fractional sumcheck, constraint checking uses the batched constraint sumcheck, and trace openings reduce through the stacked PCS opening reduction and WHIR.
+- Bumped the workspace MSRV from Rust 1.83 to Rust 1.90.
 
 ## v1.4.0 (2026-05-15)
 
