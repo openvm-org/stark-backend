@@ -302,8 +302,8 @@ pub unsafe fn stacked_reduction_sumcheck_mle_round(
 ///
 /// # Safety
 /// - The safety requirements of [`stacked_reduction_sumcheck_mle_round`] apply per group.
-/// - `group_block_offsets` and `group_ctxs` must be device pointers valid for
-///   `num_groups + 1` and `num_groups` elements respectively.
+/// - `group_block_offsets` and `group_ctxs` must be device pointers valid for `num_groups + 1` and
+///   `num_groups` elements respectively.
 /// - For each group, `num_y * window_stride < 2^32` (u64 atomic accumulation bound).
 #[allow(clippy::too_many_arguments)]
 pub unsafe fn stacked_reduction_sumcheck_mle_round_batched(
@@ -334,8 +334,8 @@ pub unsafe fn stacked_reduction_sumcheck_mle_round_batched(
 /// window group.
 ///
 /// # Safety
-/// - The safety requirements of [`stacked_reduction_sumcheck_mle_round_degenerate`] apply
-///   per group.
+/// - The safety requirements of [`stacked_reduction_sumcheck_mle_round_degenerate`] apply per
+///   group.
 /// - `group_ctxs` must be a device pointer valid for `num_groups` elements.
 pub unsafe fn stacked_reduction_sumcheck_mle_round_degenerate_batched(
     q_evals: &DeviceBuffer<*const EF>,
