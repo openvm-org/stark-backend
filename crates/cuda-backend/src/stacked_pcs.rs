@@ -16,7 +16,7 @@ use crate::{
     cuda::{
         batch_ntt_small::batch_ntt_small,
         matrix::{batch_expand_pad, batch_expand_pad_wide},
-        ntt::bit_rev,
+        ntt::{bit_rev, bit_rev_zeta_fused},
     },
     hash_scheme::GpuMerkleHash,
     merkle_tree::{MerkleTreeConstructor, MerkleTreeGpu},
@@ -285,39 +285,54 @@ pub fn rs_code_matrix(
     // e.g. for log_height=17, l_skip=2: 2 stages instead of 15.
     let log_codeword_height = log2_strict_usize(codeword_height);
 
-    // Apply l_skip stages of coeffs_to_evals within each 2^l_skip chunk.
-    // After iNTT, each chunk holds Z-monomial coefficients. We apply the subset-zeta
-    // transform to convert to hypercube evaluations over the Z-bit variables.
-    if l_skip > 0 {
-        // SAFETY: `codewords` is properly initialized and parameters are valid.
-        // Steps 2^0, 2^1, ..., 2^(l_skip-1) stay within chunk boundaries.
+    // Apply l_skip stages of coeffs_to_evals within each 2^l_skip chunk, then
+    // bit-reverse the entire buffer in-place (required for NTT). The common case
+    // fuses both into one read+write pass: the zeta stages act on the low l_skip
+    // index bits, which fit inside a bit-reversal Z-tile row.
+    if l_skip > 0 && l_skip <= 6 && codeword_height >= 4096 {
+        // SAFETY: `codewords` is properly initialized; kernel bounds checked above.
         unsafe {
-            mle_interpolate_stages(
-                codewords.as_mut_ptr(),
-                width,
+            bit_rev_zeta_fused(
+                &codewords,
+                log_codeword_height as u32,
                 codeword_height as u32,
-                log_blowup as u32,
-                0,                 // start_log_step
-                l_skip as u32 - 1, // end_log_step (inclusive)
-                false,             // coeffs to evals (NOT eval to coeff)
-                false,             // natural order
+                width as u32,
+                l_skip as u32,
                 device_ctx.stream.as_raw(),
             )
-            .map_err(|error| RsCodeMatrixError::MleInterpolateStage2d { error, step: 1 })?;
+            .map_err(RsCodeMatrixError::BitRev)?;
         }
-    }
-
-    // Bit-reverse the entire buffer in-place (required for NTT)
-    unsafe {
-        bit_rev(
-            &codewords,
-            &codewords,
-            log_codeword_height as u32,
-            codeword_height as u32,
-            width as u32,
-            device_ctx.stream.as_raw(),
-        )
-        .map_err(RsCodeMatrixError::BitRev)?;
+    } else {
+        if l_skip > 0 {
+            // SAFETY: `codewords` is properly initialized and parameters are valid.
+            // Steps 2^0, 2^1, ..., 2^(l_skip-1) stay within chunk boundaries.
+            unsafe {
+                mle_interpolate_stages(
+                    codewords.as_mut_ptr(),
+                    width,
+                    codeword_height as u32,
+                    log_blowup as u32,
+                    0,                 // start_log_step
+                    l_skip as u32 - 1, // end_log_step (inclusive)
+                    false,             // coeffs to evals (NOT eval to coeff)
+                    false,             // natural order
+                    device_ctx.stream.as_raw(),
+                )
+                .map_err(|error| RsCodeMatrixError::MleInterpolateStage2d { error, step: 1 })?;
+            }
+        }
+        // SAFETY: `codewords` is properly initialized.
+        unsafe {
+            bit_rev(
+                &codewords,
+                &codewords,
+                log_codeword_height as u32,
+                codeword_height as u32,
+                width as u32,
+                device_ctx.stream.as_raw(),
+            )
+            .map_err(RsCodeMatrixError::BitRev)?;
+        }
     }
 
     // Compute RS codeword via DFT on the smoothly-embedded domain.
