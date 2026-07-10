@@ -785,6 +785,7 @@ fn test_monomial_vs_dag_equivalence() {
             batch_mle::{TraceCtx, ZerocheckMleBatchBuilder},
             batch_mle_monomial::{compute_lambda_combinations, ZerocheckMonomialBatch},
             fold_ple::fold_ple_evals_rotate,
+            stage::RoundStager,
         },
         poly::EqEvalSegments,
         prelude::EF,
@@ -964,7 +965,8 @@ fn test_monomial_vs_dag_equivalence() {
         unsafe {
             interpolate_columns_gpu(
                 interpolated.buffer(),
-                &d_columns,
+                d_columns.as_ptr(),
+                d_columns.len(),
                 s_deg,
                 num_y as usize,
                 gpu_ctx.stream.as_raw(),
@@ -1002,15 +1004,24 @@ fn test_monomial_vs_dag_equivalence() {
                 data: std::ptr::null(),
                 air_width: 0,
             },
-            main_ptrs_dev,
+            main_ptrs: main_ptrs_dev.as_ptr(),
             public_ptr: d_public_values.as_ptr(),
             eq_3bs_ptr: std::ptr::null(),
         };
 
-        let dag_builder =
-            ZerocheckMleBatchBuilder::new(std::iter::once(&trace_ctx), &pk, s_deg as u32, &gpu_ctx)
-                .unwrap();
-        let dag_output = dag_builder.evaluate(&d_lambda_pows, s_deg as u32).unwrap();
+        let mut stager = RoundStager::new();
+        stager.begin_round(&gpu_ctx);
+        let dag_builder = ZerocheckMleBatchBuilder::new(
+            std::iter::once(&trace_ctx),
+            &pk,
+            s_deg as u32,
+            &mut stager,
+            &gpu_ctx,
+        );
+        stager.commit(&gpu_ctx).unwrap();
+        let dag_output = dag_builder
+            .evaluate(&stager, &d_lambda_pows, s_deg as u32)
+            .unwrap();
         let dag_results: Vec<EF> = dag_output.to_host_on(&gpu_ctx).expect("copy DAG output");
 
         let lambda_comb = compute_lambda_combinations(&pk, 0, &d_lambda_pows, &gpu_ctx).unwrap();
@@ -1018,10 +1029,11 @@ fn test_monomial_vs_dag_equivalence() {
             std::iter::once(&trace_ctx),
             &pk,
             &[&lambda_comb],
+            &mut stager,
             &gpu_ctx,
-        )
-        .unwrap();
-        let mono_output = mono_batch.evaluate(s_deg as u32).unwrap();
+        );
+        stager.commit(&gpu_ctx).unwrap();
+        let mono_output = mono_batch.evaluate(&stager, s_deg as u32).unwrap();
         let mono_results: Vec<EF> = mono_output
             .to_host_on(&gpu_ctx)
             .expect("copy monomial output");

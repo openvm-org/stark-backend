@@ -166,21 +166,21 @@ pub mod sumcheck {
     /// - `output_matrices` must consist of pointers to device memory locations.
     #[allow(clippy::too_many_arguments)]
     pub unsafe fn batch_fold_mle(
-        input_matrices: &DeviceBuffer<*const EF>,
-        output_matrices: &DeviceBuffer<*mut EF>,
-        widths: &DeviceBuffer<u32>,
+        input_matrices: *const *const EF,
+        output_matrices: *const *mut EF,
+        widths: *const u32,
         num_matrices: u16,
-        log_output_heights: &DeviceBuffer<u8>,
+        log_output_heights: *const u8,
         max_output_cells: u32,
         r_val: EF,
         stream: cudaStream_t,
     ) -> Result<(), CudaError> {
         CudaError::from_result(_batch_fold_mle(
-            input_matrices.as_ptr(),
-            output_matrices.as_ptr(),
-            widths.as_ptr(),
+            input_matrices,
+            output_matrices,
+            widths,
             num_matrices,
-            log_output_heights.as_ptr(),
+            log_output_heights,
             max_output_cells,
             r_val,
             stream,
