@@ -59,6 +59,7 @@ use crate::{
     poly::EqEvalLayers,
     prelude::{EF, F},
     sponge::GpuFiatShamirTranscript,
+    stacked_pcs::RsPrefetchRequest,
     utils::compute_barycentric_inv_lagrange_denoms,
 };
 
@@ -119,6 +120,7 @@ pub(crate) fn air_width_for_mat(need_rot: bool, mat_width: usize) -> u32 {
 
 #[allow(clippy::type_complexity)]
 #[instrument(level = "info", skip_all)]
+#[allow(clippy::too_many_arguments)]
 pub fn prove_zerocheck_and_logup_gpu<HS, TS>(
     transcript: &mut TS,
     mpk: &DeviceMultiStarkProvingKey<GenericGpuBackend<HS>>,
@@ -126,6 +128,7 @@ pub fn prove_zerocheck_and_logup_gpu<HS, TS>(
     save_memory: bool,
     monomial_num_y_threshold: u32,
     sm_count: u32,
+    rs_prefetch: Option<RsPrefetchRequest<'_>>,
     device_ctx: &GpuDeviceCtx,
 ) -> Result<(GkrProof<HS::SC>, BatchConstraintProof<HS::SC>, Vec<EF>), LogupZerocheckError>
 where
@@ -243,6 +246,17 @@ where
     prover.xi = xi;
 
     logup_gkr_span.exit();
+
+    // The fractional GKR peak has passed: start re-encoding the WHIR round-0
+    // RS codeword on the low-priority auxiliary stream, soaking the idle
+    // bubbles of the sumcheck phases below. The batch-MLE phases size their
+    // working buffers up to the GKR peak; shrink that budget by the resident
+    // codeword so total demand stays inside the same memory envelope.
+    if let Some(request) = rs_prefetch {
+        let codeword_bytes = request.codeword_bytes();
+        request.launch(device_ctx)?;
+        prover.memory_limit_bytes = prover.memory_limit_bytes.saturating_sub(codeword_bytes);
+    }
 
     // Note: this span includes ple_fold, but that function has no cuda synchronization so it does
     // not include the kernel times for the actual folding
