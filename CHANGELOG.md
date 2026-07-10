@@ -9,6 +9,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 ### Added
 - (CUDA common) `DeviceBuffer::mut_slice(range)` returning a `DeviceBufferMutSlice<'_, T>` with a `copy_from_host` method for overwriting a subrange of a device buffer from a host slice on a caller-supplied stream.
 
+### Changed
+- GPU prover: batched the per-round parameter uploads, kernel launches, and result readbacks of the batch-constraint, stacked-reduction, and round-0 sumcheck phases, and moved per-round transcript readbacks to pinned memory; the interactions round-0 DAG is now cached in the proving key instead of rebuilt per proof. Measured ~2.4% lower proving time on the reth benchmark on RTX Pro 6000.
+
 ## v2.0.0 (2026-07-06)
 
 ### Added
