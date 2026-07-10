@@ -3,6 +3,10 @@ name = "openvm-cpu-backend"
 version.workspace = true
 authors.workspace = true
 edition.workspace = true
+rust-version.workspace = true
+homepage.workspace = true
+repository.workspace = true
+license.workspace = true
 description = "Row-major CPU prover backend for the SWIRL proof system"
 
 [dependencies]
@@ -28,9 +32,9 @@ rustc-hash.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
-openvm-stark-backend = { workspace = true, features = ["test-utils"] }
-openvm-stark-sdk = { workspace = true, features = ["cpu-backend"] }
-openvm-backend-tests.workspace = true
+openvm-stark-backend = { path = "../stark-backend", default-features = false, features = ["test-utils"] }
+openvm-stark-sdk = { path = "../stark-sdk", default-features = false, features = ["cpu-backend"] }
+openvm-backend-tests = { path = "../backend-tests", default-features = false }
 p3-baby-bear.workspace = true
 p3-keccak-air.workspace = true
 rand.workspace = true
