@@ -11,6 +11,11 @@ use crate::error::{check, CudaError};
 extern "C" {
     fn cudaDeviceSynchronize() -> i32;
     fn cudaStreamCreateWithFlags(stream: *mut cudaStream_t, flags: u32) -> i32;
+    fn cudaStreamCreateWithPriority(stream: *mut cudaStream_t, flags: u32, priority: i32) -> i32;
+    fn cudaDeviceGetStreamPriorityRange(
+        least_priority: *mut i32,
+        greatest_priority: *mut i32,
+    ) -> i32;
     fn cudaStreamDestroy(stream: cudaStream_t) -> i32;
     fn cudaStreamSynchronize(stream: cudaStream_t) -> i32;
     fn cudaStreamWaitEvent(stream: cudaStream_t, event: cudaEvent_t, flags: u32) -> i32;
@@ -56,6 +61,21 @@ impl CudaStream {
     pub fn new_non_blocking() -> Result<Self, CudaError> {
         let mut stream: cudaStream_t = std::ptr::null_mut();
         check(unsafe { cudaStreamCreateWithFlags(&mut stream, CUDA_STREAM_NON_BLOCKING) })?;
+        let host_event = Mutex::new(CudaEvent::new()?);
+        Ok(Self { stream, host_event })
+    }
+
+    /// Creates a non-blocking stream at the device's lowest scheduling
+    /// priority. Kernels on such a stream yield SMs to work queued on
+    /// default-priority streams, so background work only soaks idle bubbles.
+    pub fn new_low_priority() -> Result<Self, CudaError> {
+        let mut least = 0i32;
+        let mut greatest = 0i32;
+        check(unsafe { cudaDeviceGetStreamPriorityRange(&mut least, &mut greatest) })?;
+        let mut stream: cudaStream_t = std::ptr::null_mut();
+        check(unsafe {
+            cudaStreamCreateWithPriority(&mut stream, CUDA_STREAM_NON_BLOCKING, least)
+        })?;
         let host_event = Mutex::new(CudaEvent::new()?);
         Ok(Self { stream, host_event })
     }
