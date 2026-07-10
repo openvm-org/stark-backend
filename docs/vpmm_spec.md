@@ -233,6 +233,15 @@ Additional rules:
 * **Pending unmap (zombies):** `sum(pool.zombie_regions.iter().map(|z| z.size))`
 * `Debug` output prints the metrics above plus every region in ascending VA order.
 
+The outer `MemoryManager` additionally exposes a public snapshot API:
+
+* `tracked_memory_stats() -> TrackedMemoryStats { current, session_peak }` — `current` is the
+  sum of live tracked allocations (pool allocations page-rounded); `session_peak` is the peak
+  of `current` since the last `reset_session_peak()` call. Unlike `max_used_size` (surfaced
+  through `MemTracker` and reset by phase-level `MemTracker::reset_peak` calls inside the
+  prover), `session_peak` survives those resets, so callers can measure a whole-proof peak.
+* `reset_session_peak()` — resets `session_peak` to the current tracked size.
+
 ## Asynchrony & Streams
 
 * VPMM supports **multi-stream workloads** using `cudaStreamPerThread`.

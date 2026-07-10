@@ -6,14 +6,15 @@ a "kill column" — every constraint multiplies by it, every interaction
 count uses it). Proof validity is not exercised end-to-end; rely on
 the cuda-backend test suite for correctness.
 
-Two binaries:
+Three binaries:
 
 | Binary             | Use case                                         | Inputs                          |
 |--------------------|--------------------------------------------------|---------------------------------|
 | `synthetic_runner` | Replay a captured workload's segment shapes for champ-vs-candidate iteration on `openvm-cuda-backend` changes. | A profile JSONL from the `SHADOW_BENCH_PROFILE_PATH` probe. |
+| `mem_meter_runner` | Replay segment shapes and compare the `memory_metering` proving-memory estimate against the measured peak GPU memory, with per-phase attribution. | Same profile JSONL. |
 | `uniform_runner`   | Sweep cost dimensions with N identical AIRs.     | CLI flags (num AIRs, cols/AIR, constraints/col, etc.). |
 
-`synthetic_runner` is GPU-only (`required-features = ["cuda"]`).
+`synthetic_runner` and `mem_meter_runner` are GPU-only (`required-features = ["cuda"]`).
 `uniform_runner` runs CPU by default; build with `--features cuda` for GPU.
 
 ## What's in here
@@ -25,6 +26,7 @@ Two binaries:
 | `src/synthetic_air.rs`              | `SyntheticAir` / `SyntheticShape` — kernel-cost-faithful replay AIR.     |
 | `src/segment_profile.rs`            | Deserialization types (`SegmentProfile`, `AirShapeRecord`) for the JSONL. |
 | `src/bin/synthetic_runner.rs`       | Profile-replay runner.                                                  |
+| `src/bin/mem_meter_runner.rs`       | Memory-metering validation runner.                                      |
 | `src/bin/uniform_runner.rs`         | Uniform-shape runner.                                                   |
 
 ## `synthetic_runner` — profile replay
@@ -167,6 +169,46 @@ processes.
 is the figure of merit for champ-vs-candidate comparison.
 `skipped_segments` should be `0`; non-zero means a prove call returned
 an error and that segment's timing was excluded.
+
+## `mem_meter_runner` — memory-metering validation
+
+Replays profile segments like `synthetic_runner`, but instead of timing
+it compares the proving-memory estimate from
+`openvm_stark_backend::memory_metering` against the actual peak GPU
+memory tracked by the cuda-common memory manager. Per segment it
+replicates OpenVM's metered cell counting (`padded_height *
+total_width` split by `need_rot`, plus `padded_height *
+num_interactions`), calls `estimate()`, proves, and records the
+measured peak (via `tracked_memory_stats`/`reset_session_peak`) with
+per-phase attribution from the `gpu_mem.*` gauges that `MemTracker`
+emits.
+
+Segments whose max constraint degree exceeds the params limit are
+skipped (keygen would reject them). GPU-only.
+
+```bash
+cargo build --release -p openvm-benchmark-synthetic --features cuda --bin mem_meter_runner
+
+target/release/mem_meter_runner \
+  --profile benchmarks/synthetic/reth-block-23992138-profile.jsonl \
+  --sample-frac 0.2 --seed 7 --max-log-height 22 \
+  --out mem-report.jsonl
+```
+
+Extra knobs: `--segments 0,15,24` (explicit segment list overriding the
+sampler), `--zerocheck-save-memory <bool>` (defaults to the production
+coupling `log_blowup == 1`), `--cache-rs-code-matrix` (production
+default: off).
+
+`--out` is JSONL, written incrementally (crash-safe): one `RunHeader`
+line with the run configuration, then one line per segment containing
+the estimate breakdown (`total` / `main` / `rs_code_matrix` /
+`main_secondary` / `interaction` / cell counts), the measured
+`baseline_bytes` / `peak_bytes` / `phase_peaks`, and the
+`gap_bytes` / `peak_over_estimate` comparison. `peak_over_estimate >
+1` means the model under-estimated that segment. The console prints
+one summary line per segment plus a final count of underestimates and
+the worst ratio.
 
 ## `uniform_runner` — uniform-shape sweep
 
