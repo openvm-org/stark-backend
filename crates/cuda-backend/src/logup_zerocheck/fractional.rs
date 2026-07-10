@@ -26,7 +26,10 @@ use crate::{
             frac_compute_round_and_revert, frac_multifold_raw, frac_precompute_m_build_raw,
             frac_precompute_m_eval_round_raw,
         },
-        ntt::{bit_rev_frac_ext, bit_rev_frac_ext_build_k2},
+        ntt::{
+            bit_rev_frac_ext, bit_rev_frac_ext_build_k2, bit_rev_frac_ext_build_k2_z4,
+            bit_rev_frac_ext_build_k2_z4_shuffle,
+        },
     },
     poly::SqrtEqLayers,
     prelude::EF,
@@ -132,6 +135,20 @@ const PRECOMPUTE_M_TAIL_TILE: usize = 4096;
 const PRECOMPUTE_M_MIN_TAIL_TILE: usize = 256;
 const PRECOMPUTE_M_DEFAULT_MIN_BLOCKS: usize = 64;
 const PRECOMPUTE_M_DEFAULT_TARGET_BLOCKS: usize = 1024;
+
+fn bitrev_build_z4_enabled() -> bool {
+    !matches!(
+        env::var("SWIRL_CUDA_GKR_BITREV_Z_COUNT").as_deref(),
+        Ok("8")
+    )
+}
+
+fn bitrev_z4_shuffle_enabled() -> bool {
+    !matches!(
+        env::var("SWIRL_CUDA_GKR_BITREV_Z4_SHUFFLE").as_deref(),
+        Ok("0")
+    )
+}
 
 impl BufferScheduler {
     /// Creates a new scheduler with data initially in layer buffer.
@@ -707,8 +724,22 @@ where
         unsafe {
             // SAFETY: Frac<EF> has exact same memory layout and alignment as (EF, EF).
             let buf = transmute::<&DeviceBuffer<Frac<EF>>, &DeviceBuffer<(EF, EF)>>(&layer);
-            bit_rev_frac_ext_build_k2(buf, real_len, total_rounds as u32, alpha, stream)
-                .map_err(FractionalSumcheckError::BitReversal)?;
+            let bitrev_result = if bitrev_build_z4_enabled() {
+                if bitrev_z4_shuffle_enabled() {
+                    bit_rev_frac_ext_build_k2_z4_shuffle(
+                        buf,
+                        real_len,
+                        total_rounds as u32,
+                        alpha,
+                        stream,
+                    )
+                } else {
+                    bit_rev_frac_ext_build_k2_z4(buf, real_len, total_rounds as u32, alpha, stream)
+                }
+            } else {
+                bit_rev_frac_ext_build_k2(buf, real_len, total_rounds as u32, alpha, stream)
+            };
+            bitrev_result.map_err(FractionalSumcheckError::BitReversal)?;
         }
         2 // layers 0+1 already done
     } else {
@@ -1597,6 +1628,11 @@ pub fn make_synthetic_leaves(
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        ffi::OsString,
+        sync::{Mutex, MutexGuard},
+    };
+
     use openvm_cuda_common::{
         common::get_device,
         copy::MemCopyH2D,
@@ -1612,6 +1648,59 @@ mod tests {
     };
     use crate::{prelude::SC, sponge::DuplexSpongeGpu};
 
+    static TEST_ENV_LOCK: Mutex<()> = Mutex::new(());
+    const TEST_ENV_VARS: &[&str] = &[
+        "SWIRL_CUDA_GKR_PRECOMPUTE_M",
+        "SWIRL_CUDA_GKR_PRECOMPUTE_M_MIN_BLOCKS",
+        "SWIRL_CUDA_GKR_PRECOMPUTE_M_MIN_N",
+        "SWIRL_CUDA_GKR_BITREV_Z_COUNT",
+        "SWIRL_CUDA_GKR_BITREV_Z4_SHUFFLE",
+    ];
+
+    struct TestEnvGuard(Vec<(&'static str, Option<OsString>)>);
+
+    struct LockedTestEnv {
+        // Fields drop in declaration order, restoring the environment before unlocking.
+        _guard: TestEnvGuard,
+        _lock: MutexGuard<'static, ()>,
+    }
+
+    impl TestEnvGuard {
+        fn capture() -> Self {
+            Self(
+                TEST_ENV_VARS
+                    .iter()
+                    .map(|&name| (name, std::env::var_os(name)))
+                    .collect(),
+            )
+        }
+    }
+
+    impl Drop for TestEnvGuard {
+        fn drop(&mut self) {
+            for (name, value) in self.0.drain(..) {
+                unsafe {
+                    if let Some(value) = value {
+                        std::env::set_var(name, value);
+                    } else {
+                        std::env::remove_var(name);
+                    }
+                }
+            }
+        }
+    }
+
+    fn lock_test_env() -> LockedTestEnv {
+        let lock = TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let guard = TestEnvGuard::capture();
+        LockedTestEnv {
+            _guard: guard,
+            _lock: lock,
+        }
+    }
+
     fn test_ctx() -> GpuDeviceCtx {
         GpuDeviceCtx {
             device_id: get_device().unwrap() as u32,
@@ -1624,7 +1713,7 @@ mod tests {
         n: usize,
         strategy: GkrRoundStrategy,
     ) -> Result<(super::FracSumcheckProof<SC>, Vec<EF>), FractionalSumcheckError> {
-        // SAFETY: test sets process env; run with --test-threads=1.
+        // SAFETY: callers hold TEST_ENV_LOCK while this helper mutates process-global state.
         let enable_precompute_m = matches!(strategy, GkrRoundStrategy::PrecomputeM);
         unsafe {
             std::env::set_var(
@@ -1715,7 +1804,7 @@ mod tests {
         alpha: EF,
         strategy: GkrRoundStrategy,
     ) -> Result<(super::FracSumcheckProof<SC>, Vec<EF>), FractionalSumcheckError> {
-        // SAFETY: test sets process env; run with --test-threads=1.
+        // SAFETY: callers hold TEST_ENV_LOCK while this helper mutates process-global state.
         let enable_precompute_m = matches!(strategy, GkrRoundStrategy::PrecomputeM);
         unsafe {
             std::env::set_var(
@@ -1749,6 +1838,7 @@ mod tests {
 
     #[test]
     fn test_virtual_input_padding_matches_dense_padding() -> Result<(), FractionalSumcheckError> {
+        let _env = lock_test_env();
         let small_cases = [4, 8, 16, 32].into_iter().flat_map(|logical_len| {
             (logical_len / 2..logical_len).map(move |real_len| (real_len, logical_len))
         });
@@ -1768,6 +1858,7 @@ mod tests {
     #[test]
     fn test_virtual_input_padding_matches_dense_padding_precompute_m(
     ) -> Result<(), FractionalSumcheckError> {
+        let _env = lock_test_env();
         for (real_len, logical_len) in [
             (33, 64),
             (47, 64),
@@ -1800,6 +1891,7 @@ mod tests {
     /// n=26: top layer rem_n=24 (one window, even more tail).
     #[test]
     fn test_precompute_m_matches_fused() -> Result<(), FractionalSumcheckError> {
+        let _env = lock_test_env();
         for n in [24, 25, 26] {
             eprintln!("--- testing n={n} ---");
             let fused = run_with_strategy(n, GkrRoundStrategy::FoldEval)?;
@@ -1814,6 +1906,7 @@ mod tests {
     /// window 2 at base=4 (rem_n=11), then fold-eval tail for the remaining round.
     #[test]
     fn test_precompute_m_multi_window_matches_fused() -> Result<(), FractionalSumcheckError> {
+        let _env = lock_test_env();
         unsafe {
             std::env::set_var("SWIRL_CUDA_GKR_PRECOMPUTE_M_MIN_N", "8");
             std::env::set_var("SWIRL_CUDA_GKR_PRECOMPUTE_M_MIN_BLOCKS", "1");
@@ -1824,6 +1917,59 @@ mod tests {
         unsafe {
             std::env::remove_var("SWIRL_CUDA_GKR_PRECOMPUTE_M_MIN_N");
             std::env::remove_var("SWIRL_CUDA_GKR_PRECOMPUTE_M_MIN_BLOCKS");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_bitrev_z4_shuffle_matches_shared_and_z8() -> Result<(), FractionalSumcheckError> {
+        let _env = lock_test_env();
+        for (real_len, logical_len) in [(2048, 2048), (1500, 2048)] {
+            let host = make_host_leaves(real_len);
+            unsafe {
+                std::env::set_var("SWIRL_CUDA_GKR_BITREV_Z_COUNT", "8");
+                std::env::remove_var("SWIRL_CUDA_GKR_BITREV_Z4_SHUFFLE");
+            }
+            let z8 = run_from_host(
+                &host,
+                real_len,
+                logical_len,
+                virtual_padding_test_alpha(),
+                GkrRoundStrategy::FoldEval,
+            )?;
+
+            unsafe {
+                std::env::set_var("SWIRL_CUDA_GKR_BITREV_Z_COUNT", "4");
+                std::env::set_var("SWIRL_CUDA_GKR_BITREV_Z4_SHUFFLE", "0");
+            }
+            let shared_z4 = run_from_host(
+                &host,
+                real_len,
+                logical_len,
+                virtual_padding_test_alpha(),
+                GkrRoundStrategy::FoldEval,
+            )?;
+            assert_proofs_equal_with_context(
+                &shared_z4,
+                &z8,
+                &format!("shared Z=4, real_len={real_len}, logical_len={logical_len}"),
+            );
+
+            unsafe {
+                std::env::set_var("SWIRL_CUDA_GKR_BITREV_Z4_SHUFFLE", "1");
+            }
+            let shuffle_z4 = run_from_host(
+                &host,
+                real_len,
+                logical_len,
+                virtual_padding_test_alpha(),
+                GkrRoundStrategy::FoldEval,
+            )?;
+            assert_proofs_equal_with_context(
+                &shuffle_z4,
+                &shared_z4,
+                &format!("shuffle Z=4, real_len={real_len}, logical_len={logical_len}"),
+            );
         }
         Ok(())
     }

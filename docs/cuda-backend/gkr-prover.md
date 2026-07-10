@@ -106,6 +106,8 @@ In the natural (big-endian) ordering, leaf at index `i` corresponds to hypercube
 
 Before building the tree, the leaves are permuted into bit-reversed order. This changes the tree wiring so that each layer's children are at stride `half` (a power of 2) apart in memory, which gives coalesced warp accesses since adjacent threads read adjacent positions.
 
+For domains larger than 1024, `bit_rev_frac_build_k2_kernel<Z_COUNT>` fuses this permutation with the first two tree layers. The default path uses a Z=4 two-stage register-shuffle transpose with no dynamic shared memory. The shuffle kernel bit-reverses its output suffix so its register-transposed rows land at exactly the same dense indices as the original Z=8 kernel. Set `SWIRL_CUDA_GKR_BITREV_Z_COUNT=8` to restore the original 64 KiB shared-memory geometry, or set `SWIRL_CUDA_GKR_BITREV_Z4_SHUFFLE=0` to use the 32 KiB shared-memory Z=4 transpose. The shuffle path retains both four-element source tiles during off-diagonal in-place swaps, so it uses more registers even though it eliminates shared-memory allocation and barriers.
+
 The tree kernel pairs `layer[idx]` with `layer[idx + half]` where `half` is halved each layer. In bit-reversed order, this means the tree sums variables from last to first (x_n, x_{n-1}, ..., x_1).
 
 Concrete example with `n = 3` (8 leaves):
