@@ -40,6 +40,31 @@ struct UnstackedPleFoldPacket {
     uint32_t width;
 };
 
+// Per-window-group context for the batched MLE sumcheck round kernel. One group
+// corresponds to one (former) per-window kernel launch: a contiguous run of
+// unstacked columns sharing the same log_height.
+struct StackedMleGroupCtx {
+    const UnstackedSlice *unstacked_cols; // window start
+    const FpExt *lambda_pows;             // 2 per column, window start
+    uint64_t *output;                     // [S_DEG * 4] atomic accumulator for this window
+    uint32_t window_len;
+    uint32_t num_y;
+    uint32_t window_stride; // former gridDim.y auto-tuned window stride
+    uint32_t _pad;
+};
+
+// Per-window-group context for the batched degenerate MLE sumcheck round kernel.
+struct StackedMleDegenGroupCtx {
+    const FpExt *eq_ub;                   // eq_ub_per_trace at window start
+    const UnstackedSlice *unstacked_cols; // window start
+    const FpExt *lambda_pows;             // 2 per column, window start
+    uint64_t *output;                     // [S_DEG * 4] atomic accumulator for this window
+    FpExt eq_r;
+    FpExt k_rot_r;
+    uint32_t window_len;
+    uint32_t shift_factor; // = l_skip + round
+};
+
 __device__ __forceinline__ FpExt get_eq_cube(const FpExt *eq_r_ns, uint32_t cube_size, uint32_t x) {
     return eq_r_ns[cube_size + x];
 }
@@ -367,6 +392,156 @@ __global__ void stacked_reduction_sumcheck_mle_round_degenerate_kernel(
     }
 }
 
+// Batched variant of stacked_reduction_sumcheck_mle_round_kernel: all window
+// groups of a round go into one launch. Blocks are assigned to groups via the
+// prefix-sum `group_block_offsets` (length num_groups + 1); within a group the
+// local block index decodes to (y_block, window offset) exactly like the
+// per-window launch's (blockIdx.x, blockIdx.y).
+__global__ void stacked_reduction_sumcheck_mle_round_batched_kernel(
+    const FpExt *__restrict__ const *__restrict__ q_evals,
+    const FpExt *__restrict__ eq_r_ns,
+    const FpExt *__restrict__ k_rot_ns,
+    const uint32_t *__restrict__ group_block_offsets, // [num_groups + 1]
+    const StackedMleGroupCtx *__restrict__ group_ctxs,
+    uint32_t num_groups,
+    uint32_t q_height
+) {
+    extern __shared__ char smem[];
+    FpExt *shared = (FpExt *)smem;
+
+    // Binary search: largest g with group_block_offsets[g] <= blockIdx.x.
+    uint32_t lo = 0, hi = num_groups;
+    while (lo + 1 < hi) {
+        uint32_t mid = (lo + hi) >> 1;
+        if (group_block_offsets[mid] <= blockIdx.x) {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    const StackedMleGroupCtx g = group_ctxs[lo];
+    uint32_t local_idx = blockIdx.x - group_block_offsets[lo];
+    uint32_t y_block = local_idx / g.window_stride;
+    uint32_t window_idx_base = local_idx % g.window_stride;
+    uint32_t y_int = y_block * blockDim.x + threadIdx.x;
+    bool const active_thread = (y_int < g.num_y);
+
+    FpExt local_sums[S_DEG];
+#pragma unroll
+    for (int i = 0; i < S_DEG; i++) {
+        local_sums[i] = FpExt(0);
+    }
+
+    if (active_thread) {
+        uint32_t num_evals = g.num_y * 2;
+
+        auto eq_0 = get_eq_cube(eq_r_ns, num_evals, y_int << 1);
+        auto eq_1 = get_eq_cube(eq_r_ns, num_evals, (y_int << 1) | 1);
+        auto eq_c1 = eq_1 - eq_0;
+        auto k_rot_0 = get_eq_cube(k_rot_ns, num_evals, y_int << 1);
+        auto k_rot_1 = get_eq_cube(k_rot_ns, num_evals, (y_int << 1) | 1);
+        auto k_rot_c1 = k_rot_1 - k_rot_0;
+
+        for (uint32_t window_idx = window_idx_base; window_idx < g.window_len;
+             window_idx += g.window_stride) {
+            UnstackedSlice s = g.unstacked_cols[window_idx];
+            const FpExt *__restrict__ q = q_evals[s.commit_idx];
+
+            auto log_height = s.log_height;
+            auto col_idx = s.stacked_col_idx;
+            auto row_start = (s.stacked_row_idx >> log_height) * num_evals;
+            auto q_offset = col_idx * q_height + row_start;
+
+            auto q_0 = q[q_offset + (y_int << 1)];
+            auto q_1 = q[q_offset + (y_int << 1) + 1];
+            auto q_c1 = q_1 - q_0;
+
+#pragma unroll
+            for (int x_int = 1; x_int <= S_DEG; ++x_int) {
+                Fp x = Fp(x_int);
+                auto q_x = q_0 + q_c1 * x;
+                auto eq = eq_0 + eq_c1 * x;
+                auto k_rot = k_rot_0 + k_rot_c1 * x;
+
+                local_sums[x_int - 1] += (g.lambda_pows[2 * window_idx] * eq +
+                                          g.lambda_pows[2 * window_idx + 1] * k_rot) *
+                                         q_x;
+            }
+        }
+    }
+
+#pragma unroll
+    for (int idx = 0; idx < S_DEG; idx++) {
+        FpExt reduced = sumcheck::block_reduce_sum(local_sums[idx], shared);
+        if (threadIdx.x == 0) {
+            sumcheck::atomic_add_fpext_to_u64(g.output + idx * 4, reduced);
+        }
+        __syncthreads();
+    }
+}
+
+// Batched variant of stacked_reduction_sumcheck_mle_round_degenerate_kernel:
+// one block per window group (the per-window launch was a single block).
+__global__ void stacked_reduction_sumcheck_mle_round_degenerate_batched_kernel(
+    const FpExt *__restrict__ const *__restrict__ q_evals,
+    const StackedMleDegenGroupCtx *__restrict__ group_ctxs,
+    uint32_t q_height
+) {
+    extern __shared__ char smem[];
+    FpExt *shared = (FpExt *)smem;
+
+    const StackedMleDegenGroupCtx g = group_ctxs[blockIdx.x];
+
+    FpExt local_sums[S_DEG];
+#pragma unroll
+    for (int i = 0; i < S_DEG; i++) {
+        local_sums[i] = FpExt(0);
+    }
+
+    for (uint32_t window_idx = threadIdx.x; window_idx < g.window_len;
+         window_idx += blockDim.x) {
+        UnstackedSlice s = g.unstacked_cols[window_idx];
+        const FpExt *__restrict__ q = q_evals[s.commit_idx];
+
+        auto col_idx = s.stacked_col_idx;
+        auto row_idx = s.stacked_row_idx;
+        auto row_start = (row_idx >> g.shift_factor) << 1;
+        auto q_offset = col_idx * q_height + row_start;
+
+        auto q_0 = q[q_offset];
+        auto q_1 = q[q_offset + 1];
+        auto q_c1 = q_1 - q_0;
+
+        uint32_t b_bool = (row_idx >> (g.shift_factor - 1)) & 1;
+        Fp b = Fp(b_bool);
+
+        auto eq_ub = g.eq_ub[window_idx];
+
+#pragma unroll
+        for (int x_int = 1; x_int <= S_DEG; ++x_int) {
+            Fp x = Fp(x_int);
+            auto eq_ub_x = eq_ub * eq1(x, b);
+            auto eq = g.eq_r * eq_ub_x;
+            auto k_rot = g.k_rot_r * eq_ub_x;
+
+            auto q_x = q_0 + q_c1 * x;
+
+            local_sums[x_int - 1] += (g.lambda_pows[2 * window_idx] * eq +
+                                      g.lambda_pows[2 * window_idx + 1] * k_rot) *
+                                     q_x;
+        }
+    }
+
+#pragma unroll
+    for (int idx = 0; idx < S_DEG; idx++) {
+        FpExt reduced = sumcheck::block_reduce_sum(local_sums[idx], shared);
+        if (threadIdx.x == 0) {
+            sumcheck::atomic_add_fpext_to_u64(g.output + idx * 4, reduced);
+        }
+        __syncthreads();
+    }
+}
+
 // ============================================================================
 // LAUNCHERS
 // ============================================================================
@@ -559,6 +734,49 @@ extern "C" int _stacked_reduction_sumcheck_mle_round_degenerate(
         q_height,
         window_len,
         shift_factor
+    );
+
+    return CHECK_KERNEL();
+}
+
+
+extern "C" int _stacked_reduction_sumcheck_mle_round_batched(
+    const FpExt *const *q_evals,
+    const FpExt *eq_r_ns,
+    const FpExt *k_rot_ns,
+    const uint32_t *group_block_offsets,
+    const StackedMleGroupCtx *group_ctxs,
+    uint32_t num_groups,
+    uint32_t num_blocks,
+    uint32_t q_height, cudaStream_t stream) {
+    if (num_blocks == 0) {
+        return 0;
+    }
+    dim3 block(256);
+    dim3 grid(num_blocks);
+    size_t shmem_bytes = div_ceil(block.x, WARP_SIZE) * sizeof(FpExt);
+
+    stacked_reduction_sumcheck_mle_round_batched_kernel<<<grid, block, shmem_bytes, stream>>>(
+        q_evals, eq_r_ns, k_rot_ns, group_block_offsets, group_ctxs, num_groups, q_height
+    );
+
+    return CHECK_KERNEL();
+}
+
+extern "C" int _stacked_reduction_sumcheck_mle_round_degenerate_batched(
+    const FpExt *const *q_evals,
+    const StackedMleDegenGroupCtx *group_ctxs,
+    uint32_t num_groups,
+    uint32_t q_height, cudaStream_t stream) {
+    if (num_groups == 0) {
+        return 0;
+    }
+    dim3 block(256);
+    dim3 grid(num_groups);
+    size_t shmem_bytes = div_ceil(block.x, WARP_SIZE) * sizeof(FpExt);
+
+    stacked_reduction_sumcheck_mle_round_degenerate_batched_kernel<<<grid, block, shmem_bytes, stream>>>(
+        q_evals, group_ctxs, q_height
     );
 
     return CHECK_KERNEL();
