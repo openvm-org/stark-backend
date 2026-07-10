@@ -84,6 +84,24 @@ extern "C" {
         alpha: EF,
         stream: cudaStream_t,
     ) -> i32;
+
+    /// Z=4 shared-memory variant of the fused bitrev + K=2 tree build.
+    fn _bit_rev_frac_ext_build_k2_z4(
+        inout: *mut std::ffi::c_void,
+        real_len: usize,
+        lg_domain_size: u32,
+        alpha: EF,
+        stream: cudaStream_t,
+    ) -> i32;
+
+    /// Z=4 warp-shuffle variant of the fused bitrev + K=2 tree build.
+    fn _bit_rev_frac_ext_build_k2_z4_shuffle(
+        inout: *mut std::ffi::c_void,
+        real_len: usize,
+        lg_domain_size: u32,
+        alpha: EF,
+        stream: cudaStream_t,
+    ) -> i32;
 }
 
 pub unsafe fn bit_rev(
@@ -148,6 +166,38 @@ pub unsafe fn bit_rev_frac_ext_build_k2(
     stream: cudaStream_t,
 ) -> Result<(), CudaError> {
     CudaError::from_result(_bit_rev_frac_ext_build_k2(
+        inout.as_mut_raw_ptr(),
+        real_len,
+        lg_domain_size,
+        alpha,
+        stream,
+    ))
+}
+
+pub unsafe fn bit_rev_frac_ext_build_k2_z4(
+    inout: &DeviceBuffer<(EF, EF)>,
+    real_len: usize,
+    lg_domain_size: u32,
+    alpha: EF,
+    stream: cudaStream_t,
+) -> Result<(), CudaError> {
+    CudaError::from_result(_bit_rev_frac_ext_build_k2_z4(
+        inout.as_mut_raw_ptr(),
+        real_len,
+        lg_domain_size,
+        alpha,
+        stream,
+    ))
+}
+
+pub unsafe fn bit_rev_frac_ext_build_k2_z4_shuffle(
+    inout: &DeviceBuffer<(EF, EF)>,
+    real_len: usize,
+    lg_domain_size: u32,
+    alpha: EF,
+    stream: cudaStream_t,
+) -> Result<(), CudaError> {
+    CudaError::from_result(_bit_rev_frac_ext_build_k2_z4_shuffle(
         inout.as_mut_raw_ptr(),
         real_len,
         lg_domain_size,

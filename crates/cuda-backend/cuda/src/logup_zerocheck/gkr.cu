@@ -1738,31 +1738,33 @@ T bit_rev(T i, unsigned int nbits)
 //
 // DERIVED FROM: bit_rev_permutation_z<T, Z_COUNT> in supra/ntt_bitrev.cu.
 // Diff vs the original template kernel:
-//   - Z_COUNT = 8 hardcoded (not a template param)
+//   - Z_COUNT is restricted to 4 or 8
 //   - In-place: single `inout` pointer (original has separate `out`/`in`)
 //   - No poly_count / no 2-D grid: operates on one poly only
 //   - Extra `alpha` parameter: adds alpha to every denominator after bit-reversing
 //   - Two GKR tree layers (K=2) are computed inside shmem before writing to global mem,
 //     eliminating two separate kernel passes
-//   - Masked __syncwarp(subgroup_mask) is used for each 8-lane Z-tile (matching
+//   - Masked __syncwarp(subgroup_mask) is used for each Z-tile (matching
 //     the original Z_COUNT <= WARP_SIZE path)
 //
-// Output layout for each Z-tile written at base_rev (i*step + base_rev, i=0..7):
-//   [0,1]  : layer-1 results  (tree level 2)
-//   [2,3]  : layer-0 results preserved (tree level 1 right half, for revert of layer 1)
-//   [4..7] : original+alpha preserved (leaves, for revert of layer 0)
+// Output layout for each Z-tile written at base_rev (i*step + base_rev, i=0..Z_COUNT-1):
+//   [0 .. Z/4)   : layer-1 results  (tree level 2)
+//   [Z/4 .. Z/2) : layer-0 results preserved (tree level 1 right half)
+//   [Z/2 .. Z)   : original+alpha preserved (leaves, for revert of layer 0)
 //
-// Sync is per 8-lane Z-tile using subgroup masks because branch predicates are
-// uniform per tile, not per whole warp. The launcher uses bsize=256, chosen after
-// benchmarking: 2x faster than bsize=32 in isolation (1525 vs 754 GB/s at lg=24
-// on RTX 5090). It requires 64KB dynamic shmem per block, so cudaFuncSetAttribute
-// is used in the launcher, paid once on the first call.
+// Sync is per Z-tile using subgroup masks because branch predicates are uniform per tile,
+// not per whole warp. The Z=8 launcher uses bsize=256, chosen after benchmarking: 2x faster
+// than bsize=32 in isolation (1525 vs 754 GB/s at lg=24 on RTX 5090). Z=4 is an alternate
+// geometry with half the per-thread FracExt register fan-out and half the dynamic shared
+// memory. It launches twice as many blocks to cover the same domain. cudaFuncSetAttribute
+// raises the dynamic-shmem limit for Z=8 and is paid once on the first call.
+template<uint32_t Z_COUNT>
 __global__
 void bit_rev_frac_build_k2_kernel(
     FracExt* inout, uint32_t real_len, uint32_t lg_domain_size, FpExt alpha)
 {
-    constexpr uint32_t Z_COUNT = 8;
-    constexpr uint32_t LG_Z_COUNT = 3;
+    static_assert(Z_COUNT == 4 || Z_COUNT == 8, "K=2 bitrev supports Z_COUNT 4 or 8");
+    constexpr uint32_t LG_Z_COUNT = Z_COUNT == 4 ? 2 : 3;
 
     extern __shared__ unsigned char xchg_raw[];
     FracExt (*xchg)[Z_COUNT][Z_COUNT] =
@@ -1814,19 +1816,22 @@ void bit_rev_frac_build_k2_kernel(
             for (uint32_t i = 0; i < Z_COUNT; i++)
                 row[i].q += alpha;
             #pragma unroll
-            for (uint32_t i = 0; i < 4; i++)  // tree layer 0: pairs (0,4),(1,5),(2,6),(3,7)
-                frac_add_inplace(row[i], row[i + 4]);
+            for (uint32_t i = 0; i < Z_COUNT / 2; i++)
+                frac_add_inplace(row[i], row[i + Z_COUNT / 2]);
             #pragma unroll
-            for (uint32_t i = 0; i < 2; i++)  // tree layer 1: pairs (0,2),(1,3)
-                frac_add_inplace(row[i], row[i + 2]);
+            for (uint32_t i = 0; i < Z_COUNT / 4; i++)
+                frac_add_inplace(row[i], row[i + Z_COUNT / 4]);
         }
         #pragma unroll
         for (uint32_t i = 0; i < Z_COUNT; i++) {
             index_t out_idx = i * step + base_rev;
             if (virtual_mode) {
                 uint32_t active_size =
-                    i < 2 ? (uint32_t)(domain_size >> 2)
-                          : (i < 4 ? (uint32_t)(domain_size >> 1) : (uint32_t)domain_size);
+                    i < Z_COUNT / 4
+                        ? (uint32_t)(domain_size >> 2)
+                        : (i < Z_COUNT / 2
+                               ? (uint32_t)(domain_size >> 1)
+                               : (uint32_t)domain_size);
                 virtual_node_store(
                     inout,
                     (uint32_t)out_idx,
@@ -1858,19 +1863,22 @@ void bit_rev_frac_build_k2_kernel(
             for (uint32_t i = 0; i < Z_COUNT; i++)
                 row[i].q += alpha;
             #pragma unroll
-            for (uint32_t i = 0; i < 4; i++)
-                frac_add_inplace(row[i], row[i + 4]);
+            for (uint32_t i = 0; i < Z_COUNT / 2; i++)
+                frac_add_inplace(row[i], row[i + Z_COUNT / 2]);
             #pragma unroll
-            for (uint32_t i = 0; i < 2; i++)
-                frac_add_inplace(row[i], row[i + 2]);
+            for (uint32_t i = 0; i < Z_COUNT / 4; i++)
+                frac_add_inplace(row[i], row[i + Z_COUNT / 4]);
         }
         #pragma unroll
         for (uint32_t i = 0; i < Z_COUNT; i++) {
             index_t out_idx = i * step + base_idx;
             if (virtual_mode) {
                 uint32_t active_size =
-                    i < 2 ? (uint32_t)(domain_size >> 2)
-                          : (i < 4 ? (uint32_t)(domain_size >> 1) : (uint32_t)domain_size);
+                    i < Z_COUNT / 4
+                        ? (uint32_t)(domain_size >> 2)
+                        : (i < Z_COUNT / 2
+                               ? (uint32_t)(domain_size >> 1)
+                               : (uint32_t)domain_size);
                 virtual_node_store(
                     inout,
                     (uint32_t)out_idx,
@@ -1886,21 +1894,196 @@ void bit_rev_frac_build_k2_kernel(
 
     } while ((tid += blockDim.x*gridDim.x) < step);
     // Note: the original bit_rev_permutation_z guards this with "Z_COUNT <= WARP_SIZE &&"
-    // to prevent register spills when Z_COUNT > WARP_SIZE. Z_COUNT=8 is always <= 32.
+    // to prevent register spills when Z_COUNT > WARP_SIZE. Both variants are <= 32.
+}
+
+__device__ __forceinline__ FpExt shfl_xor_fpext(
+    unsigned subgroup_mask, FpExt value, uint32_t lane_mask)
+{
+    FpExt result;
+    #pragma unroll
+    for (uint32_t limb = 0; limb < 4; ++limb) {
+        result.elems[limb] = Fp::fromRaw(
+            __shfl_xor_sync(subgroup_mask, value.elems[limb].asRaw(), lane_mask));
+    }
+    return result;
+}
+
+__device__ __forceinline__ FracExt shfl_xor_fracext(
+    unsigned subgroup_mask, FracExt value, uint32_t lane_mask)
+{
+    return {
+        shfl_xor_fpext(subgroup_mask, value.p, lane_mask),
+        shfl_xor_fpext(subgroup_mask, value.q, lane_mask),
+    };
+}
+
+// Transpose a 4x4 register tile across a four-lane subgroup. Before the transpose,
+// lane l owns values[l][j]. Afterwards lane l owns values[j][l]. Each stage swaps
+// one coordinate bit between the physical lane and register index. Every lane named
+// in subgroup_mask executes every shuffle.
+__device__ __forceinline__ void transpose_fracext_z4(
+    FracExt values[4], uint32_t lane_in_group, unsigned subgroup_mask)
+{
+    #pragma unroll
+    for (uint32_t lane_mask = 1; lane_mask < 4; lane_mask <<= 1) {
+        #pragma unroll
+        for (uint32_t base = 0; base < 4; base += 2 * lane_mask) {
+            #pragma unroll
+            for (uint32_t offset = 0; offset < lane_mask; ++offset) {
+                uint32_t lo_idx = base + offset;
+                uint32_t hi_idx = lo_idx + lane_mask;
+                FracExt lo_from_hi_lane =
+                    shfl_xor_fracext(subgroup_mask, values[hi_idx], lane_mask);
+                FracExt hi_from_lo_lane =
+                    shfl_xor_fracext(subgroup_mask, values[lo_idx], lane_mask);
+                if ((lane_in_group & lane_mask) != 0) {
+                    values[lo_idx] = lo_from_hi_lane;
+                } else {
+                    values[hi_idx] = hi_from_lo_lane;
+                }
+            }
+        }
+    }
+}
+
+__device__ __forceinline__ void build_k2_z4_in_registers(FracExt values[4], FpExt alpha)
+{
+    #pragma unroll
+    for (uint32_t i = 0; i < 4; ++i)
+        values[i].q += alpha;
+
+    // Logical row slots are values[bit_rev(i, 2)]. Thus the K=2 tree operations
+    // (row[0] += row[2], row[1] += row[3], row[0] += row[1]) become:
+    frac_add_inplace(values[0], values[1]);
+    frac_add_inplace(values[2], values[3]);
+    frac_add_inplace(values[0], values[2]);
+}
+
+__device__ __forceinline__ void store_k2_z4_register_tile(
+    FracExt* inout,
+    FracExt values[4],
+    index_t step,
+    index_t target_base,
+    uint32_t output_suffix,
+    bool virtual_mode,
+    uint32_t real_len,
+    uint32_t domain_size)
+{
+    #pragma unroll
+    for (uint32_t i = 0; i < 4; ++i) {
+        index_t out_idx = i * step + target_base + output_suffix;
+        FracExt value = values[bit_rev(i, 2)];
+        if (virtual_mode) {
+            uint32_t active_size =
+                i < 1 ? (domain_size >> 2)
+                      : (i < 2 ? (domain_size >> 1) : domain_size);
+            virtual_node_store(
+                inout,
+                (uint32_t)out_idx,
+                active_size,
+                real_len,
+                domain_size,
+                value
+            );
+        } else {
+            inout[out_idx] = value;
+        }
+    }
+}
+
+// Z=4 alternative that replaces the 32 KiB shared-memory transpose with two
+// four-lane butterfly shuffle stages. The output suffix is bit-reversed so the
+// transposed register row lands at exactly the same dense indices as the shared
+// kernel. For an off-diagonal group pair both source tiles must remain live until
+// the first output is written, because either output overwrites the other tile's
+// source addresses.
+__global__ void bit_rev_frac_build_k2_z4_shuffle_kernel(
+    FracExt* inout, uint32_t real_len, uint32_t lg_domain_size, FpExt alpha)
+{
+    constexpr uint32_t Z_COUNT = 4;
+    constexpr uint32_t LG_Z_COUNT = 2;
+
+    uint32_t idx = threadIdx.x % Z_COUNT;
+    uint32_t rev = bit_rev(idx, LG_Z_COUNT);
+    uint32_t lane = threadIdx.x & (WARP_SIZE - 1);
+    uint32_t subgroup_base = lane - idx;
+    unsigned subgroup_mask = ((1u << Z_COUNT) - 1u) << subgroup_base;
+
+    index_t domain_size = (index_t)1 << lg_domain_size;
+    index_t step = (index_t)1 << (lg_domain_size - LG_Z_COUNT);
+    index_t tid = threadIdx.x + blockDim.x * (index_t)blockIdx.x;
+    bool virtual_mode = real_len < domain_size;
+    FracExt zero_frac = FracExt::zero();
+
+    #pragma unroll 1
+    do {
+        index_t group_idx = tid >> LG_Z_COUNT;
+        index_t group_rev = bit_rev(group_idx, lg_domain_size - 2 * LG_Z_COUNT);
+
+        if (group_idx > group_rev)
+            continue;
+
+        index_t base_idx = group_idx * Z_COUNT;
+        index_t base_rev = group_rev * Z_COUNT;
+        bool paired_group = group_idx != group_rev;
+
+        FracExt first[Z_COUNT];
+        FracExt second[Z_COUNT];
+        #pragma unroll
+        for (uint32_t i = 0; i < Z_COUNT; ++i) {
+            index_t first_src = i * step + base_idx + idx;
+            first[i] = first_src < real_len ? inout[first_src] : zero_frac;
+            if (paired_group) {
+                index_t second_src = i * step + base_rev + idx;
+                second[i] = second_src < real_len ? inout[second_src] : zero_frac;
+            }
+        }
+
+        transpose_fracext_z4(first, idx, subgroup_mask);
+        build_k2_z4_in_registers(first, alpha);
+        store_k2_z4_register_tile(
+            inout,
+            first,
+            step,
+            base_rev,
+            rev,
+            virtual_mode,
+            real_len,
+            (uint32_t)domain_size
+        );
+
+        if (!paired_group)
+            continue;
+
+        transpose_fracext_z4(second, idx, subgroup_mask);
+        build_k2_z4_in_registers(second, alpha);
+        store_k2_z4_register_tile(
+            inout,
+            second,
+            step,
+            base_idx,
+            rev,
+            virtual_mode,
+            real_len,
+            (uint32_t)domain_size
+        );
+    } while ((tid += blockDim.x * gridDim.x) < step);
 }
 
 // Fused bitrev + K=2 tree build for a single FracExt buffer.
 // Requires domain_size >= 256 (uses Z-tile shmem kernel).
 // Applies alpha to denominators and fuses tree layers 0 and 1 in shmem.
-extern "C" int _bit_rev_frac_ext_build_k2(
+template<uint32_t Z_COUNT>
+int launch_bit_rev_frac_ext_build_k2(
     FracExt* inout, size_t real_len, uint32_t lg_domain_size, FpExt alpha, cudaStream_t stream)
 {
-    constexpr uint32_t Z_COUNT = 8;
+    static_assert(Z_COUNT == 4 || Z_COUNT == 8, "K=2 bitrev supports Z_COUNT 4 or 8");
     constexpr uint32_t bsize = 256;
-    constexpr size_t shmem_bytes = (size_t)bsize * Z_COUNT * sizeof(FracExt);  // 64 KB
+    constexpr size_t shmem_bytes = (size_t)bsize * Z_COUNT * sizeof(FracExt);
     // Raise the per-block dynamic shmem limit once (static → paid on first call only).
     static const cudaError_t shmem_err = cudaFuncSetAttribute(
-        bit_rev_frac_build_k2_kernel,
+        bit_rev_frac_build_k2_kernel<Z_COUNT>,
         cudaFuncAttributeMaxDynamicSharedMemorySize,
         (int)shmem_bytes);
     if (shmem_err != cudaSuccess) return shmem_err;
@@ -1908,7 +2091,33 @@ extern "C" int _bit_rev_frac_ext_build_k2(
     if (domain_size < (size_t)(bsize * Z_COUNT))
         return cudaErrorInvalidValue;
     uint32_t grid_x = (uint32_t)(domain_size / Z_COUNT / bsize);
-    bit_rev_frac_build_k2_kernel<<<dim3(grid_x), bsize, shmem_bytes, stream>>>(
+    bit_rev_frac_build_k2_kernel<Z_COUNT><<<dim3(grid_x), bsize, shmem_bytes, stream>>>(
+        inout, (uint32_t)real_len, lg_domain_size, alpha);
+    return CHECK_KERNEL();
+}
+
+extern "C" int _bit_rev_frac_ext_build_k2(
+    FracExt* inout, size_t real_len, uint32_t lg_domain_size, FpExt alpha, cudaStream_t stream)
+{
+    return launch_bit_rev_frac_ext_build_k2<8>(inout, real_len, lg_domain_size, alpha, stream);
+}
+
+extern "C" int _bit_rev_frac_ext_build_k2_z4(
+    FracExt* inout, size_t real_len, uint32_t lg_domain_size, FpExt alpha, cudaStream_t stream)
+{
+    return launch_bit_rev_frac_ext_build_k2<4>(inout, real_len, lg_domain_size, alpha, stream);
+}
+
+extern "C" int _bit_rev_frac_ext_build_k2_z4_shuffle(
+    FracExt* inout, size_t real_len, uint32_t lg_domain_size, FpExt alpha, cudaStream_t stream)
+{
+    constexpr uint32_t Z_COUNT = 4;
+    constexpr uint32_t bsize = 256;
+    size_t domain_size = (size_t)1 << lg_domain_size;
+    if (domain_size < (size_t)(bsize * Z_COUNT))
+        return cudaErrorInvalidValue;
+    uint32_t grid_x = (uint32_t)(domain_size / Z_COUNT / bsize);
+    bit_rev_frac_build_k2_z4_shuffle_kernel<<<dim3(grid_x), bsize, 0, stream>>>(
         inout, (uint32_t)real_len, lg_domain_size, alpha);
     return CHECK_KERNEL();
 }

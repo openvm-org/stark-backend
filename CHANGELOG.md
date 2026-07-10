@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+### Changed
+- (CUDA backend) Use a Z=4 register-shuffle transpose by default for the fused fractional-sumcheck bit-reversal and first two tree layers. Set `SWIRL_CUDA_GKR_BITREV_Z_COUNT=8` to restore the original Z=8 kernel or `SWIRL_CUDA_GKR_BITREV_Z4_SHUFFLE=0` to select the shared-memory Z=4 path.
+
 ## v2.0.0 (2026-07-06)
 
 ### Added

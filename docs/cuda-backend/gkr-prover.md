@@ -106,6 +106,8 @@ In the natural (big-endian) ordering, leaf at index `i` corresponds to hypercube
 
 Before building the tree, the leaves are permuted into bit-reversed order. This changes the tree wiring so that each layer's children are at stride `half` (a power of 2) apart in memory, which gives coalesced warp accesses since adjacent threads read adjacent positions.
 
+For domains larger than 1024, `bit_rev_frac_build_k2_kernel<Z_COUNT>` fuses this permutation with the first two tree layers. The default path uses a Z=4 two-stage register-shuffle transpose with no dynamic shared memory. The shuffle kernel bit-reverses its output suffix so its register-transposed rows land at exactly the same dense indices as the original Z=8 kernel. Set `SWIRL_CUDA_GKR_BITREV_Z_COUNT=8` to restore the original 64 KiB shared-memory geometry, or set `SWIRL_CUDA_GKR_BITREV_Z4_SHUFFLE=0` to use the 32 KiB shared-memory Z=4 transpose. The shuffle path retains both four-element source tiles during off-diagonal in-place swaps, so it uses more registers even though it eliminates shared-memory allocation and barriers.
+
 The tree kernel pairs `layer[idx]` with `layer[idx + half]` where `half` is halved each layer. In bit-reversed order, this means the tree sums variables from last to first (x_n, x_{n-1}, ..., x_1).
 
 Concrete example with `n = 3` (8 leaves):
@@ -134,8 +136,8 @@ This means only a single buffer of `2^n` elements is needed (the size of the lea
 
 Steps:
 
-1. **Bit-reverse** the leaves (`bit_rev_frac_ext`).
-2. **Build tree** by `n` rounds of in-place fractional addition, each halving the active size:
+1. **Bit-reverse and start the tree build.** For domains larger than 1024, the fused bit-reversal kernel also builds tree layers 0 and 1. Smaller domains use `bit_rev_frac_ext` followed by a separate layer-0 build.
+2. **Build the remaining tree layers** by in-place fractional addition, fusing consecutive pairs of layers where possible. Each layer halves the active size:
    ```
    for idx < half:
        layer[idx] = frac_add(layer[idx], layer[idx + half])
@@ -149,8 +151,11 @@ Steps:
 This completes GKR round `j = 1` (which has a trivial 0-round sumcheck). The remaining GKR rounds `j = 2, ..., n` each revert the next tree layer and run a `j - 1` round sumcheck — see "Sumcheck round strategies" below.
 
 Kernels:
-- `bit_rev_permutation_z` — bit-reversal permutation of `(EF, EF)` pairs
-- `frac_build_tree_layer_kernel<false>` — tree build (`frac_add_inplace`)
+- `bit_rev_frac_build_k2_z4_shuffle_kernel` — default fused bit-reversal and first two tree layers for large domains
+- `bit_rev_frac_build_k2_kernel<4|8>` — shared-memory Z=4 and Z=8 fused alternatives
+- `bit_rev_permutation_z` — standalone bit-reversal fallback for smaller dense domains
+- `frac_build_tree_two_layers_kernel` — fused pair of remaining tree-build layers
+- `frac_build_tree_layer_kernel<false>` — single tree-build layer (`frac_add_inplace`)
 - `frac_build_tree_layer_kernel<true>` — tree revert (`frac_unadd_inplace`)
 
 ### Sumcheck round implementation
