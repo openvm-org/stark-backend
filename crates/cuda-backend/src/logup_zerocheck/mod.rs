@@ -23,7 +23,6 @@ use openvm_cuda_common::{
     stream::GpuDeviceCtx,
 };
 use openvm_stark_backend::{
-    air_builders::symbolic::SymbolicConstraints,
     calculate_n_logup,
     dft::Radix2BowersSerial,
     p3_matrix::dense::RowMajorMatrix,
@@ -86,7 +85,10 @@ use batch_mle_monomial::{
 pub use errors::*;
 pub use fractional::{fractional_sumcheck_gpu, make_synthetic_leaves, FractionalInputSize};
 use gkr_input::{collect_trace_interactions, log_gkr_input_evals};
-use round0::evaluate_round0_constraints_gpu;
+use round0::{
+    compute_logup_round0_weights, evaluate_round0_constraints_gpu, logup_r0_scratch_capacities,
+    zerocheck_r0_scratch_capacities, Round0Scratch,
+};
 use stage::{RoundStager, StagedSlice};
 
 /// When `num_monomials >= DAG_FALLBACK_MONOMIAL_RATIO * rules_len`, use DAG evaluation
@@ -789,27 +791,35 @@ impl<'a, HS: GpuHashScheme> LogupZerocheckGpu<'a, HS> {
             .as_ref()
             .expect("lambda powers must be set before round-0 evaluation");
 
-        // Loop through one AIR at a time; it is more efficient to do everything for one AIR
-        // together
-        for (trace_idx, ((air_idx, air_ctx), &n, selectors_cube, public_values, eq_3bs)) in izip!(
-            &ctx.per_trace,
-            &self.n_per_trace,
-            &selectors_base,
-            &self.public_values_per_trace,
-            &self.eq_3b_per_trace,
-        )
-        .enumerate()
+        // Round-0 evaluation is phased to avoid serializing the GPU on per-AIR
+        // readbacks: stage every AIR's parameter tables (one upload), launch all
+        // round-0 kernels back-to-back, then read the results and do the host-side
+        // interpolations. Intermediate buffers are freed stream-ordered per launch,
+        // so peak memory matches the former one-AIR-at-a-time loop.
+        struct Round0Plan {
+            trace_idx: usize,
+            n: isize,
+            local_constraint_deg: usize,
+            omega_root: F,
+            height: u32,
+            n_lift: usize,
+            main_parts: StagedSlice<*const F>,
+            /// `(numer_weights, denom_weights, denom_sum_init)` for AIRs with interactions
+            logup_weights: Option<(StagedSlice<EF>, StagedSlice<EF>, EF)>,
+        }
+
+        self.stager.begin_round(&self.device_ctx);
+        let max_temp_bytes = self.memory_limit_bytes;
+        let mut scratch_intermed = 0usize;
+        let mut scratch_zc = 0usize;
+        let mut scratch_logup = 0usize;
+        let mut plans: Vec<Round0Plan> = Vec::with_capacity(num_present_airs);
+        for (trace_idx, ((air_idx, air_ctx), &n, eq_3bs)) in
+            izip!(&ctx.per_trace, &self.n_per_trace, &self.eq_3b_per_trace,).enumerate()
         {
-            debug!("starting batch constraints for air_idx={air_idx} (trace_idx={trace_idx})");
+            debug!("staging batch constraints for air_idx={air_idx} (trace_idx={trace_idx})");
             let single_pk = &self.pk.per_air[*air_idx];
-            // Includes both plain AIR constraints and symbolic interactions
-            let single_air_constraints =
-                SymbolicConstraints::from(&single_pk.vk.symbolic_constraints);
             let local_constraint_deg = single_pk.vk.max_constraint_degree as usize;
-            debug_assert_eq!(
-                single_air_constraints.max_constraint_degree(),
-                local_constraint_deg
-            );
             assert!(
                 local_constraint_deg <= self.constraint_degree,
                 "Max constraint degree ({local_constraint_deg}) of AIR {air_idx} exceeds the global maximum {}",
@@ -827,30 +837,140 @@ impl<'a, HS: GpuHashScheme> LogupZerocheckGpu<'a, HS> {
                 main_parts.push(committed.trace.buffer().as_ptr());
             }
             main_parts.push(air_ctx.common_main.buffer().as_ptr());
-            let d_main_parts = main_parts.to_device_on(&self.device_ctx)?;
+            let main_parts = self.stager.push(&main_parts);
 
+            // The interactions DAG is cached at keygen; only the challenge-dependent
+            // weight vectors are computed (and staged) per prove.
+            let logup_weights = if eq_3bs.is_empty() {
+                None
+            } else {
+                let r0_rules = single_pk
+                    .other_data
+                    .interaction_round0
+                    .as_ref()
+                    .expect("AIR with interactions must have interaction_round0 rules");
+                let (numer_weights, denom_weights, denom_sum_init) =
+                    compute_logup_round0_weights(r0_rules, eq_3bs, &self.beta_pows);
+                Some((
+                    self.stager.push(&numer_weights),
+                    self.stager.push(&denom_weights),
+                    denom_sum_init,
+                ))
+            };
+
+            // Track the scratch high-water marks so the shared scratch is allocated once
+            // before any launch (growth mid-batch would reallocate while older scratch is
+            // still pending stream-ordered frees).
             let n_lift = n.max(0) as usize;
-            let eq_xi_tree = &self.eq_xis[&n_lift];
-            let max_temp_bytes = self.memory_limit_bytes;
+            let num_cosets_zc = local_constraint_deg.saturating_sub(1);
+            let (i_zc, t_zc) = zerocheck_r0_scratch_capacities(
+                single_pk.other_data.zerocheck_round0.inner.buffer_size,
+                1 << l_skip,
+                1 << n_lift,
+                num_cosets_zc as u32,
+                max_temp_bytes,
+            );
+            scratch_intermed = scratch_intermed.max(i_zc);
+            scratch_zc = scratch_zc.max(t_zc);
+            if let Some(r0_rules) = single_pk.other_data.interaction_round0.as_ref() {
+                if logup_weights.is_some() {
+                    let (i_lg, t_lg) = logup_r0_scratch_capacities(
+                        r0_rules.buffer_size,
+                        1 << l_skip,
+                        1 << n_lift,
+                        local_constraint_deg as u32,
+                        max_temp_bytes,
+                    );
+                    scratch_intermed = scratch_intermed.max(i_lg);
+                    scratch_logup = scratch_logup.max(t_lg);
+                }
+            }
+
+            plans.push(Round0Plan {
+                trace_idx,
+                n,
+                local_constraint_deg,
+                omega_root,
+                height: height as u32,
+                n_lift,
+                main_parts,
+                logup_weights,
+            });
+        }
+        self.stager.commit(&self.device_ctx)?;
+
+        let mut r0_scratch = Round0Scratch::new();
+        r0_scratch.ensure(
+            scratch_intermed,
+            scratch_zc,
+            scratch_logup,
+            &self.device_ctx,
+        );
+
+        // Launch all round-0 kernels; reads are deferred below.
+        let mut outputs: Vec<(DeviceBuffer<EF>, DeviceBuffer<Frac<EF>>)> =
+            Vec::with_capacity(plans.len());
+        for plan in &plans {
+            let (air_idx, _) = &ctx.per_trace[plan.trace_idx];
+            let single_pk = &self.pk.per_air[*air_idx];
+            let selectors_cube = &selectors_base[plan.trace_idx];
+            let public_values = &self.public_values_per_trace[plan.trace_idx];
+            let eq_xi_tree = &self.eq_xis[&plan.n_lift];
+            let main_parts_ptr = self.stager.ptr(plan.main_parts);
             // local_constraint_deg = 0 means no constraints. The only way that linear constraints
             // on trace polynomials could vanish on 2^l_skip points is if the constraint polynomial
             // is identically zero. Thus for local_constraint_deg = 0 or 1, we must have `s'_0 = 0`.
-            let num_cosets_zc = local_constraint_deg.saturating_sub(1);
+            let num_cosets_zc = plan.local_constraint_deg.saturating_sub(1);
             let sum_buffer = evaluate_round0_constraints_gpu(
                 single_pk,
                 selectors_cube.buffer(),
-                &d_main_parts,
+                main_parts_ptr,
                 public_values,
-                eq_xi_tree.get_ptr(n_lift),
+                eq_xi_tree.get_ptr(plan.n_lift),
                 d_lambda_pows,
+                &mut r0_scratch,
                 1 << l_skip,
-                1 << n_lift,
-                height as u32,
+                1 << plan.n_lift,
+                plan.height,
                 num_cosets_zc as u32,
-                omega_root,
+                plan.omega_root,
                 max_temp_bytes,
                 &self.device_ctx,
             )?;
+
+            // PERF: we could use an interaction-specific constraint degree here
+            let num_cosets_logup = plan.local_constraint_deg;
+            let sum = if let Some((numer_slice, denom_slice, denom_sum_init)) = plan.logup_weights {
+                evaluate_round0_interactions_gpu(
+                    single_pk,
+                    selectors_cube.buffer(),
+                    main_parts_ptr,
+                    public_values,
+                    eq_xi_tree.get_ptr(plan.n_lift),
+                    self.stager.ptr(numer_slice),
+                    self.stager.ptr(denom_slice),
+                    denom_sum_init,
+                    &mut r0_scratch,
+                    1 << l_skip,
+                    1 << plan.n_lift,
+                    plan.height,
+                    num_cosets_logup as u32,
+                    plan.omega_root,
+                    max_temp_bytes,
+                    &self.device_ctx,
+                )?
+            } else {
+                DeviceBuffer::new()
+            };
+            outputs.push((sum_buffer, sum));
+        }
+
+        // Read the results back (the first read synchronizes on all launches above)
+        // and run the host-side coset interpolations.
+        for (plan, (sum_buffer, sum)) in zip(&plans, outputs) {
+            let trace_idx = plan.trace_idx;
+            let num_cosets_zc = plan.local_constraint_deg.saturating_sub(1);
+            let omega_root = plan.omega_root;
             if !sum_buffer.is_empty() {
                 let q_evals = sum_buffer.to_host_on(&self.device_ctx)?;
                 let q = {
@@ -869,7 +989,7 @@ impl<'a, HS: GpuHashScheme> LogupZerocheckGpu<'a, HS> {
                     )
                 };
                 // sp_0 = (Z^{2^l_skip} - 1) * q
-                let sp_0_deg = sumcheck_round0_deg(l_skip, local_constraint_deg);
+                let sp_0_deg = sumcheck_round0_deg(l_skip, plan.local_constraint_deg);
                 let coeffs = (0..=sp_0_deg)
                     .map(|i| {
                         let mut c = -*q.coeffs().get(i).unwrap_or(&EF::ZERO);
@@ -889,32 +1009,14 @@ impl<'a, HS: GpuHashScheme> LogupZerocheckGpu<'a, HS> {
                 batch_sp_poly[2 * num_present_airs + trace_idx] = UnivariatePoly::new(coeffs);
             }
 
-            // PERF: we could use an interaction-specific constraint degree here
-            let num_cosets_logup = local_constraint_deg;
-            let sum = evaluate_round0_interactions_gpu(
-                single_pk,
-                &single_air_constraints,
-                selectors_cube.buffer(),
-                &d_main_parts,
-                public_values,
-                eq_xi_tree.get_ptr(n_lift),
-                &self.beta_pows,
-                eq_3bs,
-                1 << l_skip,
-                1 << n_lift,
-                height as u32,
-                num_cosets_logup as u32,
-                omega_root,
-                max_temp_bytes,
-                &self.device_ctx,
-            )?;
+            let num_cosets_logup = plan.local_constraint_deg;
             if !sum.is_empty() {
                 let evals = sum.to_host_on(&self.device_ctx)?;
                 let (mut numer, denom): (Vec<EF>, Vec<EF>) =
                     evals.into_iter().map(|frac| (frac.p, frac.q)).unzip();
-                if n.is_negative() {
+                if plan.n.is_negative() {
                     // normalize for lifting
-                    let norm_factor = F::from_u32(1 << n.unsigned_abs()).inverse();
+                    let norm_factor = F::from_u32(1 << plan.n.unsigned_abs()).inverse();
                     for s in &mut numer {
                         *s *= norm_factor;
                     }
@@ -942,6 +1044,7 @@ impl<'a, HS: GpuHashScheme> LogupZerocheckGpu<'a, HS> {
                 );
             }
         }
+
         self.mem
             .emit_metrics_with_label("prover.batch_constraints.round0");
         Ok(batch_sp_poly)
