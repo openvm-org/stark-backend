@@ -334,6 +334,17 @@ Buffers used at peak (workspace only; excludes input `layer`/leaves):
 Workspace upper bound (sum of the buffers above), using `|Frac| = 2 * |EF|`:
 - `W < (2^(n-w-1) + 2^(n-7) + 2^(n+w-10) + 2^floor(n/2) + 2^ceil(n/2) + 4^w + 2^(w+1) + 2) * |EF|`
 
+For small `n` the budgeted work buffer does not shrink below `2^22` `Frac` entries
+(`GKR_WINDOW_DEFAULT_MIN_N` in `FractionalInputSize::peak_work_buffer_bytes`), so the
+work-buffer term is effectively `max(2^(n-w-2), 2^21) * |Frac|`.
+
+The conservative interaction memory estimate in
+`openvm_stark_backend::memory_metering::ProvingMemoryConfig::interaction_memory_bytes_without_overhead`
+mirrors this accounting with `logical_len = 2^n <= 2 * real_len`: leaves
+`real_len * |Frac|`, work buffer `max(logical_len / 16, 2^22) * |Frac|`, block sums
+`logical_len / 256 * |Frac|`, plus a fixed `INTERACTION_MEMORY_OVERHEAD` for the
+challenge/metadata buffers. Keep the two in sync when changing buffer sizing here.
+
 Total GPU memory required (workspace + input leaves `2^n * |Frac| = 2^(n+1) * |EF|`):
 - `M_total < (2^(n+1) + 2^(n-w-1) + 2^(n-7) + 2^(n+w-10) + 2^floor(n/2) + 2^ceil(n/2) + 4^w + 2^(w+1) + 2) * |EF|`
 - With default `w = 3` and `|EF| = 16` bytes:
