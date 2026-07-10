@@ -7,9 +7,7 @@
 //! sumcheck round's tables go to the device in a single H2D copy (see
 //! [`super::stage`]).
 
-use openvm_cuda_common::{
-    copy::MemCopyD2H, d_buffer::DeviceBuffer, stream::GpuDeviceCtx,
-};
+use openvm_cuda_common::{copy::MemCopyD2H, d_buffer::DeviceBuffer, stream::GpuDeviceCtx};
 use openvm_stark_backend::prover::{fractional_sumcheck_gkr::Frac, DeviceMultiStarkProvingKey};
 
 use crate::{
@@ -412,10 +410,8 @@ impl<'a> LogupMleBatchBuilder<'a> {
             num_blocks * num_x as usize,
             &self.device_ctx,
         );
-        let mut output = DeviceBuffer::<Frac<EF>>::with_capacity_on(
-            num_airs * num_x as usize,
-            &self.device_ctx,
-        );
+        let mut output =
+            DeviceBuffer::<Frac<EF>>::with_capacity_on(num_airs * num_x as usize, &self.device_ctx);
         // SAFETY: All device pointers in the staged contexts were constructed from valid
         // DeviceBuffers that outlive this call, and the staged tables were committed by the
         // caller. The air_offsets table has length num_airs + 1 by construction.

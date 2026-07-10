@@ -1762,8 +1762,7 @@ impl<'a, HS: GpuHashScheme> LogupZerocheckGpu<'a, HS> {
             .flatten()
             .map(|m| m.width())
             .sum();
-        let gather =
-            DeviceBuffer::<EF>::with_capacity_on(total_width.max(1), &self.device_ctx);
+        let gather = DeviceBuffer::<EF>::with_capacity_on(total_width.max(1), &self.device_ctx);
         let mut gather_offset = 0usize;
         for mat in mat_evals_per_trace.iter().flatten() {
             debug_assert_eq!(
