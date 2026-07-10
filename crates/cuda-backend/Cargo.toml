@@ -3,6 +3,10 @@ name = "openvm-cuda-backend"
 version.workspace = true
 authors.workspace = true
 edition.workspace = true
+rust-version.workspace = true
+homepage.workspace = true
+repository.workspace = true
+license.workspace = true
 description = "OpenVM CUDA prover backend for the SWIRL proof system"
 
 [dependencies]
@@ -35,8 +39,8 @@ openvm-cuda-builder.workspace = true
 glob.workspace = true
 
 [dev-dependencies]
-openvm-stark-backend = { workspace = true, features = ["test-utils"] }
-openvm-backend-tests.workspace = true
+openvm-stark-backend = { path = "../stark-backend", default-features = false, features = ["test-utils"] }
+openvm-backend-tests = { path = "../backend-tests", default-features = false }
 p3-keccak-air.workspace = true
 eyre.workspace = true
 test-case.workspace = true

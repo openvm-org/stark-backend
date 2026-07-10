@@ -3,6 +3,10 @@ name = "openvm-stark-backend"
 version.workspace = true
 authors.workspace = true
 edition.workspace = true
+rust-version.workspace = true
+homepage.workspace = true
+repository.workspace = true
+license.workspace = true
 description = "Multi-matrix STARK backend for the SWIRL proof system"
 
 [dependencies]
@@ -45,9 +49,9 @@ tikv-jemallocator = { version = "0.6", optional = true }
 mimalloc = { version = "0.1.43", optional = true }
 
 [dev-dependencies]
-openvm-stark-backend = { workspace = true, features = ["test-utils"] }
-openvm-stark-sdk.workspace = true # dev-dependency is not circular
-openvm-backend-tests.workspace = true
+openvm-stark-backend = { path = ".", default-features = false, features = ["test-utils"] }
+openvm-stark-sdk = { path = "../stark-sdk", default-features = false } # dev-dependency is not circular
+openvm-backend-tests = { path = "../backend-tests", default-features = false }
 p3-baby-bear.workspace = true
 p3-bn254.workspace = true
 rand.workspace = true

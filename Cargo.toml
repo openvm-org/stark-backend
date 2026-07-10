@@ -4,7 +4,7 @@ edition = "2021"
 rust-version = "1.83"
 authors = ["OpenVM contributors"]
 homepage = "https://openvm.dev"
-repository = "https://github.com/openvm-org/"
+repository = "https://github.com/openvm-org/stark-backend"
 license = "MIT OR Apache-2.0"
 
 [workspace]
@@ -67,14 +67,14 @@ lto = "thin"
 
 [workspace.dependencies]
 # OpenVM
-openvm-stark-backend = { path = "crates/stark-backend", default-features = false }
-openvm-codec-derive = { path = "crates/stark-backend/codec-derive", default-features = false }
-openvm-stark-sdk = { path = "crates/stark-sdk", default-features = false }
-openvm-cpu-backend = { path = "crates/cpu-backend", default-features = false }
-openvm-cuda-builder = { path = "crates/cuda-builder", default-features = false }
-openvm-cuda-common = { path = "crates/cuda-common", default-features = false }
-openvm-cuda-backend = { path = "crates/cuda-backend", default-features = false }
-openvm-backend-tests = { path = "crates/backend-tests", default-features = false }
+openvm-stark-backend = { path = "crates/stark-backend", version = "2.0.0", default-features = false }
+openvm-codec-derive = { path = "crates/stark-backend/codec-derive", version = "2.0.0", default-features = false }
+openvm-stark-sdk = { path = "crates/stark-sdk", version = "2.0.0", default-features = false }
+openvm-cpu-backend = { path = "crates/cpu-backend", version = "2.0.0", default-features = false }
+openvm-cuda-builder = { path = "crates/cuda-builder", version = "2.0.0", default-features = false }
+openvm-cuda-common = { path = "crates/cuda-common", version = "2.0.0", default-features = false }
+openvm-cuda-backend = { path = "crates/cuda-backend", version = "2.0.0", default-features = false }
+openvm-backend-tests = { path = "crates/backend-tests", version = "2.0.0", default-features = false }
 
 # Plonky3 - we pin the exact version since this dependency is security critical
 p3-air = { version = "=0.4.3", default-features = false }
