@@ -3,7 +3,9 @@ use std::{array::from_fn, convert::TryInto, env, ffi::c_void, mem::transmute};
 use openvm_cuda_common::{
     copy::{cuda_memcpy_on, MemCopyD2H},
     d_buffer::DeviceBuffer,
+    error::MemCopyError,
     memory_manager::MemTracker,
+    pinned::PinnedBuffer,
     stream::GpuDeviceCtx,
 };
 use openvm_stark_backend::{
@@ -418,7 +420,7 @@ fn copy_compact_node_from_device(
     real_len: usize,
     logical_len: usize,
     alpha: EF,
-    copy_scratch: &mut DeviceBuffer<Frac<EF>>,
+    copy_scratch: &mut PinnedBuffer<Frac<EF>>,
     device_ctx: &GpuDeviceCtx,
 ) -> Result<Frac<EF>, FractionalSumcheckError> {
     let subtree_len = logical_len / active_size;
@@ -440,6 +442,7 @@ fn copy_compact_node_from_device(
 /// Observes s_evals in transcript, updates accumulators, and returns the sampled challenge.
 #[allow(clippy::too_many_arguments)]
 fn observe_and_update<SC, TS>(
+    rb: &mut PinnedBuffer<EF>,
     d_sum_evals: &DeviceBuffer<EF>,
     transcript: &mut TS,
     round_polys_eval: &mut Vec<[EF; GKR_S_DEG]>,
@@ -454,7 +457,7 @@ where
     TS: FiatShamirTranscript<SC>,
 {
     let (s_evals, sp_evals) =
-        reconstruct_s_evals(d_sum_evals, *prev_s_eval, xi_j, *eq_r_acc, device_ctx)?;
+        reconstruct_s_evals(rb, d_sum_evals, *prev_s_eval, xi_j, *eq_r_acc, device_ctx)?;
 
     for &eval in &s_evals {
         transcript.observe_ext(eval);
@@ -476,6 +479,7 @@ where
 /// See `docs/cuda-backend/gkr-prover.md` § "Sumcheck round strategies" for context.
 #[allow(clippy::too_many_arguments)]
 fn do_sumcheck_round_and_revert<SC, TS>(
+    rb: &mut PinnedBuffer<EF>,
     eq_buffer: &mut SqrtEqLayers,
     layer: &mut DeviceBuffer<Frac<EF>>,
     pq_size: usize,
@@ -513,6 +517,7 @@ where
     }
     eq_buffer.drop_layer();
     observe_and_update(
+        rb,
         d_sum_evals,
         transcript,
         round_polys_eval,
@@ -530,6 +535,7 @@ where
 /// round's compute, eliminating one kernel launch and reducing memory traffic.
 #[allow(clippy::too_many_arguments)]
 fn do_fused_sumcheck_round<SC, TS>(
+    rb: &mut PinnedBuffer<EF>,
     eq_buffer: &mut SqrtEqLayers,
     src_pq_buffer: &DeviceBuffer<Frac<EF>>,
     dst_pq_buffer: &mut DeviceBuffer<Frac<EF>>,
@@ -573,6 +579,7 @@ where
     }
     eq_buffer.drop_layer();
     observe_and_update(
+        rb,
         d_sum_evals,
         transcript,
         round_polys_eval,
@@ -587,6 +594,7 @@ where
 /// In-place variant of [`do_fused_sumcheck_round`]. Reads and writes to the same buffer.
 #[allow(clippy::too_many_arguments)]
 fn do_fused_sumcheck_round_inplace<SC, TS>(
+    rb: &mut PinnedBuffer<EF>,
     eq_buffer: &mut SqrtEqLayers,
     pq_buffer: &mut DeviceBuffer<Frac<EF>>,
     src_pq_size: usize,
@@ -632,6 +640,7 @@ where
     }
     eq_buffer.drop_layer();
     observe_and_update(
+        rb,
         d_sum_evals,
         transcript,
         round_polys_eval,
@@ -777,7 +786,10 @@ where
     }
     mem.emit_metrics_with_label("frac_sumcheck.segment_tree");
     mem.tracing_info("fractional_sumcheck_gkr: after building segment tree");
-    let mut copy_scratch = DeviceBuffer::<Frac<EF>>::with_capacity_on(1, device_ctx);
+    let mut copy_scratch =
+        PinnedBuffer::<Frac<EF>>::with_capacity(1).map_err(MemCopyError::from)?;
+    // Pinned readback for per-round s-poly evaluations (one live copy at a time).
+    let mut rb_evals = PinnedBuffer::<EF>::with_capacity(GKR_S_DEG).map_err(MemCopyError::from)?;
     let root = copy_from_device(&layer, 0, &mut copy_scratch, device_ctx)?;
     unsafe {
         frac_build_tree_layer(&mut layer, 2, total_leaves, true, alpha, false, stream)
@@ -923,6 +935,7 @@ where
         // compute. This fuses frac_build_tree_layer(revert=true) with the first inner round
         // compute.
         let r0 = do_sumcheck_round_and_revert(
+            &mut rb_evals,
             &mut eq_buffer,
             &mut layer,
             pq_size,
@@ -973,6 +986,7 @@ where
 
                     let r = match target {
                         BufferTarget::LayerToWork => do_fused_sumcheck_round(
+                            &mut rb_evals,
                             &mut eq_buffer,
                             &layer,
                             &mut work_buffer,
@@ -993,6 +1007,7 @@ where
                             device_ctx,
                         )?,
                         BufferTarget::WorkToLayer => do_fused_sumcheck_round(
+                            &mut rb_evals,
                             &mut eq_buffer,
                             &work_buffer,
                             &mut layer,
@@ -1013,6 +1028,7 @@ where
                             device_ctx,
                         )?,
                         BufferTarget::InPlaceLayer => do_fused_sumcheck_round_inplace(
+                            &mut rb_evals,
                             &mut eq_buffer,
                             &mut layer,
                             src_pq_size,
@@ -1034,6 +1050,7 @@ where
                             device_ctx,
                         )?,
                         BufferTarget::InPlaceWork => do_fused_sumcheck_round_inplace(
+                            &mut rb_evals,
                             &mut eq_buffer,
                             &mut work_buffer,
                             src_pq_size,
@@ -1317,6 +1334,7 @@ where
                         }
                         eq_buffer.drop_layer();
                         let r = observe_and_update(
+                            &mut rb_evals,
                             &d_sum_evals,
                             transcript,
                             &mut round_polys_eval,
@@ -1411,6 +1429,7 @@ where
                     }
                     eq_buffer.drop_layer();
                     prev_r = observe_and_update(
+                        &mut rb_evals,
                         &d_sum_evals,
                         transcript,
                         &mut round_polys_eval,
@@ -1424,6 +1443,7 @@ where
                     for &xi_j in xi_prev.iter().skip(base + 1) {
                         let src_pq_size = pq_size;
                         prev_r = do_fused_sumcheck_round_inplace(
+                            &mut rb_evals,
                             &mut eq_buffer,
                             active_pq,
                             src_pq_size,
@@ -1498,20 +1518,23 @@ where
 fn copy_from_device<T: Copy>(
     buf: &DeviceBuffer<T>,
     index: usize,
-    scratch: &mut DeviceBuffer<T>,
+    pinned: &mut PinnedBuffer<T>,
     device_ctx: &GpuDeviceCtx,
 ) -> Result<T, FractionalSumcheckError> {
-    debug_assert!(!scratch.is_empty());
+    // Direct DMA into pinned host memory (no pageable staging); one element.
     unsafe {
-        cuda_memcpy_on::<true, true>(
-            scratch.as_mut_raw_ptr(),
+        cuda_memcpy_on::<true, false>(
+            pinned.as_mut_ptr() as *mut std::ffi::c_void,
             buf.as_ptr().add(index) as *const std::ffi::c_void,
             std::mem::size_of::<T>(),
             device_ctx,
         )?;
     }
-    let host = scratch.to_host_on(device_ctx)?;
-    Ok(host[0])
+    device_ctx
+        .stream
+        .to_host_sync()
+        .map_err(MemCopyError::from)?;
+    Ok(pinned.as_slice(1)[0])
 }
 
 /// Reduces claims to a single evaluation point using linear interpolation.
@@ -1531,13 +1554,15 @@ fn reduce_to_single_evaluation<SC: StarkProtocolConfig<EF = EF>>(
 ///
 /// See `docs/cuda-backend/gkr-prover.md` § "Sumcheck round implementation" for the derivation.
 fn reconstruct_s_evals(
+    rb: &mut PinnedBuffer<EF>,
     d_sum_evals: &DeviceBuffer<EF>,
     prev_s_eval: EF,
     xi_j: EF,
     eq_r_acc: EF,
     device_ctx: &GpuDeviceCtx,
 ) -> Result<([EF; GKR_S_DEG], [EF; GKR_S_DEG]), FractionalSumcheckError> {
-    let sp_vec = d_sum_evals.to_host_on(device_ctx)?;
+    let n = d_sum_evals.to_pinned_on(rb, device_ctx)?;
+    let sp_vec = rb.as_slice(n);
     debug_assert_eq!(sp_vec.len(), GKR_S_DEG - 1);
 
     // sp_evals holds evaluations of degree 2 poly `eq(xi_{j+1..}, r_{j+1..}) * s'(X)` at {0,1,2}

@@ -98,6 +98,17 @@ impl<T> MemCopyD2H<T> for DeviceMatrix<T> {
     fn to_host_on(&self, device_ctx: &GpuDeviceCtx) -> Result<Vec<T>, MemCopyError> {
         self.buffer.to_host_on(device_ctx)
     }
+
+    fn to_pinned_on(
+        &self,
+        dst: &mut openvm_cuda_common::pinned::PinnedBuffer<T>,
+        device_ctx: &GpuDeviceCtx,
+    ) -> Result<usize, MemCopyError>
+    where
+        T: Copy,
+    {
+        self.buffer.to_pinned_on(dst, device_ctx)
+    }
 }
 
 impl<T: Debug> Debug for DeviceMatrix<T> {
