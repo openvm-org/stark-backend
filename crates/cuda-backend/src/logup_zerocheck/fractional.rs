@@ -248,6 +248,17 @@ fn precompute_m_min_n() -> usize {
         .unwrap_or(GKR_WINDOW_DEFAULT_MIN_N)
 }
 
+/// Requested number of early (small) outer GKR rounds to run on the host CPU, eliminating their
+/// per-inner-round kernel launches and D2H syncs. Overridable via `SWIRL_CUDA_GKR_CPU_TAIL_ROUNDS`;
+/// `0` disables the tail. The effective `K` is additionally clamped to `total_rounds - 2` and to
+/// `precompute_m_min_n() - 1` (so every host round is a plain FoldEval round on the GPU side).
+fn gkr_cpu_tail_rounds() -> usize {
+    env::var("SWIRL_CUDA_GKR_CPU_TAIL_ROUNDS")
+        .ok()
+        .and_then(|val| val.parse::<usize>().ok())
+        .unwrap_or(13)
+}
+
 fn precompute_m_build_tail_tile(
     rem_n: usize,
     w: usize,
@@ -891,7 +902,32 @@ where
     let mut eq_suffix_buffer = DeviceBuffer::<EF>::new();
     // Note: `stream` local variable is used for FFI calls throughout the loop.
 
-    for round in 1..total_rounds {
+    // CPU tail: run the early (small) outer rounds `1..=K` on the host to eliminate their
+    // per-inner-round kernel launches and D2H syncs. `K` is clamped so every host round is a plain
+    // FoldEval round on the GPU side and the GPU loop can resume at round `K+1` unchanged.
+    let k = gkr_cpu_tail_rounds()
+        .min(total_rounds.saturating_sub(2))
+        .min(precompute_m_min_n.saturating_sub(1));
+    let start_round = if k >= 1 {
+        run_gkr_cpu_tail::<SC, TS>(
+            transcript,
+            &mut layer,
+            k,
+            real_len,
+            total_leaves,
+            alpha,
+            virtual_input,
+            &mut claims_per_layer,
+            &mut sumcheck_polys,
+            &mut xi_prev,
+            device_ctx,
+        )?;
+        k + 1
+    } else {
+        1
+    };
+
+    for round in start_round..total_rounds {
         let gkr_round_span = debug_span!("GKR", round).entered();
 
         // Note: frac_build_tree_layer revert is now fused into do_sumcheck_round_and_revert below.
@@ -1563,6 +1599,23 @@ fn reconstruct_s_evals(
 ) -> Result<([EF; GKR_S_DEG], [EF; GKR_S_DEG]), FractionalSumcheckError> {
     let n = d_sum_evals.to_pinned_on(rb, device_ctx)?;
     let sp_vec = rb.as_slice(n);
+    Ok(reconstruct_s_evals_from_sp(
+        sp_vec,
+        prev_s_eval,
+        xi_j,
+        eq_r_acc,
+    ))
+}
+
+/// Pure-host half of [`reconstruct_s_evals`]: reconstructs the full `s({1,2,3})` evaluations from
+/// the GPU-computed (or host-computed) `s'({1,2})` values. Split out so the CPU tail can feed host
+/// sums through the identical math.
+fn reconstruct_s_evals_from_sp(
+    sp_vec: &[EF],
+    prev_s_eval: EF,
+    xi_j: EF,
+    eq_r_acc: EF,
+) -> ([EF; GKR_S_DEG], [EF; GKR_S_DEG]) {
     debug_assert_eq!(sp_vec.len(), GKR_S_DEG - 1);
 
     // sp_evals holds evaluations of degree 2 poly `eq(xi_{j+1..}, r_{j+1..}) * s'(X)` at {0,1,2}
@@ -1592,7 +1645,348 @@ fn reconstruct_s_evals(
         eval_eq_mle(&[xi_j], &[x]) * sp_eval
     });
 
-    Ok((s_evals, sp_evals))
+    (s_evals, sp_evals)
+}
+
+/// Host mirror of [`observe_and_update`] that takes the `s'({1,2})` values computed on the CPU
+/// instead of reading them back from the device.
+#[allow(clippy::too_many_arguments)]
+fn observe_and_update_host<SC, TS>(
+    sp_vec: &[EF],
+    transcript: &mut TS,
+    round_polys_eval: &mut Vec<[EF; GKR_S_DEG]>,
+    r_vec: &mut Vec<EF>,
+    prev_s_eval: &mut EF,
+    xi_j: EF,
+    eq_r_acc: &mut EF,
+) -> EF
+where
+    SC: StarkProtocolConfig<EF = EF>,
+    TS: FiatShamirTranscript<SC>,
+{
+    let (s_evals, sp_evals) = reconstruct_s_evals_from_sp(sp_vec, *prev_s_eval, xi_j, *eq_r_acc);
+
+    for &eval in &s_evals {
+        transcript.observe_ext(eval);
+    }
+    round_polys_eval.push(s_evals);
+
+    let r = transcript.sample_ext();
+    r_vec.push(r);
+
+    let eq_r = eval_eq_mle(&[xi_j], &[r]);
+    *eq_r_acc *= eq_r;
+    *prev_s_eval = eq_r * interpolate_quadratic_at_012(&sp_evals, r);
+
+    r
+}
+
+/// Host mirror of `accumulate_compute_contributions` (`gkr.cu:190`): accumulates one hypercube
+/// point's contribution to `s'(1)` (`local0`) and `s'(2)` (`local1`).
+#[allow(clippy::too_many_arguments)]
+fn accumulate_gkr_contrib(
+    eq_val: EF,
+    lambda: EF,
+    p0_even: EF,
+    q0_even: EF,
+    p0_odd: EF,
+    q0_odd: EF,
+    p1_even: EF,
+    q1_even: EF,
+    p1_odd: EF,
+    q1_odd: EF,
+    local0: &mut EF,
+    local1: &mut EF,
+) {
+    let p0_diff = p0_odd - p0_even;
+    let q0_diff = q0_odd - q0_even;
+    let p1_diff = p1_odd - p1_even;
+    let q1_diff = q1_odd - q1_even;
+
+    let mut p_j0 = p0_even + lambda * q0_even;
+    let mut q_j0 = q0_even;
+    let mut p_j1 = p1_even;
+    let mut q_j1 = q1_even;
+
+    let lambda_times_q0_diff = lambda * q0_diff;
+
+    for i in 0..GKR_S_DEG - 1 {
+        p_j0 += p0_diff;
+        p_j0 += lambda_times_q0_diff;
+        q_j0 += q0_diff;
+        p_j1 += p1_diff;
+        q_j1 += q1_diff;
+
+        let contrib = eq_val * (p_j0 * q_j1 + p_j1 * q_j0);
+        if i == 0 {
+            *local0 += contrib;
+        } else {
+            *local1 += contrib;
+        }
+    }
+}
+
+/// Builds the dense `eq` weight table used by inner round `j` of outer round `round`, matching the
+/// value that `sqrt_buffer_get` returns for `eq_buffer` after `j` `drop_layer`s. The eq buffer is
+/// built from `xi_prev[1..round]` in the bit-reversed layout, so bit `k` of the index pairs with
+/// `xi_prev[round - 1 - k]` regardless of `j`; only the number of variables shrinks with `j`.
+fn gkr_tail_eq_table(xi_prev: &[EF], round: usize, j: usize) -> Vec<EF> {
+    let n = round - 1 - j;
+    let mut out = vec![EF::ONE; 1 << n];
+    for k in 0..n {
+        let x = xi_prev[round - 1 - k];
+        let one_minus = EF::ONE - x;
+        let step = 1usize << k;
+        let mut base = 0;
+        while base < (1 << n) {
+            for off in 0..step {
+                let lo = base + off;
+                let hi = lo + step;
+                let v = out[lo];
+                out[lo] = v * one_minus;
+                out[hi] = v * x;
+            }
+            base += 2 * step;
+        }
+    }
+    out
+}
+
+/// Linear fold of a fractional pair: `{a.p + r*(b.p - a.p), a.q + r*(b.q - a.q)}` (`gkr.cu:335`).
+fn gkr_fold_pair(a: Frac<EF>, b: Frac<EF>, r: EF) -> Frac<EF> {
+    Frac {
+        p: a.p + r * (b.p - a.p),
+        q: a.q + r * (b.q - a.q),
+    }
+}
+
+/// Host mirror of `fold_ef_columns_kernel` (`gkr.cu:311`) on a dense buffer: folds a size-`sz`
+/// buffer down to `sz/2`, pairing `(idx, idx + sz/4)` into `dst[idx]` and
+/// `(idx + sz/2, idx + 3*sz/4)` into `dst[idx + sz/4]`.
+fn gkr_fold_frac(src: &[Frac<EF>], r: EF) -> Vec<Frac<EF>> {
+    let size = src.len();
+    let quarter = size >> 2;
+    let half = size >> 1;
+    let mut dst = vec![Frac::default(); half];
+    for idx in 0..quarter {
+        dst[idx] = gkr_fold_pair(src[idx], src[idx + quarter], r);
+        dst[idx + quarter] = gkr_fold_pair(src[idx + half], src[idx + half + quarter], r);
+    }
+    dst
+}
+
+/// Host mirror of `virtual_node_value` (`gkr.cu:39`) for a copied dense prefix of `layer`. Used
+/// only on internal levels (`active_size <= real_len`), where `dense_idx < real_len` always holds,
+/// so the "spilled leaf" branch never triggers.
+fn virtual_node_value_host(
+    layer_prefix: &[Frac<EF>],
+    dense_idx: usize,
+    active_size: usize,
+    real_len: usize,
+    logical_len: usize,
+    alpha: EF,
+) -> Frac<EF> {
+    let subtree_len = logical_len / active_size;
+    let start = bit_reverse_usize(dense_idx, log2_strict_usize(active_size)) * subtree_len;
+    if start >= real_len {
+        Frac {
+            p: EF::ZERO,
+            q: virtual_padding_q(alpha, subtree_len),
+        }
+    } else {
+        layer_prefix[dense_idx]
+    }
+}
+
+/// Runs one outer GKR round entirely on the host, given the dense full tree layer for this round
+/// (level `round + 1`, size `2^(round+1)`). Mirrors the transcript sequence of the GPU FoldEval
+/// path exactly (per-round lambda, per-inner-round `s`-poly observe + challenge, end-of-round
+/// claims + mu). Updates `claims_per_layer`, `sumcheck_polys`, and `xi_prev` in place.
+fn run_gkr_cpu_tail_round<SC, TS>(
+    transcript: &mut TS,
+    level: &[Frac<EF>],
+    round: usize,
+    claims_per_layer: &mut Vec<GkrLayerClaims<SC>>,
+    sumcheck_polys: &mut Vec<Vec<[EF; GKR_S_DEG]>>,
+    xi_prev: &mut Vec<EF>,
+) where
+    SC: StarkProtocolConfig<EF = EF>,
+    TS: FiatShamirTranscript<SC>,
+{
+    debug_assert_eq!(xi_prev.len(), round);
+    debug_assert_eq!(level.len(), 1 << (round + 1));
+
+    let lambda = transcript.sample_ext();
+    let (numer_claim, denom_claim) =
+        reduce_to_single_evaluation(claims_per_layer.last().unwrap(), /* mu */ xi_prev[0]);
+    let mut prev_s_eval = numer_claim + lambda * denom_claim;
+    let mut eq_r_acc = EF::ONE;
+
+    let mut round_polys_eval = Vec::with_capacity(round);
+    let mut r_vec = Vec::with_capacity(round);
+
+    let mut pq = level.to_vec();
+    // Inner rounds j = 0..round: compute s'(1), s'(2), then fold by the sampled challenge. This
+    // fuses the GPU's revert-round (j=0), fused fold+compute rounds (j=1..round-1), and final fold
+    // into a uniform compute-then-fold sequence over dense host buffers.
+    for j in 0..round {
+        let sz = pq.len();
+        let half = sz >> 1;
+        let quarter = sz >> 2;
+        let eq = gkr_tail_eq_table(xi_prev, round, j);
+        debug_assert_eq!(eq.len(), quarter);
+
+        let mut local0 = EF::ZERO;
+        let mut local1 = EF::ZERO;
+        for idx in 0..quarter {
+            let a = pq[idx];
+            let b = pq[idx + half];
+            let c = pq[idx + quarter];
+            let d = pq[idx + half + quarter];
+            accumulate_gkr_contrib(
+                eq[idx],
+                lambda,
+                a.p,
+                a.q,
+                c.p,
+                c.q,
+                b.p,
+                b.q,
+                d.p,
+                d.q,
+                &mut local0,
+                &mut local1,
+            );
+        }
+        let sp = [local0, local1];
+
+        let r = observe_and_update_host::<SC, TS>(
+            &sp,
+            transcript,
+            &mut round_polys_eval,
+            &mut r_vec,
+            &mut prev_s_eval,
+            xi_prev[j],
+            &mut eq_r_acc,
+        );
+        pq = gkr_fold_frac(&pq, r);
+    }
+
+    debug_assert_eq!(pq.len(), 2);
+    claims_per_layer.push(GkrLayerClaims {
+        p_xi_0: pq[0].p,
+        q_xi_0: pq[0].q,
+        p_xi_1: pq[1].p,
+        q_xi_1: pq[1].q,
+    });
+    let last = claims_per_layer.len() - 1;
+    transcript.observe_ext(claims_per_layer[last].p_xi_0);
+    transcript.observe_ext(claims_per_layer[last].q_xi_0);
+    transcript.observe_ext(claims_per_layer[last].p_xi_1);
+    transcript.observe_ext(claims_per_layer[last].q_xi_1);
+
+    let mu = transcript.sample_ext();
+    *xi_prev = [vec![mu], r_vec].concat();
+    sumcheck_polys.push(round_polys_eval);
+}
+
+/// Runs the early-round GKR CPU tail: reverts levels `2..=K+1` on device to materialise the full
+/// level-`K+1` layer, bulk-copies it to the host (resolving virtual padding), reconstructs the
+/// intermediate levels by folding up with `frac_add`, and runs outer rounds `1..=K` on the host.
+/// After it returns, `layer` is in exactly the state the GPU loop expects at round `K+1`.
+#[allow(clippy::too_many_arguments)]
+fn run_gkr_cpu_tail<SC, TS>(
+    transcript: &mut TS,
+    layer: &mut DeviceBuffer<Frac<EF>>,
+    k: usize,
+    real_len: usize,
+    total_leaves: usize,
+    alpha: EF,
+    virtual_input: bool,
+    claims_per_layer: &mut Vec<GkrLayerClaims<SC>>,
+    sumcheck_polys: &mut Vec<Vec<[EF; GKR_S_DEG]>>,
+    xi_prev: &mut Vec<EF>,
+    device_ctx: &GpuDeviceCtx,
+) -> Result<(), FractionalSumcheckError>
+where
+    SC: StarkProtocolConfig<EF = EF>,
+    TS: FiatShamirTranscript<SC>,
+{
+    let stream = device_ctx.stream.as_raw();
+
+    // Materialise the full level-(K+1) layer on device. Level 1 was already reverted before the
+    // round-0 claims were read; each revert reconstructs level `s` from level `s-1` + the preserved
+    // right half of level `s`, without touching the deeper right halves needed at round K+1.
+    for s in 2..=(k + 1) {
+        unsafe {
+            frac_build_tree_layer(layer, 1 << s, total_leaves, true, alpha, false, stream)
+                .map_err(FractionalSumcheckError::SegmentTree)?;
+        }
+    }
+
+    // One bulk D2H of the level-(K+1) prefix (enqueued after the reverts, same stream).
+    let level_size = 1usize << (k + 1);
+    let mut prefix =
+        PinnedBuffer::<Frac<EF>>::with_capacity(level_size).map_err(MemCopyError::from)?;
+    unsafe {
+        cuda_memcpy_on::<true, false>(
+            prefix.as_mut_ptr() as *mut c_void,
+            layer.as_ptr() as *const c_void,
+            level_size * std::mem::size_of::<Frac<EF>>(),
+            device_ctx,
+        )?;
+    }
+    device_ctx
+        .stream
+        .to_host_sync()
+        .map_err(MemCopyError::from)?;
+    let prefix = prefix.as_slice(level_size);
+
+    // Resolve virtual padding into a dense host copy of level K+1. `active_size = 2^(K+1) <=
+    // real_len`, so every stored `dense_idx < real_len` and no leaf-level spill can occur.
+    let top_level: Vec<Frac<EF>> = if virtual_input {
+        (0..level_size)
+            .map(|dense_idx| {
+                virtual_node_value_host(
+                    prefix,
+                    dense_idx,
+                    level_size,
+                    real_len,
+                    total_leaves,
+                    alpha,
+                )
+            })
+            .collect()
+    } else {
+        prefix.to_vec()
+    };
+
+    // Reconstruct levels K..=2 by folding up: level[l][i] = frac_add(level[l+1][i], level[l+1][i +
+    // 2^l]). `Frac`'s `Add` is exactly `frac_add`, and revert is its exact inverse, so these match
+    // the layers the GPU rounds 1..K would have reverted.
+    let mut levels: Vec<Vec<Frac<EF>>> = vec![Vec::new(); k + 2];
+    levels[k + 1] = top_level;
+    for l in (2..=k).rev() {
+        let half = 1usize << l;
+        let parent: Vec<Frac<EF>> = {
+            let child = &levels[l + 1];
+            (0..half).map(|i| child[i] + child[i + half]).collect()
+        };
+        levels[l] = parent;
+    }
+
+    for round in 1..=k {
+        run_gkr_cpu_tail_round::<SC, TS>(
+            transcript,
+            &levels[round + 1],
+            round,
+            claims_per_layer,
+            sumcheck_polys,
+            xi_prev,
+        );
+    }
+
+    Ok(())
 }
 
 /// Generate random fractional leaves on device for benchmarking.
@@ -1849,6 +2243,112 @@ mod tests {
         unsafe {
             std::env::remove_var("SWIRL_CUDA_GKR_PRECOMPUTE_M_MIN_N");
             std::env::remove_var("SWIRL_CUDA_GKR_PRECOMPUTE_M_MIN_BLOCKS");
+        }
+        Ok(())
+    }
+
+    /// Runs the dense prover with an explicit CPU-tail depth `tail_rounds` (0 disables the tail).
+    fn run_dense_with_tail(
+        n: usize,
+        strategy: GkrRoundStrategy,
+        tail_rounds: usize,
+    ) -> Result<(super::FracSumcheckProof<SC>, Vec<EF>), FractionalSumcheckError> {
+        // SAFETY: test sets process env; run with --test-threads=1.
+        let enable_precompute_m = matches!(strategy, GkrRoundStrategy::PrecomputeM);
+        unsafe {
+            std::env::set_var(
+                "SWIRL_CUDA_GKR_PRECOMPUTE_M",
+                if enable_precompute_m { "1" } else { "0" },
+            );
+            std::env::set_var("SWIRL_CUDA_GKR_CPU_TAIL_ROUNDS", tail_rounds.to_string());
+        }
+        let device_ctx = test_ctx();
+        let mut transcript = DuplexSpongeGpu::default();
+        let leaves = make_synthetic_leaves(n, &device_ctx)?;
+        let mut mem = MemTracker::start("test.cpu_tail");
+        let result = fractional_sumcheck_gpu(
+            &mut transcript,
+            leaves,
+            FractionalInputSize::dense(1usize << n),
+            EF::ZERO,
+            false,
+            &mut mem,
+            &device_ctx,
+        );
+        unsafe {
+            std::env::remove_var("SWIRL_CUDA_GKR_CPU_TAIL_ROUNDS");
+        }
+        let result = result?;
+        device_ctx.stream.synchronize().expect("sync");
+        Ok(result)
+    }
+
+    /// Runs a host-provided (optionally virtual-padded) input with an explicit CPU-tail depth.
+    fn run_from_host_with_tail(
+        host: &[Frac<EF>],
+        real_len: usize,
+        logical_len: usize,
+        alpha: EF,
+        tail_rounds: usize,
+    ) -> Result<(super::FracSumcheckProof<SC>, Vec<EF>), FractionalSumcheckError> {
+        // SAFETY: test sets process env; run with --test-threads=1.
+        unsafe {
+            std::env::set_var("SWIRL_CUDA_GKR_PRECOMPUTE_M", "0");
+            std::env::set_var("SWIRL_CUDA_GKR_CPU_TAIL_ROUNDS", tail_rounds.to_string());
+        }
+        let device_ctx = test_ctx();
+        let leaves = host.to_device_on(&device_ctx)?;
+        let mut transcript = DuplexSpongeGpu::default();
+        let mut mem = MemTracker::start("test.cpu_tail_virtual");
+        let result = fractional_sumcheck_gpu(
+            &mut transcript,
+            leaves,
+            FractionalInputSize::new(real_len, logical_len),
+            alpha,
+            false,
+            &mut mem,
+            &device_ctx,
+        );
+        unsafe {
+            std::env::remove_var("SWIRL_CUDA_GKR_CPU_TAIL_ROUNDS");
+        }
+        let result = result?;
+        device_ctx.stream.synchronize().expect("sync");
+        Ok(result)
+    }
+
+    /// The CPU tail must produce a bit-identical proof to the all-GPU path (tail disabled), for
+    /// both round strategies and across sizes that give short and long tails.
+    #[test]
+    fn test_gkr_cpu_tail_matches_no_tail() -> Result<(), FractionalSumcheckError> {
+        for n in [3, 4, 8, 16, 20, 24] {
+            for strategy in [GkrRoundStrategy::FoldEval, GkrRoundStrategy::PrecomputeM] {
+                let no_tail = run_dense_with_tail(n, strategy, 0)?;
+                let with_tail = run_dense_with_tail(n, strategy, 13)?;
+                assert_proofs_equal(&no_tail, &with_tail);
+            }
+        }
+        Ok(())
+    }
+
+    /// The CPU tail must reproduce the all-GPU proof under virtual padding as well, exercising the
+    /// host virtual-node synthesis of padding-only subtrees.
+    #[test]
+    fn test_gkr_cpu_tail_virtual_matches_no_tail() -> Result<(), FractionalSumcheckError> {
+        let alpha = virtual_padding_test_alpha();
+        for (real_len, logical_len) in [
+            (5, 8),
+            (12, 16),
+            (24, 32),
+            (48, 64),
+            (1025, 2048),
+            (1500, 2048),
+        ] {
+            let real = make_host_leaves(real_len);
+            let no_tail = run_from_host_with_tail(&real, real_len, logical_len, alpha, 0)?;
+            let with_tail = run_from_host_with_tail(&real, real_len, logical_len, alpha, 13)?;
+            let context = format!("real_len={real_len}, logical_len={logical_len}");
+            assert_proofs_equal_with_context(&no_tail, &with_tail, &context);
         }
         Ok(())
     }
