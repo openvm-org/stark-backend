@@ -1196,8 +1196,8 @@ impl<'a, HS: GpuHashScheme> LogupZerocheckGpu<'a, HS> {
         // The round is processed in phases to minimize host<->device round trips:
         // 1. stage all per-trace pointer tables (one H2D upload for the whole round),
         // 2. launch column interpolations and materialize `TraceCtx`s,
-        // 3. stage all monomial batch contexts (second H2D upload) and launch every
-        //    monomial batch kernel back-to-back without intermediate syncs,
+        // 3. stage all monomial batch contexts (second H2D upload) and launch every monomial batch
+        //    kernel back-to-back without intermediate syncs,
         // 4. run the DAG (rules) paths, which keep their launch-then-read-per-memory-batch
         //    structure to bound intermediate buffer memory,
         // 5. read the monomial results back (the first read syncs; the rest are cheap).
