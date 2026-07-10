@@ -45,9 +45,9 @@ Non-default CUDA support members (require GPU/CUDA toolchain — don't add to de
 
 Non-default benchmark workspace members:
 - **`openvm-benchmarks-fields`** (`benchmarks/fields`): CUDA field-extension and Poseidon2 benchmarks and verification tests.
-- **`openvm-benchmark-synthetic`** (`benchmarks/synthetic`): Synthetic AIR benchmark suite, including the champ-vs-candidate profile replay workflow documented in its README.
+- **`openvm-benchmark-synthetic`** (`benchmarks/synthetic`): Synthetic AIR benchmark suite, including the champ-vs-candidate profile replay workflow and the `mem_meter_runner` memory-metering validation runner documented in its README.
 
-When changing CUDA fractional-GKR buffer layout, scheduling, or scratch allocations, update the interaction memory estimate in `crates/stark-backend/src/memory_metering.rs` and the accounting in `docs/cuda-backend/gkr-prover.md`.
+When changing GPU buffer layout, scheduling, or scratch allocations in any proving phase — fractional-GKR, batch-constraint/batch-MLE, stacking/RS encoding, or WHIR opening — update the proving memory model in `crates/stark-backend/src/memory_metering.rs` (see `ProvingMemoryConfig::estimate` and the mirrored constants documented there), and validate against measured peaks with `mem_meter_runner`. For GKR changes, also update the accounting in `docs/cuda-backend/gkr-prover.md`.
 
 Plonky3 crates are exact-version crates.io dependencies pinned in the workspace `Cargo.toml`.
 
