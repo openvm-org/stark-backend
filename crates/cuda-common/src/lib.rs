@@ -4,4 +4,5 @@ pub mod d_buffer;
 pub mod error;
 pub mod memory_manager;
 pub mod pinned;
+pub mod static_alloc;
 pub mod stream;
