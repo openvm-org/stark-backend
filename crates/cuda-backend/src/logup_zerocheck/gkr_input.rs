@@ -113,8 +113,12 @@ pub fn log_gkr_input_evals<HS: GpuHashScheme>(
         return Ok((DeviceBuffer::new(), alpha_logup));
     }
 
+    // No zero-fill: `real_len` equals the sum of all interaction slice lengths and the
+    // single-column stacked layout packs them gaplessly, so every element of
+    // `leaves[..real_len]` is written below — by the batch eval kernel directly
+    // (non-lifting AIRs) or by `frac_matrix_vertically_repeat` (lifting AIRs).
+    // Zeroing was ~4 GB of redundant memset per segment on the reth workload.
     let leaves = DeviceBuffer::<Frac<EF>>::with_capacity_on(real_len, device_ctx);
-    leaves.fill_zero_on(device_ctx)?;
     let null_preprocessed = DeviceBuffer::<F>::new();
 
     let stream = device_ctx.stream.as_raw();
