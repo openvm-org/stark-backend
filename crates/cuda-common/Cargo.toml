@@ -30,3 +30,15 @@ touchemall = []
 # operations (fill_zero, etc.) use the same stream. Useful for catching
 # accidental cross-stream misuse during development.
 debug-cuda-stream = []
+
+[[bench]]
+name = "static_alloc"
+harness = false
+
+[[bench]]
+name = "trace_replay"
+harness = false
+
+[[bench]]
+name = "trace_phases"
+harness = false
