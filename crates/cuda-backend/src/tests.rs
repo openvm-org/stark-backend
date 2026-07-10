@@ -130,6 +130,69 @@ fn test_bn254_fib_air_roundtrip(l_skip: usize, log_trace_degree: usize) {
         .expect("BN254 verification failed");
 }
 
+/// The stacked-reduction host tail must yield a bit-identical proof to the all-GPU path. With
+/// `n_stack = 8` (stacked height `256`), threshold `0` disables the tail (all rounds on the GPU),
+/// while threshold `16` runs the last few small rounds on the host — the proofs must match.
+#[cfg(feature = "baby-bear-bn254-poseidon2")]
+#[test]
+fn test_bn254_fib_stacked_cpu_tail_matches_no_tail() {
+    use openvm_stark_backend::{
+        test_utils::FibFixture, SystemParams, WhirConfig, WhirParams, WhirProximityStrategy,
+    };
+    use openvm_stark_sdk::config::log_up_params::log_up_security_params_baby_bear_100_bits;
+
+    // SAFETY: test sets process env; run with --test-threads=1.
+    let prove_with_tail = |max_height: usize| {
+        unsafe {
+            std::env::set_var(
+                "SWIRL_CUDA_STACKED_CPU_TAIL_MAX_HEIGHT",
+                max_height.to_string(),
+            );
+        }
+        let l_skip = 2;
+        let n_stack = 8;
+        let w_stack = 8;
+        let k_whir = 4;
+        let whir_params = WhirParams {
+            k: k_whir,
+            log_final_poly_len: k_whir,
+            query_phase_pow_bits: 1,
+            proximity: WhirProximityStrategy::UniqueDecoding,
+            folding_pow_bits: 1,
+            mu_pow_bits: 1,
+        };
+        let log_blowup = 1;
+        let whir = WhirConfig::new(log_blowup, l_skip + n_stack, whir_params, 80);
+        let params = SystemParams {
+            l_skip,
+            n_stack,
+            w_stack,
+            log_blowup,
+            whir,
+            logup: log_up_security_params_baby_bear_100_bits(0.0),
+            max_constraint_degree: 3,
+        };
+        let fib = FibFixture::new(0, 1, 1 << 10);
+        let engine = crate::BabyBearBn254Poseidon2GpuEngine::new(params);
+        let (pk, vk) = fib.keygen(&engine);
+        let proof = fib.prove(&engine, &pk);
+        engine
+            .verify(&vk, &proof)
+            .expect("BN254 verification failed");
+        unsafe {
+            std::env::remove_var("SWIRL_CUDA_STACKED_CPU_TAIL_MAX_HEIGHT");
+        }
+        proof
+    };
+
+    let no_tail = prove_with_tail(0);
+    let partial_tail = prove_with_tail(16);
+    assert_eq!(
+        no_tail, partial_tail,
+        "stacked-reduction CPU tail changed the proof"
+    );
+}
+
 #[cfg(feature = "baby-bear-bn254-poseidon2")]
 fn bn254_host_merkle_layers(
     matrix: &[F],

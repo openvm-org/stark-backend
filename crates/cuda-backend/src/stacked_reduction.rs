@@ -1,4 +1,4 @@
-use std::{array::from_fn, cmp::max, ffi::c_void, iter::zip, mem, sync::Arc};
+use std::{array::from_fn, cmp::max, env, ffi::c_void, iter::zip, mem, sync::Arc};
 
 use itertools::{zip_eq, Itertools};
 use openvm_cuda_common::{
@@ -201,6 +201,29 @@ impl<D> StackedReductionGpu<D> {
     fn cur_max_n(&self, round: usize) -> usize {
         self.n_max - (round - 1)
     }
+
+    /// First MLE round (in `1..=n_stack`) whose stacked height is small enough to hand the
+    /// remaining rounds off to the host CPU tail. Returns `n_stack + 1` when no round qualifies
+    /// (i.e. the tail is disabled or every round operates on a large stacked matrix), in which case
+    /// the entire sumcheck runs on the GPU.
+    fn cpu_tail_first_round(&self, max_height: usize) -> usize {
+        if max_height == 0 {
+            return self.n_stack + 1;
+        }
+        (1..=self.n_stack)
+            .find(|&round| self.stacked_height(round) <= max_height)
+            .unwrap_or(self.n_stack + 1)
+    }
+}
+
+/// Maximum stacked height (`stacked_height(round)`) at which the tail MLE sumcheck rounds are run
+/// on the host instead of the GPU, avoiding per-round kernel-launch/sync latency on tiny data.
+/// Overridable via `SWIRL_CUDA_STACKED_CPU_TAIL_MAX_HEIGHT`; `0` disables the tail entirely.
+fn stacked_cpu_tail_max_height() -> usize {
+    env::var("SWIRL_CUDA_STACKED_CPU_TAIL_MAX_HEIGHT")
+        .ok()
+        .and_then(|val| val.parse::<usize>().ok())
+        .unwrap_or(2048)
 }
 
 /// Batch sumcheck to reduce trace openings, including rotations, to stacked matrix opening.
@@ -266,14 +289,18 @@ where
 
     let mut sumcheck_round_polys = Vec::with_capacity(n_stack);
 
-    // Rounds 1..=n_stack: MLE sumcheck
+    // Rounds 1..=n_stack: MLE sumcheck. Once the stacked height drops to `cpu_tail_max_height`,
+    // the remaining rounds (and `get_stacked_openings`) run on the host to avoid per-round
+    // kernel-launch/sync latency; the host math is bit-identical (exact field arithmetic).
+    let cpu_tail_max_height = stacked_cpu_tail_max_height();
+    let r0 = prover.cpu_tail_first_round(cpu_tail_max_height);
     let _mle_rounds_span = info_span!(
         "prover.openings.stacked_reduction.mle_rounds",
         phase = "prover"
     )
     .entered();
     #[allow(clippy::needless_range_loop)]
-    for round in 1..=n_stack {
+    for round in 1..r0 {
         let batch_s_evals = prover.batch_sumcheck_poly_eval(round, u_vec[round - 1])?;
 
         for &eval in &batch_s_evals {
@@ -287,7 +314,27 @@ where
 
         prover.fold_mle_evals(round, u_round)?;
     }
-    let stacking_openings = prover.get_stacked_openings()?;
+    let stacking_openings = if r0 <= n_stack {
+        // Handoff after `fold_mle_evals(r0 - 1)`: transport device state to host and finish there.
+        let mut tail = StackedReductionCpuTail::from_prover(&prover, r0)?;
+        for round in r0..=n_stack {
+            let batch_s_evals = tail.batch_sumcheck_poly_eval(round);
+
+            for &eval in &batch_s_evals {
+                transcript.observe_ext(eval);
+            }
+            sumcheck_round_polys.push(batch_s_evals);
+
+            let u_round = transcript.sample_ext();
+            u_vec.push(u_round);
+            debug!(%round, %u_round);
+
+            tail.fold_mle_evals(round, u_round);
+        }
+        tail.get_stacked_openings()
+    } else {
+        prover.get_stacked_openings()?
+    };
     for claims_for_com in &stacking_openings {
         for &claim in claims_for_com {
             transcript.observe_ext(claim);
@@ -1146,6 +1193,241 @@ impl<D: Copy + Clone + Send + Sync + 'static> StackedReductionGpu<D> {
             })
             .collect())
     }
+}
+
+/// Host-side prover for the tail MLE sumcheck rounds `r0..=n_stack` of
+/// [`prove_stacked_opening_reduction_gpu`], plus `get_stacked_openings`.
+///
+/// Every field element it produces is bit-identical to the GPU path: the formulas and indices below
+/// mirror the kernels in `stacked_reduction.cu` and `sumcheck.cu` exactly (exact field arithmetic
+/// makes summation order irrelevant). See [`StackedReductionCpuTail::from_prover`] for the handoff.
+struct StackedReductionCpuTail {
+    // Immutable parameters (mirror `StackedReductionGpu`).
+    l_skip: usize,
+    n_stack: usize,
+    n_max: usize,
+    /// Stacked-matrix width per commit, in `stacked_per_commit` order.
+    q_widths: Vec<usize>,
+    unstacked_cols: Vec<UnstackedSlice>,
+    ht_diff_idxs: Vec<usize>,
+    /// Global per-column lambda weights: `lambda_pows[2*c] = lambda^(2c)` and
+    /// `lambda_pows[2*c+1] = lambda^(2c+1)` (or `ZERO` when the column needs no rotation).
+    lambda_pows: Vec<EF>,
+
+    // Mutable state, transported once at handoff and folded each round.
+    /// Column-major stacked evaluations per commit; column `j` of commit `c` occupies
+    /// `q[c][j * q_height .. (j + 1) * q_height]`.
+    q: Vec<Vec<EF>>,
+    q_height: usize,
+    /// `eq_r_ns.buffer` and `k_rot_ns.buffer`: segment-tree layout (segment for cube size `m`
+    /// lives at `[m .. 2m]`, index 0 unused). Length `2 << cur_max_n`, or `1` when `n_max <
+    /// round - 1`.
+    eq_seg: Vec<EF>,
+    k_rot_seg: Vec<EF>,
+    eq_stable: Vec<EF>,
+    k_rot_stable: Vec<EF>,
+    /// `eq_ub_per_trace`: one entry per unstacked column.
+    eq_ub_per_col: Vec<EF>,
+}
+
+impl StackedReductionCpuTail {
+    /// Copies the device-resident sumcheck state to the host at the handoff point (immediately
+    /// after `fold_mle_evals(r0 - 1)`). The host copies of
+    /// `eq_stable`/`k_rot_stable`/`eq_ub_per_trace`/ `unstacked_cols`/`ht_diff_idxs` are
+    /// cloned; `q_evals`, `eq_r_ns`, `k_rot_ns`, and `d_lambda_pows` (whose host original was
+    /// dropped in `new`) are read back via D2H.
+    fn from_prover<D>(
+        prover: &StackedReductionGpu<D>,
+        r0: usize,
+    ) -> Result<Self, StackedReductionError> {
+        let device_ctx = &prover.device_ctx;
+        let q = prover
+            .q_evals
+            .iter()
+            .map(|buf| buf.to_host_on(device_ctx))
+            .collect::<Result<Vec<_>, _>>()?;
+        let eq_seg = prover.eq_r_ns.buffer.to_host_on(device_ctx)?;
+        let k_rot_seg = prover.k_rot_ns.buffer.to_host_on(device_ctx)?;
+        let lambda_pows = prover.d_lambda_pows.to_host_on(device_ctx)?;
+        let q_widths = prover
+            .stacked_per_commit
+            .iter()
+            .map(|d| d.layout().width())
+            .collect_vec();
+        Ok(Self {
+            l_skip: prover.l_skip,
+            n_stack: prover.n_stack,
+            n_max: prover.n_max,
+            q_widths,
+            unstacked_cols: prover.unstacked_cols.clone(),
+            ht_diff_idxs: prover.ht_diff_idxs.clone(),
+            lambda_pows,
+            q,
+            q_height: prover.stacked_height(r0),
+            eq_seg,
+            k_rot_seg,
+            eq_stable: prover.eq_stable.clone(),
+            k_rot_stable: prover.k_rot_stable.clone(),
+            eq_ub_per_col: prover.eq_ub_per_trace.clone(),
+        })
+    }
+
+    /// Host mirror of `StackedReductionGpu::batch_sumcheck_poly_eval` (see `stacked_reduction.cu`
+    /// `stacked_reduction_sumcheck_mle_round_batched_kernel` and its degenerate variant).
+    fn batch_sumcheck_poly_eval(&mut self, round: usize) -> [EF; STACKED_REDUCTION_S_DEG] {
+        let l_skip = self.l_skip;
+
+        // Per-round stable push (mirrors stacked_reduction.rs:856-885): `get_ptr(0)` == buffer[1].
+        if self.n_max >= round - 1 {
+            debug_assert_eq!(self.eq_stable.len(), l_skip + round - 1);
+            debug_assert_eq!(self.k_rot_stable.len(), l_skip + round - 1);
+            self.eq_stable.push(self.eq_seg[1]);
+            self.k_rot_stable.push(self.k_rot_seg[1]);
+        }
+
+        let mut s = [EF::ZERO; STACKED_REDUCTION_S_DEG];
+        let q_height = self.q_height;
+        debug_assert_eq!(q_height, 1 << (self.n_stack - round + 1));
+
+        for window in self.ht_diff_idxs.windows(2) {
+            let (w_start, w_end) = (window[0], window[1]);
+            let log_height = self.unstacked_cols[w_start].log_height as usize;
+
+            if log_height < l_skip + round {
+                // Degenerate window: constant `s` contribution (all `n < 0` cases included).
+                let shift_factor = l_skip + round;
+                let eq_r = self.eq_stable[log_height];
+                let k_rot_r = self.k_rot_stable[log_height];
+                for col in w_start..w_end {
+                    let sl = self.unstacked_cols[col];
+                    let qc = &self.q[sl.commit_idx as usize];
+                    let row_idx = sl.stacked_row_idx as usize;
+                    let row_start = (row_idx >> shift_factor) << 1;
+                    let off = sl.stacked_col_idx as usize * q_height + row_start;
+                    let q0 = qc[off];
+                    let q1 = qc[off + 1];
+                    let q_c1 = q1 - q0;
+                    let b = EF::from_bool(((row_idx >> (shift_factor - 1)) & 1) == 1);
+                    let eq_ub = self.eq_ub_per_col[col];
+                    let lam_eq = self.lambda_pows[2 * col];
+                    let lam_rot = self.lambda_pows[2 * col + 1];
+                    for x_int in 1..=STACKED_REDUCTION_S_DEG {
+                        let x = EF::from_usize(x_int);
+                        // eq1(x, b) = 1 - x - b + 2xb (stacked_reduction.cu:76).
+                        let eq_ub_x = eq_ub * (EF::ONE - x - b + (x * b).double());
+                        let q_x = q0 + q_c1 * x;
+                        let eq = eq_r * eq_ub_x;
+                        let kr = k_rot_r * eq_ub_x;
+                        s[x_int - 1] += (lam_eq * eq + lam_rot * kr) * q_x;
+                    }
+                }
+            } else {
+                // Regular window: interpolate the `eq`/`k_rot` cubes at `x`.
+                let num_y = 1usize << (log_height - l_skip - round);
+                let num_evals = num_y * 2;
+                for y in 0..num_y {
+                    let eq_0 = self.eq_seg[num_evals + (y << 1)];
+                    let eq_1 = self.eq_seg[num_evals + (y << 1) + 1];
+                    let eq_c1 = eq_1 - eq_0;
+                    let kr_0 = self.k_rot_seg[num_evals + (y << 1)];
+                    let kr_1 = self.k_rot_seg[num_evals + (y << 1) + 1];
+                    let kr_c1 = kr_1 - kr_0;
+                    for col in w_start..w_end {
+                        let sl = self.unstacked_cols[col];
+                        let qc = &self.q[sl.commit_idx as usize];
+                        let row_start =
+                            (sl.stacked_row_idx as usize >> sl.log_height as usize) * num_evals;
+                        let off = sl.stacked_col_idx as usize * q_height + row_start;
+                        let q0 = qc[off + (y << 1)];
+                        let q1 = qc[off + (y << 1) + 1];
+                        let q_c1 = q1 - q0;
+                        let lam_eq = self.lambda_pows[2 * col];
+                        let lam_rot = self.lambda_pows[2 * col + 1];
+                        for x_int in 1..=STACKED_REDUCTION_S_DEG {
+                            let x = EF::from_usize(x_int);
+                            let q_x = q0 + q_c1 * x;
+                            let eq = eq_0 + eq_c1 * x;
+                            let kr = kr_0 + kr_c1 * x;
+                            s[x_int - 1] += (lam_eq * eq + lam_rot * kr) * q_x;
+                        }
+                    }
+                }
+            }
+        }
+        s
+    }
+
+    /// Host mirror of `StackedReductionGpu::fold_mle_evals` (see `sumcheck.cu` `fold_mle` and
+    /// `triangular_fold_mle_kernel`, plus the `eq_ub_per_trace` update at
+    /// `stacked_reduction.rs:1103-1111`).
+    fn fold_mle_evals(&mut self, round: usize, u: EF) {
+        debug_assert!(round <= self.n_stack);
+        let l_skip = self.l_skip;
+
+        // (a) Fold q evaluations, halving the stacked height.
+        let out_h = 1usize << (self.n_stack - round);
+        let in_h = 2 * out_h;
+        for (c, qc) in self.q.iter_mut().enumerate() {
+            let w = self.q_widths[c];
+            let mut folded = vec![EF::ZERO; out_h * w];
+            for col in 0..w {
+                for y in 0..out_h {
+                    let t0 = qc[col * in_h + (y << 1)];
+                    let t1 = qc[col * in_h + (y << 1) + 1];
+                    folded[col * out_h + y] = t0 + u * (t1 - t0);
+                }
+            }
+            *qc = folded;
+        }
+        self.q_height = out_h;
+
+        // (b) Fold the eq / k_rot segment trees, or assert they are exhausted placeholders.
+        if self.n_max >= round - 1 {
+            let input_max_n = self.n_max - (round - 1);
+            self.eq_seg = triangular_fold_mle_host(&self.eq_seg, input_max_n, u);
+            self.k_rot_seg = triangular_fold_mle_host(&self.k_rot_seg, input_max_n, u);
+        } else {
+            debug_assert_eq!(self.eq_seg.len(), 1);
+            debug_assert_eq!(self.k_rot_seg.len(), 1);
+        }
+
+        // (c) Update eq_ub for columns that are degenerate at this round.
+        for (col, sl) in self.unstacked_cols.iter().enumerate() {
+            if round + l_skip > sl.log_height as usize {
+                debug_assert_eq!(sl.stacked_row_idx as usize % (1 << sl.log_height), 0);
+                let b = (sl.stacked_row_idx as usize >> (l_skip + round - 1)) & 1;
+                let y = EF::from_bool(b == 1);
+                self.eq_ub_per_col[col] *= EF::ONE - y - u + (u * y).double();
+            }
+        }
+    }
+
+    /// Host mirror of `StackedReductionGpu::get_stacked_openings`. After the final fold the stacked
+    /// height is 1, so each commit's buffer is exactly its width-ordered opening vector.
+    fn get_stacked_openings(&self) -> Vec<Vec<EF>> {
+        self.q.clone()
+    }
+}
+
+/// Host mirror of `triangular_fold_mle_kernel` (`sumcheck.cu:270-281`): folds every segment `n` in
+/// `0..=input_max_n-1` of a segment-tree buffer, writing `out[2^n + x] = t0 + (t1 - t0) * u` with
+/// `t0 = in[2^(n+1) + 2x]`, `t1 = in[2^(n+1) + 2x + 1]`. Position 0 is left zero and never read;
+/// the input segment `n = 0` (index 1) is ignored. When `input_max_n == 0` the output is `[ZERO]`.
+fn triangular_fold_mle_host(seg: &[EF], input_max_n: usize, u: EF) -> Vec<EF> {
+    let mut out = vec![EF::ZERO; 1 << input_max_n];
+    if input_max_n != 0 {
+        let output_max_n = input_max_n - 1;
+        for n in 0..=output_max_n {
+            let m_out = 1usize << n;
+            let m_in = 2 * m_out;
+            for x in 0..m_out {
+                let t0 = seg[m_in + (x << 1)];
+                let t1 = seg[m_in + (x << 1) + 1];
+                out[m_out + x] = t0 + (t1 - t0) * u;
+            }
+        }
+    }
+    out
 }
 
 /// Build indicator polynomial: ind(Z) = sum_{k=0}^{2^{n_abs}-1} Z^{k * 2^l} / 2^{n_abs}
