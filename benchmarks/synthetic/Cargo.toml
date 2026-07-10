@@ -21,9 +21,13 @@ p3-matrix.workspace = true
 
 clap = { workspace = true }
 eyre = { workspace = true }
+metrics = { workspace = true }
+metrics-util = { workspace = true }
 rand = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["std", "env-filter", "fmt"] }
 
 [features]
 default = []
@@ -34,6 +38,12 @@ baby-bear-bn254-poseidon2 = ["openvm-cuda-backend?/baby-bear-bn254-poseidon2"]
 # GPU-only (imports openvm-cuda-backend unconditionally).
 [[bin]]
 name = "synthetic_runner"
+required-features = ["cuda"]
+
+# Memory-metering validation runner: replays profile segments and compares the
+# `memory_metering` estimate against the measured peak GPU memory.
+[[bin]]
+name = "mem_meter_runner"
 required-features = ["cuda"]
 
 [[bin]]

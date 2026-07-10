@@ -53,6 +53,10 @@ pub struct MemoryManager {
     allocated_ptrs: HashMap<NonNull<c_void>, AllocRecord>,
     current_size: usize,
     max_used_size: usize,
+    /// Peak of `current_size` since the last [`reset_session_peak`] call. Unlike
+    /// `max_used_size`, this is never reset by [`MemTracker::reset_peak`], so it survives
+    /// the phase-level peak resets inside the prover.
+    session_peak: usize,
 }
 
 /// # Safety
@@ -71,6 +75,7 @@ impl MemoryManager {
             allocated_ptrs: HashMap::new(),
             current_size: 0,
             max_used_size: 0,
+            session_peak: 0,
         }
     }
 
@@ -104,6 +109,9 @@ impl MemoryManager {
         self.current_size += tracked_size;
         if self.current_size > self.max_used_size {
             self.max_used_size = self.current_size;
+        }
+        if self.current_size > self.session_peak {
+            self.session_peak = self.current_size;
         }
         Ok(ptr)
     }
@@ -157,6 +165,35 @@ pub fn d_malloc_on(size: usize, stream: &StreamGuard) -> Result<*mut c_void, Mem
     let manager = MEMORY_MANAGER.get().unwrap();
     let mut manager = manager.lock().map_err(|_| MemoryError::LockError)?;
     manager.d_malloc_on(size, stream)
+}
+
+/// Snapshot of the memory manager's tracked allocation counters, in bytes.
+///
+/// `current` is the sum of live allocations as tracked by the manager (pool allocations are
+/// page-rounded). `session_peak` is the maximum of `current` since the last
+/// [`reset_session_peak`] call; it is not affected by [`MemTracker::reset_peak`].
+#[derive(Clone, Copy, Debug, Default)]
+pub struct TrackedMemoryStats {
+    pub current: usize,
+    pub session_peak: usize,
+}
+
+pub fn tracked_memory_stats() -> TrackedMemoryStats {
+    MEMORY_MANAGER
+        .get()
+        .and_then(|m| m.lock().ok())
+        .map(|m| TrackedMemoryStats {
+            current: m.current_size,
+            session_peak: m.session_peak,
+        })
+        .unwrap_or_default()
+}
+
+/// Resets the session peak to the current tracked allocation size. See [`tracked_memory_stats`].
+pub fn reset_session_peak() {
+    if let Some(mut manager) = MEMORY_MANAGER.get().and_then(|m| m.lock().ok()) {
+        manager.session_peak = manager.current_size;
+    }
 }
 
 /// # Safety
