@@ -19,7 +19,7 @@ use crate::{
     merkle_tree::{MerkleProofQueryDigest, MerkleTreeConstructor},
     prelude::{D_EF, EF, F},
     sponge::GpuFiatShamirTranscript,
-    stacked_pcs::{stacked_commit, StackedPcsDataGpu},
+    stacked_pcs::{stacked_commit, RsPrefetchRequest, StackedPcsDataGpu},
     stacked_reduction::prove_stacked_opening_reduction_gpu,
     whir::prove_whir_opening_gpu,
     AirDataGpu, GpuDevice, ProverError,
@@ -107,9 +107,29 @@ impl<HS: GpuHashScheme, TS: GpuFiatShamirTranscript<HS::SC>>
         transcript: &mut TS,
         mpk: &DeviceMultiStarkProvingKey<GenericGpuBackend<HS>>,
         ctx: &ProvingContext<GenericGpuBackend<HS>>,
-        _common_main_pcs_data: &StackedPcsDataGpu<F, HS::Digest>,
+        common_main_pcs_data: &StackedPcsDataGpu<F, HS::Digest>,
     ) -> Result<((GkrProof<HS::SC>, BatchConstraintProof<HS::SC>), Vec<EF>), Self::Error> {
         let mem = MemTracker::start_and_reset_peak("prover.rap_constraints");
+        // Drop any prefetch left over from an aborted proof; its codeword
+        // does not belong to this proof's traces.
+        self.rs_prefetch
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        let rs_prefetch = (self.prover_config().prefetch_rs_code_matrix
+            && !self.prover_config().cache_rs_code_matrix)
+            .then(|| RsPrefetchRequest {
+                layout: common_main_pcs_data.layout(),
+                traces: ctx
+                    .per_trace
+                    .iter()
+                    .map(|(_, air_ctx)| &air_ctx.common_main)
+                    .collect(),
+                stacked_matrix: common_main_pcs_data.matrix(),
+                log_blowup: self.params().log_blowup,
+                aux_ctx: &self.aux_ctx,
+                slot: &self.rs_prefetch,
+            });
         let save_memory = self.prover_config().zerocheck_save_memory;
         // Threshold for monomial evaluation path based on proof type:
         // - App proofs (log_blowup=1): higher threshold (512)
@@ -126,6 +146,7 @@ impl<HS: GpuHashScheme, TS: GpuFiatShamirTranscript<HS::SC>>
             save_memory,
             monomial_num_y_threshold,
             self.sm_count(),
+            rs_prefetch,
             &self.device_ctx,
         )?;
         mem.emit_metrics();
@@ -194,11 +215,17 @@ where
             .chain(u_rest.iter().copied())
             .collect_vec();
 
+        let prefetched_rs = self
+            .rs_prefetch
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
         let whir_proof = prove_whir_opening_gpu::<HS, TS>(
             params,
             transcript,
             stacked_per_commit,
             &u_cube,
+            prefetched_rs,
             &self.device_ctx,
         )?;
         mem.emit_metrics();

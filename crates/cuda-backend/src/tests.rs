@@ -1056,3 +1056,46 @@ fn test_monomial_vs_dag_equivalence() {
         );
     }
 }
+
+// ===========================================================================
+// RS codeword prefetch
+// ===========================================================================
+
+/// The prefetched round-0 codeword must yield byte-identical proofs to the
+/// in-round recompute it replaces: both run the same `rs_code_matrix` kernels
+/// on the same inputs, only earlier and on the auxiliary stream.
+#[test]
+fn test_rs_codeword_prefetch_proof_unchanged() {
+    use openvm_stark_backend::{codec::Encode, proof::Proof};
+
+    setup_tracing_with_log_level(Level::WARN);
+    let params = default_test_params_small();
+    let fib = FibFixture::new(0, 1, 1 << 10);
+
+    let mut prefetch_engine = BabyBearPoseidon2GpuEngine::new(params.clone());
+    prefetch_engine
+        .device_mut()
+        .set_prefetch_rs_code_matrix(true);
+    let (pk, vk) = fib.keygen(&prefetch_engine);
+    let prefetch_proof = fib.prove(&prefetch_engine, &pk);
+    prefetch_engine
+        .verify(&vk, &prefetch_proof)
+        .expect("verification with prefetch_rs_code_matrix failed");
+
+    let mut recompute_engine = BabyBearPoseidon2GpuEngine::new(params);
+    recompute_engine
+        .device_mut()
+        .set_prefetch_rs_code_matrix(false);
+    let recompute_proof = fib.prove(&recompute_engine, &pk);
+
+    let encode = |proof: &Proof<SC>| {
+        let mut bytes = Vec::new();
+        proof.encode(&mut bytes).unwrap();
+        bytes
+    };
+    assert_eq!(
+        encode(&prefetch_proof),
+        encode(&recompute_proof),
+        "prefetch and recompute proofs must be byte-identical"
+    );
+}

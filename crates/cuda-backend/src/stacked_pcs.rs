@@ -1,9 +1,15 @@
-use std::{ffi::c_void, sync::Arc};
+use std::{
+    ffi::c_void,
+    sync::{Arc, Mutex},
+};
 
 use getset::Getters;
 use itertools::Itertools;
 use openvm_cuda_common::{
-    copy::cuda_memcpy_on, d_buffer::DeviceBuffer, memory_manager::MemTracker, stream::GpuDeviceCtx,
+    copy::cuda_memcpy_on,
+    d_buffer::DeviceBuffer,
+    memory_manager::MemTracker,
+    stream::{CudaEvent, GpuDeviceCtx},
 };
 use openvm_stark_backend::{
     p3_util::log2_strict_usize,
@@ -23,8 +29,61 @@ use crate::{
     ntt::batch_ntt,
     poly::{mle_interpolate_stages, PleMatrix},
     prelude::F,
-    GpuProverConfig, ProverError, RsCodeMatrixError, StackTracesError,
+    GpuProverConfig, ProverError, RsCodeMatrixError, RsPrefetchError, StackTracesError,
 };
+
+/// The WHIR round-0 RS codeword, re-encoded ahead of time on a low-priority
+/// auxiliary stream so the encode overlaps the sumcheck phases between the
+/// trace commit and WHIR instead of running serially inside the WHIR round.
+pub struct RsCodewordPrefetch {
+    pub(crate) matrix: DeviceMatrix<F>,
+    /// Recorded on the auxiliary stream after the encode; the main stream
+    /// waits on this before gathering opened rows.
+    pub(crate) done: CudaEvent,
+}
+
+/// Inputs for launching the round-0 codeword prefetch once the GKR
+/// fractional sumcheck — the phase with the largest transient device-memory
+/// footprint — has completed.
+pub struct RsPrefetchRequest<'a> {
+    pub(crate) layout: &'a StackedLayout,
+    /// Common-main traces in the same (height-sorted) order used at commit.
+    pub(crate) traces: Vec<&'a DeviceMatrix<F>>,
+    pub(crate) stacked_matrix: &'a Option<PleMatrix<F>>,
+    pub(crate) log_blowup: usize,
+    pub(crate) aux_ctx: &'a GpuDeviceCtx,
+    pub(crate) slot: &'a Mutex<Option<RsCodewordPrefetch>>,
+}
+
+impl RsPrefetchRequest<'_> {
+    /// Device bytes the prefetched codeword will occupy while it is resident
+    /// (from launch until the WHIR initial round). Callers subtract this from
+    /// concurrent phases' memory budgets so peak usage does not grow.
+    pub(crate) fn codeword_bytes(&self) -> usize {
+        (self.layout.height() << self.log_blowup) * self.layout.width() * std::mem::size_of::<F>()
+    }
+
+    /// Enqueues the RS re-encode on the auxiliary stream, ordered after all
+    /// work currently queued on `main_ctx`'s stream (the traces it reads are
+    /// settled long before). Does not block the host; the codeword is handed
+    /// to the WHIR prover through `slot`.
+    pub(crate) fn launch(self, main_ctx: &GpuDeviceCtx) -> Result<(), RsPrefetchError> {
+        let matrix = rs_code_matrix_with_exec(
+            self.log_blowup,
+            self.layout,
+            &self.traces,
+            self.stacked_matrix,
+            main_ctx,
+            self.aux_ctx,
+        )?;
+        let done = CudaEvent::new().map_err(RsPrefetchError::Event)?;
+        done.record_on(&self.aux_ctx.stream)
+            .map_err(RsPrefetchError::Event)?;
+        *self.slot.lock().unwrap_or_else(|e| e.into_inner()) =
+            Some(RsCodewordPrefetch { matrix, done });
+        Ok(())
+    }
+}
 
 #[derive(Getters)]
 pub struct StackedPcsDataGpu<F, Digest> {
@@ -233,13 +292,52 @@ pub fn rs_code_matrix(
     stacked_matrix: &Option<PleMatrix<F>>,
     device_ctx: &GpuDeviceCtx,
 ) -> Result<DeviceMatrix<F>, RsCodeMatrixError> {
+    rs_code_matrix_with_exec(
+        log_blowup,
+        layout,
+        traces,
+        stacked_matrix,
+        device_ctx,
+        device_ctx,
+    )
+}
+
+/// Same as [`rs_code_matrix`], but allocates the codeword on `alloc_ctx`'s
+/// stream while enqueueing all kernels and copies on `exec_ctx`'s stream.
+///
+/// Used by the round-0 prefetch: keeping the multi-GB codeword allocation on
+/// the main stream keeps the VPMM pool single-stream — same-stream free
+/// regions are reusable without event gating, and regions of different
+/// streams never coalesce — while execution overlaps on the low-priority
+/// auxiliary stream. When the streams differ, the exec stream is ordered
+/// after all work currently enqueued on the alloc stream (which covers both
+/// earlier users of any recycled pages and the production of `traces`).
+pub(crate) fn rs_code_matrix_with_exec(
+    log_blowup: usize,
+    layout: &StackedLayout,
+    traces: &[&DeviceMatrix<F>],
+    stacked_matrix: &Option<PleMatrix<F>>,
+    alloc_ctx: &GpuDeviceCtx,
+    exec_ctx: &GpuDeviceCtx,
+) -> Result<DeviceMatrix<F>, RsCodeMatrixError> {
     let mem = MemTracker::start_and_reset_peak("prover.rs_code_matrix");
     let l_skip = layout.l_skip();
     let height = layout.height();
     let width = layout.width();
     debug_assert!(height >= (1 << l_skip));
     let codeword_height = height.checked_shl(log_blowup as u32).unwrap();
-    let mut codewords = DeviceBuffer::<F>::with_capacity_on(codeword_height * width, device_ctx);
+    let mut codewords = DeviceBuffer::<F>::with_capacity_on(codeword_height * width, alloc_ctx);
+    if alloc_ctx.stream.as_raw() != exec_ctx.stream.as_raw() {
+        let ready = CudaEvent::new().map_err(RsCodeMatrixError::Event)?;
+        ready
+            .record_on(&alloc_ctx.stream)
+            .map_err(RsCodeMatrixError::Event)?;
+        exec_ctx
+            .stream
+            .wait(&ready)
+            .map_err(RsCodeMatrixError::Event)?;
+    }
+    let device_ctx = exec_ctx;
     // The following kernels together perform MLE interpolation followed by coset NTT for
     // `width` polys from `height -> codeword_height` size domains.
     if let Some(stacked_matrix) = stacked_matrix.as_ref() {
