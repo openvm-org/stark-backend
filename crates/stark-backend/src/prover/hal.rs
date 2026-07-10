@@ -65,6 +65,22 @@ pub trait ProverDevice<PB: ProverBackend, TS>:
     type DeviceCtx: Clone + Send + Sync;
 
     fn device_ctx(&self) -> &Self::DeviceCtx;
+
+    /// Hook to transform the owned [`ProvingContext`] immediately after the common-main trace
+    /// commitment, before constraint proving and openings. The `common_main_pcs_data` is the PCS
+    /// data just produced by [`TraceCommitter::commit`] for the common-main traces.
+    ///
+    /// The default is the identity, so devices that do not need it (e.g. the CPU backend) are
+    /// untouched. Backends may use it to replace per-trace buffers with views into a shared arena
+    /// to reduce peak memory; any such transformation must preserve trace dimensions and the exact
+    /// bytes read by every downstream kernel (proof output must be unchanged).
+    fn optimize_committed_context(
+        &self,
+        ctx: ProvingContext<PB>,
+        _common_main_pcs_data: &PB::PcsData,
+    ) -> Result<ProvingContext<PB>, <Self as ProverDevice<PB, TS>>::Error> {
+        Ok(ctx)
+    }
 }
 
 /// Provides functionality for committing to a batch of trace matrices, possibly of different

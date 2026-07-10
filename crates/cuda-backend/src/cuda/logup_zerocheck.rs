@@ -1044,9 +1044,13 @@ pub unsafe fn frac_multifold_raw(
     ))
 }
 
+/// # Safety
+/// - `input_ptr` must point to a valid `height * width` column-major matrix of `F`. Callers pass an
+///   offset-aware pointer (e.g. a view into a shared arena), so this takes a raw pointer rather
+///   than a `&DeviceBuffer` (whose start may not be the matrix's first element).
 #[allow(clippy::too_many_arguments)]
 pub unsafe fn fold_ple_from_evals(
-    input_matrix: &DeviceBuffer<F>,
+    input_ptr: *const F,
     output_matrix: *mut EF,
     omega_skip_pows: &DeviceBuffer<F>,
     inv_lagrange_denoms: &DeviceBuffer<EF>,
@@ -1058,7 +1062,7 @@ pub unsafe fn fold_ple_from_evals(
     stream: cudaStream_t,
 ) -> Result<(), CudaError> {
     CudaError::from_result(_fold_ple_from_evals(
-        input_matrix.as_ptr(),
+        input_ptr,
         output_matrix,
         omega_skip_pows.as_ptr(),
         inv_lagrange_denoms.as_ptr(),

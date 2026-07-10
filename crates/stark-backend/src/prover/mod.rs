@@ -124,6 +124,13 @@ where
             self.device.commit(&traces)?
         };
 
+        // Give the device a chance to transform the owned context now that the common-main
+        // commitment exists (e.g. replace per-trace buffers with views into a shared arena). This
+        // is the identity by default and must not change any bytes read downstream.
+        let ctx = self
+            .device
+            .optimize_committed_context(ctx, &common_main_pcs_data)?;
+
         let mut trace_vdata: Vec<Option<TraceVData<SC>>> = vec![None; mpk.per_air.len()];
         let mut public_values: Vec<Vec<SC::F>> = vec![Vec::new(); mpk.per_air.len()];
 

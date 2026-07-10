@@ -6,8 +6,8 @@ use openvm_stark_backend::{
     poly_common::Squarable,
     proof::*,
     prover::{
-        DeviceMultiStarkProvingKey, MultiRapProver, OpeningProver, ProverBackend, ProverDevice,
-        ProvingContext, TraceCommitter,
+        AirProvingContext, DeviceMultiStarkProvingKey, MultiRapProver, OpeningProver,
+        ProverBackend, ProverDevice, ProvingContext, TraceCommitter,
     },
 };
 use tracing::instrument;
@@ -19,7 +19,7 @@ use crate::{
     merkle_tree::{MerkleProofQueryDigest, MerkleTreeConstructor},
     prelude::{D_EF, EF, F},
     sponge::GpuFiatShamirTranscript,
-    stacked_pcs::{stacked_commit, StackedPcsDataGpu},
+    stacked_pcs::{build_common_main_arena, stacked_commit, StackedPcsDataGpu},
     stacked_reduction::prove_stacked_opening_reduction_gpu,
     whir::prove_whir_opening_gpu,
     AirDataGpu, GpuDevice, ProverError,
@@ -88,6 +88,69 @@ where
 
     fn device_ctx(&self) -> &openvm_cuda_common::stream::GpuDeviceCtx {
         &self.device_ctx
+    }
+
+    /// After committing the common-main traces, stack the qualifying (height `>= 2^l_skip`) ones
+    /// into a single persistent eval-form arena and replace each per-trace `common_main` with a
+    /// view into that arena, dropping the original owning buffers. The arena bytes are copied from
+    /// the traces, so every downstream kernel reads bit-identical data; strided (height
+    /// `< 2^l_skip`) traces keep their own buffers.
+    #[instrument(
+        name = "prover.optimize_committed_context",
+        skip_all,
+        fields(phase = "prover")
+    )]
+    fn optimize_committed_context(
+        &self,
+        ctx: ProvingContext<GenericGpuBackend<HS>>,
+        common_main_pcs_data: &StackedPcsDataGpu<F, HS::Digest>,
+    ) -> Result<ProvingContext<GenericGpuBackend<HS>>, ProverError> {
+        if !self.prover_config().stack_trace_arena {
+            return Ok(ctx);
+        }
+        let layout = common_main_pcs_data.layout();
+        let traces = ctx
+            .per_trace
+            .iter()
+            .map(|(_, air_ctx)| &air_ctx.common_main)
+            .collect_vec();
+        let views = build_common_main_arena(layout, &traces, &self.device_ctx)?;
+        drop(traces);
+        // Synchronize before dropping the original trace buffers: the arena-fill copies were
+        // enqueued on `self.device_ctx.stream`, but `DeviceBuffer::drop` frees on each buffer's
+        // ALLOCATION stream, which the caller controls and may differ (e.g. tracegen streams).
+        // Without this sync, a freed region's reuse-gating event could complete on an idle
+        // allocation stream and the pool could hand the region to a new allocation while the
+        // copy is still in flight. One sync per proof; negligible.
+        self.device_ctx
+            .stream
+            .to_host_sync()
+            .map_err(|e| ProverError::from(openvm_cuda_common::error::MemCopyError::from(e)))?;
+
+        // Replace each qualifying common_main with its arena view; the original owning buffer is
+        // dropped here (safe: the arena copies completed in the sync above).
+        let per_trace = ctx
+            .per_trace
+            .into_iter()
+            .zip(views)
+            .map(|((air_idx, air_ctx), view)| {
+                let AirProvingContext {
+                    cached_mains,
+                    common_main,
+                    public_values,
+                } = air_ctx;
+                let common_main = view.unwrap_or(common_main);
+                (
+                    air_idx,
+                    AirProvingContext {
+                        cached_mains,
+                        common_main,
+                        public_values,
+                    },
+                )
+            })
+            .collect();
+        Ok(ProvingContext { per_trace })
     }
 }
 

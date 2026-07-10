@@ -834,9 +834,10 @@ impl<'a, HS: GpuHashScheme> LogupZerocheckGpu<'a, HS> {
             let height = air_ctx.common_main.height();
             let mut main_parts = Vec::with_capacity(air_ctx.cached_mains.len() + 1);
             for committed in &air_ctx.cached_mains {
-                main_parts.push(committed.trace.buffer().as_ptr());
+                main_parts.push(committed.trace.as_ptr());
             }
-            main_parts.push(air_ctx.common_main.buffer().as_ptr());
+            // `as_ptr()` honors any view offset (arena-backed common_main traces).
+            main_parts.push(air_ctx.common_main.as_ptr());
             let main_parts = self.stager.push(&main_parts);
 
             // The interactions DAG is cached at keygen; only the challenge-dependent
@@ -1144,7 +1145,7 @@ impl<'a, HS: GpuHashScheme> LogupZerocheckGpu<'a, HS> {
                 unsafe {
                     fold_selectors_round0(
                         folded_buf.as_mut_ptr(),
-                        selectors_cube.buffer().as_ptr(),
+                        selectors_cube.as_ptr(),
                         is_first,
                         is_last,
                         num_x,
@@ -1266,7 +1267,7 @@ impl<'a, HS: GpuHashScheme> LogupZerocheckGpu<'a, HS> {
                     // A.1: evaluate directly at (num_x=1, num_y=1)
                     let prep_ptr = if has_preprocessed {
                         MainMatrixPtrs {
-                            data: mats[0].buffer().as_ptr(),
+                            data: mats[0].as_ptr(),
                             air_width: air_width_for_mat(need_rot, mats[0].width()),
                         }
                     } else {
@@ -1278,7 +1279,7 @@ impl<'a, HS: GpuHashScheme> LogupZerocheckGpu<'a, HS> {
                     let main_ptrs: Vec<MainMatrixPtrs<EF>> = mats[first_main_idx..]
                         .iter()
                         .map(|m| MainMatrixPtrs {
-                            data: m.buffer().as_ptr(),
+                            data: m.as_ptr(),
                             air_width: air_width_for_mat(need_rot, m.width()),
                         })
                         .collect_vec();
@@ -1293,7 +1294,7 @@ impl<'a, HS: GpuHashScheme> LogupZerocheckGpu<'a, HS> {
                         has_interactions,
                         norm_factor,
                         eq_xi_ptr: eq_xi_tree.get_ptr(0),
-                        sels_ptr: sels.buffer().as_ptr(),
+                        sels_ptr: sels.as_ptr(),
                         prep_ptr,
                         main_ptrs_slice,
                         public_ptr: public_vals.as_ptr(),
@@ -1327,7 +1328,7 @@ impl<'a, HS: GpuHashScheme> LogupZerocheckGpu<'a, HS> {
                     .chain(mats.iter())
                     .flat_map(|m| {
                         assert_eq!(m.height(), height);
-                        (0..m.width()).map(|col| m.buffer().as_ptr().wrapping_add(col * m.height()))
+                        (0..m.width()).map(|col| m.as_ptr().wrapping_add(col * m.height()))
                     })
                     .collect_vec();
                 let num_columns = columns.len();
@@ -1787,8 +1788,8 @@ impl<'a, HS: GpuHashScheme> LogupZerocheckGpu<'a, HS> {
                 max_output_cells = max(max_output_cells, output_height * width);
                 let out =
                     DeviceMatrix::<EF>::with_capacity_on(output_height, width, &self.device_ctx);
-                input_ptrs.push(mat.buffer().as_ptr());
-                output_ptrs.push(out.buffer().as_mut_ptr());
+                input_ptrs.push(mat.as_ptr());
+                output_ptrs.push(out.as_mut_ptr());
                 widths.push(width as u32);
                 log_output_heights.push(output_height.ilog2() as u8);
                 output_mats[i] = Some(out);
@@ -1879,7 +1880,7 @@ impl<'a, HS: GpuHashScheme> LogupZerocheckGpu<'a, HS> {
             unsafe {
                 cuda_memcpy_on::<true, true>(
                     gather.as_mut_ptr().add(gather_offset) as *mut _,
-                    mat.buffer().as_ptr() as *const _,
+                    mat.as_ptr() as *const _,
                     width * size_of::<EF>(),
                     &self.device_ctx,
                 )?;

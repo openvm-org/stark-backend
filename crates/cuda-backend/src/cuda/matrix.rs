@@ -91,14 +91,14 @@ extern "C" {
 /// - `input` and `output` must each have capacity at least `width * height`.
 pub unsafe fn matrix_transpose_fp(
     output: &DeviceBuffer<F>,
-    input: &DeviceBuffer<F>,
+    input: *const F,
     width: usize,
     height: usize,
     stream: cudaStream_t,
 ) -> Result<(), CudaError> {
     CudaError::from_result(_matrix_transpose_fp(
         output.as_mut_ptr(),
-        input.as_ptr(),
+        input,
         width,
         height,
         stream,

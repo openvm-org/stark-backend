@@ -1,12 +1,20 @@
 use std::{fmt::Debug, marker::PhantomData, sync::Arc};
 
 use openvm_cuda_common::{
-    copy::MemCopyD2H, d_buffer::DeviceBuffer, error::MemCopyError, stream::GpuDeviceCtx,
+    copy::{cuda_memcpy_on, MemCopyD2H},
+    d_buffer::DeviceBuffer,
+    error::MemCopyError,
+    stream::GpuDeviceCtx,
 };
 use openvm_stark_backend::prover::MatrixDimensions;
 
 pub struct DeviceMatrix<T> {
     buffer: Arc<DeviceBuffer<T>>,
+    /// Element offset of this matrix's first element within `buffer`. Non-zero only for views into
+    /// a larger backing buffer (e.g. a trace column-view into the shared eval-form stacked arena).
+    /// Pointer math must go through [`DeviceMatrix::as_ptr`] / [`DeviceMatrix::as_mut_ptr`], which
+    /// honor this offset; `buffer()` still returns the whole backing buffer.
+    offset: usize,
     height: usize,
     width: usize,
 }
@@ -18,6 +26,7 @@ impl<T> Clone for DeviceMatrix<T> {
     fn clone(&self) -> Self {
         Self {
             buffer: Arc::clone(&self.buffer),
+            offset: self.offset,
             height: self.height,
             width: self.width,
         }
@@ -50,6 +59,42 @@ impl<T> DeviceMatrix<T> {
         );
         Self {
             buffer,
+            offset: 0,
+            height,
+            width,
+        }
+    }
+
+    /// Constructs a matrix that is a view into `buffer` starting at element `offset`.
+    ///
+    /// The view borrows a shared reference to `buffer` (via `Arc`) but does not own the whole
+    /// allocation exclusively: multiple views may share one backing buffer. Dropping the view only
+    /// frees the backing buffer once the last `Arc` reference is gone.
+    ///
+    /// # Panics
+    /// Panics on zero dimensions or if `[offset, offset + height * width)` is out of bounds.
+    pub fn view_of(
+        buffer: Arc<DeviceBuffer<T>>,
+        offset: usize,
+        height: usize,
+        width: usize,
+    ) -> Self {
+        assert_ne!(
+            height * width,
+            0,
+            "Zero dimensions h {height} w {width} are wrong"
+        );
+        assert!(
+            offset
+                .checked_add(height * width)
+                .is_some_and(|end| end <= buffer.len()),
+            "View [offset {offset}, +{}) exceeds buffer length {}",
+            height * width,
+            buffer.len()
+        );
+        Self {
+            buffer,
+            offset,
             height,
             width,
         }
@@ -63,13 +108,35 @@ impl<T> DeviceMatrix<T> {
     pub fn dummy() -> Self {
         Self {
             buffer: Arc::new(DeviceBuffer::new()),
+            offset: 0,
             height: 0,
             width: 0,
         }
     }
 
+    /// The full backing buffer, which may be larger than `height * width` for a view. Use
+    /// [`DeviceMatrix::as_ptr`] / [`DeviceMatrix::as_mut_ptr`] for pointer math into this matrix's
+    /// own data, and this only for capacity/whole-buffer operations on non-views.
     pub fn buffer(&self) -> &DeviceBuffer<T> {
         &self.buffer
+    }
+
+    /// Element offset of this matrix within its backing [`DeviceMatrix::buffer`]. Zero unless this
+    /// is a view.
+    pub fn offset(&self) -> usize {
+        self.offset
+    }
+
+    /// Const device pointer to this matrix's first element, honoring the view offset.
+    pub fn as_ptr(&self) -> *const T {
+        // SAFETY: `offset` is within `buffer` bounds by construction (`new`/`view_of`).
+        unsafe { self.buffer.as_ptr().add(self.offset) }
+    }
+
+    /// Mutable device pointer to this matrix's first element, honoring the view offset.
+    pub fn as_mut_ptr(&self) -> *mut T {
+        // SAFETY: `offset` is within `buffer` bounds by construction (`new`/`view_of`).
+        unsafe { self.buffer.as_mut_ptr().add(self.offset) }
     }
 
     pub fn strong_count(&self) -> usize {
@@ -77,8 +144,8 @@ impl<T> DeviceMatrix<T> {
     }
 
     pub fn as_view(&self) -> DeviceMatrixView<'_, T> {
-        // SAFETY: buffer is borrowed for lifetime 'a of the view
-        unsafe { DeviceMatrixView::from_raw_parts(self.buffer.as_ptr(), self.height, self.width) }
+        // SAFETY: buffer is borrowed for lifetime 'a of the view; `as_ptr` honors the offset.
+        unsafe { DeviceMatrixView::from_raw_parts(self.as_ptr(), self.height, self.width) }
     }
 }
 
@@ -96,7 +163,26 @@ impl<T> MatrixDimensions for DeviceMatrix<T> {
 
 impl<T> MemCopyD2H<T> for DeviceMatrix<T> {
     fn to_host_on(&self, device_ctx: &GpuDeviceCtx) -> Result<Vec<T>, MemCopyError> {
-        self.buffer.to_host_on(device_ctx)
+        // Only copy this matrix's own `height * width` elements starting at `offset`; for a view
+        // the backing buffer is larger than the matrix.
+        let len = self.height * self.width;
+        if self.offset == 0 && self.buffer.len() == len {
+            return self.buffer.to_host_on(device_ctx);
+        }
+        let mut host_vec = Vec::<T>::with_capacity(len);
+        // SAFETY: `[offset, offset + len)` is in bounds (view invariant); `host_vec` has `len`
+        // capacity. `to_host_sync` synchronizes before the host reads the data.
+        unsafe {
+            cuda_memcpy_on::<true, false>(
+                host_vec.as_mut_ptr() as *mut std::ffi::c_void,
+                self.as_ptr() as *const std::ffi::c_void,
+                std::mem::size_of::<T>() * len,
+                device_ctx,
+            )?;
+            device_ctx.stream.to_host_sync()?;
+            host_vec.set_len(len);
+        }
+        Ok(host_vec)
     }
 
     fn to_pinned_on(
@@ -107,7 +193,22 @@ impl<T> MemCopyD2H<T> for DeviceMatrix<T> {
     where
         T: Copy,
     {
-        self.buffer.to_pinned_on(dst, device_ctx)
+        let len = self.height * self.width;
+        if self.offset == 0 && self.buffer.len() == len {
+            return self.buffer.to_pinned_on(dst, device_ctx);
+        }
+        dst.ensure_capacity(len)?;
+        // SAFETY: `[offset, offset + len)` is in bounds (view invariant); `dst` has `len` capacity.
+        unsafe {
+            cuda_memcpy_on::<true, false>(
+                dst.as_mut_ptr() as *mut std::ffi::c_void,
+                self.as_ptr() as *const std::ffi::c_void,
+                std::mem::size_of::<T>() * len,
+                device_ctx,
+            )?;
+        }
+        device_ctx.stream.to_host_sync()?;
+        Ok(len)
     }
 }
 

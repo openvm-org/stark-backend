@@ -123,7 +123,7 @@ pub fn transport_matrix_h2d_row(
     unsafe {
         matrix_transpose_fp(
             output.buffer(),
-            &input_buffer,
+            input_buffer.as_ptr(),
             Matrix::width(matrix),
             Matrix::height(matrix),
             device_ctx.stream.as_raw(),
@@ -355,7 +355,9 @@ pub fn transport_matrix_d2h_col_major<T>(
     matrix: &DeviceMatrix<T>,
     device_ctx: &GpuDeviceCtx,
 ) -> Result<ColMajorMatrix<T>, MemCopyError> {
-    let values_host = matrix.buffer().to_host_on(device_ctx)?;
+    // `matrix.to_host_on` copies only this matrix's `height * width` elements (honoring any view
+    // offset), which for a non-view equals the whole backing buffer.
+    let values_host = matrix.to_host_on(device_ctx)?;
     Ok(ColMajorMatrix::new(values_host, matrix.width()))
 }
 
@@ -368,7 +370,7 @@ pub fn transport_matrix_d2h_row_major(
     unsafe {
         matrix_transpose_fp(
             &matrix_buffer,
-            matrix.buffer(),
+            matrix.as_ptr(),
             matrix.height(),
             matrix.width(),
             device_ctx.stream.as_raw(),
@@ -409,7 +411,7 @@ pub fn assert_eq_host_and_device_matrix_col_maj<T: Clone + Send + Sync + Partial
 ) {
     assert_eq!(gpu.width(), cpu.width());
     assert_eq!(gpu.height(), cpu.height());
-    let gpu = gpu.buffer().to_host_on(device_ctx).unwrap();
+    let gpu = gpu.to_host_on(device_ctx).unwrap();
     for r in 0..cpu.height() {
         for c in 0..cpu.width() {
             assert_eq!(
@@ -430,9 +432,8 @@ pub fn assert_eq_device_matrix<T: Clone + Send + Sync + PartialEq + Debug>(
 ) {
     assert_eq!(a.height(), b.height());
     assert_eq!(a.width(), b.width());
-    assert_eq!(a.buffer().len(), b.buffer().len());
-    let a_host = a.buffer().to_host_on(device_ctx).unwrap();
-    let b_host = b.buffer().to_host_on(device_ctx).unwrap();
+    let a_host = a.to_host_on(device_ctx).unwrap();
+    let b_host = b.to_host_on(device_ctx).unwrap();
     for r in 0..a.height() {
         for c in 0..a.width() {
             assert_eq!(
@@ -453,7 +454,7 @@ pub fn assert_eq_host_and_device_matrix<T: Clone + Send + Sync + PartialEq + Deb
 ) {
     assert_eq!(gpu.width(), Matrix::width(cpu.as_ref()));
     assert_eq!(gpu.height(), Matrix::height(cpu.as_ref()));
-    let gpu = gpu.buffer().to_host_on(device_ctx).unwrap();
+    let gpu = gpu.to_host_on(device_ctx).unwrap();
     for r in 0..Matrix::height(cpu.as_ref()) {
         for c in 0..Matrix::width(cpu.as_ref()) {
             assert_eq!(

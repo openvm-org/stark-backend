@@ -27,6 +27,11 @@ pub struct GpuProverConfig {
     pub cache_stacked_matrix: bool,
     pub cache_rs_code_matrix: bool,
     pub zerocheck_save_memory: bool,
+    /// When true (default), after the common-main commitment the qualifying common-main traces are
+    /// stacked into one persistent eval-form arena and each per-trace buffer is replaced by a view
+    /// into that arena (freeing the original owning buffers). Set to false to recover the previous
+    /// behavior of keeping the per-trace buffers alive.
+    pub stack_trace_arena: bool,
 }
 
 impl GpuProverConfig {
@@ -111,6 +116,7 @@ impl Default for GpuProverConfig {
             cache_stacked_matrix: false,
             cache_rs_code_matrix: false,
             zerocheck_save_memory: true,
+            stack_trace_arena: true,
         }
     }
 }

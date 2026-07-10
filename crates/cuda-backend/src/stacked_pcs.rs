@@ -137,6 +137,86 @@ pub(crate) fn stack_traces(
     ))
 }
 
+/// Builds the persistent eval-form stacked arena for the (height-sorted) `traces` and returns, for
+/// each trace, an optional view into that arena that can replace the trace's own owning buffer.
+///
+/// - Traces with height `>= 2^l_skip` occupy a contiguous range of the stacked layout, so they get
+///   `Some(view)`: a [`DeviceMatrix`] with the same height/width whose data aliases the arena. Its
+///   bytes are identical to the original trace (the arena is filled by copying the traces in).
+/// - Traces with height `< 2^l_skip` are stored *strided* in the stacked layout and are therefore
+///   not contiguous, so they get `None` and must keep their own buffer.
+///
+/// The arena holds the raw eval-form stacked matrix — exactly what [`stack_traces`] produces before
+/// [`PleMatrix::from_evals`] converts it to mixed form. All returned views share one arena `Arc`,
+/// which stays alive as long as any view (or the WHIR recompute) references it.
+///
+/// Returns `Ok(vec![None; traces.len()])` without allocating if no trace qualifies.
+#[instrument(level = "info", skip_all)]
+pub fn build_common_main_arena(
+    layout: &StackedLayout,
+    traces: &[&DeviceMatrix<F>],
+    device_ctx: &GpuDeviceCtx,
+) -> Result<Vec<Option<DeviceMatrix<F>>>, StackTracesError> {
+    let l_skip = layout.l_skip();
+    let height = layout.height();
+    let width = layout.width();
+
+    // Which traces are contiguous (height >= 2^l_skip) and hence viewable.
+    let qualifies = |mat_idx: usize| {
+        layout
+            .get(mat_idx, 0)
+            .is_some_and(|s| s.log_height() >= l_skip)
+    };
+    if !(0..traces.len()).any(qualifies) {
+        // Nothing to stack into an arena; leave every trace owning its buffer.
+        return Ok(vec![None; traces.len()]);
+    }
+
+    let mem = MemTracker::start("prover.build_common_main_arena");
+    let mut arena_buf =
+        DeviceBuffer::<F>::with_capacity_on(width.checked_mul(height).unwrap(), device_ctx);
+    // Fill the arena with the eval-form stacked matrix via D2D copies from the owning traces.
+    // These copies are enqueued async on `device_ctx.stream`. The caller MUST synchronize the
+    // stream before freeing any source trace buffer: `DeviceBuffer::drop` frees on the buffer's own
+    // *allocation* stream (which may differ from `device_ctx.stream`), so without a barrier a
+    // source region could be reused by a new allocation while its copy into the arena is still
+    // in flight. `optimize_committed_context` performs that sync before dropping the originals.
+    stack_traces_into_expanded(layout, traces, &mut arena_buf, height, device_ctx)?;
+    let arena = Arc::new(arena_buf);
+
+    let views = (0..traces.len())
+        .map(|mat_idx| {
+            let s = layout
+                .get(mat_idx, 0)
+                .expect("each common-main trace has at least one column");
+            if s.log_height() < l_skip {
+                return None;
+            }
+            let trace = traces[mat_idx];
+            debug_assert_eq!(1 << s.log_height(), trace.height());
+            // Whole trace is contiguous in the stacked layout starting at column 0's flat offset.
+            let base = s.col_idx * height + s.row_idx;
+            debug_assert!(base + trace.height() * trace.width() <= arena.len());
+            // Verify every column j lands at exactly `base + j * trace_height` in the (col-major)
+            // arena — the contiguity the view relies on. This mirrors the memcpy fast-path grouping
+            // in `stack_traces_into_expanded`.
+            debug_assert!((0..trace.width()).all(|j| {
+                layout
+                    .get(mat_idx, j)
+                    .is_some_and(|sj| sj.col_idx * height + sj.row_idx == base + j * trace.height())
+            }));
+            Some(DeviceMatrix::view_of(
+                Arc::clone(&arena),
+                base,
+                trace.height(),
+                trace.width(),
+            ))
+        })
+        .collect();
+    mem.emit_metrics();
+    Ok(views)
+}
+
 /// `buffer` should be the buffer to write the stacked traces into.
 /// `buffer` should be a matrix with dimensions `padded_height x width` where `width` is the stacked
 /// width and `padded_height` must be a multiple of the stacked height.
@@ -182,8 +262,10 @@ pub(crate) fn stack_traces_into_expanded(
 
             // SAFETY: matrix buffers are allocated correctly with respect to dimensions.
             // The grouped columns are contiguous in both source and destination buffers.
+            // `trace.as_ptr()` honors any view offset (arena-backed traces on the WHIR recompute
+            // path) and equals `buffer().as_ptr()` for owning traces (commit path).
             unsafe {
-                let src = trace.buffer().as_ptr().add(*j * s_len);
+                let src = trace.as_ptr().add(*j * s_len);
                 let dst = buffer.as_mut_ptr().add(start);
                 cuda_memcpy_on::<true, true>(
                     dst as *mut c_void,
@@ -201,7 +283,7 @@ pub(crate) fn stack_traces_into_expanded(
             // - we abuse `batch_expand_pad` with `poly_count = trace.height()` to create a strided
             //   column of length `s_len = stride * trace.height()`
             unsafe {
-                let src = trace.buffer().as_ptr().add(*j * trace.height());
+                let src = trace.as_ptr().add(*j * trace.height());
                 let dst = buffer.as_mut_ptr().add(start);
                 batch_expand_pad_wide(
                     dst,

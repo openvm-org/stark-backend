@@ -90,10 +90,10 @@ pub unsafe fn fold_ple_evals_gpu(
     let lifted_height = max(skip_domain, height);
     let num_x = lifted_height / skip_domain;
 
-    // Launch kernel
+    // Launch kernel. `mat.as_ptr()` honors any view offset (arena-backed common_main traces).
     unsafe {
         fold_ple_from_evals(
-            mat.buffer(),
+            mat.as_ptr(),
             output,
             d_omega_skip_pows,
             d_inv_lagrange_denoms_r0,

@@ -189,7 +189,7 @@ pub fn evaluate_round0_constraints_gpu<HS: GpuHashScheme>(
     let preprocessed_ptr = pk
         .preprocessed_data
         .as_ref()
-        .map(|cd| cd.trace.buffer().as_ptr())
+        .map(|cd| cd.trace.as_ptr())
         .unwrap_or(std::ptr::null());
 
     let mut sp_evals = DeviceBuffer::<EF>::with_capacity_on(
@@ -312,7 +312,7 @@ pub fn evaluate_round0_interactions_gpu<HS: GpuHashScheme>(
     let preprocessed_ptr = pk
         .preprocessed_data
         .as_ref()
-        .map(|cd| cd.trace.buffer().as_ptr())
+        .map(|cd| cd.trace.as_ptr())
         .unwrap_or(std::ptr::null());
 
     let mut s_evals = DeviceBuffer::<Frac<EF>>::with_capacity_on(large_domain as usize, device_ctx);

@@ -393,7 +393,7 @@ impl<D: Copy + Clone + Send + Sync + 'static> StackedReductionGpu<D> {
                 debug_assert_ne!(trace.width(), 0);
                 debug_assert_ne!(trace.height(), 0);
                 ht_diff_idxs.push(unstacked_cols.len());
-                trace_ptrs.push((trace.buffer().as_ptr(), trace.height(), trace.width()));
+                trace_ptrs.push((trace.as_ptr(), trace.height(), trace.width()));
                 let need_rot = need_rot_for_commit[mat_idx];
                 for j in 0..trace.width() {
                     let (_, _j, s) = layout.sorted_cols[idx + j];
@@ -768,8 +768,8 @@ impl<D: Copy + Clone + Send + Sync + 'static> StackedReductionGpu<D> {
 
                 // Launch single-trace kernel for this trace
                 // SAFETY:
-                // - `trace.buffer()` is a valid device pointer for `trace.height() * trace.width()`
-                //   elements
+                // - `trace.as_ptr()` is a valid device pointer for `trace.height() * trace.width()`
+                //   elements, honoring any view offset (arena-backed common_main traces)
                 // - `folded_evals` at `dst_offset` is valid for `new_height * trace.width()`
                 //   elements since we allocated `num_x * stacked_width` and traces fill
                 //   contiguously
@@ -777,7 +777,7 @@ impl<D: Copy + Clone + Send + Sync + 'static> StackedReductionGpu<D> {
                 unsafe {
                     let dst = folded_evals.as_mut_ptr().add(dst_offset);
                     stacked_reduction_fold_ple(
-                        trace.buffer().as_ptr(),
+                        trace.as_ptr(),
                         dst,
                         &self.d_omega_skip_pows,
                         &d_inv_lagrange_denoms,

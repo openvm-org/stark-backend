@@ -112,7 +112,7 @@ where
             for (trace, &idx) in zip(&stacked.traces, &layout.mat_starts) {
                 let (_, _, s) = layout.sorted_cols[idx];
                 let packet = BatchingTracePacket {
-                    ptr: trace.buffer().as_ptr(),
+                    ptr: trace.as_ptr(),
                     height: trace.height() as u32,
                     width: trace.width() as u32,
                     stacked_row_start: s.row_idx as u32,

@@ -245,9 +245,11 @@ pub fn log_gkr_input_evals<HS: GpuHashScheme>(
                 partitioned_main.push(&committed.trace);
             }
             partitioned_main.push(&air_ctx.common_main);
+            // `as_ptr()` honors any view offset (arena-backed common_main traces); cached mains and
+            // preprocessed keep offset 0.
             let main_ptrs: Vec<u64> = partitioned_main
                 .iter()
-                .map(|m| m.buffer().as_ptr() as u64)
+                .map(|m| m.as_ptr() as u64)
                 .collect_vec();
             let d_main_ptrs = main_ptrs.to_device_on(device_ctx)?;
             let main_ptr = d_main_ptrs.as_ptr();
