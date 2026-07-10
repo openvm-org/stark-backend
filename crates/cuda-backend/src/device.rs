@@ -37,7 +37,11 @@ impl GpuProverConfig {
         // Interaction memory is estimated from the CUDA fractional-GKR buffer model in
         // `openvm_stark_backend::memory_metering`. Update that estimate when changing GKR
         // input layout, work-buffer sizing, or scratch allocations.
-        ProvingMemoryConfig::from_protocol_config(config, self.cache_rs_code_matrix)
+        let mut memory_config =
+            ProvingMemoryConfig::from_protocol_config(config, self.cache_rs_code_matrix);
+        memory_config.cache_stacked_matrix = self.cache_stacked_matrix;
+        memory_config.zerocheck_save_memory = self.zerocheck_save_memory;
+        memory_config
     }
 }
 

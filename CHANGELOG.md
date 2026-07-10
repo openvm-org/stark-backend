@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+### Fixed
+- Proving memory estimates (`memory_metering`) no longer under-estimate the observed peak GPU memory: the estimate now accounts for the WHIR opening working set (commitment Merkle layers, round-0 codeword and tree, scratch) that coexists with the Reed-Solomon code matrix, stacking width round-up in the RS code matrix, the fractional-GKR work-buffer floor, batch-constraint scratch (additive on `main_secondary` when `zerocheck_save_memory` is off), and the resident stacked matrix when `cache_stacked_matrix` is on.
+
+### Added
+- `tracked_memory_stats`/`reset_session_peak` in `openvm-cuda-common` for peak GPU memory measurement that survives phase-level peak resets.
+- `mem_meter_runner` benchmark binary that replays captured segment profiles on the GPU and compares the memory-metering estimate against the measured peak.
+
 ## v2.0.0 (2026-07-06)
 
 ### Added
