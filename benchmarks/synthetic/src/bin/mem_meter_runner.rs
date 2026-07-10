@@ -6,11 +6,10 @@
 //! peak GPU memory tracked by the cuda-common memory manager.
 //!
 //! Per segment it reports:
-//! - the model estimate breakdown (main / rs_code_matrix / main_secondary /
-//!   interaction / secondary_peak / total),
-//! - the measured baseline before proving (device pk + traces), the measured
-//!   peak during proving, per-phase peaks from the `gpu_mem.*` gauges emitted
-//!   by `MemTracker`, and
+//! - the model estimate breakdown (main / rs_code_matrix / main_secondary / interaction /
+//!   secondary_peak / total),
+//! - the measured baseline before proving (device pk + traces), the measured peak during proving,
+//!   per-phase peaks from the `gpu_mem.*` gauges emitted by `MemTracker`, and
 //! - the estimate-vs-measured gap.
 //!
 //! Usage:
