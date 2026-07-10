@@ -226,7 +226,11 @@ impl<'a> ZerocheckMonomialBatch<'a> {
     /// See [`crate::logup_zerocheck`] module docs for async-free/peak memory behavior.
     ///
     /// The `stager` cycle this batch staged into must be committed.
-    pub fn evaluate(&self, stager: &RoundStager, num_x: u32) -> Result<DeviceBuffer<EF>, KernelError> {
+    pub fn evaluate(
+        &self,
+        stager: &RoundStager,
+        num_x: u32,
+    ) -> Result<DeviceBuffer<EF>, KernelError> {
         let num_blocks = self.num_blocks;
         let num_airs = self.traces.len();
 
@@ -439,7 +443,11 @@ impl<'a> ZerocheckMonomialParYBatch<'a> {
     /// See [`crate::logup_zerocheck`] module docs for async-free/peak memory behavior.
     ///
     /// The `stager` cycle this batch staged into must be committed.
-    pub fn evaluate(&self, stager: &RoundStager, num_x: u32) -> Result<DeviceBuffer<EF>, KernelError> {
+    pub fn evaluate(
+        &self,
+        stager: &RoundStager,
+        num_x: u32,
+    ) -> Result<DeviceBuffer<EF>, KernelError> {
         let num_airs = self.traces.len();
 
         debug!(
