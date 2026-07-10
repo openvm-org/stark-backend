@@ -6,6 +6,7 @@ use openvm_cuda_common::{
     d_buffer::DeviceBuffer,
     error::MemCopyError,
     memory_manager::MemTracker,
+    pinned::PinnedBuffer,
     stream::GpuDeviceCtx,
 };
 use openvm_stark_backend::{
@@ -106,6 +107,10 @@ pub struct StackedReductionGpu<D = Digest> {
 
     d_block_sums: DeviceBuffer<EF>,
     d_accum: DeviceBuffer<u64>,
+    /// Pinned readback buffer for the per-round accumulator (see `to_pinned_on`).
+    rb_accum: PinnedBuffer<u64>,
+    /// Pinned readback for the two per-round (eq, k_rot) stable scalars.
+    rb_scalars: PinnedBuffer<EF>,
     d_input_ptrs: DeviceBuffer<*const EF>,
     d_output_ptrs: DeviceBuffer<*mut EF>,
 
@@ -433,6 +438,10 @@ impl<D: Copy + Clone + Send + Sync + 'static> StackedReductionGpu<D> {
             num_windows * STACKED_REDUCTION_S_DEG * D_EF,
             &device_ctx,
         );
+        let rb_accum =
+            PinnedBuffer::<u64>::with_capacity(num_windows * STACKED_REDUCTION_S_DEG * D_EF)
+                .map_err(MemCopyError::from)?;
+        let rb_scalars = PinnedBuffer::<EF>::with_capacity(2).map_err(MemCopyError::from)?;
         let d_eq_ub = if unstacked_cols.is_empty() {
             DeviceBuffer::new()
         } else {
@@ -469,6 +478,8 @@ impl<D: Copy + Clone + Send + Sync + 'static> StackedReductionGpu<D> {
             d_eq_ub,
             d_block_sums: DeviceBuffer::new(),
             d_accum,
+            rb_accum,
+            rb_scalars,
             d_input_ptrs,
             d_output_ptrs,
             mem,
@@ -819,33 +830,33 @@ impl<D: Copy + Clone + Send + Sync + 'static> StackedReductionGpu<D> {
 
         if self.n_max >= (round - 1) {
             // Move stable eq, k_rot to stable vectors
-            let mut tmp = [EF::ZERO];
             debug_assert_eq!(self.eq_stable.len(), l_skip + round - 1);
             debug_assert_eq!(self.k_rot_stable.len(), l_skip + round - 1);
             debug_assert!(self.eq_r_ns.buffer.len() > 1);
             debug_assert!(self.k_rot_ns.buffer.len() > 1);
-            // SAFETY: size of eq_r_ns, k_rot_ns is currently 2 * 2^{n_max - round + 1}
+            // SAFETY: size of eq_r_ns, k_rot_ns is currently 2 * 2^{n_max - round + 1}.
+            // Both single-element D2H copies go into pinned memory with one stream sync.
             unsafe {
-                // D2H copy of single EF element
                 cuda_memcpy_on::<true, false>(
-                    tmp.as_mut_ptr() as *mut c_void,
+                    self.rb_scalars.as_mut_ptr() as *mut c_void,
                     self.eq_r_ns.get_ptr(0) as *const c_void,
                     size_of::<EF>(),
                     &self.device_ctx,
                 )?;
-
-                self.eq_stable.push(tmp[0]);
-
-                // D2H copy of single EF element
                 cuda_memcpy_on::<true, false>(
-                    tmp.as_mut_ptr() as *mut c_void,
+                    self.rb_scalars.as_mut_ptr().add(1) as *mut c_void,
                     self.k_rot_ns.get_ptr(0) as *const c_void,
                     size_of::<EF>(),
                     &self.device_ctx,
                 )?;
-
-                self.k_rot_stable.push(tmp[0]);
             }
+            self.device_ctx
+                .stream
+                .to_host_sync()
+                .map_err(MemCopyError::from)?;
+            let scalars = self.rb_scalars.as_slice(2);
+            self.eq_stable.push(scalars[0]);
+            self.k_rot_stable.push(scalars[1]);
         }
         let accum_stride = STACKED_REDUCTION_S_DEG * D_EF;
         let num_windows = self.ht_diff_idxs.len() - 1;
@@ -931,7 +942,10 @@ impl<D: Copy + Clone + Send + Sync + 'static> StackedReductionGpu<D> {
         }
 
         // D2H copy and reduce modulo P once after all window kernels have queued.
-        let h_accum = self.d_accum.to_host_on(&self.device_ctx)?;
+        let n = self
+            .d_accum
+            .to_pinned_on(&mut self.rb_accum, &self.device_ctx)?;
+        let h_accum = self.rb_accum.as_slice(n);
         let s_evals_batch = h_accum[..num_windows * accum_stride]
             .chunks_exact(accum_stride)
             .map(reduce_raw_u64_to_ef)
