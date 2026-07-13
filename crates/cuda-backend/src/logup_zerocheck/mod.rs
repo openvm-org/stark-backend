@@ -249,13 +249,15 @@ where
 
     // The fractional GKR peak has passed: start re-encoding the WHIR round-0
     // RS codeword on the low-priority auxiliary stream, soaking the idle
-    // bubbles of the sumcheck phases below. The batch-MLE phases size their
-    // working buffers up to the GKR peak; shrink that budget by the resident
-    // codeword so total demand stays inside the same memory envelope.
+    // bubbles of the sumcheck phases below. Do NOT shrink `memory_limit_bytes`
+    // to "reserve" for the resident codeword: that budget is the batch-MLE
+    // working-buffer hint, and driving it below the value keygen picked pushes
+    // the round-0 batch-MLE onto a degenerate path whose D2H readback
+    // deadlocks. The codeword is a separate pool allocation already accounted
+    // by the allocator, which returns a recoverable OOM rather than corrupting
+    // the batch budget.
     if let Some(request) = rs_prefetch {
-        let codeword_bytes = request.codeword_bytes();
         request.launch(device_ctx)?;
-        prover.memory_limit_bytes = prover.memory_limit_bytes.saturating_sub(codeword_bytes);
     }
 
     // Note: this span includes ple_fold, but that function has no cuda synchronization so it does
