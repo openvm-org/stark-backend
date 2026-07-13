@@ -618,7 +618,12 @@ impl<SC: DecodableConfig> Decode for WhirProof<SC> {
         let query_phase_pow_witnesses = SC::decode_base_field_n(reader, num_whir_rounds)?;
 
         let num_commits = usize::decode(reader)?;
-        assert!(num_commits > 0);
+        if num_commits == 0 {
+            return Err(Error::new(
+                std::io::ErrorKind::InvalidData,
+                "num_commits must be nonzero",
+            ));
+        }
         let initial_num_whir_queries = usize::decode(reader)?;
         let k_whir_exp = 1 << k_whir;
         let mut merkle_depth = 0;
