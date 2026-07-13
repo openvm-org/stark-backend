@@ -56,13 +56,6 @@ pub struct RsPrefetchRequest<'a> {
 }
 
 impl RsPrefetchRequest<'_> {
-    /// Device bytes the prefetched codeword will occupy while it is resident
-    /// (from launch until the WHIR initial round). Callers subtract this from
-    /// concurrent phases' memory budgets so peak usage does not grow.
-    pub(crate) fn codeword_bytes(&self) -> usize {
-        (self.layout.height() << self.log_blowup) * self.layout.width() * std::mem::size_of::<F>()
-    }
-
     /// Enqueues the RS re-encode on the auxiliary stream, ordered after all
     /// work currently queued on `main_ctx`'s stream (the traces it reads are
     /// settled long before). Does not block the host; the codeword is handed
