@@ -168,7 +168,7 @@ fn test_quintic_challenge_field_bits() {
 }
 
 #[test]
-fn test_internal_vk_folding_pow_guard_stability() {
+fn test_internal_vk_folding_pow_preset_values() {
     let engine = BabyBearPoseidon2RefEngine::<DuplexSponge>::new(internal_params());
     let (_, internal_vk) = FibFixture::new(0, 1, 1).keygen(&engine);
 
