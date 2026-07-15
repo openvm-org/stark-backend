@@ -5,9 +5,15 @@
 //! These tests cover field/protocol soundness only. They do not assess commitment or transcript
 //! hash security and make no end-to-end security claim.
 
-use openvm_stark_backend::{soundness::*, SystemParams};
+use openvm_stark_backend::{
+    soundness::*,
+    test_utils::{FibFixture, TestFixture},
+    StarkEngine, SystemParams,
+};
 use openvm_stark_sdk::config::{
-    app_params_with_128_bits_field_security, base_field_order, challenge_field_bits,
+    app_params_with_128_bits_field_security,
+    baby_bear_poseidon2::{BabyBearPoseidon2RefEngine, DuplexSponge},
+    base_field_order, challenge_field_bits,
     hook_params_with_128_bits_field_security as hook_params,
     internal_params_with_128_bits_field_security as internal_params,
     leaf_params_with_128_bits_field_security as leaf_params,
@@ -159,6 +165,15 @@ fn test_quintic_challenge_field_bits() {
         (bits - 154.5).abs() < 0.1,
         "expected a 154.5-bit quintic challenge field, got {bits:.4} bits"
     );
+}
+
+#[test]
+fn test_internal_vk_folding_pow_guard_stability() {
+    let engine = BabyBearPoseidon2RefEngine::<DuplexSponge>::new(internal_params());
+    let (_, internal_vk) = FibFixture::new(0, 1, 1).keygen(&engine);
+
+    assert_eq!(internal_vk.inner.params.whir.folding_pow_bits, 14);
+    assert_eq!(internal_vk.inner.params.whir.query_phase_pow_bits, 20);
 }
 
 #[test]
