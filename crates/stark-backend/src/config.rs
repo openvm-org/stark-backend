@@ -6,70 +6,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::{hasher::MerkleHasher, interaction::LogUpSecurityParameters};
 
-/// Generic collision and preimage bounds for one hash-based protocol role.
-///
-/// These are explicit cryptographic assumptions owned by a concrete
-/// [`StarkProtocolConfig`]. They are not inferred from the digest Rust type: a
-/// digest's representation alone does not establish the security of the hash,
-/// transcript, or commitment construction that produces it.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct HashSecurityBounds {
-    pub collision_bits: f64,
-    pub preimage_bits: f64,
-}
-
-/// How Fiat-Shamir `sample_bits` obtains bits for queries and proof-of-work.
-///
-/// The field/protocol soundness calculator uses this declaration to decide
-/// whether it must charge the bias from reducing a sampled base-field element.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum FiatShamirSamplingModel {
-    /// `sample_bits(n)` samples a base-field element and keeps its low `n` bits.
-    /// Unless the field order is a power of two, the result is slightly biased.
-    BaseFieldElement,
-    /// `sample_bits(n)` consumes uniform hash-output bits directly.
-    ///
-    /// This is the extension point intended for a future SHA-256 transcript.
-    UniformBits,
-}
-
-/// Config-owned commitment, transcript, and sampling security assumptions.
-///
-/// This profile is deliberately separate from field/protocol soundness. The
-/// end-to-end estimate is the minimum of the field/protocol estimate and
-/// [`Self::hash_security_bits`].
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct ConfigSecurityProfile {
-    /// Binding/hash bounds for the commitment scheme, including its Merkle tree.
-    pub commitment: HashSecurityBounds,
-    /// Hash bounds for the Fiat-Shamir transcript construction.
-    pub transcript: HashSecurityBounds,
-    /// Sampling behavior used by the transcript's `sample_bits` implementation.
-    pub sampling: FiatShamirSamplingModel,
-}
-
-impl ConfigSecurityProfile {
-    /// The config's hash-side security bound.
-    ///
-    /// Both collision and preimage assumptions are surfaced so configurations
-    /// such as a future SHA-256/B256 config can explicitly declare 128-bit
-    /// collision and 256-bit preimage bounds. The conservative aggregate is the
-    /// minimum across commitment and transcript roles.
-    pub fn hash_security_bits(&self) -> f64 {
-        let bounds = [
-            self.commitment.collision_bits,
-            self.commitment.preimage_bits,
-            self.transcript.collision_bits,
-            self.transcript.preimage_bits,
-        ];
-        assert!(
-            bounds.iter().all(|bits| bits.is_finite() && *bits >= 0.0),
-            "config security bounds must be finite and nonnegative"
-        );
-        bounds.into_iter().reduce(f64::min).unwrap()
-    }
-}
-
 /// Trait that holds the associated types for the SWIRL protocol. These are the types needed by the
 /// verifier and must be independent of the prover backend.
 ///
@@ -101,13 +37,6 @@ pub trait StarkProtocolConfig: 'static + Clone + Send + Sync {
 
     /// Degree of the extension field.
     const D_EF: usize = <Self::EF as BasedVectorSpace<Self::F>>::DIMENSION;
-
-    /// Commitment, transcript, and sampling security assumptions for this
-    /// concrete configuration.
-    ///
-    /// Implementations must make these assumptions explicit rather than derive
-    /// them generically from [`Self::Digest`].
-    fn security_profile() -> ConfigSecurityProfile;
 
     fn params(&self) -> &SystemParams;
 
@@ -168,9 +97,8 @@ impl SystemParams {
     /// `query_phase_pow_bits` are preset with constants.
     ///
     /// The `security_bits` value targets field/protocol security when selecting the number of WHIR
-    /// queries. It does **not** guarantee that level for the complete protocol. Use the
-    /// config-aware soundness assessment to combine field/protocol security with the config-owned
-    /// commitment and transcript bounds.
+    /// queries. It does **not** include commitment or transcript hash security. The soundness
+    /// calculator is likewise field-side-only and does not establish an end-to-end security level.
     ///
     /// This function should only be used for internal cryptography libraries. Most users should
     /// instead use preset parameters provided in SDKs.

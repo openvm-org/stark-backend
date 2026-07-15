@@ -187,9 +187,6 @@ where
     SC: StarkProtocolConfig<F = F>,
     SC::Digest: AsRef<[SF]>,
 {
-    const SAMPLING_MODEL: crate::FiatShamirSamplingModel =
-        crate::FiatShamirSamplingModel::BaseFieldElement;
-
     fn observe(&mut self, value: F) {
         self.observe(value);
     }

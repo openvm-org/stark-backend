@@ -23,10 +23,12 @@ pub mod log_up_params;
 // ==========================================================================
 // Production configurations
 // ==========================================================================
-// These configurations target 128 bits of field/protocol round-by-round (RBR) security with
-// BabyBear as the base field and BabyBear^5 as the extension field. Their Poseidon2 commitment and
-// transcript profile caps end-to-end security below 128 bits; use the config-aware soundness
-// assessment for the honest end-to-end estimate.
+// SECURITY: These degree-5 configurations target at least 128 bits of field/protocol soundness
+// with a 154.5-bit challenge field. The commitment and transcript hash remain Poseidon2 with an
+// approximately 123.6-bit generic collision bound: this is the pre-SHA baseline. End-to-end
+// 128-bit security is the goal of the M3 SHA-256 swap; its exact construction-specific bound and
+// strict-versus-conventional-128 semantics remain a pending design decision. The in-code
+// soundness calculator is field-side-only and is not an end-to-end security claim.
 
 pub const DEFAULT_K_WHIR: usize = 4;
 pub const DEFAULT_WHIR_QUERY_PHASE_POW_BITS: usize = 20;
@@ -78,7 +80,7 @@ fn log_up_params_for_whir(
 /// Builds production `SystemParams` for 128-bit field/protocol security, calibrating LogUp grinding
 /// to the WHIR proximity regime's PCS list size. The LogUp params are derived up front (from the
 /// same inputs `SystemParams::new` uses to build the WHIR config) so they can be passed straight
-/// in. This name intentionally does not claim 128-bit end-to-end security for Poseidon2 configs.
+/// in. This function makes no end-to-end security claim.
 #[allow(clippy::too_many_arguments)]
 pub fn params_with_128_bits_field_security(
     log_blowup: usize,
@@ -111,10 +113,6 @@ pub fn params_with_128_bits_field_security(
 }
 
 /// Returns `SystemParams` targeting 128 bits of field/protocol RBR security for App VM circuits.
-///
-/// The default Poseidon2 config remains capped at approximately 123.6 bits end-to-end by its
-/// commitment/transcript profile.
-///
 /// # Assumptions for 128-bit field/protocol security
 /// - **Max trace height**: `log_stacked_height` ≤ [`MAX_APP_LOG_STACKED_HEIGHT`] (24)
 /// - **Max constraints per AIR**: ≤ 5,000
@@ -145,7 +143,7 @@ pub fn app_params_with_128_bits_field_security(log_stacked_height: usize) -> Sys
 }
 
 /// Returns `SystemParams` targeting 128 bits of field/protocol RBR security for leaf aggregation
-/// circuits. Poseidon2 caps the end-to-end estimate below 128 bits.
+/// circuits.
 ///
 /// # Assumptions for 128-bit field/protocol security
 /// - **Max trace height**: ≤ 2^21
@@ -176,7 +174,7 @@ pub fn leaf_params_with_128_bits_field_security() -> SystemParams {
 }
 
 /// Returns `SystemParams` targeting 128 bits of field/protocol RBR security for internal
-/// aggregation circuits. Poseidon2 caps the end-to-end estimate below 128 bits.
+/// aggregation circuits.
 ///
 /// # Assumptions for 128-bit field/protocol security
 /// - **Max trace height**: ≤ 2^21
@@ -206,7 +204,6 @@ pub fn internal_params_with_128_bits_field_security() -> SystemParams {
 }
 
 /// Returns `SystemParams` targeting 128 bits of field/protocol RBR security for root circuits.
-/// Poseidon2 caps the end-to-end estimate below 128 bits.
 ///
 /// # Assumptions for 128-bit field/protocol security
 /// - **Max trace height**: ≤ 2^20
@@ -236,7 +233,7 @@ pub fn root_params_with_128_bits_field_security() -> SystemParams {
 }
 
 /// Returns `SystemParams` targeting 128 bits of field/protocol RBR security for deferral hook
-/// circuits. Poseidon2 caps the end-to-end estimate below 128 bits.
+/// circuits.
 ///
 /// # Assumptions for 128-bit field/protocol security
 /// - **Max trace height**: ≤ 2^20

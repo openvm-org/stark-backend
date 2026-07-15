@@ -1,12 +1,14 @@
 //! ==========================================================================
 //! Production configuration soundness tests
 //! ==========================================================================
+//!
+//! These tests cover field/protocol soundness only. They do not assess commitment or transcript
+//! hash security and make no end-to-end security claim.
 
 use openvm_stark_backend::{soundness::*, SystemParams};
 use openvm_stark_sdk::config::{
-    app_params_with_128_bits_field_security,
-    baby_bear_poseidon2::{BabyBearPoseidon2Config, DuplexSponge},
-    challenge_field_bits, hook_params_with_128_bits_field_security as hook_params,
+    app_params_with_128_bits_field_security, base_field_order, challenge_field_bits,
+    hook_params_with_128_bits_field_security as hook_params,
     internal_params_with_128_bits_field_security as internal_params,
     leaf_params_with_128_bits_field_security as leaf_params,
     root_params_with_128_bits_field_security as root_params, MAX_APP_LOG_STACKED_HEIGHT,
@@ -60,8 +62,6 @@ const ROOT_NUM_COLUMNS: usize = 2400;
 const RECURSION_MAX_INTERACTIONS_PER_AIR: usize = 100; // estimate, needs verification
 
 const TARGET_FIELD_PROTOCOL_SECURITY_BITS: f64 = 128.0;
-const MIN_POSEIDON2_END_TO_END_BITS: f64 = 123.0;
-const MAX_POSEIDON2_END_TO_END_BITS: f64 = 124.0;
 
 fn app_params() -> SystemParams {
     app_params_with_128_bits_field_security(MAX_APP_LOG_STACKED_HEIGHT)
@@ -75,20 +75,19 @@ fn check_soundness(
     max_log_height: usize,
     num_columns: usize,
     n_logup: usize,
-) -> ConfigSoundnessAssessment {
-    let soundness =
-        SoundnessCalculator::calculate_for_config::<BabyBearPoseidon2Config, DuplexSponge>(
-            params,
-            max_constraints,
-            num_airs,
-            params.max_constraint_degree,
-            max_log_height,
-            num_columns,
-            params.w_stack,
-            n_logup,
-        );
-    let field_protocol = &soundness.field_protocol;
-    let profile = &soundness.config_security_profile;
+) -> SoundnessCalculator {
+    let soundness = SoundnessCalculator::calculate_field_protocol(
+        params,
+        base_field_order(),
+        challenge_field_bits(),
+        max_constraints,
+        num_airs,
+        params.max_constraint_degree,
+        max_log_height,
+        num_columns,
+        params.w_stack,
+        n_logup,
+    );
 
     println!("\n=== {} Soundness ===", name);
     println!(
@@ -106,52 +105,35 @@ fn check_soundness(
     );
     println!("Challenge field:      {:.1} bits", challenge_field_bits());
     println!();
-    println!("LogUp (α/β + PoW):   {:.1} bits", field_protocol.logup_bits);
+    println!("LogUp (α/β + PoW):   {:.1} bits", soundness.logup_bits);
     println!(
         "GKR sumcheck:        {:.1} bits",
-        field_protocol.gkr_sumcheck_bits
+        soundness.gkr_sumcheck_bits
     );
     println!(
         "GKR batching (μ/λ):  {:.1} bits",
-        field_protocol.gkr_batching_bits
+        soundness.gkr_batching_bits
     );
     println!(
         "ZeroCheck sumcheck:  {:.1} bits",
-        field_protocol.zerocheck_sumcheck_bits
+        soundness.zerocheck_sumcheck_bits
     );
     println!(
         "Fused boundary/batching: {:.1} bits",
-        field_protocol.constraint_batching_bits
+        soundness.constraint_batching_bits
     );
     println!(
         "Stacked reduction:   {:.1} bits",
-        field_protocol.stacked_reduction_bits
+        soundness.stacked_reduction_bits
     );
-    println!("WHIR:                {:.1} bits", field_protocol.whir_bits);
+    println!("WHIR:                {:.1} bits", soundness.whir_bits);
     println!(
         "FIELD/PROTOCOL SECURITY: {:.1} bits",
-        field_protocol.field_protocol_security_bits
-    );
-    println!(
-        "CONFIG COMMITMENT: collision={:.1}, preimage={:.1} bits",
-        profile.commitment.collision_bits, profile.commitment.preimage_bits
-    );
-    println!(
-        "CONFIG TRANSCRIPT: collision={:.1}, preimage={:.1} bits",
-        profile.transcript.collision_bits, profile.transcript.preimage_bits
-    );
-    println!("CONFIG SAMPLING:     {:?}", profile.sampling);
-    println!(
-        "CONFIG HASH-SIDE SECURITY: {:.1} bits",
-        soundness.config_hash_security_bits()
-    );
-    println!(
-        "END-TO-END SECURITY: {:.1} bits",
-        soundness.end_to_end_security_bits
+        soundness.field_protocol_security_bits
     );
 
     println!("\nWHIR Error Source Breakdown:");
-    let whir = &field_protocol.whir_details;
+    let whir = &soundness.whir_details;
     println!("  Query error:          {:.1} bits", whir.query_bits);
     println!(
         "  Proximity gaps:       {:.1} bits",
@@ -170,26 +152,12 @@ fn check_soundness(
     soundness
 }
 
-fn assert_poseidon2_security(name: &str, soundness: &ConfigSoundnessAssessment) {
-    let field_protocol_bits = soundness.field_protocol.field_protocol_security_bits;
-    let config_hash_bits = soundness.config_hash_security_bits();
-    let end_to_end_bits = soundness.end_to_end_security_bits;
-
+#[test]
+fn test_quintic_challenge_field_bits() {
+    let bits = challenge_field_bits();
     assert!(
-        field_protocol_bits >= TARGET_FIELD_PROTOCOL_SECURITY_BITS,
-        "{name}: field/protocol estimate is only {field_protocol_bits:.1} bits"
-    );
-    assert!(
-        (MIN_POSEIDON2_END_TO_END_BITS..MAX_POSEIDON2_END_TO_END_BITS).contains(&config_hash_bits),
-        "{name}: unexpected Poseidon2 hash-side estimate {config_hash_bits:.1} bits"
-    );
-    assert!(
-        end_to_end_bits < TARGET_FIELD_PROTOCOL_SECURITY_BITS,
-        "{name}: Poseidon2 must remain below 128 bits end-to-end, got {end_to_end_bits:.1}"
-    );
-    assert!(
-        (end_to_end_bits - field_protocol_bits.min(config_hash_bits)).abs() < f64::EPSILON,
-        "{name}: end-to-end estimate is not min(field/protocol, config hash-side)"
+        (bits - 154.5).abs() < 0.1,
+        "expected a 154.5-bit quintic challenge field, got {bits:.4} bits"
     );
 }
 
@@ -212,7 +180,11 @@ fn test_app_vm_security() {
         APP_NUM_COLUMNS,
         n_logup,
     );
-    assert_poseidon2_security("App VM", &soundness);
+    assert!(
+        soundness.field_protocol_security_bits >= TARGET_FIELD_PROTOCOL_SECURITY_BITS,
+        "App VM: got {:.1} bits",
+        soundness.field_protocol_security_bits
+    );
 }
 
 #[test]
@@ -235,7 +207,11 @@ fn test_leaf_aggregation_security() {
         RECURSION_NUM_COLUMNS,
         n_logup,
     );
-    assert_poseidon2_security("Leaf", &soundness);
+    assert!(
+        soundness.field_protocol_security_bits >= TARGET_FIELD_PROTOCOL_SECURITY_BITS,
+        "Leaf: got {:.1} bits",
+        soundness.field_protocol_security_bits
+    );
 }
 
 #[test]
@@ -258,7 +234,11 @@ fn test_internal_aggregation_security() {
         RECURSION_NUM_COLUMNS,
         n_logup,
     );
-    assert_poseidon2_security("Internal", &soundness);
+    assert!(
+        soundness.field_protocol_security_bits >= TARGET_FIELD_PROTOCOL_SECURITY_BITS,
+        "Internal: got {:.1} bits",
+        soundness.field_protocol_security_bits
+    );
 }
 
 #[test]
@@ -281,7 +261,11 @@ fn test_root_aggregation_security() {
         ROOT_NUM_COLUMNS,
         n_logup,
     );
-    assert_poseidon2_security("Root", &soundness);
+    assert!(
+        soundness.field_protocol_security_bits >= TARGET_FIELD_PROTOCOL_SECURITY_BITS,
+        "Root: got {:.1} bits",
+        soundness.field_protocol_security_bits
+    );
 }
 
 #[test]
@@ -304,7 +288,11 @@ fn test_hook_security() {
         RECURSION_NUM_COLUMNS,
         n_logup,
     );
-    assert_poseidon2_security("Hook", &soundness);
+    assert!(
+        soundness.field_protocol_security_bits >= TARGET_FIELD_PROTOCOL_SECURITY_BITS,
+        "Hook: got {:.1} bits",
+        soundness.field_protocol_security_bits
+    );
 }
 
 #[test]
@@ -386,7 +374,12 @@ fn test_all_production_configs() {
             num_columns,
             n_logup,
         );
-        assert_poseidon2_security(name, &soundness);
+        assert!(
+            soundness.field_protocol_security_bits >= TARGET_FIELD_PROTOCOL_SECURITY_BITS,
+            "{}: got {:.1} bits",
+            name,
+            soundness.field_protocol_security_bits
+        );
     }
 
     println!("\n========== ALL CONFIGS PASSED ==========");

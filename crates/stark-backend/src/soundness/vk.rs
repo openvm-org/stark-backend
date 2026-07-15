@@ -1,22 +1,18 @@
 use p3_util::log2_ceil_usize;
 
-use super::{ConfigSoundnessAssessment, SoundnessCalculator};
-use crate::{keygen::types::MultiStarkVerifyingKey, FiatShamirTranscript, StarkProtocolConfig};
+use super::{base_field_order, challenge_field_bits, SoundnessCalculator};
+use crate::{keygen::types::MultiStarkVerifyingKey, StarkProtocolConfig};
 
 impl SoundnessCalculator {
-    /// Computes a conservative config-aware soundness assessment for the verifier
-    /// defined by the given `vk`.
+    /// Computes a conservative field/protocol soundness estimate for the verifier defined by the
+    /// given `vk`. This field-side-only estimate excludes commitment and transcript hash security.
     ///
     /// The verifying key does not fix a single proof shape: optional AIRs may be absent and trace
     /// heights can vary within verifier-enforced bounds. This function therefore uses verifier-side
     /// upper bounds derived from the key.
-    pub fn calculate_for_config_from_vk<SC, TS>(
+    pub fn calculate_field_protocol_from_vk<SC: StarkProtocolConfig>(
         vk: &MultiStarkVerifyingKey<SC>,
-    ) -> ConfigSoundnessAssessment
-    where
-        SC: StarkProtocolConfig,
-        TS: FiatShamirTranscript<SC>,
-    {
+    ) -> Self {
         let params = &vk.inner.params;
         let num_airs = vk.inner.per_air.len();
         let mut max_constraints_per_air = 0;
@@ -42,8 +38,10 @@ impl SoundnessCalculator {
             params.log_stacked_height(),
         ));
 
-        Self::calculate_for_config::<SC, TS>(
+        Self::calculate_field_protocol(
             params,
+            base_field_order::<SC>(),
+            challenge_field_bits::<SC>(),
             max_constraints_per_air,
             num_airs,
             params.max_constraint_degree,
@@ -94,9 +92,8 @@ mod tests {
             MultiStarkVerifyingKey, MultiStarkVerifyingKey0, StarkVerifyingKey,
             StarkVerifyingParams, TraceWidth,
         },
-        soundness::SoundnessCalculator,
+        soundness::{base_field_order, challenge_field_bits, SoundnessCalculator},
         test_utils::default_test_params_small,
-        ConfigSecurityProfile, FiatShamirSamplingModel, FiatShamirTranscript, HashSecurityBounds,
         StarkProtocolConfig,
     };
 
@@ -121,53 +118,11 @@ mod tests {
         params: crate::SystemParams,
     }
 
-    #[derive(Clone, Debug)]
-    struct DummyTranscript;
-
-    impl FiatShamirTranscript<DummyConfig> for DummyTranscript {
-        const SAMPLING_MODEL: FiatShamirSamplingModel = FiatShamirSamplingModel::BaseFieldElement;
-
-        fn observe(&mut self, _value: BabyBear) {}
-
-        fn sample(&mut self) -> BabyBear {
-            BabyBear::ZERO
-        }
-
-        fn observe_commit(&mut self, _digest: [BabyBear; 1]) {}
-    }
-
-    #[derive(Clone, Debug)]
-    struct IncompatibleSamplingTranscript;
-
-    impl FiatShamirTranscript<DummyConfig> for IncompatibleSamplingTranscript {
-        const SAMPLING_MODEL: FiatShamirSamplingModel = FiatShamirSamplingModel::UniformBits;
-
-        fn observe(&mut self, _value: BabyBear) {}
-
-        fn sample(&mut self) -> BabyBear {
-            BabyBear::ZERO
-        }
-
-        fn observe_commit(&mut self, _digest: [BabyBear; 1]) {}
-    }
-
     impl StarkProtocolConfig for DummyConfig {
         type F = BabyBear;
         type EF = BinomialExtensionField<BabyBear, 5>;
         type Digest = [BabyBear; 1];
         type Hasher = DummyHasher;
-
-        fn security_profile() -> ConfigSecurityProfile {
-            let no_security = HashSecurityBounds {
-                collision_bits: 0.0,
-                preimage_bits: 0.0,
-            };
-            ConfigSecurityProfile {
-                commitment: no_security,
-                transcript: no_security,
-                sampling: FiatShamirSamplingModel::BaseFieldElement,
-            }
-        }
 
         fn params(&self) -> &crate::SystemParams {
             &self.params
@@ -284,11 +239,12 @@ mod tests {
     fn calculates_vk_soundness_from_verifier_bounds() {
         let vk = test_vk();
         let params = vk.inner.params.clone();
-        let soundness =
-            SoundnessCalculator::calculate_for_config_from_vk::<DummyConfig, DummyTranscript>(&vk);
+        let soundness = SoundnessCalculator::calculate_field_protocol_from_vk(&vk);
 
-        let expected = SoundnessCalculator::calculate_for_config::<DummyConfig, DummyTranscript>(
+        let expected = SoundnessCalculator::calculate_field_protocol(
             &params,
+            base_field_order::<DummyConfig>(),
+            challenge_field_bits::<DummyConfig>(),
             4,
             3,
             params.max_constraint_degree,
@@ -299,26 +255,12 @@ mod tests {
         );
 
         assert_eq!(
-            soundness.field_protocol.field_protocol_security_bits,
-            expected.field_protocol.field_protocol_security_bits
+            soundness.field_protocol_security_bits,
+            expected.field_protocol_security_bits
         );
         assert_eq!(
-            soundness.end_to_end_security_bits,
-            expected.end_to_end_security_bits
+            soundness.constraint_batching_bits,
+            expected.constraint_batching_bits
         );
-        assert_eq!(
-            soundness.field_protocol.constraint_batching_bits,
-            expected.field_protocol.constraint_batching_bits
-        );
-    }
-
-    #[test]
-    #[should_panic(expected = "transcript sample_bits model does not match")]
-    fn rejects_transcript_sampling_model_mismatch() {
-        let vk = test_vk();
-        let _ = SoundnessCalculator::calculate_for_config_from_vk::<
-            DummyConfig,
-            IncompatibleSamplingTranscript,
-        >(&vk);
     }
 }

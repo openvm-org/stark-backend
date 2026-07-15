@@ -1000,7 +1000,7 @@ mod tests {
 
     use itertools::Itertools;
     use p3_baby_bear::{default_babybear_poseidon2_16, BabyBear, Poseidon2BabyBear};
-    use p3_field::{extension::BinomialExtensionField, PrimeField32};
+    use p3_field::extension::BinomialExtensionField;
     use p3_symmetric::{PaddingFreeSponge, TruncatedPermutation};
 
     use super::{extract_proof, WhirProofHints};
@@ -1012,8 +1012,7 @@ mod tests {
             test_system_params_small, CachedFixture11, InteractionsFixture11,
             PreprocessedAndCachedFixture, PreprocessedFibFixture, TestFixture,
         },
-        ConfigSecurityProfile, FiatShamirSamplingModel, FiatShamirTranscript, HashSecurityBounds,
-        StarkEngine, StarkProtocolConfig, SystemParams, TranscriptHistory,
+        FiatShamirTranscript, StarkEngine, StarkProtocolConfig, SystemParams, TranscriptHistory,
     };
 
     const RATE: usize = 8;
@@ -1039,19 +1038,6 @@ mod tests {
         type EF = EF;
         type Digest = Digest;
         type Hasher = Hasher<F, Digest, Hash, Compress>;
-
-        fn security_profile() -> ConfigSecurityProfile {
-            let digest_bits = CHUNK as f64 * (BabyBear::ORDER_U32 as f64).log2();
-            let bounds = HashSecurityBounds {
-                collision_bits: digest_bits / 2.0,
-                preimage_bits: digest_bits,
-            };
-            ConfigSecurityProfile {
-                commitment: bounds,
-                transcript: bounds,
-                sampling: FiatShamirSamplingModel::BaseFieldElement,
-            }
-        }
 
         fn params(&self) -> &SystemParams {
             &self.params
