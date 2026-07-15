@@ -13,10 +13,11 @@ use openvm_stark_backend::{
     p3_symmetric::{PaddingFreeSponge, Permutation, TruncatedPermutation},
     prover::{Coordinator, CpuColMajorBackend, ReferenceDevice},
     transcript::duplex_sponge,
-    FiatShamirTranscript, StarkEngine, StarkProtocolConfig, SystemParams, TranscriptLog,
+    ConfigSecurityProfile, FiatShamirSamplingModel, FiatShamirTranscript, HashSecurityBounds,
+    StarkEngine, StarkProtocolConfig, SystemParams, TranscriptLog,
 };
 use p3_baby_bear::{default_babybear_poseidon2_16, BabyBear, Poseidon2BabyBear};
-use p3_field::{extension::BinomialExtensionField, PrimeCharacteristicRing};
+use p3_field::{extension::BinomialExtensionField, PrimeCharacteristicRing, PrimeField32};
 
 const RATE: usize = 8;
 /// permutation width
@@ -41,7 +42,7 @@ pub type DuplexSponge = duplex_sponge::DuplexSponge<F, Perm, WIDTH, RATE>;
 pub type DuplexSpongeRecorder = duplex_sponge::DuplexSpongeRecorder<F, Perm, WIDTH, RATE>;
 pub type DuplexSpongeValidator = duplex_sponge::DuplexSpongeValidator<F, Perm, WIDTH, RATE>;
 
-#[derive(Clone, Debug, derive_new::new)]
+#[derive(Clone, Debug)]
 pub struct BabyBearPoseidon2Config {
     params: SystemParams,
     hasher: PermHasher<Perm>,
@@ -53,6 +54,26 @@ impl StarkProtocolConfig for BabyBearPoseidon2Config {
     type Digest = Digest;
     type Hasher = PermHasher<Perm>;
 
+    fn security_profile() -> ConfigSecurityProfile {
+        // The commitment digest and transcript sponge capacity are both eight
+        // BabyBear elements. State the generic Poseidon2 bounds explicitly here
+        // rather than deriving a security claim from `Digest` in the calculator.
+        let commitment_digest_bits = DIGEST_SIZE as f64 * (F::ORDER_U32 as f64).log2();
+        let transcript_capacity_bits = (WIDTH - RATE) as f64 * (F::ORDER_U32 as f64).log2();
+
+        ConfigSecurityProfile {
+            commitment: HashSecurityBounds {
+                collision_bits: commitment_digest_bits / 2.0,
+                preimage_bits: commitment_digest_bits,
+            },
+            transcript: HashSecurityBounds {
+                collision_bits: transcript_capacity_bits / 2.0,
+                preimage_bits: transcript_capacity_bits,
+            },
+            sampling: FiatShamirSamplingModel::BaseFieldElement,
+        }
+    }
+
     fn params(&self) -> &SystemParams {
         &self.params
     }
@@ -63,7 +84,7 @@ impl StarkProtocolConfig for BabyBearPoseidon2Config {
 }
 
 impl BabyBearPoseidon2Config {
-    pub fn new_from_perm(params: SystemParams, perm: Perm) -> Self {
+    fn new_from_perm(params: SystemParams, perm: Perm) -> Self {
         let hasher = Hasher::new(
             PaddingFreeSponge::new(perm.clone()),
             TruncatedPermutation::new(perm),
@@ -185,6 +206,8 @@ mod cpu_engine {
     }
 
     impl FiatShamirTranscript<BabyBearPoseidon2Config> for CpuTranscript {
+        const SAMPLING_MODEL: FiatShamirSamplingModel = FiatShamirSamplingModel::BaseFieldElement;
+
         #[inline]
         fn observe(&mut self, value: BabyBear) {
             openvm_stark_backend::p3_challenger::CanObserve::observe(&mut self.inner, value);
@@ -301,6 +324,18 @@ mod poseidon2_constant_tests {
     };
 
     use super::*;
+
+    #[test]
+    fn security_profile_exposes_digest_and_transcript_bounds() {
+        let profile = BabyBearPoseidon2Config::security_profile();
+        let digest_bits = DIGEST_SIZE as f64 * (BabyBear::ORDER_U32 as f64).log2();
+
+        assert!((profile.commitment.collision_bits - digest_bits / 2.0).abs() < 1e-9);
+        assert!((profile.commitment.preimage_bits - digest_bits).abs() < 1e-9);
+        assert_eq!(profile.commitment, profile.transcript);
+        assert_eq!(profile.sampling, FiatShamirSamplingModel::BaseFieldElement);
+        assert!(profile.hash_security_bits() < 128.0);
+    }
 
     fn horizen_to_p3(horizen_babybear: HorizenBabyBear) -> BabyBear {
         BabyBear::from_u64(horizen_babybear.into_bigint().0[0])

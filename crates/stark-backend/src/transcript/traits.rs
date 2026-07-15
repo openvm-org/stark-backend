@@ -4,7 +4,7 @@ use p3_field::{BasedVectorSpace, PrimeCharacteristicRing, PrimeField, PrimeField
 use p3_maybe_rayon::prelude::*;
 use tracing::instrument;
 
-use crate::StarkProtocolConfig;
+use crate::{FiatShamirSamplingModel, StarkProtocolConfig};
 
 /// Unified trait describing the interface for the Fiat-Shamir transcript needed by the SWIRL
 /// protocol.
@@ -12,6 +12,15 @@ pub trait FiatShamirTranscript<SC>: Clone + Send + Sync
 where
     SC: StarkProtocolConfig,
 {
+    /// Sampling behavior implemented by [`Self::sample_bits`].
+    ///
+    /// This must match [`StarkProtocolConfig::security_profile`]. Built-in
+    /// config-aware soundness entry points reject a mismatch. Implementations
+    /// must also use a transcript construction meeting the config profile's
+    /// declared hash bounds; cryptographic strength cannot be inferred from a
+    /// Rust type or checked at runtime.
+    const SAMPLING_MODEL: FiatShamirSamplingModel;
+
     fn observe(&mut self, value: SC::F);
     fn sample(&mut self) -> SC::F;
 
@@ -229,6 +238,8 @@ where
     F: PrimeField,
     SC: StarkProtocolConfig<F = F, Digest = [F; RATE]>,
 {
+    const SAMPLING_MODEL: FiatShamirSamplingModel = FiatShamirSamplingModel::BaseFieldElement;
+
     #[inline]
     fn observe(&mut self, value: F) {
         debug_assert!(

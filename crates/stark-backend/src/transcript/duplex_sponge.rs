@@ -91,6 +91,9 @@ where
     SC: StarkProtocolConfig<Digest = [F; RATE], F = F>,
     P: CryptographicPermutation<[F; WIDTH]> + Send + Sync,
 {
+    const SAMPLING_MODEL: crate::FiatShamirSamplingModel =
+        crate::FiatShamirSamplingModel::BaseFieldElement;
+
     fn observe(&mut self, value: F) {
         self.absorb(value);
     }
@@ -151,6 +154,9 @@ where
     SC: StarkProtocolConfig<Digest = [F; RATE], F = F>,
     P: CryptographicPermutation<[F; WIDTH]> + Send + Sync,
 {
+    const SAMPLING_MODEL: crate::FiatShamirSamplingModel =
+        crate::FiatShamirSamplingModel::BaseFieldElement;
+
     fn observe(&mut self, x: F) {
         CanObserve::observe(&mut self.inner, x);
         self.log.push_observe(x);
@@ -219,6 +225,9 @@ where
     SC: StarkProtocolConfig<Digest = [F; RATE], F = F>,
     P: CryptographicPermutation<[F; WIDTH]> + Send + Sync,
 {
+    const SAMPLING_MODEL: crate::FiatShamirSamplingModel =
+        crate::FiatShamirSamplingModel::BaseFieldElement;
+
     fn observe(&mut self, x: F) {
         debug_assert!(self.idx < self.log.len(), "transcript replay overflow");
         assert!(!self.log.samples()[self.idx]);

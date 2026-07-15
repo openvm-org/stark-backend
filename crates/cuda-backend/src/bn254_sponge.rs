@@ -177,6 +177,9 @@ impl MultiFieldTranscriptGpu {
 // ---------------------------------------------------------------------------
 
 impl FiatShamirTranscript<BabyBearBn254Poseidon2Config> for MultiFieldTranscriptGpu {
+    const SAMPLING_MODEL: openvm_stark_backend::FiatShamirSamplingModel =
+        openvm_stark_backend::FiatShamirSamplingModel::BaseFieldElement;
+
     fn observe(&mut self, value: BabyBear) {
         FiatShamirTranscript::<BabyBearBn254Poseidon2Config>::observe(&mut self.inner, value);
     }

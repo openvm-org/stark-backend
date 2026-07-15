@@ -88,6 +88,9 @@ impl DeviceSpongeState {
 }
 
 impl FiatShamirTranscript<SC> for DeviceSpongeState {
+    const SAMPLING_MODEL: openvm_stark_backend::FiatShamirSamplingModel =
+        openvm_stark_backend::FiatShamirSamplingModel::BaseFieldElement;
+
     #[inline]
     fn observe(&mut self, value: F) {
         DeviceSpongeState::observe(self, value);
@@ -309,6 +312,9 @@ pub enum GrindError {
 }
 
 impl FiatShamirTranscript<SC> for DuplexSpongeGpu {
+    const SAMPLING_MODEL: openvm_stark_backend::FiatShamirSamplingModel =
+        openvm_stark_backend::FiatShamirSamplingModel::BaseFieldElement;
+
     #[inline]
     fn observe(&mut self, value: F) {
         self.host.observe(value);

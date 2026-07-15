@@ -1,4 +1,8 @@
 //! Soundness analysis for the SWIRL proof system.
+//!
+//! [`SoundnessCalculator`] reports algebraic field/protocol security separately from the
+//! commitment/transcript assumptions declared by [`StarkProtocolConfig::security_profile`]. Use
+//! [`SoundnessCalculator::calculate_for_config`] for the separately named end-to-end minimum.
 
 use p3_field::PrimeField64;
 

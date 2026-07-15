@@ -296,7 +296,8 @@ mod tests {
             StarkEngine,
         };
         use openvm_stark_sdk::config::{
-            app_params_with_128_bits_security, baby_bear_poseidon2::BabyBearPoseidon2CpuEngine,
+            app_params_with_128_bits_field_security,
+            baby_bear_poseidon2::BabyBearPoseidon2CpuEngine,
         };
         use p3_baby_bear::BabyBear;
 
@@ -306,7 +307,7 @@ mod tests {
 
         // Stacked height must be >= log_height of any AIR; use a
         // value comfortably larger than the test shape's log_height.
-        let params = app_params_with_128_bits_security(15);
+        let params = app_params_with_128_bits_field_security(15);
         let engine: BabyBearPoseidon2CpuEngine = StarkEngine::new(params);
 
         let air_arc = Arc::new(air);

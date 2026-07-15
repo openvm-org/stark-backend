@@ -23,7 +23,8 @@ use openvm_stark_backend::{
     p3_symmetric::TruncatedPermutation,
     prover::{Coordinator, CpuColMajorBackend, ReferenceDevice},
     transcript::multi_field::MultiFieldTranscript,
-    FiatShamirTranscript, StarkEngine, StarkProtocolConfig, SystemParams,
+    ConfigSecurityProfile, FiatShamirSamplingModel, FiatShamirTranscript, HashSecurityBounds,
+    StarkEngine, StarkProtocolConfig, SystemParams,
 };
 use p3_baby_bear::BabyBear;
 // NOTE: plonky3's Bn254 is the type for scalar field of the BN254 curve. It is not the type
@@ -47,6 +48,10 @@ pub const BN254_RATE: usize = 2;
 /// Digest width in BN254 elements.
 pub const DIGEST_WIDTH: usize = 1;
 
+/// `log2` of the BN254 scalar-field order. The commitment digest and the
+/// width-3/rate-2 transcript capacity are each one scalar-field element.
+const BN254_SCALAR_FIELD_BITS: f64 = 253.596_691_355_002_15;
+
 type H = MultiFieldHasher<
     F,
     Bn254Scalar,
@@ -67,7 +72,7 @@ pub type EF = BinomialExtensionField<BabyBear, 5>;
 pub const D_EF: usize = 5;
 pub type Digest = [Bn254Scalar; DIGEST_WIDTH];
 
-#[derive(Clone, Debug, derive_new::new)]
+#[derive(Clone, Debug)]
 pub struct BabyBearBn254Poseidon2Config {
     params: SystemParams,
     hasher: PermHasher,
@@ -78,6 +83,20 @@ impl StarkProtocolConfig for BabyBearBn254Poseidon2Config {
     type EF = EF;
     type Digest = Digest;
     type Hasher = PermHasher;
+
+    fn security_profile() -> ConfigSecurityProfile {
+        // Both roles expose one BN254 scalar-field element. The resulting
+        // generic birthday bound is about 126.8 bits, still below 128.
+        let bounds = HashSecurityBounds {
+            collision_bits: BN254_SCALAR_FIELD_BITS / 2.0,
+            preimage_bits: BN254_SCALAR_FIELD_BITS,
+        };
+        ConfigSecurityProfile {
+            commitment: bounds,
+            transcript: bounds,
+            sampling: FiatShamirSamplingModel::BaseFieldElement,
+        }
+    }
 
     fn params(&self) -> &SystemParams {
         &self.params
@@ -139,7 +158,7 @@ impl DecodableConfig for BabyBearBn254Poseidon2Config {
 }
 
 impl BabyBearBn254Poseidon2Config {
-    pub fn new_from_perms(
+    fn new_from_perms(
         params: SystemParams,
         hash_perm: Poseidon2Bn254Width3,
         compress_perm: Poseidon2Bn254Width2,
@@ -262,4 +281,19 @@ pub use cpu_engine::BabyBearBn254Poseidon2CpuEngine;
 
 pub fn default_transcript() -> Transcript {
     Transcript::from(default_bn254_poseidon2_width3())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn security_profile_exposes_bn254_poseidon2_bounds() {
+        let profile = BabyBearBn254Poseidon2Config::security_profile();
+
+        assert!((profile.hash_security_bits() - BN254_SCALAR_FIELD_BITS / 2.0).abs() < 1e-9);
+        assert_eq!(profile.commitment, profile.transcript);
+        assert_eq!(profile.sampling, FiatShamirSamplingModel::BaseFieldElement);
+        assert!(profile.hash_security_bits() < 128.0);
+    }
 }

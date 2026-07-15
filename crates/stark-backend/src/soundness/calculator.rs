@@ -6,8 +6,10 @@
 //! 3. Stacked Reduction - Reduces trace evaluations to stacked polynomial evaluations
 //! 4. WHIR - Polynomial commitment opening via FRI-like folding
 //!
-//! Each component contributes to the overall soundness error, and the total security
-//! is the minimum across all components.
+//! Each algebraic component contributes to the field/protocol soundness error, and
+//! [`SoundnessCalculator::field_protocol_security_bits`] is the minimum across those components.
+//! Commitment and transcript hash assumptions are owned by [`StarkProtocolConfig`] and combined
+//! only in the separately named [`ConfigSoundnessAssessment::end_to_end_security_bits`].
 //!
 //! Components add proof-of-work grinding (`*_pow_bits`) on top of their statistical soundness.
 //! Grinding bits count hash evaluations, so the attacker's cost for `g` grinding bits is
@@ -17,8 +19,10 @@
 use std::f64;
 
 use crate::{
-    config::{ProximityRegime, SystemParams, WhirConfig},
-    WhirProximityStrategy,
+    config::{
+        ConfigSecurityProfile, FiatShamirSamplingModel, ProximityRegime, SystemParams, WhirConfig,
+    },
+    FiatShamirTranscript, StarkProtocolConfig, WhirProximityStrategy,
 };
 
 #[derive(Clone, Debug)]
@@ -39,8 +43,29 @@ pub struct SoundnessCalculator {
     pub whir_bits: f64,
     /// Detailed WHIR soundness breakdown.
     pub whir_details: WhirSoundnessCalculator,
-    /// Total security bits (minimum of all components).
-    pub total_bits: f64,
+    /// Field/protocol security bits (minimum of all algebraic protocol components).
+    ///
+    /// This does not include the commitment or transcript hash bounds and must
+    /// not be presented as an end-to-end security estimate.
+    pub field_protocol_security_bits: f64,
+}
+
+/// Config-aware soundness assessment with field and hash assumptions kept separate.
+#[derive(Clone, Debug)]
+pub struct ConfigSoundnessAssessment {
+    /// Detailed field/protocol security calculation.
+    pub field_protocol: SoundnessCalculator,
+    /// Commitment, transcript, and sampling assumptions declared by the config.
+    pub config_security_profile: ConfigSecurityProfile,
+    /// End-to-end minimum across field/protocol and config hash-side security.
+    pub end_to_end_security_bits: f64,
+}
+
+impl ConfigSoundnessAssessment {
+    /// Conservative config-owned commitment/transcript hash bound.
+    pub fn config_hash_security_bits(&self) -> f64 {
+        self.config_security_profile.hash_security_bits()
+    }
 }
 
 /// WHIR soundness breakdown by error source.
@@ -71,7 +96,11 @@ pub struct ProximityGapSecurity {
 }
 
 impl SoundnessCalculator {
-    /// Calculates soundness for the given system parameters.
+    /// Calculates field/protocol soundness for the given system parameters.
+    ///
+    /// This low-level entry point models `sample_bits` as low-bit extraction
+    /// from a base-field element. Use [`Self::calculate_for_config`] to include
+    /// the config-owned sampling model and hash-side bounds.
     ///
     /// # Arguments
     /// * `params` - System parameters including WHIR config and LogUp parameters.
@@ -87,9 +116,8 @@ impl SoundnessCalculator {
     /// * `num_trace_columns` - Total columns batched in stacked reduction.
     /// * `num_stacked_columns` - Total columns across all commitments (for WHIR μ batching).
     /// * `n_logup` - GKR depth (log₂ of total interactions), or 0 if no interactions.
-    /// * `proximity_regime` - Unique decoding or other regimes (for WHIR-related calculations).
     #[allow(clippy::too_many_arguments)]
-    pub fn calculate(
+    pub fn calculate_field_protocol(
         params: &SystemParams,
         base_field_order: f64,
         challenge_field_bits: f64,
@@ -101,6 +129,85 @@ impl SoundnessCalculator {
         num_stacked_columns: usize,
         n_logup: usize,
     ) -> Self {
+        Self::calculate_field_protocol_with_sampling(
+            params,
+            base_field_order,
+            challenge_field_bits,
+            max_num_constraints_per_air,
+            num_airs,
+            max_constraint_degree,
+            max_log_trace_height,
+            num_trace_columns,
+            num_stacked_columns,
+            n_logup,
+            FiatShamirSamplingModel::BaseFieldElement,
+        )
+    }
+
+    /// Calculates a config-aware soundness assessment.
+    ///
+    /// The field/protocol estimate uses the config's declared Fiat-Shamir
+    /// sampling model. The independently declared commitment/transcript bound
+    /// is then combined only in the separately named end-to-end minimum.
+    #[allow(clippy::too_many_arguments)]
+    pub fn calculate_for_config<SC, TS>(
+        params: &SystemParams,
+        max_num_constraints_per_air: usize,
+        num_airs: usize,
+        max_constraint_degree: usize,
+        max_log_trace_height: usize,
+        num_trace_columns: usize,
+        num_stacked_columns: usize,
+        n_logup: usize,
+    ) -> ConfigSoundnessAssessment
+    where
+        SC: StarkProtocolConfig,
+        TS: FiatShamirTranscript<SC>,
+    {
+        let config_security_profile = SC::security_profile();
+        assert_eq!(
+            config_security_profile.sampling,
+            TS::SAMPLING_MODEL,
+            "transcript sample_bits model does not match the config security profile"
+        );
+        let field_protocol = Self::calculate_field_protocol_with_sampling(
+            params,
+            super::base_field_order::<SC>(),
+            super::challenge_field_bits::<SC>(),
+            max_num_constraints_per_air,
+            num_airs,
+            max_constraint_degree,
+            max_log_trace_height,
+            num_trace_columns,
+            num_stacked_columns,
+            n_logup,
+            TS::SAMPLING_MODEL,
+        );
+        let end_to_end_security_bits = field_protocol
+            .field_protocol_security_bits
+            .min(config_security_profile.hash_security_bits());
+
+        ConfigSoundnessAssessment {
+            field_protocol,
+            config_security_profile,
+            end_to_end_security_bits,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn calculate_field_protocol_with_sampling(
+        params: &SystemParams,
+        base_field_order: f64,
+        challenge_field_bits: f64,
+        max_num_constraints_per_air: usize,
+        num_airs: usize,
+        max_constraint_degree: usize,
+        max_log_trace_height: usize,
+        num_trace_columns: usize,
+        num_stacked_columns: usize,
+        n_logup: usize,
+        sampling_model: FiatShamirSamplingModel,
+    ) -> Self {
         let init_prox_gap = Self::whir_proximity_gap_security(
             params.whir.proximity.initial_round(),
             challenge_field_bits,
@@ -111,12 +218,13 @@ impl SoundnessCalculator {
         // log2_list_size is log2(L_{PCS}) where L_{PCS} is the list size with respect to the
         // proximity radius of the _initial_ WHIR round.
         let log2_list_size = init_prox_gap.log2_list_size;
-        let logup_bits = Self::logup_soundness(
-            params.logup.max_interaction_count,
-            params.logup.log_max_message_length,
-            challenge_field_bits,
-            log2_list_size,
-        ) + Self::effective_pow_bits(params.logup.pow_bits, base_field_order);
+        let logup_bits =
+            Self::logup_soundness(
+                params.logup.max_interaction_count,
+                params.logup.log_max_message_length,
+                challenge_field_bits,
+                log2_list_size,
+            ) + Self::effective_pow_bits(params.logup.pow_bits, base_field_order, sampling_model);
 
         let gkr_sumcheck_bits =
             Self::calculate_gkr_sumcheck_soundness(challenge_field_bits, params.l_skip, n_logup);
@@ -155,9 +263,10 @@ impl SoundnessCalculator {
             challenge_field_bits,
             num_stacked_columns,
             params.whir.proximity,
+            sampling_model,
         );
 
-        let total_bits = logup_bits
+        let field_protocol_security_bits = logup_bits
             .min(gkr_sumcheck_bits)
             .min(gkr_batching_bits)
             .min(zerocheck_sumcheck_bits)
@@ -174,7 +283,7 @@ impl SoundnessCalculator {
             stacked_reduction_bits,
             whir_bits,
             whir_details,
-            total_bits,
+            field_protocol_security_bits,
         }
     }
 
@@ -359,6 +468,7 @@ impl SoundnessCalculator {
         challenge_field_bits: f64,
         num_stacked_columns: usize,
         proximity: WhirProximityStrategy,
+        sampling_model: FiatShamirSamplingModel,
     ) -> (f64, WhirSoundnessCalculator) {
         let whir = &params.whir;
         let k_whir = whir.k;
@@ -384,8 +494,8 @@ impl SoundnessCalculator {
             params.log_blowup,
             num_stacked_columns,
         );
-        let mu_batching_bits =
-            mu_security.log2_err + Self::effective_pow_bits(whir.mu_pow_bits, base_field_order);
+        let mu_batching_bits = mu_security.log2_err
+            + Self::effective_pow_bits(whir.mu_pow_bits, base_field_order, sampling_model);
         let mut min_rbr_bits = mu_batching_bits;
 
         let mut log_inv_rate = params.log_blowup;
@@ -415,7 +525,11 @@ impl SoundnessCalculator {
                     log2_list_size = Some(prox_gaps.log2_list_size);
                 }
                 let prox_gaps_bits = prox_gaps.log2_err
-                    + Self::effective_pow_bits(whir.folding_pow_bits, base_field_order);
+                    + Self::effective_pow_bits(
+                        whir.folding_pow_bits,
+                        base_field_order,
+                        sampling_model,
+                    );
                 min_prox_gaps_bits = min_prox_gaps_bits.min(prox_gaps_bits);
 
                 let sumcheck_bits = Self::whir_sumcheck_security(
@@ -423,6 +537,7 @@ impl SoundnessCalculator {
                     challenge_field_bits,
                     whir.folding_pow_bits,
                     log2_list_size.unwrap(),
+                    sampling_model,
                 );
                 min_sumcheck_bits = min_sumcheck_bits.min(sumcheck_bits);
 
@@ -439,14 +554,23 @@ impl SoundnessCalculator {
             // `current_log_degree + log_inv_rate` here. `whir_query_security_biased` folds the
             // `sample_bits` bias into the agreement-set bound.
             let log_query_domain = current_log_degree + log_inv_rate;
-            let query_bits =
-                Self::whir_query_security_biased(
+            let query_security_bits = match sampling_model {
+                FiatShamirSamplingModel::BaseFieldElement => Self::whir_query_security_biased(
                     proximity_regime,
                     round_config.num_queries,
                     log_inv_rate,
                     log_query_domain,
                     base_field_order,
-                ) + Self::effective_pow_bits(whir.query_phase_pow_bits, base_field_order);
+                ),
+                FiatShamirSamplingModel::UniformBits => proximity_regime
+                    .whir_query_security_bits(round_config.num_queries, log_inv_rate),
+            };
+            let query_bits = query_security_bits
+                + Self::effective_pow_bits(
+                    whir.query_phase_pow_bits,
+                    base_field_order,
+                    sampling_model,
+                );
             min_query_bits = min_query_bits.min(query_bits);
 
             // ε_shift and ε_out reference m_i, ℓ_{i,0} where `i = round + 1` refers to the *next*
@@ -652,13 +776,23 @@ impl SoundnessCalculator {
     /// grind is worth `-log2((c+1)/p)` bits — slightly under its nominal `pow_bits`. These count
     /// hash evaluations; see the module-level note on the grinding hash.
     #[inline]
-    fn effective_pow_bits(pow_bits: usize, base_field_order: f64) -> f64 {
+    fn effective_pow_bits(
+        pow_bits: usize,
+        base_field_order: f64,
+        sampling_model: FiatShamirSamplingModel,
+    ) -> f64 {
         if pow_bits == 0 {
             // `check_witness` short-circuits to `true` without sampling, so there is no bias.
             return 0.0;
         }
-        let (p_hi, _p_lo, _r) = Self::sample_bits_residue_probs(pow_bits as f64, base_field_order);
-        -p_hi.log2()
+        match sampling_model {
+            FiatShamirSamplingModel::BaseFieldElement => {
+                let (p_hi, _p_lo, _r) =
+                    Self::sample_bits_residue_probs(pow_bits as f64, base_field_order);
+                -p_hi.log2()
+            }
+            FiatShamirSamplingModel::UniformBits => pow_bits as f64,
+        }
     }
 
     #[inline]
@@ -806,11 +940,12 @@ impl SoundnessCalculator {
         challenge_field_bits: f64,
         folding_pow_bits: usize,
         log2_list_size: f64,
+        sampling_model: FiatShamirSamplingModel,
     ) -> f64 {
         // For our use case, w0 has degree 1 in each variable, so d = 3.
         let sumcheck_degree: f64 = 3.0;
         challenge_field_bits - sumcheck_degree.log2() - log2_list_size
-            + Self::effective_pow_bits(folding_pow_bits, base_field_order)
+            + Self::effective_pow_bits(folding_pow_bits, base_field_order, sampling_model)
     }
 
     /// Computes WHIR out-of-domain (OOD) security bits.
@@ -842,9 +977,9 @@ impl SoundnessCalculator {
     }
 }
 
-/// Prints a detailed soundness report to stdout.
+/// Prints a detailed field/protocol soundness report to stdout.
 #[allow(clippy::too_many_arguments)]
-pub fn print_soundness_report(
+pub fn print_field_protocol_soundness_report(
     params: &SystemParams,
     base_field_order: f64,
     challenge_field_bits: f64,
@@ -857,7 +992,7 @@ pub fn print_soundness_report(
     n_logup: usize,
     proximity_regime: ProximityRegime,
 ) {
-    let soundness = SoundnessCalculator::calculate(
+    let soundness = SoundnessCalculator::calculate_field_protocol(
         params,
         base_field_order,
         challenge_field_bits,
@@ -934,8 +1069,8 @@ pub fn print_soundness_report(
     println!("  WHIR (round-by-round min):   {:.1}", soundness.whir_bits);
     println!();
     println!(
-        "  TOTAL SECURITY:              {:.1} bits",
-        soundness.total_bits
+        "  FIELD/PROTOCOL SECURITY:     {:.1} bits",
+        soundness.field_protocol_security_bits
     );
     println!();
 
@@ -1025,12 +1160,12 @@ mod tests {
     // ==========================================================================
     // Unit tests
     // ==========================================================================
-    const TARGET_SECURITY_BITS: usize = 128;
+    const TARGET_FIELD_SECURITY_BITS: usize = 128;
 
     #[test]
     fn test_soundness_calculation() {
         let params = test_params();
-        let soundness = SoundnessCalculator::calculate(
+        let soundness = SoundnessCalculator::calculate_field_protocol(
             &params,
             base_field_order(),
             challenge_field_bits(),
@@ -1050,7 +1185,7 @@ mod tests {
         assert!(soundness.constraint_batching_bits > 0.0);
         assert!(soundness.stacked_reduction_bits > 0.0);
         assert!(soundness.whir_bits > 0.0);
-        assert!(soundness.total_bits > 0.0);
+        assert!(soundness.field_protocol_security_bits > 0.0);
 
         let expected_total = soundness
             .logup_bits
@@ -1060,26 +1195,51 @@ mod tests {
             .min(soundness.constraint_batching_bits)
             .min(soundness.stacked_reduction_bits)
             .min(soundness.whir_bits);
-        assert!((soundness.total_bits - expected_total).abs() < 0.001);
+        assert!((soundness.field_protocol_security_bits - expected_total).abs() < 0.001);
     }
 
     #[test]
     fn test_whir_query_calculation() {
-        let queries = min_whir_queries(ProximityRegime::UniqueDecoding, TARGET_SECURITY_BITS, 1);
+        let queries = min_whir_queries(
+            ProximityRegime::UniqueDecoding,
+            TARGET_FIELD_SECURITY_BITS,
+            1,
+        );
         assert!(queries > 0);
     }
 
     #[test]
     fn test_logup_soundness() {
         let logup = test_params().logup;
-        let security =
-            SoundnessCalculator::logup_soundness(
-                logup.max_interaction_count,
-                logup.log_max_message_length,
-                challenge_field_bits(),
-                0.0,
-            ) + SoundnessCalculator::effective_pow_bits(logup.pow_bits, base_field_order());
-        assert!(security > TARGET_SECURITY_BITS as f64);
+        let security = SoundnessCalculator::logup_soundness(
+            logup.max_interaction_count,
+            logup.log_max_message_length,
+            challenge_field_bits(),
+            0.0,
+        ) + SoundnessCalculator::effective_pow_bits(
+            logup.pow_bits,
+            base_field_order(),
+            FiatShamirSamplingModel::BaseFieldElement,
+        );
+        assert!(security > TARGET_FIELD_SECURITY_BITS as f64);
+    }
+
+    #[test]
+    fn uniform_bit_sampling_has_no_pow_bias() {
+        let pow_bits = 20;
+        let uniform = SoundnessCalculator::effective_pow_bits(
+            pow_bits,
+            base_field_order(),
+            FiatShamirSamplingModel::UniformBits,
+        );
+        let field_element = SoundnessCalculator::effective_pow_bits(
+            pow_bits,
+            base_field_order(),
+            FiatShamirSamplingModel::BaseFieldElement,
+        );
+
+        assert_eq!(uniform, pow_bits as f64);
+        assert!(field_element < uniform);
     }
 
     #[test]

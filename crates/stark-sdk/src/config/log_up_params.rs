@@ -5,14 +5,15 @@ use p3_baby_bear::BabyBear;
 
 use crate::config::challenge_field_bits;
 
-const TARGET_LOGUP_SECURITY_BITS: f64 = 128.0;
+const TARGET_LOGUP_FIELD_SECURITY_BITS: f64 = 128.0;
 const MIN_BABY_BEAR_LOGUP_POW_BITS: usize = 13;
 
-/// Returns BabyBear LogUp parameters with at least 128 bits after the PCS list-size union bound.
+/// Returns BabyBear LogUp parameters with at least 128 field/protocol bits after the PCS list-size
+/// union bound.
 ///
 /// `log2_pcs_list_size` is `log2(L_PCS)` for the initial WHIR proximity regime. It is zero for
 /// unique decoding.
-pub fn log_up_security_params_baby_bear_128_bits(
+pub fn log_up_security_params_baby_bear_128_bits_field_security(
     log2_pcs_list_size: f64,
 ) -> LogUpSecurityParameters {
     assert!(
@@ -36,7 +37,7 @@ pub fn log_up_security_params_baby_bear_128_bits(
         challenge_field_bits,
         log2_pcs_list_size,
     );
-    let pow_bits = ((TARGET_LOGUP_SECURITY_BITS - security_without_pow)
+    let pow_bits = ((TARGET_LOGUP_FIELD_SECURITY_BITS - security_without_pow)
         .ceil()
         .max(0.0) as usize)
         .max(MIN_BABY_BEAR_LOGUP_POW_BITS);
