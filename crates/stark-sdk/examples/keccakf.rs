@@ -5,7 +5,7 @@ use std::sync::Arc;
 use cfg_if::cfg_if;
 use eyre::eyre;
 use openvm_stark_sdk::{
-    config::app_params_with_100_bits_security,
+    config::app_params_with_128_bits_security,
     openvm_stark_backend::{
         p3_air::{Air, AirBuilder, BaseAir, BaseAirWithPublicValues},
         p3_field::Field,
@@ -37,7 +37,7 @@ impl<AB: AirBuilder> Air<AB> for TestAir {
 }
 
 fn main() -> eyre::Result<()> {
-    let params = app_params_with_100_bits_security(21);
+    let params = app_params_with_128_bits_security(21);
     let mut rng = StdRng::seed_from_u64(42);
     let air = TestAir(KeccakAir {});
 

@@ -12,7 +12,7 @@ use openvm_stark_backend::{
 };
 use openvm_stark_sdk::{
     config::{
-        app_params_with_100_bits_security,
+        app_params_with_128_bits_security,
         baby_bear_poseidon2::{BabyBearPoseidon2RefEngine, DuplexSponge},
     },
     utils::setup_tracing,
@@ -42,7 +42,7 @@ impl<AB: AirBuilder> Air<AB> for TestAir {
 }
 
 fn make_params() -> SystemParams {
-    app_params_with_100_bits_security(21)
+    app_params_with_128_bits_security(21)
 }
 
 fn main() {

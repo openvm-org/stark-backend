@@ -42,10 +42,10 @@ const _: () = assert!(
     std::mem::size_of::<F>() == std::mem::size_of::<u32>(),
     "F must be 4 bytes to match CUDA uint32_t"
 );
-// `EF` (BinomialExtensionField<BabyBear, 4>) is cast to `*const u32` (stride of 4 u32s).
+// `EF` (BinomialExtensionField<BabyBear, 5>) is cast to `*const u32` (stride of 5 u32s).
 const _: () = assert!(
-    std::mem::size_of::<EF>() == 4 * std::mem::size_of::<u32>(),
-    "EF must be 16 bytes (4 x uint32_t) for CUDA"
+    std::mem::size_of::<EF>() == 5 * std::mem::size_of::<u32>(),
+    "EF must be 20 bytes (5 x uint32_t) for CUDA"
 );
 
 // ---------------------------------------------------------------------------
@@ -85,7 +85,7 @@ extern "C" {
 
     fn _bn254_poseidon2_compressing_row_hashes_ext(
         out: *mut Bn254FrRaw,
-        matrix: *const u32, // EF = [BabyBear; 4], each BabyBear is repr(transparent) over u32
+        matrix: *const u32, // EF = BinomialExtensionField<BabyBear, 5>, stored as 5 u32 limbs
         width: usize,
         query_stride: usize,
         log_rows_per_query: usize,

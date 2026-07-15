@@ -225,6 +225,7 @@ fn default_main_cell_secondary_weight(
 /// logical_len    <= 2 * real_len
 ///
 /// interaction_weight = leaf_weight * (1 + 2 * (1 / 16 + 1 / 256))
+///                    = 11.328125 base-field cells for the quintic extension
 /// ```
 fn default_interaction_cell_weight(extension_degree: usize) -> f64 {
     (2 * extension_degree) as f64 * (1.0 + 2.0 * (1.0 / 16.0 + 1.0 / 256.0))
@@ -242,13 +243,13 @@ mod tests {
 
     fn test_memory_config() -> ProvingMemoryConfig {
         let params = default_test_params_small();
-        ProvingMemoryConfig::from_params::<u32>(&params, 4, true)
+        ProvingMemoryConfig::from_params::<u32>(&params, 5, true)
     }
 
     #[test]
     fn dropped_rs_code_matrix_is_phase_disjoint() {
         let params = default_test_params_small();
-        let config = ProvingMemoryConfig::from_params::<u32>(&params, 4, false);
+        let config = ProvingMemoryConfig::from_params::<u32>(&params, 5, false);
         let counts = ProvingMemoryCounts::new(10, 20, 5);
 
         let estimate = config.estimate(counts);
@@ -276,5 +277,13 @@ mod tests {
             estimate.secondary_peak,
             estimate.rs_code_matrix + max(estimate.main_secondary, estimate.interaction)
         );
+    }
+
+    #[test]
+    fn quintic_interaction_weight_tracks_fpext_layout() {
+        let config = test_memory_config();
+
+        assert_eq!(default_interaction_cell_weight(5), 11.328125);
+        assert_eq!(config.interaction_memory_bytes_without_overhead(1), 46);
     }
 }

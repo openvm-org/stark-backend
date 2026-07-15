@@ -200,7 +200,7 @@ where
     }
 }
 
-const BIAS_BITS: usize = 100;
+const BIAS_BITS: usize = 128;
 
 /// Returns the largest `k` such that extracting `k` base-`p` digits from a
 /// uniform `SF` element has statistical distance at most `2^{-BIAS_BITS}` from
@@ -264,7 +264,7 @@ mod tests {
     fn test_constants_bn254_babybear() {
         let t = TestTranscript::new(MockPerm);
         assert_eq!(t.num_obs_per_elem, 8);
-        assert_eq!(t.num_samples_per_elem, 5);
+        assert_eq!(t.num_samples_per_elem, 4);
     }
 
     #[test]
@@ -289,11 +289,11 @@ mod tests {
             BigUint::from(1u64) + BigUint::from(2u64) * &p + BigUint::from(3u64) * &p * &p;
         let val = Bn254::from_biguint(val_big).unwrap();
         let digits = t.extract_samples(val);
-        assert_eq!(digits.len(), 5);
+        assert_eq!(digits.len(), 4);
         assert_eq!(digits[0], BabyBear::from_int(1u32));
         assert_eq!(digits[1], BabyBear::from_int(2u32));
         assert_eq!(digits[2], BabyBear::from_int(3u32));
-        for digit in &digits[3..5] {
+        for digit in &digits[3..] {
             assert_eq!(*digit, BabyBear::ZERO);
         }
     }

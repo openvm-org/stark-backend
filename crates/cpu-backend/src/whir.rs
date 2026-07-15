@@ -391,7 +391,7 @@ where
         if TypeId::of::<SC::F>() == TypeId::of::<BabyBear>()
             && TypeId::of::<SC::Digest>() == TypeId::of::<[BabyBear; 8]>()
         {
-            // SAFETY: BinomialExtensionField<BabyBear, 4> is #[repr(C)] with value: [BabyBear; 4],
+            // SAFETY: BinomialExtensionField<BabyBear, 5> is #[repr(C)] with value: [BabyBear; 5],
             // so the memory layout is contiguous BabyBear values.
             let bb_vals: &[BabyBear] = unsafe {
                 std::slice::from_raw_parts(g_rs.as_ptr().cast::<BabyBear>(), height * ef_width)

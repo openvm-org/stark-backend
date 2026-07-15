@@ -1,10 +1,10 @@
 /*
  * Fp4 - Quartic Extension of BabyBear Field (Non-optimized version)
  * 
- * This is a simple schoolbook implementation of BabyBear[4] for benchmarking
- * comparison against the optimized bb31_4_t (FpExt) implementation.
+ * This is a simple schoolbook implementation of BabyBear[4], retained as a
+ * standalone legacy quartic benchmark alongside the production quintic FpExt.
  * 
- * Polynomial: X^4 - 11 (same as FpExt/bb31_4_t)
+ * Polynomial: X^4 - 11
  * 
  * Element representation: a0 + a1*α + a2*α² + a3*α³
  * where each ai is a BabyBear element and α^4 = 11.

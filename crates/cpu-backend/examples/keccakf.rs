@@ -11,7 +11,7 @@ use openvm_stark_backend::{
     PartitionedBaseAir, StarkEngine,
 };
 use openvm_stark_sdk::config::{
-    app_params_with_100_bits_security, baby_bear_poseidon2::BabyBearPoseidon2CpuEngine,
+    app_params_with_128_bits_security, baby_bear_poseidon2::BabyBearPoseidon2CpuEngine,
 };
 use p3_air::{Air, AirBuilder, BaseAir, BaseAirWithPublicValues};
 use p3_field::Field;
@@ -42,7 +42,7 @@ fn main() -> eyre::Result<()> {
     // Initialize tracing (reads RUST_LOG env var).
     openvm_stark_sdk::utils::setup_tracing();
 
-    let params = app_params_with_100_bits_security(21);
+    let params = app_params_with_128_bits_security(21);
 
     let mut rng = StdRng::seed_from_u64(42);
     let air = TestAir(KeccakAir {});

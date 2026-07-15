@@ -29,10 +29,8 @@ struct bn254_digest_t {
 static const int BN254_BABY_BEAR_RATE = 16;
 static const int BN254_NUM_F_ELMS = 8;
 
-static_assert(
-    BN254_BABY_BEAR_RATE % 4 == 0,
-    "BN254_BABY_BEAR_RATE must be a multiple of FpExt degree (4)"
-);
+// The sponge flushes inside each extension element's coefficient loop, so the rate need not be a
+// multiple of the extension degree.
 
 
 // ---------------------------------------------------------------------------

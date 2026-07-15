@@ -117,7 +117,7 @@ mod tests {
 
     impl StarkProtocolConfig for DummyConfig {
         type F = BabyBear;
-        type EF = BinomialExtensionField<BabyBear, 4>;
+        type EF = BinomialExtensionField<BabyBear, 5>;
         type Digest = [BabyBear; 1];
         type Hasher = DummyHasher;
 

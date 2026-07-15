@@ -78,7 +78,8 @@ impl SoundnessCalculator {
     /// * `base_field_order` - Order `p` of the base field that `sample_bits` reduces. For BabyBear:
     ///   `2^31 - 2^27 + 1`. Used to charge the `sample_bits` sampling bias (query bad-set argument
     ///   and proof-of-work).
-    /// * `challenge_field_bits` - Bits in the challenge field. For BabyBear4: ~124 bits.
+    /// * `challenge_field_bits` - Bits in the challenge field. For the BabyBear quintic extension:
+    ///   ~155 bits.
     /// * `max_num_constraints_per_air` - Maximum constraints in any single AIR.
     /// * `num_airs` - Number of AIRs being batched.
     /// * `max_constraint_degree` - Maximum degree of any constraint polynomial.
@@ -1024,7 +1025,7 @@ mod tests {
     // ==========================================================================
     // Unit tests
     // ==========================================================================
-    const TARGET_SECURITY_BITS: usize = 100;
+    const TARGET_SECURITY_BITS: usize = 128;
 
     #[test]
     fn test_soundness_calculation() {
