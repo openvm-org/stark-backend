@@ -57,6 +57,8 @@ pub struct ProvingMemoryEstimate {
     pub total: usize,
     /// Cached main trace data.
     pub main: usize,
+    /// Cached stacked PCS matrix, if retained after commitment.
+    pub stacked_matrix: usize,
     /// Reed-Solomon code matrix for main traces.
     pub rs_code_matrix: usize,
     /// Batch-constraint phase peak.
@@ -130,6 +132,13 @@ impl ProvingMemoryConfig {
     #[inline]
     pub fn main_memory_bytes(&self, main_cells: usize) -> usize {
         main_cells * self.base_field_size
+    }
+
+    /// Stacked PCS matrix for the committed main trace data.
+    #[inline]
+    pub fn stacked_matrix_memory_bytes(&self, main_cells: usize) -> usize {
+        let stacked_height = 1usize << self.log_stacked_height;
+        main_cells.next_multiple_of(stacked_height) * self.base_field_size
     }
 
     /// Reed-Solomon code matrix for the committed main trace data.
@@ -211,6 +220,7 @@ impl ProvingMemoryConfig {
     /// ```text
     /// main_cells       = main_cells_with_rot + main_cells_without_rot
     /// main             = main_memory_bytes(main_cells)
+    /// stacked_matrix   = stacked_matrix_memory_bytes(main_cells), if cached
     /// rs_code_matrix   = rs_code_matrix_memory_bytes(main_cells)
     /// batch_constraint = batch-constraint phase peak
     /// gkr              = GKR phase peak
@@ -219,18 +229,23 @@ impl ProvingMemoryConfig {
     /// Cached RS code matrix:
     ///
     /// ```text
-    /// total = main + rs_code_matrix + max(batch_constraint, gkr)
+    /// total = main + stacked_matrix + rs_code_matrix + max(batch_constraint, gkr)
     /// ```
     ///
     /// Dropped RS code matrix:
     ///
     /// ```text
-    /// total = main + max(rs_code_matrix, batch_constraint, gkr)
+    /// total = main + stacked_matrix + max(rs_code_matrix, batch_constraint, gkr)
     /// ```
     #[inline]
     pub fn estimate(&self, counts: ProvingMemoryCounts) -> ProvingMemoryEstimate {
         let main_cells = counts.main_cells();
         let main = self.main_memory_bytes(main_cells);
+        let stacked_matrix = if self.cache_stacked_matrix {
+            self.stacked_matrix_memory_bytes(main_cells)
+        } else {
+            0
+        };
         let rs_code_matrix = self.rs_code_matrix_memory_bytes(main_cells);
 
         let gkr_buffers = self.gkr_buffer_memory_bytes(counts.interaction_cells);
@@ -254,8 +269,9 @@ impl ProvingMemoryConfig {
         };
 
         ProvingMemoryEstimate {
-            total: main + secondary_peak,
+            total: main + stacked_matrix + secondary_peak,
             main,
+            stacked_matrix,
             rs_code_matrix,
             batch_constraint,
             gkr,
