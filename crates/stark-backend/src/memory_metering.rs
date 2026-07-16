@@ -383,7 +383,8 @@ mod tests {
         let unsaved = config.estimate(counts);
         assert_eq!(
             unsaved.batch_constraint,
-            batch_main + max(gkr_buffers, BATCH_MLE_MEMORY_FLOOR)
+            batch_main
+                + max(gkr_buffers, BATCH_MLE_MEMORY_FLOOR)
                 + BATCH_CONSTRAINT_MEMORY_OVERHEAD
         );
         assert!(unsaved.total > saved.total);
