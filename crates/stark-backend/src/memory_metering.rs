@@ -161,46 +161,31 @@ impl ProvingMemoryConfig {
             * self.base_field_size
     }
 
-    #[inline]
-    pub fn batch_constraint_main_cell_weight(&self) -> f64 {
-        default_batch_constraint_main_cell_weight(
-            self.extension_degree,
-            self.l_skip,
-            self.max_constraint_degree,
-        )
-    }
-
-    /// Batch-constraint main-trace buffers for `main_cells = Σ(padded_height * width)`.
+    /// Batch-constraint main-trace buffers across rotation classes.
+    ///
+    /// The per-opening weight is `(1 + constraint_degree / 2) * D_EF / 2^l_skip`;
+    /// equivalently, `1 + constraint_degree / 2 = (constraint_degree + 2) / 2`.
     ///
     /// ```text
-    /// mat_eval_bytes = (padded_height / 2^l_skip) * ((1 + need_rot) * width) * sizeof(EF)
-    ///                = (1 + need_rot) * main_cells * D_EF / 2^l_skip * sizeof(F)
-    ///
-    /// interp_bytes = (constraint_degree / 2) * mat_eval_bytes
-    /// weight       = (1 + constraint_degree / 2) * D_EF / 2^l_skip
+    /// bytes = ceil(
+    ///   main_cells * num_openings * D_EF * sizeof(F) * (constraint_degree + 2)
+    ///   / 2^(l_skip + 1)
+    /// )
     /// ```
     ///
-    /// AIRs with `need_rot = true` open two PCS cells per column.
-    #[inline]
-    pub fn batch_constraint_main_memory_bytes_for_rot(
-        &self,
-        main_cells: usize,
-        need_rot: bool,
-    ) -> usize {
-        let main_cell_weight = self.batch_constraint_main_cell_weight();
-        let weight = if need_rot {
-            2.0 * main_cell_weight
-        } else {
-            main_cell_weight
-        };
-        ceil_weighted_bytes(main_cells, self.base_field_size, weight)
-    }
-
-    /// Batch-constraint main-trace buffers across rotation classes.
+    /// AIRs with rotations have `num_openings = 2`; AIRs without rotations have
+    /// `num_openings = 1`.
     #[inline]
     pub fn batch_constraint_main_memory_bytes(&self, counts: ProvingMemoryCounts) -> usize {
-        self.batch_constraint_main_memory_bytes_for_rot(counts.main_cells_with_rot, true)
-            + self.batch_constraint_main_memory_bytes_for_rot(counts.main_cells_without_rot, false)
+        let bytes_per_opening_numerator =
+            self.extension_degree * self.base_field_size * (self.max_constraint_degree + 2);
+        let denominator = 1usize << (self.l_skip + 1);
+
+        let bytes_for = |main_cells: usize, num_openings: usize| {
+            (main_cells * num_openings * bytes_per_opening_numerator).div_ceil(denominator)
+        };
+
+        bytes_for(counts.main_cells_with_rot, 2) + bytes_for(counts.main_cells_without_rot, 1)
     }
 
     /// Fractional-GKR scalable buffers, excluding fixed GKR-phase overhead.
@@ -311,19 +296,6 @@ impl ProvingMemoryConfig {
             secondary_peak,
         }
     }
-}
-
-fn default_batch_constraint_main_cell_weight(
-    extension_degree: usize,
-    l_skip: usize,
-    max_constraint_degree: usize,
-) -> f64 {
-    (1.0 + max_constraint_degree as f64 / 2.0) * extension_degree as f64 / (1usize << l_skip) as f64
-}
-
-/// `ceil(cell_count * base_field_size * weight)`
-fn ceil_weighted_bytes(cell_count: usize, base_field_size: usize, weight: f64) -> usize {
-    ((cell_count * base_field_size) as f64 * weight).ceil() as usize
 }
 
 #[cfg(test)]
