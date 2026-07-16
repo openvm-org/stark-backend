@@ -346,4 +346,71 @@ mod tests {
                 + max(estimate.whir, max(estimate.batch_constraint, estimate.gkr))
         );
     }
+
+    #[test]
+    fn batch_constraint_main_memory_uses_integer_formula() {
+        let config = test_memory_config();
+        let counts = ProvingMemoryCounts::new(7, 11, 0);
+        let weighted_bytes = |main_cells: usize, need_rot: bool| {
+            let weight = (1.0 + config.max_constraint_degree as f64 / 2.0)
+                * config.extension_degree as f64
+                / (1usize << config.l_skip) as f64;
+            let weight = if need_rot { 2.0 * weight } else { weight };
+            ((main_cells * config.base_field_size) as f64 * weight).ceil() as usize
+        };
+
+        assert_eq!(
+            config.batch_constraint_main_memory_bytes(counts),
+            weighted_bytes(counts.main_cells_with_rot, true)
+                + weighted_bytes(counts.main_cells_without_rot, false)
+        );
+    }
+
+    #[test]
+    fn no_save_memory_batch_scratch_is_additive() {
+        let mut config = test_memory_config();
+        let counts = ProvingMemoryCounts::new(10, 20, 5);
+        let batch_main = config.batch_constraint_main_memory_bytes(counts);
+        let gkr_buffers = config.gkr_buffer_memory_bytes(counts.interaction_cells);
+
+        let saved = config.estimate(counts);
+        assert_eq!(
+            saved.batch_constraint,
+            max(batch_main, gkr_buffers) + BATCH_CONSTRAINT_MEMORY_OVERHEAD
+        );
+
+        config.zerocheck_save_memory = false;
+        let unsaved = config.estimate(counts);
+        assert_eq!(
+            unsaved.batch_constraint,
+            batch_main + max(gkr_buffers, BATCH_MLE_MEMORY_FLOOR)
+                + BATCH_CONSTRAINT_MEMORY_OVERHEAD
+        );
+        assert!(unsaved.total > saved.total);
+    }
+
+    #[test]
+    fn stacked_matrix_and_whir_components_are_counted_separately() {
+        let mut config = test_memory_config();
+        let counts = ProvingMemoryCounts::new(10, 20, 5);
+        let stacked_height = 1usize << config.log_stacked_height;
+        let expected_stacked =
+            counts.main_cells().next_multiple_of(stacked_height) * config.base_field_size;
+
+        let without_stacked = config.estimate(counts);
+        config.cache_stacked_matrix = true;
+        let with_stacked = config.estimate(counts);
+
+        assert_eq!(without_stacked.stacked_matrix, 0);
+        assert_eq!(with_stacked.stacked_matrix, expected_stacked);
+        assert_eq!(with_stacked.total - without_stacked.total, expected_stacked);
+
+        let codeword_height = stacked_height << config.log_blowup;
+        let expected_whir = 2 * config.digest_size * (codeword_height >> config.k_whir)
+            + config.extension_degree * config.base_field_size * (codeword_height >> 1)
+            + 2 * config.digest_size * (codeword_height >> (config.k_whir + 1))
+            + WHIR_MEMORY_OVERHEAD;
+        assert_eq!(config.whir_memory_bytes(), expected_whir);
+        assert_eq!(with_stacked.whir, expected_whir);
+    }
 }
