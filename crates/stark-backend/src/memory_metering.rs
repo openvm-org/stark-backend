@@ -69,6 +69,8 @@ pub struct ProvingMemoryConfig {
     pub log_blowup: usize,
     /// `log_2` of the univariate skip domain.
     pub l_skip: usize,
+    /// `log_2` of the stacked matrix height (`l_skip + n_stack`).
+    pub log_stacked_height: usize,
     /// Maximum constraint degree across AIR and interaction constraints.
     pub max_constraint_degree: usize,
     /// Whether the prover keeps the Reed-Solomon code matrix cached after `stacked_commit`.
@@ -93,6 +95,7 @@ impl ProvingMemoryConfig {
             extension_degree,
             log_blowup: params.log_blowup,
             l_skip: params.l_skip,
+            log_stacked_height: params.log_stacked_height(),
             max_constraint_degree: params.max_constraint_degree,
             cache_rs_code_matrix,
         }
@@ -107,7 +110,10 @@ impl ProvingMemoryConfig {
     /// Reed-Solomon code matrix for the committed main trace data.
     #[inline]
     pub fn rs_code_matrix_memory_bytes(&self, main_cells: usize) -> usize {
-        main_cells * (1usize << self.log_blowup) * self.base_field_size
+        let stacked_height = 1usize << self.log_stacked_height;
+        main_cells.next_multiple_of(stacked_height)
+            * (1usize << self.log_blowup)
+            * self.base_field_size
     }
 
     #[inline]
@@ -258,7 +264,11 @@ mod tests {
         let estimate = config.estimate(counts);
 
         assert_eq!(estimate.main, 30 * 4);
-        assert_eq!(estimate.rs_code_matrix, 30 * 2 * 4);
+        let stacked_height = 1usize << config.log_stacked_height;
+        assert_eq!(
+            estimate.rs_code_matrix,
+            30usize.next_multiple_of(stacked_height) * 2 * 4
+        );
         assert_eq!(estimate.total, estimate.main + estimate.secondary_peak);
         assert_eq!(
             estimate.secondary_peak,
