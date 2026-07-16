@@ -4,17 +4,20 @@ use std::{cmp::max, mem::size_of};
 
 use crate::{StarkProtocolConfig, SystemParams};
 
+/// Fixed batch-constraint scratch on top of the modeled main-trace buffers.
+pub const BATCH_CONSTRAINT_MEMORY_OVERHEAD: usize = 192 << 20;
+
+/// Minimum batch-MLE scratch budget when `zerocheck_save_memory` is off.
+pub const BATCH_MLE_MEMORY_FLOOR: usize = 6 << 30;
+
 /// Fixed fractional-GKR scratch not proportional to interaction cells.
 pub const GKR_MEMORY_OVERHEAD: usize = 64 << 20;
 
 /// Minimum fractional-GKR work-buffer length in `Frac<EF>` entries.
 pub const GKR_MIN_WORK_BUFFER_LEN: usize = 1 << 22;
 
-/// Fixed batch-constraint scratch on top of the modeled main-trace buffers.
-pub const BATCH_CONSTRAINT_MEMORY_OVERHEAD: usize = 192 << 20;
-
-/// Minimum batch-MLE scratch budget when `zerocheck_save_memory` is off.
-pub const BATCH_MLE_MEMORY_FLOOR: usize = 6 << 30;
+/// Fixed WHIR opening scratch not proportional to the stacked height.
+pub const WHIR_MEMORY_OVERHEAD: usize = 64 << 20;
 
 /// Cell counts for a proving memory estimate.
 ///
@@ -65,6 +68,8 @@ pub struct ProvingMemoryEstimate {
     pub batch_constraint: usize,
     /// Fractional-GKR buffers plus fixed GKR-phase overhead.
     pub gkr: usize,
+    /// WHIR opening working set that coexists with the RS code matrix.
+    pub whir: usize,
     /// Peak among secondary phases, excluding cached main trace data.
     pub secondary_peak: usize,
 }
@@ -76,12 +81,16 @@ pub struct ProvingMemoryConfig {
     pub base_field_size: usize,
     /// Degree of the extension field over the base field.
     pub extension_degree: usize,
+    /// Size of one commitment digest in bytes.
+    pub digest_size: usize,
     /// `-log_2` of the rate for the initial Reed-Solomon code.
     pub log_blowup: usize,
     /// `log_2` of the univariate skip domain.
     pub l_skip: usize,
     /// `log_2` of the stacked matrix height (`l_skip + n_stack`).
     pub log_stacked_height: usize,
+    /// `log_2` of the number of codeword rows per WHIR Merkle-tree leaf.
+    pub k_whir: usize,
     /// Maximum constraint degree across AIR and interaction constraints.
     pub max_constraint_degree: usize,
     /// Whether the prover keeps the stacked matrix cached after `stacked_commit`.
@@ -99,7 +108,7 @@ impl ProvingMemoryConfig {
         cache_rs_code_matrix: bool,
         zerocheck_save_memory: bool,
     ) -> Self {
-        Self::from_params::<SC::F>(
+        Self::from_params::<SC::F, SC::Digest>(
             config.params(),
             SC::D_EF,
             cache_stacked_matrix,
@@ -108,7 +117,7 @@ impl ProvingMemoryConfig {
         )
     }
 
-    fn from_params<F>(
+    fn from_params<F, Digest>(
         params: &SystemParams,
         extension_degree: usize,
         cache_stacked_matrix: bool,
@@ -118,9 +127,11 @@ impl ProvingMemoryConfig {
         Self {
             base_field_size: size_of::<F>(),
             extension_degree,
+            digest_size: size_of::<Digest>(),
             log_blowup: params.log_blowup,
             l_skip: params.l_skip,
             log_stacked_height: params.log_stacked_height(),
+            k_whir: params.k_whir(),
             max_constraint_degree: params.max_constraint_degree,
             cache_stacked_matrix,
             cache_rs_code_matrix,
@@ -215,6 +226,23 @@ impl ProvingMemoryConfig {
         leaves + work_buffer + tmp_block_sums
     }
 
+    /// WHIR opening working set that coexists with the RS code matrix.
+    ///
+    /// ```text
+    /// codeword_height = 2^(log_stacked_height + log_blowup)
+    /// commit_tree     = 2 * digest_size * codeword_height / 2^k_whir
+    /// g_codeword      = D_EF * sizeof(F) * codeword_height / 2
+    /// g_tree          = 2 * digest_size * codeword_height / 2^(k_whir + 1)
+    /// ```
+    #[inline]
+    pub fn whir_memory_bytes(&self) -> usize {
+        let codeword_height = 1usize << (self.log_stacked_height + self.log_blowup);
+        let commit_tree = 2 * self.digest_size * (codeword_height >> self.k_whir);
+        let g_codeword = self.extension_degree * self.base_field_size * (codeword_height >> 1);
+        let g_tree = 2 * self.digest_size * (codeword_height >> (self.k_whir + 1));
+        commit_tree + g_codeword + g_tree + WHIR_MEMORY_OVERHEAD
+    }
+
     /// Convert main trace cells and interaction cells to proving memory bytes.
     ///
     /// ```text
@@ -224,18 +252,19 @@ impl ProvingMemoryConfig {
     /// rs_code_matrix   = rs_code_matrix_memory_bytes(main_cells)
     /// batch_constraint = batch-constraint phase peak
     /// gkr              = GKR phase peak
+    /// whir             = WHIR working set that coexists with rs_code_matrix
     /// ```
     ///
     /// Cached RS code matrix:
     ///
     /// ```text
-    /// total = main + stacked_matrix + rs_code_matrix + max(batch_constraint, gkr)
+    /// total = main + stacked_matrix + rs_code_matrix + max(whir, batch_constraint, gkr)
     /// ```
     ///
     /// Dropped RS code matrix:
     ///
     /// ```text
-    /// total = main + stacked_matrix + max(rs_code_matrix, batch_constraint, gkr)
+    /// total = main + stacked_matrix + max(rs_code_matrix + whir, batch_constraint, gkr)
     /// ```
     #[inline]
     pub fn estimate(&self, counts: ProvingMemoryCounts) -> ProvingMemoryEstimate {
@@ -262,10 +291,13 @@ impl ProvingMemoryConfig {
             batch_constraint_main + max(gkr_buffers, BATCH_MLE_MEMORY_FLOOR)
         } + BATCH_CONSTRAINT_MEMORY_OVERHEAD;
 
+        let whir = self.whir_memory_bytes();
+
+        let batch_or_gkr = max(batch_constraint, gkr);
         let secondary_peak = if self.cache_rs_code_matrix {
-            rs_code_matrix + max(batch_constraint, gkr)
+            rs_code_matrix + max(whir, batch_or_gkr)
         } else {
-            max(rs_code_matrix, max(batch_constraint, gkr))
+            max(rs_code_matrix + whir, batch_or_gkr)
         };
 
         ProvingMemoryEstimate {
@@ -275,6 +307,7 @@ impl ProvingMemoryConfig {
             rs_code_matrix,
             batch_constraint,
             gkr,
+            whir,
             secondary_peak,
         }
     }
@@ -300,13 +333,14 @@ mod tests {
 
     fn test_memory_config() -> ProvingMemoryConfig {
         let params = default_test_params_small();
-        ProvingMemoryConfig::from_params::<u32>(&params, 4, false, true, true)
+        ProvingMemoryConfig::from_params::<u32, [u32; 8]>(&params, 4, false, true, true)
     }
 
     #[test]
     fn dropped_rs_code_matrix_is_phase_disjoint() {
         let params = default_test_params_small();
-        let config = ProvingMemoryConfig::from_params::<u32>(&params, 4, false, false, true);
+        let config =
+            ProvingMemoryConfig::from_params::<u32, [u32; 8]>(&params, 4, false, false, true);
         let counts = ProvingMemoryCounts::new(10, 20, 5);
 
         let estimate = config.estimate(counts);
@@ -321,7 +355,7 @@ mod tests {
         assert_eq!(
             estimate.secondary_peak,
             max(
-                estimate.rs_code_matrix,
+                estimate.rs_code_matrix + estimate.whir,
                 max(estimate.batch_constraint, estimate.gkr)
             )
         );
@@ -336,7 +370,8 @@ mod tests {
 
         assert_eq!(
             estimate.secondary_peak,
-            estimate.rs_code_matrix + max(estimate.batch_constraint, estimate.gkr)
+            estimate.rs_code_matrix
+                + max(estimate.whir, max(estimate.batch_constraint, estimate.gkr))
         );
     }
 }
