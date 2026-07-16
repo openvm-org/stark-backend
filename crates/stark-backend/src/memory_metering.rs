@@ -50,10 +50,10 @@ pub struct ProvingMemoryEstimate {
     pub main: usize,
     /// Reed-Solomon code matrix for main traces.
     pub rs_code_matrix: usize,
-    /// Secondary main-trace buffers after PCS opening.
-    pub main_secondary: usize,
-    /// Interaction GKR buffers plus fixed interaction overhead.
-    pub interaction: usize,
+    /// Batch-constraint main-trace buffers after PCS opening.
+    pub batch_constraint: usize,
+    /// Fractional-GKR buffers plus fixed GKR-phase overhead.
+    pub gkr: usize,
     /// Peak among secondary phases, excluding cached main trace data.
     pub secondary_peak: usize,
 }
@@ -98,118 +98,122 @@ impl ProvingMemoryConfig {
         }
     }
 
+    /// Resident main trace matrices.
     #[inline]
     pub fn main_memory_bytes(&self, main_cells: usize) -> usize {
         main_cells * self.base_field_size
     }
 
+    /// Reed-Solomon code matrix for the committed main trace data.
     #[inline]
     pub fn rs_code_matrix_memory_bytes(&self, main_cells: usize) -> usize {
         main_cells * (1usize << self.log_blowup) * self.base_field_size
     }
 
     #[inline]
-    pub fn main_cell_secondary_weight(&self) -> f64 {
-        default_main_cell_secondary_weight(
+    pub fn batch_constraint_main_cell_weight(&self) -> f64 {
+        default_batch_constraint_main_cell_weight(
             self.extension_degree,
             self.l_skip,
             self.max_constraint_degree,
         )
     }
 
-    /// Secondary memory for `main_cells = Σ(padded_height * width)`.
+    /// Batch-constraint main-trace buffers for `main_cells = Σ(padded_height * width)`.
     ///
     /// ```text
     /// mat_eval_bytes = (padded_height / 2^l_skip) * ((1 + need_rot) * width) * sizeof(EF)
     ///                = (1 + need_rot) * main_cells * D_EF / 2^l_skip * sizeof(F)
     ///
-    /// interp_bytes      = (constraint_degree / 2) * mat_eval_bytes
-    /// secondary_bytes   = (1 + constraint_degree / 2) * mat_eval_bytes
-    /// secondary_weight  = (1 + constraint_degree / 2) * D_EF / 2^l_skip
+    /// interp_bytes = (constraint_degree / 2) * mat_eval_bytes
+    /// weight       = (1 + constraint_degree / 2) * D_EF / 2^l_skip
     /// ```
     ///
     /// AIRs with `need_rot = true` open two PCS cells per column.
     #[inline]
-    pub fn main_secondary_memory_bytes_for_rot(&self, main_cells: usize, need_rot: bool) -> usize {
-        let main_cell_secondary_weight = self.main_cell_secondary_weight();
+    pub fn batch_constraint_memory_bytes_for_rot(
+        &self,
+        main_cells: usize,
+        need_rot: bool,
+    ) -> usize {
+        let main_cell_weight = self.batch_constraint_main_cell_weight();
         let weight = if need_rot {
-            2.0 * main_cell_secondary_weight
+            2.0 * main_cell_weight
         } else {
-            main_cell_secondary_weight
+            main_cell_weight
         };
         ceil_weighted_bytes(main_cells, self.base_field_size, weight)
     }
 
+    /// Batch-constraint main-trace buffers across rotation classes.
     #[inline]
-    pub fn main_secondary_memory_bytes(&self, counts: ProvingMemoryCounts) -> usize {
-        self.main_secondary_memory_bytes_for_rot(counts.main_cells_with_rot, true)
-            + self.main_secondary_memory_bytes_for_rot(counts.main_cells_without_rot, false)
+    pub fn batch_constraint_memory_bytes(&self, counts: ProvingMemoryCounts) -> usize {
+        self.batch_constraint_memory_bytes_for_rot(counts.main_cells_with_rot, true)
+            + self.batch_constraint_memory_bytes_for_rot(counts.main_cells_without_rot, false)
     }
 
+    /// Fractional-GKR interaction buffers before fixed interaction-phase overhead.
     #[inline]
-    pub fn interaction_memory_bytes_without_overhead(&self, interaction_cells: usize) -> usize {
+    pub fn gkr_memory_bytes_without_overhead(&self, interaction_cells: usize) -> usize {
         ceil_weighted_bytes(
             interaction_cells,
             self.base_field_size,
-            default_interaction_cell_weight(self.extension_degree),
+            default_gkr_cell_weight(self.extension_degree),
         )
     }
 
+    /// Fractional-GKR interaction phase, including fixed non-cell-proportional overhead.
     #[inline]
-    pub fn interaction_memory_bytes(&self, interaction_cells: usize) -> usize {
-        self.interaction_memory_bytes_without_overhead(interaction_cells)
-            + INTERACTION_MEMORY_OVERHEAD
+    pub fn gkr_memory_bytes(&self, interaction_cells: usize) -> usize {
+        self.gkr_memory_bytes_without_overhead(interaction_cells) + INTERACTION_MEMORY_OVERHEAD
     }
 
-    /// Convert main trace cells and interaction cells to memory bytes.
+    /// Convert main trace cells and interaction cells to proving memory bytes.
     ///
     /// ```text
     /// main_cells       = main_cells_with_rot + main_cells_without_rot
-    /// main             = main_cells * sizeof(F)
-    /// rs_code_matrix   = main_cells * 2^log_blowup * sizeof(F)
-    /// main_secondary   = sizeof(F) *
-    ///                    (2 * main_cell_secondary_weight() * main_cells_with_rot
-    ///                     + main_cell_secondary_weight() * main_cells_without_rot)
-    /// interaction      = sizeof(F) * interaction_cell_weight * interaction_cells
-    ///                    + INTERACTION_MEMORY_OVERHEAD
+    /// main             = main_memory_bytes(main_cells)
+    /// rs_code_matrix   = rs_code_matrix_memory_bytes(main_cells)
+    /// batch_constraint = batch_constraint_memory_bytes(counts)
+    /// gkr              = gkr_memory_bytes(interaction_cells)
     /// ```
     ///
     /// Cached RS code matrix:
     ///
     /// ```text
-    /// total = main + rs_code_matrix + max(main_secondary, interaction)
+    /// total = main + rs_code_matrix + max(batch_constraint, gkr)
     /// ```
     ///
     /// Dropped RS code matrix:
     ///
     /// ```text
-    /// total = main + max(rs_code_matrix, main_secondary, interaction)
+    /// total = main + max(rs_code_matrix, batch_constraint, gkr)
     /// ```
     #[inline]
     pub fn estimate(&self, counts: ProvingMemoryCounts) -> ProvingMemoryEstimate {
         let main_cells = counts.main_cells();
         let main = self.main_memory_bytes(main_cells);
         let rs_code_matrix = self.rs_code_matrix_memory_bytes(main_cells);
-        let main_secondary = self.main_secondary_memory_bytes(counts);
-        let interaction = self.interaction_memory_bytes(counts.interaction_cells);
+        let batch_constraint = self.batch_constraint_memory_bytes(counts);
+        let gkr = self.gkr_memory_bytes(counts.interaction_cells);
         let secondary_peak = if self.cache_rs_code_matrix {
-            rs_code_matrix + max(main_secondary, interaction)
+            rs_code_matrix + max(batch_constraint, gkr)
         } else {
-            max(rs_code_matrix, max(main_secondary, interaction))
+            max(rs_code_matrix, max(batch_constraint, gkr))
         };
 
         ProvingMemoryEstimate {
             total: main + secondary_peak,
             main,
             rs_code_matrix,
-            main_secondary,
-            interaction,
+            batch_constraint,
+            gkr,
             secondary_peak,
         }
     }
 }
 
-fn default_main_cell_secondary_weight(
+fn default_batch_constraint_main_cell_weight(
     extension_degree: usize,
     l_skip: usize,
     max_constraint_degree: usize,
@@ -226,7 +230,7 @@ fn default_main_cell_secondary_weight(
 ///
 /// interaction_weight = leaf_weight * (1 + 2 * (1 / 16 + 1 / 256))
 /// ```
-fn default_interaction_cell_weight(extension_degree: usize) -> f64 {
+fn default_gkr_cell_weight(extension_degree: usize) -> f64 {
     (2 * extension_degree) as f64 * (1.0 + 2.0 * (1.0 / 16.0 + 1.0 / 256.0))
 }
 
@@ -260,7 +264,7 @@ mod tests {
             estimate.secondary_peak,
             max(
                 estimate.rs_code_matrix,
-                max(estimate.main_secondary, estimate.interaction)
+                max(estimate.batch_constraint, estimate.gkr)
             )
         );
     }
@@ -274,7 +278,7 @@ mod tests {
 
         assert_eq!(
             estimate.secondary_peak,
-            estimate.rs_code_matrix + max(estimate.main_secondary, estimate.interaction)
+            estimate.rs_code_matrix + max(estimate.batch_constraint, estimate.gkr)
         );
     }
 }
