@@ -73,22 +73,36 @@ pub struct ProvingMemoryConfig {
     pub log_stacked_height: usize,
     /// Maximum constraint degree across AIR and interaction constraints.
     pub max_constraint_degree: usize,
+    /// Whether the prover keeps the stacked matrix cached after `stacked_commit`.
+    pub cache_stacked_matrix: bool,
     /// Whether the prover keeps the Reed-Solomon code matrix cached after `stacked_commit`.
     pub cache_rs_code_matrix: bool,
+    /// Whether the batch-MLE scratch budget is reduced by the resident `mat_eval` buffers.
+    pub zerocheck_save_memory: bool,
 }
 
 impl ProvingMemoryConfig {
     pub fn from_protocol_config<SC: StarkProtocolConfig>(
         config: &SC,
+        cache_stacked_matrix: bool,
         cache_rs_code_matrix: bool,
+        zerocheck_save_memory: bool,
     ) -> Self {
-        Self::from_params::<SC::F>(config.params(), SC::D_EF, cache_rs_code_matrix)
+        Self::from_params::<SC::F>(
+            config.params(),
+            SC::D_EF,
+            cache_stacked_matrix,
+            cache_rs_code_matrix,
+            zerocheck_save_memory,
+        )
     }
 
     fn from_params<F>(
         params: &SystemParams,
         extension_degree: usize,
+        cache_stacked_matrix: bool,
         cache_rs_code_matrix: bool,
+        zerocheck_save_memory: bool,
     ) -> Self {
         Self {
             base_field_size: size_of::<F>(),
@@ -97,7 +111,9 @@ impl ProvingMemoryConfig {
             l_skip: params.l_skip,
             log_stacked_height: params.log_stacked_height(),
             max_constraint_degree: params.max_constraint_degree,
+            cache_stacked_matrix,
             cache_rs_code_matrix,
+            zerocheck_save_memory,
         }
     }
 
@@ -252,13 +268,13 @@ mod tests {
 
     fn test_memory_config() -> ProvingMemoryConfig {
         let params = default_test_params_small();
-        ProvingMemoryConfig::from_params::<u32>(&params, 4, true)
+        ProvingMemoryConfig::from_params::<u32>(&params, 4, false, true, true)
     }
 
     #[test]
     fn dropped_rs_code_matrix_is_phase_disjoint() {
         let params = default_test_params_small();
-        let config = ProvingMemoryConfig::from_params::<u32>(&params, 4, false);
+        let config = ProvingMemoryConfig::from_params::<u32>(&params, 4, false, false, true);
         let counts = ProvingMemoryCounts::new(10, 20, 5);
 
         let estimate = config.estimate(counts);
