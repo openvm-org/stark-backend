@@ -4,8 +4,17 @@ use std::{cmp::max, mem::size_of};
 
 use crate::{StarkProtocolConfig, SystemParams};
 
-/// Fixed interaction scratch not proportional to interaction cells.
-pub const INTERACTION_MEMORY_OVERHEAD: usize = 2 << 20;
+/// Fixed fractional-GKR scratch not proportional to interaction cells.
+pub const GKR_MEMORY_OVERHEAD: usize = 64 << 20;
+
+/// Minimum fractional-GKR work-buffer length in `Frac<EF>` entries.
+pub const GKR_MIN_WORK_BUFFER_LEN: usize = 1 << 22;
+
+/// Fixed batch-constraint scratch on top of the modeled main-trace buffers.
+pub const BATCH_CONSTRAINT_MEMORY_OVERHEAD: usize = 192 << 20;
+
+/// Minimum batch-MLE scratch budget when `zerocheck_save_memory` is off.
+pub const BATCH_MLE_MEMORY_FLOOR: usize = 6 << 30;
 
 /// Cell counts for a proving memory estimate.
 ///
@@ -50,7 +59,7 @@ pub struct ProvingMemoryEstimate {
     pub main: usize,
     /// Reed-Solomon code matrix for main traces.
     pub rs_code_matrix: usize,
-    /// Batch-constraint main-trace buffers after PCS opening.
+    /// Batch-constraint phase peak.
     pub batch_constraint: usize,
     /// Fractional-GKR buffers plus fixed GKR-phase overhead.
     pub gkr: usize,
@@ -153,7 +162,7 @@ impl ProvingMemoryConfig {
     ///
     /// AIRs with `need_rot = true` open two PCS cells per column.
     #[inline]
-    pub fn batch_constraint_memory_bytes_for_rot(
+    pub fn batch_constraint_main_memory_bytes_for_rot(
         &self,
         main_cells: usize,
         need_rot: bool,
@@ -169,25 +178,32 @@ impl ProvingMemoryConfig {
 
     /// Batch-constraint main-trace buffers across rotation classes.
     #[inline]
-    pub fn batch_constraint_memory_bytes(&self, counts: ProvingMemoryCounts) -> usize {
-        self.batch_constraint_memory_bytes_for_rot(counts.main_cells_with_rot, true)
-            + self.batch_constraint_memory_bytes_for_rot(counts.main_cells_without_rot, false)
+    pub fn batch_constraint_main_memory_bytes(&self, counts: ProvingMemoryCounts) -> usize {
+        self.batch_constraint_main_memory_bytes_for_rot(counts.main_cells_with_rot, true)
+            + self.batch_constraint_main_memory_bytes_for_rot(counts.main_cells_without_rot, false)
     }
 
-    /// Fractional-GKR interaction buffers before fixed interaction-phase overhead.
+    /// Fractional-GKR scalable buffers, excluding fixed GKR-phase overhead.
+    ///
+    /// ```text
+    /// leaf_bytes     = 2 * extension_degree * sizeof(F)
+    /// real_len       = interaction_cells
+    /// logical_len    = 2^ceil_log2(real_len + 1)
+    /// leaves         = real_len * leaf_bytes
+    /// work_buffer    = max(logical_len / 16, 2^22) * leaf_bytes
+    /// tmp_block_sums = logical_len / 256 * leaf_bytes
+    /// ```
     #[inline]
-    pub fn gkr_memory_bytes_without_overhead(&self, interaction_cells: usize) -> usize {
-        ceil_weighted_bytes(
-            interaction_cells,
-            self.base_field_size,
-            default_gkr_cell_weight(self.extension_degree),
-        )
-    }
-
-    /// Fractional-GKR interaction phase, including fixed non-cell-proportional overhead.
-    #[inline]
-    pub fn gkr_memory_bytes(&self, interaction_cells: usize) -> usize {
-        self.gkr_memory_bytes_without_overhead(interaction_cells) + INTERACTION_MEMORY_OVERHEAD
+    pub fn gkr_buffer_memory_bytes(&self, interaction_cells: usize) -> usize {
+        if interaction_cells == 0 {
+            return 0;
+        }
+        let leaf_bytes = 2 * self.extension_degree * self.base_field_size;
+        let logical_len = (interaction_cells + 1).next_power_of_two();
+        let leaves = interaction_cells * leaf_bytes;
+        let work_buffer = max(logical_len / 16, GKR_MIN_WORK_BUFFER_LEN) * leaf_bytes;
+        let tmp_block_sums = logical_len / 256 * leaf_bytes;
+        leaves + work_buffer + tmp_block_sums
     }
 
     /// Convert main trace cells and interaction cells to proving memory bytes.
@@ -196,8 +212,8 @@ impl ProvingMemoryConfig {
     /// main_cells       = main_cells_with_rot + main_cells_without_rot
     /// main             = main_memory_bytes(main_cells)
     /// rs_code_matrix   = rs_code_matrix_memory_bytes(main_cells)
-    /// batch_constraint = batch_constraint_memory_bytes(counts)
-    /// gkr              = gkr_memory_bytes(interaction_cells)
+    /// batch_constraint = batch-constraint phase peak
+    /// gkr              = GKR phase peak
     /// ```
     ///
     /// Cached RS code matrix:
@@ -216,8 +232,21 @@ impl ProvingMemoryConfig {
         let main_cells = counts.main_cells();
         let main = self.main_memory_bytes(main_cells);
         let rs_code_matrix = self.rs_code_matrix_memory_bytes(main_cells);
-        let batch_constraint = self.batch_constraint_memory_bytes(counts);
-        let gkr = self.gkr_memory_bytes(counts.interaction_cells);
+
+        let gkr_buffers = self.gkr_buffer_memory_bytes(counts.interaction_cells);
+        let gkr = if gkr_buffers == 0 {
+            0
+        } else {
+            gkr_buffers + GKR_MEMORY_OVERHEAD
+        };
+
+        let batch_constraint_main = self.batch_constraint_main_memory_bytes(counts);
+        let batch_constraint = if self.zerocheck_save_memory {
+            max(batch_constraint_main, gkr_buffers)
+        } else {
+            batch_constraint_main + max(gkr_buffers, BATCH_MLE_MEMORY_FLOOR)
+        } + BATCH_CONSTRAINT_MEMORY_OVERHEAD;
+
         let secondary_peak = if self.cache_rs_code_matrix {
             rs_code_matrix + max(batch_constraint, gkr)
         } else {
@@ -241,19 +270,6 @@ fn default_batch_constraint_main_cell_weight(
     max_constraint_degree: usize,
 ) -> f64 {
     (1.0 + max_constraint_degree as f64 / 2.0) * extension_degree as f64 / (1usize << l_skip) as f64
-}
-
-/// ```
-/// leaf_weight = 2 * extension_degree
-///
-/// work_buffer    <= logical_len / 16
-/// tmp_block_sums ~= logical_len / 256
-/// logical_len    <= 2 * real_len
-///
-/// interaction_weight = leaf_weight * (1 + 2 * (1 / 16 + 1 / 256))
-/// ```
-fn default_gkr_cell_weight(extension_degree: usize) -> f64 {
-    (2 * extension_degree) as f64 * (1.0 + 2.0 * (1.0 / 16.0 + 1.0 / 256.0))
 }
 
 /// `ceil(cell_count * base_field_size * weight)`
