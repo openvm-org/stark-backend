@@ -9,24 +9,25 @@ license = "MIT OR Apache-2.0"
 
 [workspace]
 members = [
-    "crates/stark-backend",
-    "crates/stark-backend/codec-derive",
-    "crates/stark-sdk",
-    "crates/backend-tests",
-    "crates/cpu-backend",
-    "crates/cuda-common",
-    "crates/cuda-builder",
-    "crates/cuda-backend",
-    "benchmarks/fields",
-    "benchmarks/synthetic",
+  "crates/stark-backend",
+  "crates/stark-backend/codec-derive",
+  "crates/stark-sdk",
+  "crates/backend-tests",
+  "crates/cpu-backend",
+  "crates/cuda-common",
+  "crates/cuda-builder",
+  "crates/cuda-backend",
+  "crates/compiler",
+  "benchmarks/fields",
+  "benchmarks/synthetic",
 ]
 # Only these build by default
 default-members = [
-    "crates/stark-backend",
-    "crates/stark-backend/codec-derive",
-    "crates/stark-sdk",
-    "crates/backend-tests",
-    "crates/cpu-backend",
+  "crates/stark-backend",
+  "crates/stark-backend/codec-derive",
+  "crates/stark-sdk",
+  "crates/backend-tests",
+  "crates/cpu-backend",
 ]
 resolver = "2"
 
@@ -99,7 +100,7 @@ p3-poseidon = { version = "=0.4.3", default-features = false }
 p3-poseidon2 = { version = "=0.4.3", default-features = false }
 p3-symmetric = { version = "=0.4.3", default-features = false }
 p3-uni-stark = { version = "=0.4.3", default-features = false }
-p3-maybe-rayon = { version = "=0.4.3", default-features = false } # the "parallel" feature is NOT on by default to allow single-threaded benchmarking
+p3-maybe-rayon = { version = "=0.4.3", default-features = false }   # the "parallel" feature is NOT on by default to allow single-threaded benchmarking
 
 # Bn254 support
 p3-bn254 = { version = "=0.4.3", default-features = false }

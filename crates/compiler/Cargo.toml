@@ -1,0 +1,8 @@
+[package]
+name = "crypto-compiler"
+description = "crpytography compiler"
+
+[dependencies]
+openvm-cuda-common = { workspace = true }
+
+[dev-dependencies]
