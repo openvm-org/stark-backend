@@ -2,9 +2,10 @@
 //!
 //! - Every top-level let output becomes a global buffer (input / output / scratch) with a row-major
 //!   layout.
-//! - Every canonical compute becomes one kernel with a compute layout: a flat grid-stride
-//!   factorization, or grid = outer / threads = inner when the compute nests a thread-level
-//!   compute.
+//! - Every canonical compute becomes one kernel with a compute layout: a flat one-thread-per-point
+//!   factorization, or grid = outer with explicit `Par` statements over threads when the compute
+//!   nests a thread-level compute or binds inner tiles.
+//! - Let-bound inner computes become shared-memory buffers written by their own `Par`.
 //! - Reduces become sequential `for` loops over mutable accumulators.
 //! - Scalar expression DAGs become SSA `Def` statements (hash-consing in the HIR provides CSE);
 //!   values computed inside a loop are scoped to it.
@@ -13,7 +14,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use crate::{
-    canonicalize::{CanonKernel, CanonValue, Program, ResultExpr, TensorRef},
+    canonicalize::{CanonKernel, CanonValue, InnerLet, Program, ResultExpr, TensorRef},
     ir::{BinOp, IRBuilder, Node, NodeId, ReduceOp, ScalarType, Type, VarId},
     kernel_ir::{
         AddressSpace, BufferDecl, BufferKind, KExpr, Kernel, KernelProgram, LaunchShape, Stmt,
@@ -41,6 +42,7 @@ pub fn lower(program: &Program) -> Result<KernelProgram, CompileError> {
             shape: decl.shape.clone(),
             kind: BufferKind::Input(k),
             space: AddressSpace::Global,
+            layout: None,
         });
         buf_map.insert(TensorRef::Input(k), id);
         input_bufs.push(id);
@@ -76,6 +78,7 @@ pub fn lower(program: &Program) -> Result<KernelProgram, CompileError> {
                 shape,
                 kind,
                 space: AddressSpace::Global,
+                layout: None,
             });
             buf_map.insert(tref, id);
         }
@@ -84,6 +87,25 @@ pub fn lower(program: &Program) -> Result<KernelProgram, CompileError> {
     let mut output_bufs = vec![usize::MAX; program.outputs.len()];
     for (&tref, &pos) in &output_pos {
         output_bufs[pos] = buf_map[&tref];
+    }
+
+    // Block-local shared buffers: one per let-bound inner compute (tile).
+    let mut shared_maps: Vec<HashMap<VarId, usize>> = Vec::new();
+    for kernel in &program.kernels {
+        let mut map = HashMap::new();
+        for (t_idx, il) in kernel.inner_lets.iter().enumerate() {
+            let id = buffers.len();
+            buffers.push(BufferDecl {
+                name: format!("{}_tile{t_idx}", kernel.name),
+                elem: il.elem,
+                shape: il.shape.clone(),
+                kind: BufferKind::Shared,
+                space: AddressSpace::Shared,
+                layout: None,
+            });
+            map.insert(il.var, id);
+        }
+        shared_maps.push(map);
     }
 
     // --- Lower kernel bodies -------------------------------------------
@@ -96,6 +118,7 @@ pub fn lower(program: &Program) -> Result<KernelProgram, CompileError> {
             program,
             buffers: &buffers,
             buf_map: &buf_map,
+            shared_bufs: &shared_maps[let_id],
             kernel: ck,
             stmts: vec![Vec::new()],
             memo: HashMap::new(),
@@ -103,25 +126,32 @@ pub fn lower(program: &Program) -> Result<KernelProgram, CompileError> {
             var_vals: HashMap::new(),
             next_val: 0,
             outer_val: None,
-            inner_val: None,
             reads: BTreeSet::new(),
             writes: BTreeSet::new(),
         };
         cx.emit_body(let_id)?;
 
-        let launch = match ck.inner {
-            None => LaunchShape::Flat { n: ck.outer_bound },
-            Some((m, _)) => LaunchShape::GridBlock {
-                n: ck.outer_bound,
-                m,
-            },
+        let is_grid = ck.inner.is_some() || !ck.inner_lets.is_empty();
+        let launch = if is_grid {
+            LaunchShape::Grid { n: ck.outer_bound }
+        } else {
+            LaunchShape::Flat { n: ck.outer_bound }
         };
         let (grid, block) = match launch {
             LaunchShape::Flat { n } => {
                 let block = n.min(BLOCK_SIZE);
                 (n.div_ceil(block), block)
             }
-            LaunchShape::GridBlock { n, m } => (n, m.min(BLOCK_SIZE)),
+            LaunchShape::Grid { n } => {
+                let max_par = ck
+                    .inner_lets
+                    .iter()
+                    .map(|il| il.bound)
+                    .chain(ck.inner.map(|(m, _)| m))
+                    .max()
+                    .unwrap_or(1);
+                (n, max_par.min(BLOCK_SIZE))
+            }
         };
 
         let mut params: Vec<(usize, bool)> = Vec::new();
@@ -181,6 +211,8 @@ struct EmitCx<'a> {
     program: &'a Program,
     buffers: &'a [BufferDecl],
     buf_map: &'a HashMap<TensorRef, usize>,
+    /// Shared buffer per let-bound inner compute of this kernel.
+    shared_bufs: &'a HashMap<VarId, usize>,
     kernel: &'a CanonKernel,
     /// Stack of statement sinks; the top receives new statements.
     stmts: Vec<Vec<Stmt>>,
@@ -191,54 +223,121 @@ struct EmitCx<'a> {
     var_vals: HashMap<VarId, ValId>,
     next_val: u32,
     outer_val: Option<ValId>,
-    inner_val: Option<ValId>,
     reads: BTreeSet<usize>,
     writes: BTreeSet<usize>,
 }
 
 impl EmitCx<'_> {
     fn emit_body(&mut self, let_id: usize) -> Result<(), CompileError> {
-        for (out_idx, result) in self.kernel.results.iter().cloned().enumerate() {
+        let kernel = self.kernel;
+        if kernel.inner.is_none() && kernel.inner_lets.is_empty() {
+            // Flat kernel: one thread per outer iteration point.
+            let base = self.outer_idx();
+            return self.emit_result_stores(let_id, base);
+        }
+
+        // Grid kernel: outer = blockIdx.x. Define it once at the top level so
+        // every `Par` body can reference it.
+        let outer = self.outer_idx();
+
+        for il in &kernel.inner_lets {
+            self.emit_inner_let(il)?;
+        }
+
+        match kernel.inner {
+            Some((m, j)) => self.emit_par(m, Some(j), |cx, idx| {
+                let mc = cx.def(KExpr::ConstU32(m as u32));
+                let scaled = cx.def_bin(BinOp::Mul, ScalarType::U32, outer, mc);
+                let base = cx.def_bin(BinOp::Add, ScalarType::U32, scaled, idx);
+                cx.emit_result_stores(let_id, base)
+            }),
+            // Scalar results computed per block: a single-iteration par so
+            // only one thread stores them.
+            None => self.emit_par(1, None, |cx, _idx| cx.emit_result_stores(let_id, outer)),
+        }
+    }
+
+    /// Materializes a let-bound inner compute: allocates its shared buffer
+    /// and writes the tile in its own `Par`.
+    fn emit_inner_let(&mut self, il: &InnerLet) -> Result<(), CompileError> {
+        let buf = self.shared_bufs[&il.var];
+        self.push(Stmt::Alloc { buf });
+        self.emit_par(il.bound, Some(il.iter_var), |cx, idx| {
+            cx.store_result(buf, idx, &il.result)
+        })
+    }
+
+    /// Stores every kernel result at linear index `base` of its output
+    /// buffer (packs fan out to `base * k + l`).
+    fn emit_result_stores(&mut self, let_id: usize, base: ValId) -> Result<(), CompileError> {
+        let kernel = self.kernel;
+        for (out_idx, result) in kernel.results.iter().enumerate() {
             let buf = self.buf_map[&TensorRef::Let { let_id, out_idx }];
             self.writes.insert(buf);
-            let base = self.linear_iter_index()?;
-            match result {
-                ResultExpr::Scalar(node) => {
-                    let value = self.emit(node)?;
-                    self.push(Stmt::Store {
-                        buf,
-                        index: base,
-                        value,
-                    });
-                }
-                ResultExpr::Pack(elems) => {
-                    let k = self.def(KExpr::ConstU32(elems.len() as u32));
-                    let scaled = self.def_bin(BinOp::Mul, ScalarType::U32, base, k);
-                    for (l, e) in elems.iter().enumerate() {
-                        let off = self.def(KExpr::ConstU32(l as u32));
-                        let index = self.def_bin(BinOp::Add, ScalarType::U32, scaled, off);
-                        let value = self.emit(*e)?;
-                        self.push(Stmt::Store { buf, index, value });
-                    }
+            self.store_result(buf, base, result)?;
+        }
+        Ok(())
+    }
+
+    fn store_result(
+        &mut self,
+        buf: usize,
+        base: ValId,
+        result: &ResultExpr,
+    ) -> Result<(), CompileError> {
+        match result {
+            ResultExpr::Scalar(node) => {
+                let value = self.emit(*node)?;
+                self.push(Stmt::Store {
+                    buf,
+                    index: base,
+                    value,
+                });
+            }
+            ResultExpr::Pack(elems) => {
+                let k = self.def(KExpr::ConstU32(elems.len() as u32));
+                let scaled = self.def_bin(BinOp::Mul, ScalarType::U32, base, k);
+                for (l, e) in elems.iter().enumerate() {
+                    let off = self.def(KExpr::ConstU32(l as u32));
+                    let index = self.def_bin(BinOp::Add, ScalarType::U32, scaled, off);
+                    let value = self.emit(*e)?;
+                    self.push(Stmt::Store { buf, index, value });
                 }
             }
         }
         Ok(())
     }
 
-    /// Linear index of the current iteration point in the kernel's row-major
-    /// output space: `outer` for flat kernels, `outer * m + inner` otherwise.
-    fn linear_iter_index(&mut self) -> Result<ValId, CompileError> {
-        let outer = self.outer_idx();
-        match self.kernel.inner {
-            None => Ok(outer),
-            Some((m, _)) => {
-                let mc = self.def(KExpr::ConstU32(m as u32));
-                let scaled = self.def_bin(BinOp::Mul, ScalarType::U32, outer, mc);
-                let inner = self.inner_idx();
-                Ok(self.def_bin(BinOp::Add, ScalarType::U32, scaled, inner))
-            }
+    /// Emits `f` into the body of a new `Par` statement, binding `var` (if
+    /// given) to the par's logical index. Values defined inside are scoped
+    /// to the par body.
+    fn emit_par(
+        &mut self,
+        bound: usize,
+        var: Option<VarId>,
+        f: impl FnOnce(&mut Self, ValId) -> Result<(), CompileError>,
+    ) -> Result<(), CompileError> {
+        let idx = self.fresh();
+        if let Some(v) = var {
+            self.var_vals.insert(v, idx);
         }
+        self.scopes.push(Vec::new());
+        self.stmts.push(Vec::new());
+        f(self, idx)?;
+        let body = self.stmts.pop().expect("par sink");
+        self.push(Stmt::Par {
+            bound,
+            idx,
+            attr: None,
+            body,
+        });
+        if let Some(v) = var {
+            self.var_vals.remove(&v);
+        }
+        for evicted in self.scopes.pop().expect("scope") {
+            self.memo.remove(&evicted);
+        }
+        Ok(())
     }
 
     fn fresh(&mut self) -> ValId {
@@ -270,15 +369,6 @@ impl EmitCx<'_> {
         v
     }
 
-    fn inner_idx(&mut self) -> ValId {
-        if let Some(v) = self.inner_val {
-            return v;
-        }
-        let v = self.def(KExpr::InnerIdx);
-        self.inner_val = Some(v);
-        v
-    }
-
     fn memoize(&mut self, id: NodeId, val: ValId) {
         self.memo.insert(id, val);
         self.scopes.last_mut().expect("scope").push(id);
@@ -303,11 +393,10 @@ impl EmitCx<'_> {
             Node::Var(v) => {
                 if v == self.kernel.outer_var {
                     self.outer_idx()
-                } else if self.kernel.inner.is_some_and(|(_, iv)| iv == v) {
-                    self.inner_idx()
                 } else if let Some(&val) = self.var_vals.get(&v) {
-                    // Loop vars / scalar lets: already a value, do not memoize
-                    // the Var node itself (its binding is scope-dependent).
+                    // Par/loop indices and scalar lets: already a value, do
+                    // not memoize the Var node itself (its binding is
+                    // scope-dependent).
                     return Ok(val);
                 } else if let Some(&value_node) = self.kernel.inline_lets.get(&v) {
                     self.emit(value_node)?
@@ -343,9 +432,19 @@ impl EmitCx<'_> {
                 })
             }
             Node::Index { tensor, indices } => {
-                let tref = resolve_tensor_ref(self.b, &self.program.env, tensor)?;
-                let buf = self.buf_map[&tref];
-                self.reads.insert(buf);
+                let shared = match self.b.node(tensor) {
+                    Node::Var(v) => self.shared_bufs.get(v).copied(),
+                    _ => None,
+                };
+                let buf = match shared {
+                    Some(buf) => buf,
+                    None => {
+                        let tref = resolve_tensor_ref(self.b, &self.program.env, tensor)?;
+                        let buf = self.buf_map[&tref];
+                        self.reads.insert(buf);
+                        buf
+                    }
+                };
                 let shape = self.buffers[buf].shape.clone();
                 if indices.len() != shape.len() {
                     return Err(CompileError::Lower(format!(

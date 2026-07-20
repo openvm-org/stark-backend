@@ -106,12 +106,12 @@ fn macro_ntt_matches_p3_radix2dit() {
         let step = n / m;
         let stage = kernel!(ib,
             compute [n] |i| {
-                let j = i % #m in
-                let lo = j < #half in
-                let base = if lo then i else i - #half in
-                let u = prev[base] in
-                let v = prev[base + #half] in
-                let t = v * w[(j % #half) * #step] in
+                let j = i % #m;
+                let lo = j < #half;
+                let base = if lo then i else i - #half;
+                let u = prev[base];
+                let v = prev[base + #half];
+                let t = v * w[(j % #half) * #step];
                 if lo then u + t else u - t
             }
         );
@@ -273,9 +273,10 @@ fn macro_tuple_outputs_and_scalar_lets() {
 
     let mut ib = IRBuilder::new();
     let a_in = ib.input("a", ScalarType::BabyBear, vec![n]);
-    let pair = kernel!(ib,
-        compute [n] |i| {
-            let v = a_in[i] in
+    let pair = kernel!(
+        ib,
+        compute[n] | i | {
+            let v = a_in[i];
             (v * v + v, v + v)
         }
     );
@@ -317,6 +318,41 @@ fn macro_top_level_reduce_dot_product() {
     assert_eq!(outs[0], vec![acc.as_canonical_u32()]);
 }
 
+/// Shared memory via nested compute: an inner `let buf = compute [t] ...`
+/// materializes a per-block shared buffer. Threads then read `buf` at
+/// permuted indices (reversal) and a reduce sums the whole tile — both
+/// require the staged data to be visible across the block (`__syncthreads`).
+#[test]
+fn macro_shared_memory_tile() {
+    let (blocks, t) = (33usize, 64usize);
+    let n = blocks * t;
+    let a = pseudo_field_elems(n, 11);
+
+    let mut ib = IRBuilder::new();
+    let a_in = ib.input("a", ScalarType::BabyBear, vec![n]);
+    let body = kernel!(ib,
+        compute [blocks] |i| {
+            let buf = compute [t] |j| { a_in[i * #t + j] };
+            let total = reduce [t] |j| { buf[j] };
+            compute [t] |j| { buf[#t - 1 - j] * 2bb + total }
+        }
+    );
+    let module = ib.finish("shared_tile_macro", body);
+
+    let outs = run_module(module, std::slice::from_ref(&a));
+    assert_eq!(outs.len(), 1);
+
+    let mut want = vec![0u32; n];
+    for i in 0..blocks {
+        let tile = &a[i * t..(i + 1) * t];
+        let total: BabyBear = tile.iter().map(|&x| bb(x)).sum();
+        for j in 0..t {
+            want[i * t + j] = (bb(tile[t - 1 - j]) * bb(2) + total).as_canonical_u32();
+        }
+    }
+    assert_eq!(outs[0], want);
+}
+
 /// Pack (array literal) syntax: each row of the output is `[v*v, v + 2]`.
 #[test]
 fn macro_pack_rows() {
@@ -325,9 +361,10 @@ fn macro_pack_rows() {
 
     let mut ib = IRBuilder::new();
     let a_in = ib.input("a", ScalarType::BabyBear, vec![n]);
-    let body = kernel!(ib,
-        compute [n] |i| {
-            let v = a_in[i] in
+    let body = kernel!(
+        ib,
+        compute[n] | i | {
+            let v = a_in[i];
             [v * v, v + 2bb]
         }
     );

@@ -10,7 +10,9 @@
 //!   memory layout);
 //! - a top-level `reduce` is wrapped into `compute [1]`;
 //! - scalar `let`s wrapping a compute body are peeled into an inline environment resolved during
-//!   lowering.
+//!   lowering;
+//! - `let`s binding an inner `compute` (a per-block tile) directly under the outer compute are
+//!   collected as [`InnerLet`]s; lowering materializes them in shared memory.
 //!
 //! All rewrites preserve types, and the [`TypeMap`] is extended for every
 //! node they create.
@@ -48,6 +50,22 @@ pub enum ResultExpr {
     Pack(Vec<NodeId>),
 }
 
+/// An inner `compute` bound by a `let` directly under the outer compute:
+/// `let var = compute [bound] |iter_var| { ... }`. One tile is materialized
+/// per outer iteration point (per block), so lowering places it in shared
+/// memory.
+#[derive(Clone, Debug)]
+pub struct InnerLet {
+    pub var: VarId,
+    pub bound: usize,
+    pub iter_var: VarId,
+    pub result: ResultExpr,
+    pub elem: ScalarType,
+    /// Logical row-major shape of the tile (e.g. `[bound]`, or `[bound, k]`
+    /// for a pack body).
+    pub shape: Vec<usize>,
+}
+
 /// A canonical top-level compute: `compute [outer_bound] |i| { body }` where
 /// the body optionally nests exactly one more compute (the thread level) and
 /// otherwise consists of scalar expressions.
@@ -57,6 +75,8 @@ pub struct CanonKernel {
     pub outer_var: VarId,
     /// `Some((bound, var))` if the body is an inner `compute` over threads.
     pub inner: Option<(usize, VarId)>,
+    /// Let-bound inner computes (shared-memory tiles), in binding order.
+    pub inner_lets: Vec<InnerLet>,
     /// One entry per output buffer.
     pub results: Vec<ResultExpr>,
     /// Scalar lets peeled from body positions, resolved at use sites.
@@ -303,9 +323,11 @@ impl CanonCx<'_> {
             unreachable!()
         };
 
-        // Peel scalar lets wrapping the body.
+        // Peel lets wrapping the body: scalars are inlined at use sites,
+        // let-bound inner computes become shared-memory tiles.
         let mut inline_lets = HashMap::new();
-        let body = self.peel_scalar_lets(body, &mut inline_lets)?;
+        let mut inner_lets = Vec::new();
+        let body = self.peel_body_lets(body, &mut inline_lets, &mut inner_lets)?;
 
         // If the body is an inner compute, flatten any deeper nests into it.
         let (inner, result_root) = match self.b.node(body).clone() {
@@ -349,6 +371,7 @@ impl CanonCx<'_> {
             outer_bound,
             outer_var,
             inner,
+            inner_lets,
             results,
             inline_lets,
             member_types,
@@ -371,9 +394,64 @@ impl CanonCx<'_> {
         }
     }
 
-    /// Peels `let v = <scalar> in ...` wrappers off a compute body into an
-    /// inline environment. Lets binding tensors (materialized inner buffers)
-    /// are rejected: they would require shared-memory planning.
+    /// Peels `let` wrappers off the body of an outer compute. Scalar values
+    /// go to the inline environment; values that are themselves a `compute`
+    /// become [`InnerLet`]s (per-block shared-memory tiles).
+    fn peel_body_lets(
+        &mut self,
+        mut id: NodeId,
+        inline_lets: &mut HashMap<VarId, NodeId>,
+        inner_lets: &mut Vec<InnerLet>,
+    ) -> Result<NodeId, CompileError> {
+        while let Node::Let { var, value, body } = self.b.node(id).clone() {
+            match self.b.node(value).clone() {
+                Node::Compute {
+                    bound,
+                    var: iter_var,
+                    body: tile_body,
+                } => {
+                    let (elem, shape) = match self.ty(value)? {
+                        Type::Tensor(e, s) => (e, s),
+                        other => {
+                            return Err(CompileError::Canonicalize(format!(
+                                "let-bound inner compute must have tensor type, got {other:?}"
+                            )))
+                        }
+                    };
+                    let (bound, iter_var, tile_body) =
+                        self.flatten_nests(bound, iter_var, tile_body)?;
+                    let tile_body = self.peel_scalar_lets(tile_body, inline_lets)?;
+                    let result = self.classify_result(tile_body)?;
+                    inner_lets.push(InnerLet {
+                        var,
+                        bound,
+                        iter_var,
+                        result,
+                        elem,
+                        shape,
+                    });
+                    id = body;
+                }
+                _ => match self.ty(value)? {
+                    Type::Scalar(_) => {
+                        inline_lets.insert(var, value);
+                        id = body;
+                    }
+                    other => {
+                        return Err(CompileError::Canonicalize(format!(
+                            "let-bound value of type {other:?} inside a compute body is not \
+                             supported; only scalars and inner computes can be bound"
+                        )))
+                    }
+                },
+            }
+        }
+        Ok(id)
+    }
+
+    /// Peels `let v = <scalar> in ...` wrappers off an inner body into an
+    /// inline environment. Tensor-typed lets are only supported directly
+    /// under the outer compute (see [`CanonCx::peel_body_lets`]).
     fn peel_scalar_lets(
         &mut self,
         mut id: NodeId,
@@ -387,8 +465,8 @@ impl CanonCx<'_> {
                 }
                 other => {
                     return Err(CompileError::Canonicalize(format!(
-                        "let-bound value of type {other:?} inside a compute body would \
-                         materialize an inner buffer, which is not supported yet"
+                        "let-bound value of type {other:?} is only supported directly \
+                         under the outer compute"
                     )))
                 }
             }

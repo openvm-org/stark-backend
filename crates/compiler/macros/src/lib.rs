@@ -3,7 +3,7 @@
 //! ```ignore
 //! let y = kernel!(ib,
 //!     compute [n] |i| {
-//!         let v = a[i] in
+//!         let v = a[i];
 //!         if v < 10 then v * 2bb else v + 1bb
 //!     }
 //! );
@@ -11,7 +11,7 @@
 //!
 //! Grammar (expressions produce `NodeId`s via `IRBuilder` method calls):
 //!
-//! - `let v = e in e'` — let binding (`IRBuilder::bind`);
+//! - `let v = e; e'` (or `let v = e in e'`) — let binding (`IRBuilder::bind`);
 //! - `if c then e else e'` — select (both branches are evaluated);
 //! - `compute [bound] |i| { e }` / `reduce [bound] |i| { e }` — the parallel primitives; `bound` is
 //!   a host Rust expression;
@@ -101,7 +101,11 @@ fn parse_expr(input: ParseStream) -> syn::Result<DslExpr> {
         let var: Ident = input.parse()?;
         input.parse::<Token![=]>()?;
         let value = parse_expr(input)?;
-        input.parse::<Token![in]>()?;
+        if input.peek(Token![in]) {
+            input.parse::<Token![in]>()?;
+        } else {
+            input.parse::<Token![;]>()?;
+        }
         let body = parse_expr(input)?;
         return Ok(DslExpr::Let {
             var,

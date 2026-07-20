@@ -2,10 +2,14 @@
 //!
 //! In contrast to the purely functional HIR, KernelIR is explicit about
 //! memory and mutation: every tensor lives in a declared buffer with an
-//! address space and a (row-major affine) layout, kernels are annotated with
-//! a compute layout (grid/block factorization of the iteration domain),
-//! reduces have been lowered to sequential `for` loops over mutable
-//! accumulators, and results are written through explicit stores.
+//! address space and a layout, kernels are annotated with a compute layout
+//! (grid/block factorization of the iteration domain), reduces have been
+//! lowered to sequential `for` loops over mutable accumulators, and results
+//! are written through explicit stores.
+//!
+//! Layout attributes (`ParAttr` on `Stmt::Par`, `BufferDecl::layout`) are
+//! `None` right after lowering and are filled in by the `layout_infer` pass;
+//! `Stmt::Sync` statements are inserted by the `insert_sync` pass.
 
 use crate::ir::{BinOp, ReduceOp, ScalarType};
 
@@ -13,11 +17,52 @@ use crate::ir::{BinOp, ReduceOp, ScalarType};
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ValId(pub u32);
 
-/// Address space of a buffer. The MVP only materializes global buffers;
-/// `Shared` and `Register` are reserved for the tiling/fusion passes.
+/// A linear map `T: Z_2^k -> Z_2^k`, represented by its images of the basis
+/// vectors: `bases[i] = T(1 << i)`. `T(x)` is the XOR of the bases selected
+/// by the set bits of `x`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LinearLayout {
+    pub bases: Vec<u64>,
+}
+
+impl LinearLayout {
+    pub fn identity(bits: usize) -> Self {
+        Self {
+            bases: (0..bits).map(|i| 1u64 << i).collect(),
+        }
+    }
+
+    pub fn apply(&self, x: u64) -> u64 {
+        self.bases
+            .iter()
+            .enumerate()
+            .filter(|&(i, _)| (x >> i) & 1 == 1)
+            .fold(0, |acc, (_, &b)| acc ^ b)
+    }
+
+    pub fn is_identity(&self) -> bool {
+        self.bases.iter().enumerate().all(|(i, &b)| b == 1u64 << i)
+    }
+}
+
+/// Compute layout of a `par [N]`: a factorization of the logical iteration
+/// domain into `seq_size` sequential steps (ILP) times the thread dimension.
+/// `layout` maps the flattened physical index `x = s * blockDim + t` (the
+/// sequential index `s` in the most significant bits) to the logical index;
+/// out-of-range logical indices are masked by an `x < N` guard. The identity
+/// layout is the strided factorization `i = s * blockDim + t`.
+#[derive(Clone, Debug)]
+pub struct ParAttr {
+    pub seq_size: usize,
+    pub layout: LinearLayout,
+}
+
+/// Address space of a buffer. `Register` is reserved for future passes.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum AddressSpace {
     Global,
+    /// Block-local shared memory.
+    Shared,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -28,17 +73,22 @@ pub enum BufferKind {
     Output(usize),
     /// Lives at `offset` bytes inside the scratch allocation.
     Scratch { offset: usize },
+    /// Kernel-local shared memory, materialized by a `Stmt::Alloc`.
+    Shared,
 }
 
 #[derive(Clone, Debug)]
 pub struct BufferDecl {
     pub name: String,
     pub elem: ScalarType,
-    /// Logical row-major shape; the physical layout is the identity affine
-    /// map over this shape.
+    /// Logical row-major shape.
     pub shape: Vec<usize>,
     pub kind: BufferKind,
     pub space: AddressSpace,
+    /// Map from the linearized logical index to the physical index (the
+    /// alloc attribute). `None` (or the identity) is the row-major identity
+    /// layout. Filled in by `layout_infer` for shared buffers.
+    pub layout: Option<LinearLayout>,
 }
 
 impl BufferDecl {
@@ -63,9 +113,9 @@ pub enum LaunchShape {
     /// One thread per iteration point: `idx = blockIdx.x * blockDim.x +
     /// threadIdx.x`, guarded by `idx < n`. `OuterIdx` is `idx`.
     Flat { n: usize },
-    /// `OuterIdx = blockIdx.x` (grid = n); the body runs inside
-    /// `for (InnerIdx = threadIdx.x; InnerIdx < m; InnerIdx += blockDim.x)`.
-    GridBlock { n: usize, m: usize },
+    /// `OuterIdx = blockIdx.x` (grid = n); thread-level parallelism inside
+    /// the body is expressed with explicit `Stmt::Par` statements.
+    Grid { n: usize },
 }
 
 #[derive(Clone, Debug)]
@@ -75,8 +125,6 @@ pub enum KExpr {
     ConstField(u32),
     /// Linear index of the outer compute.
     OuterIdx,
-    /// Index of the inner (thread-level) compute.
-    InnerIdx,
     Bin {
         op: BinOp,
         /// Operand scalar type (selects field vs integer semantics).
@@ -107,6 +155,19 @@ pub enum Stmt {
         bound: usize,
         body: Vec<Stmt>,
     },
+    /// Thread-parallel loop over `bound` logical indices; `v<idx>` is the
+    /// logical index inside `body`. `attr` (from `layout_infer`) describes
+    /// the factorization onto sequential steps × threads.
+    Par {
+        bound: usize,
+        idx: ValId,
+        attr: Option<ParAttr>,
+        body: Vec<Stmt>,
+    },
+    /// Materializes a `BufferKind::Shared` buffer in the kernel.
+    Alloc { buf: usize },
+    /// `__syncthreads()`: block-level barrier between `Par` statements.
+    Sync,
     /// `v<acc> = v<acc> <op> v<value>;`
     AccUpdate {
         acc: ValId,
