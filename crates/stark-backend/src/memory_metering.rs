@@ -145,9 +145,12 @@ impl ProvingMemoryConfig {
         main_cells * self.base_field_size
     }
 
-    /// Stacked PCS matrix for the committed main trace data.
+    /// Cached stacked PCS matrix for the committed main trace data.
     #[inline]
     pub fn stacked_matrix_memory_bytes(&self, main_cells: usize) -> usize {
+        if !self.cache_stacked_matrix {
+            return 0;
+        }
         let stacked_height = 1usize << self.log_stacked_height;
         main_cells.next_multiple_of(stacked_height) * self.base_field_size
     }
@@ -161,34 +164,66 @@ impl ProvingMemoryConfig {
             * self.base_field_size
     }
 
-    /// Batch-constraint main-trace buffers across rotation classes.
+    /// Batch-constraint phase peak.
     ///
-    /// The per-opening weight is `(1 + constraint_degree / 2) * D_EF / 2^l_skip`;
-    /// equivalently, `1 + constraint_degree / 2 = (constraint_degree + 2) / 2`.
+    /// The main-trace buffer's per-opening weight is
+    /// `(1 + constraint_degree / 2) * D_EF / 2^l_skip`; equivalently,
+    /// `1 + constraint_degree / 2 = (constraint_degree + 2) / 2`. AIRs with rotations have
+    /// `num_openings = 2`; AIRs without rotations have `num_openings = 1`.
     ///
     /// ```text
-    /// bytes = ceil(
+    /// main = ceil(
     ///   main_cells * num_openings * D_EF * sizeof(F) * (constraint_degree + 2)
     ///   / 2^(l_skip + 1)
     /// )
     /// ```
     ///
-    /// AIRs with rotations have `num_openings = 2`; AIRs without rotations have
-    /// `num_openings = 1`.
+    /// Round0 uses `gkr_mem_contribution`: GKR leaves plus the largest strategy
+    /// workspace (typically `/4`), without GKR-only `tmp_block_sums`. The GKR
+    /// estimate instead uses default precompute-M (`/16` plus `tmp_block_sums`).
+    ///
+    /// ```text
+    /// round0_max_temp_bytes = gkr_mem_contribution(interaction_cells)
+    /// working_set (save memory) = max(main, round0_max_temp_bytes)
+    /// working_set (no save memory) = main + max(round0_max_temp_bytes, 6 GiB)
+    /// batch_constraint = working_set + 192 MiB
+    /// ```
     #[inline]
-    pub fn batch_constraint_main_memory_bytes(&self, counts: ProvingMemoryCounts) -> usize {
-        let bytes_per_opening_numerator =
-            self.extension_degree * self.base_field_size * (self.max_constraint_degree + 2);
-        let denominator = 1usize << (self.l_skip + 1);
+    pub fn batch_constraint_memory_bytes(&self, counts: ProvingMemoryCounts) -> usize {
+        let main_bytes = {
+            let bytes_per_opening_numerator =
+                self.extension_degree * self.base_field_size * (self.max_constraint_degree + 2);
+            let denominator = 1usize << (self.l_skip + 1);
 
-        let bytes_for = |main_cells: usize, num_openings: usize| {
-            (main_cells * num_openings * bytes_per_opening_numerator).div_ceil(denominator)
+            let bytes_for = |main_cells: usize, num_openings: usize| {
+                (main_cells * num_openings * bytes_per_opening_numerator).div_ceil(denominator)
+            };
+
+            let bytes_with_rot = bytes_for(counts.main_cells_with_rot, 2);
+            let bytes_without_rot = bytes_for(counts.main_cells_without_rot, 1);
+
+            bytes_with_rot + bytes_without_rot
         };
 
-        bytes_for(counts.main_cells_with_rot, 2) + bytes_for(counts.main_cells_without_rot, 1)
+        let round0_max_temp_bytes = if counts.interaction_cells == 0 {
+            0
+        } else {
+            let leaf_bytes = 2 * self.extension_degree * self.base_field_size;
+            let logical_len = (counts.interaction_cells + 1).next_power_of_two();
+            let leaves = counts.interaction_cells * leaf_bytes;
+            let work_buffer = max(logical_len / 4, GKR_MIN_WORK_BUFFER_LEN) * leaf_bytes;
+            leaves + work_buffer
+        };
+
+        let batch_constraint_working_set_bytes = if self.zerocheck_save_memory {
+            max(main_bytes, round0_max_temp_bytes)
+        } else {
+            main_bytes + max(round0_max_temp_bytes, BATCH_MLE_MEMORY_FLOOR)
+        };
+        batch_constraint_working_set_bytes + BATCH_CONSTRAINT_MEMORY_OVERHEAD
     }
 
-    /// Fractional-GKR scalable buffers, excluding fixed GKR-phase overhead.
+    /// Fractional-GKR phase peak, including fixed overhead.
     ///
     /// ```text
     /// leaf_bytes     = 2 * extension_degree * sizeof(F)
@@ -197,9 +232,10 @@ impl ProvingMemoryConfig {
     /// leaves         = real_len * leaf_bytes
     /// work_buffer    = max(logical_len / 16, 2^22) * leaf_bytes
     /// tmp_block_sums = logical_len / 256 * leaf_bytes
+    /// gkr             = leaves + work_buffer + tmp_block_sums + 64 MiB
     /// ```
     #[inline]
-    pub fn gkr_buffer_memory_bytes(&self, interaction_cells: usize) -> usize {
+    pub fn gkr_memory_bytes(&self, interaction_cells: usize) -> usize {
         if interaction_cells == 0 {
             return 0;
         }
@@ -208,7 +244,7 @@ impl ProvingMemoryConfig {
         let leaves = interaction_cells * leaf_bytes;
         let work_buffer = max(logical_len / 16, GKR_MIN_WORK_BUFFER_LEN) * leaf_bytes;
         let tmp_block_sums = logical_len / 256 * leaf_bytes;
-        leaves + work_buffer + tmp_block_sums
+        leaves + work_buffer + tmp_block_sums + GKR_MEMORY_OVERHEAD
     }
 
     /// WHIR opening working set that coexists with the RS code matrix.
@@ -233,7 +269,7 @@ impl ProvingMemoryConfig {
     /// ```text
     /// main_cells       = main_cells_with_rot + main_cells_without_rot
     /// main             = main_memory_bytes(main_cells)
-    /// stacked_matrix   = stacked_matrix_memory_bytes(main_cells), if cached
+    /// stacked_matrix   = stacked_matrix_memory_bytes(main_cells)
     /// rs_code_matrix   = rs_code_matrix_memory_bytes(main_cells)
     /// batch_constraint = batch-constraint phase peak
     /// gkr              = GKR phase peak
@@ -255,27 +291,11 @@ impl ProvingMemoryConfig {
     pub fn estimate(&self, counts: ProvingMemoryCounts) -> ProvingMemoryEstimate {
         let main_cells = counts.main_cells();
         let main = self.main_memory_bytes(main_cells);
-        let stacked_matrix = if self.cache_stacked_matrix {
-            self.stacked_matrix_memory_bytes(main_cells)
-        } else {
-            0
-        };
+        let stacked_matrix = self.stacked_matrix_memory_bytes(main_cells);
         let rs_code_matrix = self.rs_code_matrix_memory_bytes(main_cells);
 
-        let gkr_buffers = self.gkr_buffer_memory_bytes(counts.interaction_cells);
-        let gkr = if gkr_buffers == 0 {
-            0
-        } else {
-            gkr_buffers + GKR_MEMORY_OVERHEAD
-        };
-
-        let batch_constraint_main = self.batch_constraint_main_memory_bytes(counts);
-        let batch_constraint = if self.zerocheck_save_memory {
-            max(batch_constraint_main, gkr_buffers)
-        } else {
-            batch_constraint_main + max(gkr_buffers, BATCH_MLE_MEMORY_FLOOR)
-        } + BATCH_CONSTRAINT_MEMORY_OVERHEAD;
-
+        let batch_constraint = self.batch_constraint_memory_bytes(counts);
+        let gkr = self.gkr_memory_bytes(counts.interaction_cells);
         let whir = self.whir_memory_bytes();
 
         let batch_or_gkr = max(batch_constraint, gkr);
@@ -348,7 +368,7 @@ mod tests {
     }
 
     #[test]
-    fn batch_constraint_main_memory_uses_integer_formula() {
+    fn batch_constraint_memory_uses_integer_formula() {
         let config = test_memory_config();
         let counts = ProvingMemoryCounts::new(7, 11, 0);
         let weighted_bytes = |main_cells: usize, need_rot: bool| {
@@ -360,34 +380,27 @@ mod tests {
         };
 
         assert_eq!(
-            config.batch_constraint_main_memory_bytes(counts),
+            config.batch_constraint_memory_bytes(counts),
             weighted_bytes(counts.main_cells_with_rot, true)
                 + weighted_bytes(counts.main_cells_without_rot, false)
+                + BATCH_CONSTRAINT_MEMORY_OVERHEAD
         );
     }
 
     #[test]
     fn no_save_memory_batch_scratch_is_additive() {
         let mut config = test_memory_config();
-        let counts = ProvingMemoryCounts::new(10, 20, 5);
-        let batch_main = config.batch_constraint_main_memory_bytes(counts);
-        let gkr_buffers = config.gkr_buffer_memory_bytes(counts.interaction_cells);
+        let counts = ProvingMemoryCounts::default();
 
         let saved = config.estimate(counts);
-        assert_eq!(
-            saved.batch_constraint,
-            max(batch_main, gkr_buffers) + BATCH_CONSTRAINT_MEMORY_OVERHEAD
-        );
+        assert_eq!(saved.batch_constraint, BATCH_CONSTRAINT_MEMORY_OVERHEAD);
 
         config.zerocheck_save_memory = false;
         let unsaved = config.estimate(counts);
         assert_eq!(
             unsaved.batch_constraint,
-            batch_main
-                + max(gkr_buffers, BATCH_MLE_MEMORY_FLOOR)
-                + BATCH_CONSTRAINT_MEMORY_OVERHEAD
+            BATCH_MLE_MEMORY_FLOOR + BATCH_CONSTRAINT_MEMORY_OVERHEAD
         );
-        assert!(unsaved.total > saved.total);
     }
 
     #[test]
@@ -399,9 +412,14 @@ mod tests {
             counts.main_cells().next_multiple_of(stacked_height) * config.base_field_size;
 
         let without_stacked = config.estimate(counts);
+        assert_eq!(config.stacked_matrix_memory_bytes(counts.main_cells()), 0);
         config.cache_stacked_matrix = true;
         let with_stacked = config.estimate(counts);
 
+        assert_eq!(
+            config.stacked_matrix_memory_bytes(counts.main_cells()),
+            expected_stacked
+        );
         assert_eq!(without_stacked.stacked_matrix, 0);
         assert_eq!(with_stacked.stacked_matrix, expected_stacked);
         assert_eq!(with_stacked.total - without_stacked.total, expected_stacked);
