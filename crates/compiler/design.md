@@ -149,5 +149,116 @@ After the compiler has layout information on all data buffers, all computes are 
 
 The compiler generates code in CUDA C++, which exports a C interface that can be DL-opened in Rust. In Rust for now the compiler exports the public IRBuilder through which users can build the higher level functional IR, as well as APIs for controlling codegen and exporting a `KernelModule` that wraps around the DL-opened dynamic library.
 
+## Proc macro 
+
+To make the programs easier to write in rust, write a proc macro 
+```
+kernel!(ctx, 
+  let p = compute [N] |i| { ... };
+  ...
+```
+
+that takes as first argument the ir builder and after that the kernel expression.
+
+The proc macro should also support function calls, with the convention that a function `foo` called in the macro with n arguments has n+1 arguments, with the first argument being the ir builder.
+
+The abstract syntax is as follows:
+
+```
+Expr e = let v = e;
+       | compute [N] |i| { e }
+       | reduce [N] |i| { e }
+       | A[e]
+       | e 'BIN_OP' e 
+       | 'UNARY_OP' e 
+       | 'FN_NAME' (e)
+```
+
+where `let v = e; ...` is equivalent to `let v = e in ...`. And to interpolate constants, use `#c`. 
+
+
+## Higher level IR, lower level IR, codegen and passes
+
+The compiler operates on two IRs, the higher level IR that has pure functional semantics, call it `TExpr`, and a lower level IR that has mutation semantics, call it `KernelIR`. The higher level IR is responsible for higher-level optimizations such as kernel fusion, algebraic rewrites and future optimizations like equality saturation. While the lower level IR is responsible for performing device specific optimizations like layout assignment, mapping computation onto the parallel hierarchy of the GPU, and finally codegen. 
+
+`TExpr` is conceptually organized as follows:
+
+```
+TExpr e = let v = e in e 
+       | compute [N] |i| { e }
+       | reduce [N] |i| { e }
+       | Elementwise
+
+Elementwise e = A[e]  // index
+              | Add e e 
+              | ... // and other unary/binary ops
+              | Var v // variables
+              | (e)
+
+```
+
+Meanwhile the lower-level IR is organized as follows:
+
+```
+KernelIR = grid [N] |i| Block 
+         | par [T] (par_attrs?) |i| Block 
+         | A[Elementwise] = Elementwise 
+         | for [N] |i| Block 
+         | if Elementwise Block
+         | Alloc A (alloc_attr?)
+         | Sync
+         | ConvertLayout A B // copy B to A, where these two may have different layouts
+
+Block = (KernelIR+)
+```
+
+### Compilation Flow 
+
+Starting with a `TExpr`:
+1. type inference
+2. perform algebraic rewrites, optimizations 
+3. canonicalize to standard form (at most one nested compute)
+4. lower to `KernelIR` (initially attrs are empty)
+  - lowers reduce to combination of for and compute
+
+Starting with a `KernelIR`:
+1. Layout inference, inferring `par_attr` and `alloc_attr`
+2. various optimization passes, such as remove layout 
+3. insert sync 
+4. codegen
+
+
+A `par_attr` is a linear layout mapping physical and sequential indices to the logical index. 
+
+For example suppose we only have `64` threads but an inner `par` has `N = 128`. Then there's need for `sequential_size = 2`, and one such mapping from `(s, t) -> i`, ie. the sequential and thread map to logical index is `(s, t) -> s + t * 2`, another possibility is `(s, t) -> s * 64 + t`. Keep in mind that these are linear layouts, so all shapes are a power of 2. 
+
+A linear layout is represented like:
+```
+struct LinearLayout {
+  bases: Vec<u64>,
+}
+```
+for a linear map that maps `T: Z_2^N -> Z_2^N`, we only need to record the bases `T(1), T(2), T(4), ...`, and we'll assume that `N < 2^64`.
+We also need to keep track how indices are flattened and their representation in the input/output space. In the above example, `s \in {0, 1}` and `t \in {0, ..., 127}`, this induces a linear map from `Z_2^{256} -> Z_2^{256}`. We'll flatten `(s, t)` lexicographically where `s` is stored in the most significant bit, and `t` in the next 7 bits.
+
+For the sake of simplicity, in the initial implementation infer all `par [N]` to use layout `(s, t) -> s * (N / T) + t`, where `T` is the number of threads. If `N < T` or `T` does not divide `N` insert an `if` guard for out of bounds indices.
+
+
+A `alloc_attr` is a kind (shared/register/global) and a linear layout mapping logical index to physical index. For shared/global the physical index is the address, and for registers it's a tuple `(s, l, w)` where `s` is the spatial index (multiple elements stored on the same thread), `l` is the lane, and `w` is the warp id. Assume that all internal buffers have powers of 2 and their layouts are linear layouts, mapping the logical index `i` to their respective physical index. 
+
+To simplify the initial implementation assume all internal buffers are shared buffers with layout `i -> i`. 
+
+### Implementation
+
+Since the expression/statements are separate enums, there should be multiple node id types representing each enum, there should also be two structs representing the IR for `TExpr` and `KernelIR`. 
+
+For the initial implementation there should be distinct passes as functions on their respective IR managers
+1. type inference 
+2. canonicalize_texpr
+3. lower_to_kernel_ir
+4. layout_infer
+5. insert_sync
+6. codegen
+
 
 

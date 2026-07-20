@@ -1,8 +1,30 @@
 [package]
 name = "crypto-compiler"
-description = "crpytography compiler"
+description = "Compiler lowering a functional DSL for cryptography kernels to CUDA"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+homepage.workspace = true
+repository.workspace = true
+license.workspace = true
 
 [dependencies]
+crypto-compiler-macros = { workspace = true }
 openvm-cuda-common = { workspace = true }
+itertools = { workspace = true }
+libloading = { workspace = true }
+p3-baby-bear = { workspace = true }
+p3-field = { workspace = true }
+rustc-hash = { workspace = true }
+tempfile = { workspace = true }
+thiserror = { workspace = true }
 
 [dev-dependencies]
+openvm-cuda-backend = { workspace = true }
+p3-dft = { workspace = true }
+p3-symmetric = { workspace = true }
+
+[[bench]]
+name = "ntt"
+harness = false
