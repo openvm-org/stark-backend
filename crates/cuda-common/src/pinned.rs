@@ -115,8 +115,29 @@ impl Drop for PinnedBuffer {
             registered: self.registered,
         };
         // The cleaner owning the receiver never exits, so send only fails if
-        // the buffer raced process teardown; dropping it then is fine.
-        let _ = cleaner().lock().unwrap().send(returned);
+        // the buffer raced process teardown; clean up inline then.
+        if let Err(mpsc::SendError(returned)) = cleaner().lock().unwrap().send(returned) {
+            wait_and_release(returned);
+        }
+    }
+}
+
+/// Best-effort drain of the copies still reading `returned`, then [release].
+/// For use outside the cleaner (whose batch loop amortizes the waiting).
+fn wait_and_release(returned: Returned) {
+    if let Err(e) = device_synchronize() {
+        tracing::debug!("cudaDeviceSynchronize failed: {e}");
+    }
+    release(returned);
+}
+
+/// Frees `returned` without pooling it, unregistering first so the allocator
+/// never gets back memory that is still page-locked. Called on failure paths
+/// where in-flight copies could not be drained; a broken context is not
+/// making DMA progress, so unregistering is the lesser evil there.
+fn release(mut returned: Returned) {
+    if returned.registered {
+        unregister_region(returned.data.as_mut_ptr());
     }
 }
 
@@ -165,6 +186,9 @@ fn cleaner() -> &'static Mutex<mpsc::Sender<Returned>> {
                             "cudaDeviceSynchronize failed: {e}; dropping {} pooled buffers",
                             batch.len()
                         );
+                        for returned in batch {
+                            release(returned);
+                        }
                         continue;
                     }
                     for returned in batch {
