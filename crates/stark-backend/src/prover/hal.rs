@@ -6,7 +6,7 @@ use crate::{
     keygen::types::MultiStarkProvingKey,
     prover::{
         stacked_pcs::StackedPcsData, AirProvingContext, ColMajorMatrix, CommittedTraceData,
-        CpuColMajorBackend, DeviceMultiStarkProvingKey, ProvingContext,
+        CpuColMajorBackend, DeviceMultiStarkProvingKey, DeviceStarkProvingKey, ProvingContext,
     },
     StarkProtocolConfig,
 };
@@ -48,6 +48,18 @@ pub trait ProverBackend {
     /// For example, multiple buffers for LDE matrices, their trace domain sizes, and pointer to
     /// mixed merkle tree.
     type PcsData: Send + Sync;
+
+    // ==== Metering Functions ====
+    /// Per-row intermediate buffer size required to evaluate this AIR's constraints during
+    /// batch constraints zerocheck round 0. Constant `0` (the default) means the backend does
+    /// not track this; if all AIRs report `0`, memory metering falls back to the full round-0
+    /// temporary-memory limit.
+    fn constraint_eval_buffer_size(_pk: &DeviceStarkProvingKey<Self>) -> usize
+    where
+        Self: Sized,
+    {
+        0
+    }
 }
 
 pub trait ProverDevice<PB: ProverBackend, TS>:
