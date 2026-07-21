@@ -11,6 +11,7 @@ pub use crypto_compiler_macros::kernel;
 
 pub mod canonicalize;
 pub mod codegen;
+pub mod graph_ir;
 pub mod ir;
 pub mod kernel_ir;
 pub mod kernels;

@@ -4,7 +4,9 @@
 use crypto_compiler::{
     compile_and_load,
     ir::{IRBuilder, ScalarType},
-    kernels::{merkle_tree_module, ntt_module, ntt_twiddles, Poseidon2Constants},
+    kernels::{
+        merkle_tree_module, ntt_module, ntt_shared_module, ntt_twiddles, Poseidon2Constants,
+    },
     runtime::CompileOptions,
 };
 use openvm_cuda_common::{
@@ -83,6 +85,28 @@ fn ntt_matches_p3_radix2dit() {
         .map(|x| x.as_canonical_u32())
         .collect();
     assert_eq!(outs[0], want);
+}
+
+/// The shared-memory NTT must match p3 for a single group (log_n = 8), two
+/// groups plus the restore pass (12), and three groups (17).
+#[test]
+fn shared_ntt_matches_p3_radix2dit() {
+    for log_n in [8usize, 12, 17] {
+        let n = 1usize << log_n;
+        let coeffs = pseudo_field_elems(n, 3);
+        let twiddles = ntt_twiddles(log_n);
+
+        let outs = run_module(ntt_shared_module(log_n), &[coeffs.clone(), twiddles]);
+        assert_eq!(outs.len(), 1);
+
+        let input_f: Vec<BabyBear> = coeffs.iter().map(|&c| bb(c)).collect();
+        let want: Vec<u32> = Radix2Dit::default()
+            .dft(input_f)
+            .iter()
+            .map(|x| x.as_canonical_u32())
+            .collect();
+        assert_eq!(outs[0], want, "shared NTT mismatch at log_n={log_n}");
+    }
 }
 
 #[test]

@@ -6,7 +6,10 @@ use p3_baby_bear::{
 };
 use p3_field::{PrimeCharacteristicRing, PrimeField32, TwoAdicField};
 
-use crate::ir::{IRBuilder, Module, NodeId, ScalarType};
+use crate::{
+    ir::{IRBuilder, Module, NodeId, ScalarType},
+    kernel,
+};
 
 /// Poseidon2-16 BabyBear round constants and internal diagonal, canonical
 /// `u32` representation.
@@ -55,28 +58,30 @@ impl Poseidon2Constants {
     }
 }
 
-/// `x^7` via 4 multiplications.
+/// `IRBuilder::const_field` as a free function, for `kernel!` call syntax
+/// (the `#x` splice only produces `const_u32`).
+fn cf(b: &mut IRBuilder, v: u32) -> NodeId {
+    b.const_field(v)
+}
+
+/// `x^7` via 4 multiplications (hash-consing dedups the repeated squares).
 fn sbox7(b: &mut IRBuilder, x: NodeId) -> NodeId {
-    let x2 = b.mul(x, x);
-    let x3 = b.mul(x2, x);
-    let x4 = b.mul(x2, x2);
-    b.mul(x3, x4)
+    kernel!(b, ((x * x) * x) * ((x * x) * (x * x)))
 }
 
 /// The 4x4 MDS matrix [[2,3,1,1],[1,2,3,1],[1,1,2,3],[3,1,1,2]], applied via
 /// the same addition chain as p3's `apply_mat4`.
 fn apply_mat4(b: &mut IRBuilder, x: &mut [NodeId]) {
-    let t01 = b.add(x[0], x[1]);
-    let t23 = b.add(x[2], x[3]);
-    let t0123 = b.add(t01, t23);
-    let t01123 = b.add(t0123, x[1]);
-    let t01233 = b.add(t0123, x[3]);
-    let x0_dbl = b.add(x[0], x[0]);
-    let x2_dbl = b.add(x[2], x[2]);
-    x[3] = b.add(t01233, x0_dbl);
-    x[1] = b.add(t01123, x2_dbl);
-    x[0] = b.add(t01123, t01);
-    x[2] = b.add(t01233, t23);
+    let (x0, x1, x2, x3) = (x[0], x[1], x[2], x[3]);
+    let t01 = kernel!(b, x0 + x1);
+    let t23 = kernel!(b, x2 + x3);
+    let t0123 = kernel!(b, t01 + t23);
+    let t01123 = kernel!(b, t0123 + x1);
+    let t01233 = kernel!(b, t0123 + x3);
+    x[3] = kernel!(b, t01233 + (x0 + x0));
+    x[1] = kernel!(b, t01123 + (x2 + x2));
+    x[0] = kernel!(b, t01123 + t01);
+    x[2] = kernel!(b, t01233 + t23);
 }
 
 /// External linear layer: `apply_mat4` per 4-chunk, then `s[i] += sums[i%4]`
@@ -89,36 +94,35 @@ fn mds_light(b: &mut IRBuilder, state: &mut [NodeId; 16]) {
     for (k, sum) in sums.iter_mut().enumerate() {
         let mut s = state[k];
         for j in (4..16).step_by(4) {
-            s = b.add(s, state[j + k]);
+            let x = state[j + k];
+            s = kernel!(b, s + x);
         }
         *sum = s;
     }
     for (i, s) in state.iter_mut().enumerate() {
-        *s = b.add(*s, sums[i % 4]);
+        let (x, m) = (*s, sums[i % 4]);
+        *s = kernel!(b, x + m);
     }
 }
 
 fn external_round(b: &mut IRBuilder, state: &mut [NodeId; 16], rc: &[u32; 16]) {
     for (s, &k) in state.iter_mut().zip(rc) {
-        let kc = b.const_field(k);
-        let x = b.add(*s, kc);
-        *s = sbox7(b, x);
+        let x = *s;
+        *s = kernel!(b, sbox7(x + cf(k)));
     }
     mds_light(b, state);
 }
 
 fn internal_round(b: &mut IRBuilder, state: &mut [NodeId; 16], rc: u32, diag: &[u32; 16]) {
-    let kc = b.const_field(rc);
-    let x = b.add(state[0], kc);
-    state[0] = sbox7(b, x);
+    let s0 = state[0];
+    state[0] = kernel!(b, sbox7(s0 + cf(rc)));
     let mut sum = state[0];
     for &s in state[1..].iter() {
-        sum = b.add(sum, s);
+        sum = kernel!(b, sum + s);
     }
     for (s, &v) in state.iter_mut().zip(diag) {
-        let vc = b.const_field(v);
-        let prod = b.mul(vc, *s);
-        *s = b.add(sum, prod);
+        let x = *s;
+        *s = kernel!(b, sum + cf(v) * x);
     }
 }
 
@@ -136,6 +140,34 @@ pub fn poseidon2_permutation(b: &mut IRBuilder, state: &mut [NodeId; 16], c: &Po
     }
 }
 
+/// Bit-reversal of `x` over the low `bits` bits, unrolled into div/rem ops.
+fn bitrev_expr(b: &mut IRBuilder, x: NodeId, bits: usize) -> NodeId {
+    let mut rev = b.const_u32(0);
+    for bit in 0..bits {
+        let q = if bit == 0 {
+            x
+        } else {
+            let shift = 1u32 << bit;
+            kernel!(b, x / #shift)
+        };
+        let scale = 1u32 << (bits - 1 - bit);
+        rev = kernel!(b, rev + q % 2 * #scale);
+    }
+    rev
+}
+
+/// `(x / 2^pos) % 2^width`: the `width`-bit field of `x` at bit `pos`.
+fn extract_bits(b: &mut IRBuilder, x: NodeId, pos: usize, width: usize) -> NodeId {
+    let q = if pos == 0 {
+        x
+    } else {
+        let shift = 1u32 << pos;
+        kernel!(b, x / #shift)
+    };
+    let m = 1u32 << width;
+    kernel!(b, q % #m)
+}
+
 /// Radix-2 DIT NTT of size `2^log_n` over BabyBear.
 ///
 /// Inputs: `a: [n]` (coefficients), `w: [n/2]` (twiddles, `w[j] = omega^j`
@@ -149,52 +181,27 @@ pub fn ntt_module(log_n: usize) -> Module {
     let w = b.input("w", ScalarType::BabyBear, vec![n / 2]);
 
     // Bit-reversal permutation: out[i] = a[bitrev(i)].
-    let bitrev = b.compute(n, |b, i| {
-        let mut rev = b.const_u32(0);
-        for bit in 0..log_n {
-            let q = if bit == 0 {
-                i
-            } else {
-                let shift = b.const_u32(1 << bit);
-                b.div(i, shift)
-            };
-            let two = b.const_u32(2);
-            let bit_val = b.rem(q, two);
-            let scale = b.const_u32(1 << (log_n - 1 - bit));
-            let term = b.mul(bit_val, scale);
-            rev = b.add(rev, term);
-        }
-        b.index(a, &[rev])
-    });
+    let bitrev = kernel!(b, compute[n] | i | { a[bitrev_expr(i, log_n)] });
     let mut prev = b.let_bound(bitrev);
 
-    // Butterfly stages: stage s merges blocks of size 2^(s-1) into 2^s.
+    // Butterfly stages: stage s merges blocks of size 2^(s-1) into 2^s. The
+    // discarded `i - half` branch may wrap, but it is never dereferenced:
+    // only `base` and `base + half` are, and both are in bounds.
     for s in 1..=log_n {
         let m = 1usize << s;
         let half = m / 2;
         let step = n / m;
-        let stage = b.compute(n, |b, i| {
-            let m_c = b.const_u32(m as u32);
-            let half_c = b.const_u32(half as u32);
-            let j = b.rem(i, m_c);
-            let lo = b.lt(j, half_c);
-            // Index of the low element of this butterfly. The `i - half`
-            // branch may wrap when discarded, but it is never dereferenced:
-            // only `base` and `base + half` are, and both are in bounds.
-            let i_minus_half = b.sub(i, half_c);
-            let base = b.select(lo, i, i_minus_half);
-            let hi = b.add(base, half_c);
-            let u = b.index(prev, &[base]);
-            let v = b.index(prev, &[hi]);
-            let jj = b.rem(j, half_c);
-            let step_c = b.const_u32(step as u32);
-            let tw_idx = b.mul(jj, step_c);
-            let tw = b.index(w, &[tw_idx]);
-            let t = b.mul(v, tw);
-            let add = b.add(u, t);
-            let sub = b.sub(u, t);
-            b.select(lo, add, sub)
-        });
+        let stage = kernel!(b,
+            compute [n] |i| {
+                let j = i % #m;
+                let lo = j < #half;
+                let base = if lo then i else i - #half;
+                let u = prev[base];
+                let v = prev[base + #half];
+                let t = v * w[(j % #half) * #step];
+                if lo then u + t else u - t
+            }
+        );
         prev = b.let_bound(stage);
     }
 
@@ -210,6 +217,166 @@ pub fn ntt_twiddles(log_n: usize) -> Vec<u32> {
         .take(1 << (log_n - 1))
         .map(|x| x.as_canonical_u32())
         .collect()
+}
+
+/// Largest bit-field a single shared-memory NTT group handles. A group of
+/// `b` bits uses a `2^b`-element tile per stage, so `b = 8` means 256-thread
+/// blocks and `8 * 256 * 4B = 8KB` of shared memory per block.
+const NTT_GROUP_MAX_BITS: usize = 8;
+
+/// Indexes a row-major `[rows, 2^cols_log2]` tensor by flat address.
+fn index_flat2(b: &mut IRBuilder, t: NodeId, addr: NodeId, cols_log2: usize) -> NodeId {
+    let cols = 1u32 << cols_log2;
+    kernel!(b, t[addr / #cols, addr % #cols])
+}
+
+/// Splits `log_n` into `ceil(log_n / NTT_GROUP_MAX_BITS)` balanced fields.
+fn split_bits(log_n: usize) -> Vec<usize> {
+    let g = log_n.div_ceil(NTT_GROUP_MAX_BITS);
+    let base = log_n / g;
+    let rem = log_n % g;
+    (0..g).map(|k| base + usize::from(k < rem)).collect()
+}
+
+/// Chains the butterfly stages of one NTT group as let-bound inner computes
+/// (shared-memory tiles), the last stage being the block's result.
+///
+/// `prev` is the tile holding the group's input, `t` the local stage in
+/// `1..=bg`, `start` the group's first logical bit, and `p_low` the low
+/// `start` logical bits of the element (constant across the tile), which
+/// determine the twiddle offset.
+#[allow(clippy::too_many_arguments)]
+fn ntt_group_stages(
+    b: &mut IRBuilder,
+    prev: NodeId,
+    t: usize,
+    bg: usize,
+    start: usize,
+    p_low: NodeId,
+    w: NodeId,
+    log_n: usize,
+) -> NodeId {
+    let tile = 1usize << bg;
+    let m = 1usize << t;
+    let half = 1usize << (t - 1);
+    let fstride = 1usize << start;
+    let step = 1usize << (log_n - start - t);
+    // As in `ntt_module`, the discarded `j - half` branch may wrap but is
+    // never dereferenced. The twiddle index is the global butterfly position
+    // modulo half, `p_low + (j % half) * 2^start`, times the stage step.
+    let stage = kernel!(b,
+        compute [tile] |j| {
+            let jm = j % #m;
+            let lo = jm < #half;
+            let base = if lo then j else j - #half;
+            let u = prev[base];
+            let v = prev[base + #half];
+            let t = v * w[(p_low + (j % #half) * #fstride) * #step];
+            if lo then u + t else u - t
+        }
+    );
+    if t == bg {
+        stage
+    } else {
+        b.bind(stage, |b, v| {
+            ntt_group_stages(b, v, t + 1, bg, start, p_low, w, log_n)
+        })
+    }
+}
+
+/// Shared-memory radix-2 DIT NTT of size `2^log_n` over BabyBear.
+///
+/// Same interface and result as [`ntt_module`] (inputs `a: [n]`, `w: [n/2]`,
+/// natural order in and out), but the `log_n` butterfly stages are grouped
+/// into bit-fields of at most [`NTT_GROUP_MAX_BITS`] bits. Each group is one
+/// kernel whose block gathers a `2^b_g`-element tile into shared memory (a
+/// let-bound inner compute) and runs all of the group's stages locally.
+///
+/// Group 0 reads contiguous tiles with a fused bit-reversal gather. Tiles
+/// are always written back contiguously (`out[i * tile + j]`), which moves
+/// the group's bit-field to the bottom of the address — tracked by `pi[k]`,
+/// the physical position of logical field `k`. Later groups gather their
+/// field with a strided read, and a final flat kernel restores natural order
+/// when there is more than one group (a generalized four-step NTT).
+pub fn ntt_shared_module(log_n: usize) -> Module {
+    assert!(log_n >= 1, "NTT size must be at least 2");
+    let n = 1usize << log_n;
+    let bits = split_bits(log_n);
+    let groups = bits.len();
+    let starts: Vec<usize> = bits
+        .iter()
+        .scan(0, |acc, &width| {
+            let s = *acc;
+            *acc += width;
+            Some(s)
+        })
+        .collect();
+
+    let mut b = IRBuilder::new();
+    let a = b.input("a", ScalarType::BabyBear, vec![n]);
+    let w = b.input("w", ScalarType::BabyBear, vec![n / 2]);
+
+    let mut pi = starts.clone();
+    let mut prev = a;
+    for g in 0..groups {
+        let (bg, start) = (bits[g], starts[g]);
+        let tile = 1usize << bg;
+        let group = b.compute(n >> bg, |b, i| {
+            let gather = if g == 0 {
+                // Element (i, j) of the natural-order tile grid is
+                // a[bitrev(i * tile + j)] = a[rev(j) * n/tile + rev(i)].
+                let hi_bits = log_n - bg;
+                let sc = 1usize << hi_bits;
+                kernel!(b, compute [tile] |j| {
+                    a[bitrev_expr(j, bg) * #sc + bitrev_expr(i, hi_bits)]
+                })
+            } else {
+                // Insert `j` at bit `pi[g]` of `i`: a strided gather of
+                // field g from the previous kernel's layout, whose output is
+                // [n >> b_prev, 2^b_prev].
+                let pg = 1usize << pi[g];
+                let pgb = 1usize << (pi[g] + bg);
+                let cols = bits[g - 1];
+                kernel!(b, compute [tile] |j| {
+                    index_flat2(prev, i / #pg * #pgb + i % #pg + j * #pg, cols)
+                })
+            };
+            // Processed fields k < g occupy the physical range [0, start_g),
+            // below field g, so their positions within `i` equal pi[k].
+            let mut p_low = b.const_u32(0);
+            for k in 0..g {
+                let (pos, width) = (pi[k], bits[k]);
+                let scale = 1usize << starts[k];
+                p_low = kernel!(b, p_low + extract_bits(i, pos, width) * #scale);
+            }
+            b.bind(gather, |b, tile_var| {
+                ntt_group_stages(b, tile_var, 1, bg, start, p_low, w, log_n)
+            })
+        });
+        prev = b.let_bound(group);
+        for k in 0..groups {
+            if k != g && pi[k] < pi[g] {
+                pi[k] += bg;
+            }
+        }
+        pi[g] = 0;
+    }
+
+    if groups > 1 {
+        // Restore natural order: out[p] = prev[sum_k field_k(p) * 2^pi[k]].
+        let restored = b.compute(n, |b, p| {
+            let mut addr = b.const_u32(0);
+            for k in 0..groups {
+                let (pos, width) = (starts[k], bits[k]);
+                let scale = 1usize << pi[k];
+                addr = kernel!(b, addr + extract_bits(p, pos, width) * #scale);
+            }
+            index_flat2(b, prev, addr, bits[groups - 1])
+        });
+        prev = b.let_bound(restored);
+    }
+
+    b.finish(format!("ntt_shared_{n}"), prev)
 }
 
 /// Poseidon2-16 Merkle compression tree over `2^log_leaves` digests.
@@ -230,16 +397,11 @@ pub fn merkle_tree_module(log_leaves: usize, c: &Poseidon2Constants) -> Module {
     for lvl in 0..log_leaves {
         let n = n_leaves >> (lvl + 1);
         let layer = b.compute(n, |b, i| {
-            let two = b.const_u32(2);
-            let one = b.const_u32(1);
-            let li = b.mul(i, two);
-            let ri = b.add(li, one);
             let zero = b.const_u32(0);
             let mut state = [zero; 16];
             for j in 0..8 {
-                let jc = b.const_u32(j as u32);
-                state[j] = b.index(prev, &[li, jc]);
-                state[8 + j] = b.index(prev, &[ri, jc]);
+                state[j] = kernel!(b, prev[i * 2, #j]);
+                state[8 + j] = kernel!(b, prev[i * 2 + 1, #j]);
             }
             poseidon2_permutation(b, &mut state, c);
             b.pack(&state[..8])

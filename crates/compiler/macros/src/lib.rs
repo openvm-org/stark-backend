@@ -435,7 +435,7 @@ pub fn kernel(input: TokenStream) -> TokenStream {
     let KernelInput { ctx, expr } = parse_macro_input!(input as KernelInput);
     let body = gen_expr(&expr);
     quote!({
-        let __cc_b = &mut #ctx;
+        let __cc_b = #ctx.as_builder_mut();
         #body
     })
     .into()

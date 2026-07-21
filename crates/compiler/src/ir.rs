@@ -150,6 +150,13 @@ impl IRBuilder {
         Self::default()
     }
 
+    /// Identity reborrow used by the `kernel!` expansion: method autoref
+    /// makes the macro's context work for both owned `mut` builders and
+    /// (non-`mut`) `&mut IRBuilder` bindings.
+    pub fn as_builder_mut(&mut self) -> &mut Self {
+        self
+    }
+
     pub fn node(&self, id: NodeId) -> &Node {
         &self.nodes[id.0 as usize]
     }
