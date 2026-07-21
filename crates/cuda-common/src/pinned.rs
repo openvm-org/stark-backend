@@ -83,7 +83,6 @@ fn cleaner() -> &'static Mutex<mpsc::Sender<ReturnedBuffer>> {
         std::thread::Builder::new()
             .name("pinned-cleaner".into())
             .spawn(move || {
-                let mut batch_idx = 0usize;
                 while let Ok(first) = rx.recv() {
                     // Coalesce the burst of buffer returns behind one device sync.
                     let mut batch = vec![first];
@@ -96,10 +95,7 @@ fn cleaner() -> &'static Mutex<mpsc::Sender<ReturnedBuffer>> {
                     // The H2D copies reading these buffers were enqueued
                     // before the owners gave them back; wait for them (and
                     // anything else in flight) before touching contents.
-                    let _span =
-                        tracing::info_span!("pinned_cleaner_batch", batch = batch_idx.to_string())
-                            .entered();
-                    batch_idx += 1;
+                    let _span = tracing::info_span!("pinned_cleaner_batch").entered();
                     if let Err(e) = device_synchronize() {
                         tracing::debug!(
                             "cudaDeviceSynchronize failed: {e}; dropping {} pooled buffers",
