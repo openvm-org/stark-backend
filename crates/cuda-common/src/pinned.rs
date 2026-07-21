@@ -150,11 +150,7 @@ impl Drop for PinnedBuffer {
             // issued from the dropping thread, on its current device.
             device: get_device().unwrap_or(0),
         };
-        // The cleaner owning the receiver never exits, so send only fails if
-        // the buffer raced process teardown; clean up inline then.
-        if let Err(mpsc::SendError(returned)) = cleaner().lock().unwrap().send(returned) {
-            wait_and_release(returned);
-        }
+        send_to_cleaner(returned);
     }
 }
 
@@ -204,73 +200,110 @@ fn pool() -> &'static Mutex<BTreeMap<usize, Vec<Vec<u8>>>> {
     POOL.get_or_init(|| Mutex::new(BTreeMap::new()))
 }
 
-/// Cleaner thread: registers (first cycle) and re-zeroes buffers off the
-/// critical path, then makes them available to [`take`].
-fn cleaner() -> &'static Mutex<mpsc::Sender<Returned>> {
-    static TX: OnceLock<Mutex<mpsc::Sender<Returned>>> = OnceLock::new();
-    TX.get_or_init(|| {
-        let (tx, rx) = mpsc::channel::<Returned>();
-        std::thread::Builder::new()
-            .name("pinned-cleaner".into())
-            .spawn(move || {
-                let mut batch_idx = 0usize;
-                while let Ok(first) = rx.recv() {
-                    // Coalesce the burst of buffer returns behind one device sync.
-                    let mut batch = vec![first];
-                    while batch.len() < 64 {
-                        match rx.recv_timeout(std::time::Duration::from_millis(100)) {
-                            Ok(next) => batch.push(next),
-                            Err(_) => break,
-                        }
-                    }
-                    let _span =
-                        tracing::info_span!("pinned_cleaner_batch", batch = batch_idx.to_string())
-                            .entered();
-                    batch_idx += 1;
-                    // The H2D copies reading each buffer were enqueued before
-                    // its owner gave it back; wait for them before touching
-                    // contents:
-                    //  - recorded last-use events cover exactly those copies;
-                    //  - a registered buffer without events falls back to a whole-device sync of
-                    //    the device recorded at drop (memoized per batch);
-                    //  - a never-registered buffer was pageable during use, and a pageable
-                    //    cudaMemcpyAsync returns only after the source is staged, so it is already
-                    //    quiescent.
-                    let mut synced_devices = BTreeMap::new();
-                    for returned in batch {
-                        let drained = if !returned.last_use.is_empty() {
-                            returned
-                                .last_use
-                                .iter()
-                                .try_for_each(CudaEvent::synchronize)
-                                .map_err(|e| tracing::debug!("cudaEventSynchronize failed: {e}"))
-                                .is_ok()
-                        } else if !returned.registered {
-                            true
-                        } else {
-                            *synced_devices.entry(returned.device).or_insert_with(|| {
-                                set_device_by_id(returned.device)
-                                    .and_then(|_| device_synchronize())
-                                    .map_err(|e| {
-                                        tracing::debug!(
-                                            "synchronizing device {} failed: {e}",
-                                            returned.device
-                                        )
-                                    })
-                                    .is_ok()
-                            })
-                        };
-                        if drained {
-                            recycle(returned);
-                        } else {
-                            release(returned);
-                        }
+/// A running cleaner thread and the channel feeding it.
+struct Cleaner {
+    tx: mpsc::Sender<Returned>,
+    thread: std::thread::JoinHandle<()>,
+}
+
+/// Slot holding the live cleaner; empty until first use and after [shutdown].
+fn cleaner_slot() -> &'static Mutex<Option<Cleaner>> {
+    static SLOT: OnceLock<Mutex<Option<Cleaner>>> = OnceLock::new();
+    SLOT.get_or_init(|| Mutex::new(None))
+}
+
+/// Queues `returned` for the cleaner, spawning it if none is running.
+fn send_to_cleaner(returned: Returned) {
+    let mut slot = cleaner_slot().lock().unwrap();
+    let cleaner = slot.get_or_insert_with(spawn_cleaner);
+    if let Err(mpsc::SendError(returned)) = cleaner.tx.send(returned) {
+        // Only reachable if the cleaner thread died; clean up inline.
+        tracing::debug!("pinned-cleaner thread is gone; releasing buffer inline");
+        wait_and_release(returned);
+    }
+}
+
+/// Spawns the cleaner thread: it drains in-flight copies, registers buffers
+/// on their first cycle, and re-zeroes them off the critical path, then makes
+/// them available to [`take`]. It exits once the feeding channel closes and
+/// its queue is empty.
+fn spawn_cleaner() -> Cleaner {
+    let (tx, rx) = mpsc::channel::<Returned>();
+    let thread = std::thread::Builder::new()
+        .name("pinned-cleaner".into())
+        .spawn(move || {
+            let mut batch_idx = 0usize;
+            while let Ok(first) = rx.recv() {
+                // Coalesce the burst of buffer returns behind one device sync.
+                let mut batch = vec![first];
+                while batch.len() < 64 {
+                    match rx.recv_timeout(std::time::Duration::from_millis(100)) {
+                        Ok(next) => batch.push(next),
+                        Err(_) => break,
                     }
                 }
-            })
-            .expect("failed to spawn pinned-cleaner thread");
-        Mutex::new(tx)
-    })
+                let _span =
+                    tracing::info_span!("pinned_cleaner_batch", batch = batch_idx.to_string())
+                        .entered();
+                batch_idx += 1;
+                // The H2D copies reading each buffer were enqueued before
+                // its owner gave it back; wait for them before touching
+                // contents:
+                //  - recorded last-use events cover exactly those copies;
+                //  - a registered buffer without events falls back to a whole-device sync of the
+                //    device recorded at drop (memoized per batch);
+                //  - a never-registered buffer was pageable during use, and a pageable
+                //    cudaMemcpyAsync returns only after the source is staged, so it is already
+                //    quiescent.
+                let mut synced_devices = BTreeMap::new();
+                for returned in batch {
+                    let drained = if !returned.last_use.is_empty() {
+                        returned
+                            .last_use
+                            .iter()
+                            .try_for_each(CudaEvent::synchronize)
+                            .map_err(|e| tracing::debug!("cudaEventSynchronize failed: {e}"))
+                            .is_ok()
+                    } else if !returned.registered {
+                        true
+                    } else {
+                        *synced_devices.entry(returned.device).or_insert_with(|| {
+                            set_device_by_id(returned.device)
+                                .and_then(|_| device_synchronize())
+                                .map_err(|e| {
+                                    tracing::debug!(
+                                        "synchronizing device {} failed: {e}",
+                                        returned.device
+                                    )
+                                })
+                                .is_ok()
+                        })
+                    };
+                    if drained {
+                        recycle(returned);
+                    } else {
+                        release(returned);
+                    }
+                }
+            }
+        })
+        .expect("failed to spawn pinned-cleaner thread");
+    Cleaner { tx, thread }
+}
+
+/// Drains and joins the cleaner thread, then unregisters and frees every
+/// pooled buffer. Call once outstanding buffers have been handed back, e.g.
+/// before tearing down CUDA contexts or between tests. Not final: a
+/// [PinnedBuffer] dropped afterwards respawns the cleaner (and may repopulate
+/// the pool).
+pub fn shutdown() {
+    let cleaner = cleaner_slot().lock().unwrap().take();
+    if let Some(Cleaner { tx, thread }) = cleaner {
+        // Closing the channel lets the cleaner drain its queue, then exit.
+        drop(tx);
+        let _ = thread.join();
+    }
+    clear();
 }
 
 /// Registers `returned` if this is its first cycle, re-zeroes its dirty
@@ -320,7 +353,8 @@ pub fn take(min_size: usize) -> PinnedBuffer {
     }
 }
 
-/// Unregisters and frees all pooled buffers (test hygiene; optional).
+/// Unregisters and frees all pooled buffers. Does not touch buffers still
+/// queued for the cleaner; [shutdown] drains those first.
 pub fn clear() {
     let mut pool = pool().lock().unwrap();
     for (_, bufs) in pool.iter_mut() {
@@ -394,6 +428,26 @@ mod tests {
             "pool hit should reuse the allocation"
         );
         assert!(buf.iter().all(|&b| b == 0), "recycled buffer not re-zeroed");
+    }
+
+    #[test]
+    fn shutdown_drains_joins_and_respawns_on_demand() {
+        let _lock = lock_tests();
+        const SIZE: usize = 1 << 15;
+        let mut buf = take(SIZE);
+        buf.fill(0xEF);
+        drop(buf); // queued to the cleaner
+        shutdown();
+        assert!(
+            pool().lock().unwrap().is_empty(),
+            "shutdown left buffers pooled"
+        );
+        // The pool keeps working afterwards: the next drop respawns the cleaner.
+        let buf = take(SIZE);
+        assert!(!buf.is_pinned(), "pool should be empty after shutdown");
+        drop(buf);
+        wait_for_pooled(SIZE);
+        assert!(take(SIZE).is_pinned());
     }
 
     #[test]
