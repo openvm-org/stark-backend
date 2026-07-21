@@ -5,13 +5,13 @@ use std::{cmp::max, mem::size_of};
 use crate::{StarkProtocolConfig, SystemParams};
 
 /// Fixed batch-constraint scratch on top of the modeled main-trace buffers.
-pub const BATCH_CONSTRAINT_MEMORY_OVERHEAD: usize = 192 << 20;
+pub const BATCH_CONSTRAINT_MEMORY_OVERHEAD: usize = 256 << 20;
 
 /// Minimum batch-MLE scratch budget when `zerocheck_save_memory` is off.
 pub const BATCH_MLE_MEMORY_FLOOR: usize = 6 << 30;
 
 /// Fixed fractional-GKR scratch not proportional to interaction cells.
-pub const GKR_MEMORY_OVERHEAD: usize = 64 << 20;
+pub const GKR_MEMORY_OVERHEAD: usize = 256 << 20;
 
 /// Minimum fractional-GKR work-buffer length in `Frac<EF>` entries.
 pub const GKR_MIN_WORK_BUFFER_LEN: usize = 1 << 22;
