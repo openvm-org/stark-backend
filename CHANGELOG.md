@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+### Added
+- (CUDA common) `DeviceBuffer::mut_slice(range)` returning a `DeviceBufferMutSlice<'_, T>` with a `copy_from_host` method for overwriting a subrange of a device buffer from a host slice on a caller-supplied stream.
+
 ## v2.0.0 (2026-07-06)
 
 ### Added
