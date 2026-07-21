@@ -12,7 +12,10 @@ use std::collections::HashMap;
 
 use rustc_hash::FxHashMap;
 
-use crate::CompileError;
+use crate::{
+    quast::{Quast, Scatter},
+    CompileError,
+};
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct NodeId(pub(crate) u32);
@@ -102,11 +105,14 @@ pub enum Node {
         tensor: NodeId,
         indices: Vec<NodeId>,
     },
-    /// Parallel map: `compute [bound] |var| { body }`.
+    /// Parallel map: `compute [bound] |var| { body }`. An optional
+    /// [`Scatter`] stores results through a bijective quasi-affine map from
+    /// logical to physical coordinates.
     Compute {
         bound: usize,
         var: VarId,
         body: NodeId,
+        scatter: Option<Box<Scatter>>,
     },
     /// Parallel associative reduction: `reduce [bound] |var| { body }`.
     Reduce {
@@ -268,7 +274,52 @@ impl IRBuilder {
         let var = self.fresh_var();
         let var_node = self.intern(Node::Var(var));
         let body = f(self, var_node);
-        self.intern(Node::Compute { bound, var, body })
+        self.intern(Node::Compute {
+            bound,
+            var,
+            body,
+            scatter: None,
+        })
+    }
+
+    /// `#[scatter(...)] compute [bound] |i| { f(i) }`: results are stored
+    /// through the bijective quasi-affine `scatter` map (see [`Scatter`]).
+    pub fn compute_scatter(
+        &mut self,
+        bound: usize,
+        scatter: Scatter,
+        f: impl FnOnce(&mut Self, NodeId) -> NodeId,
+    ) -> NodeId {
+        let var = self.fresh_var();
+        let var_node = self.intern(Node::Var(var));
+        let body = f(self, var_node);
+        self.intern(Node::Compute {
+            bound,
+            var,
+            body,
+            scatter: Some(Box::new(scatter)),
+        })
+    }
+
+    /// Builds a [`Scatter`]: allocates `n_params` fresh symbols and passes
+    /// them to `f` together with a constant constructor ([`Quast::cst`]) to
+    /// build the physical coordinate expressions. `out_shape` is required
+    /// when the map changes the number of dimensions.
+    pub fn scatter_map(
+        &mut self,
+        n_params: usize,
+        out_shape: Option<Vec<usize>>,
+        f: impl FnOnce(&[Quast], fn(i64) -> Quast) -> Vec<Quast>,
+    ) -> Scatter {
+        let params: Vec<VarId> = (0..n_params).map(|_| self.fresh_var()).collect();
+        let syms: Vec<Quast> = params.iter().map(|&p| Quast::sym(p)).collect();
+        let exprs = f(&syms, Quast::cst);
+        Scatter {
+            params,
+            exprs,
+            out_shape,
+            bounds: Default::default(),
+        }
     }
 
     /// `reduce [bound] |i| { f(i) }` with the given associative operator.
@@ -508,10 +559,19 @@ impl TypeCx<'_> {
                 }
                 Ok(Type::Scalar(elem))
             }
-            Node::Compute { bound, var, body } => {
+            Node::Compute {
+                bound,
+                var,
+                body,
+                scatter,
+            } => {
                 self.var_types.insert(var, Type::Scalar(ScalarType::U32));
                 let tb = self.infer(body)?;
-                lift_compute_type(bound, &tb)
+                let ty = lift_compute_type(bound, &tb)?;
+                match scatter {
+                    None => Ok(ty),
+                    Some(sc) => scatter_result_type(&sc, &ty),
+                }
             }
             Node::Reduce {
                 bound: _,
@@ -571,6 +631,36 @@ impl TypeCx<'_> {
             }
         }
     }
+}
+
+/// Type of a compute with a `#[scatter(...)]` attribute, given its logical
+/// (pre-scatter) type: the physical shape replaces the logical one.
+fn scatter_result_type(sc: &Scatter, logical_ty: &Type) -> Result<Type, CompileError> {
+    let Type::Tensor(elem, logical) = logical_ty else {
+        return Err(CompileError::Type(format!(
+            "scatter requires a tensor-valued compute, got {logical_ty:?}"
+        )));
+    };
+    if sc.params.len() != logical.len() {
+        return Err(CompileError::Type(format!(
+            "scatter has {} parameters but the compute output has rank {}",
+            sc.params.len(),
+            logical.len()
+        )));
+    }
+    let out = sc.out_shape_for(logical).map_err(|e| match e {
+        CompileError::Quast(m) => CompileError::Type(m),
+        other => other,
+    })?;
+    let n_log: usize = logical.iter().product();
+    let n_out: usize = out.iter().product();
+    if n_log != n_out {
+        return Err(CompileError::Type(format!(
+            "scatter output shape {out:?} has {n_out} elements but the logical \
+             shape {logical:?} has {n_log}"
+        )));
+    }
+    Ok(Type::Tensor(*elem, out))
 }
 
 /// Type of `compute [bound] |i| { body }` given the body type: prepends the

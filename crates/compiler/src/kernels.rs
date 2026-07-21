@@ -184,9 +184,9 @@ pub fn ntt_module(log_n: usize) -> Module {
     let bitrev = kernel!(b, compute[n] | i | { a[bitrev_expr(i, log_n)] });
     let mut prev = b.let_bound(bitrev);
 
-    // Butterfly stages: stage s merges blocks of size 2^(s-1) into 2^s. The
-    // discarded `i - half` branch may wrap, but it is never dereferenced:
-    // only `base` and `base + half` are, and both are in bounds.
+    // Butterfly stages: stage s merges blocks of size 2^(s-1) into 2^s.
+    // `base` is the butterfly's low element (`i` with the half bit cleared),
+    // written quasi-affinely so it can be used as an index.
     for s in 1..=log_n {
         let m = 1usize << s;
         let half = m / 2;
@@ -195,7 +195,7 @@ pub fn ntt_module(log_n: usize) -> Module {
             compute [n] |i| {
                 let j = i % #m;
                 let lo = j < #half;
-                let base = if lo then i else i - #half;
+                let base = i - j / #half * #half;
                 let u = prev[base];
                 let v = prev[base + #half];
                 let t = v * w[(j % #half) * #step];
@@ -261,14 +261,14 @@ fn ntt_group_stages(
     let half = 1usize << (t - 1);
     let fstride = 1usize << start;
     let step = 1usize << (log_n - start - t);
-    // As in `ntt_module`, the discarded `j - half` branch may wrap but is
-    // never dereferenced. The twiddle index is the global butterfly position
+    // As in `ntt_module`, `base` is the butterfly's low element in
+    // quasi-affine form. The twiddle index is the global butterfly position
     // modulo half, `p_low + (j % half) * 2^start`, times the stage step.
     let stage = kernel!(b,
         compute [tile] |j| {
             let jm = j % #m;
             let lo = jm < #half;
-            let base = if lo then j else j - #half;
+            let base = j - jm / #half * #half;
             let u = prev[base];
             let v = prev[base + #half];
             let t = v * w[(p_low + (j % #half) * #fstride) * #step];

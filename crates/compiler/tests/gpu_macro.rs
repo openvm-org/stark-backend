@@ -108,7 +108,7 @@ fn macro_ntt_matches_p3_radix2dit() {
             compute [n] |i| {
                 let j = i % #m;
                 let lo = j < #half;
-                let base = if lo then i else i - #half;
+                let base = i - j / #half * #half;
                 let u = prev[base];
                 let v = prev[base + #half];
                 let t = v * w[(j % #half) * #step];
@@ -318,6 +318,36 @@ fn macro_top_level_reduce_dot_product() {
     assert_eq!(outs[0], vec![acc.as_canonical_u32()]);
 }
 
+/// A reduce whose body never touches memory stays inline in its par as a
+/// sequential SSA loop (no register hoisting): `out[i] = a[i] + sum_j (i+j)^2`
+/// in u32 arithmetic.
+#[test]
+fn macro_load_free_reduce_inline_loop() {
+    let (n, k) = (517usize, 37usize);
+    let a = pseudo_field_elems(n, 10);
+
+    let mut ib = IRBuilder::new();
+    let a_in = ib.input("a", ScalarType::U32, vec![n]);
+    let body = kernel!(
+        ib,
+        compute[n] | i | {
+            let s = reduce[k] | j | { (i + j) * (i + j) };
+            a_in[i] + s
+        }
+    );
+    let module = ib.finish("inline_reduce_macro", body);
+
+    let outs = run_module(module, std::slice::from_ref(&a));
+
+    let want: Vec<u32> = (0..n)
+        .map(|i| {
+            let s: u32 = (0..k).map(|j| ((i + j) * (i + j)) as u32).sum();
+            a[i].wrapping_add(s)
+        })
+        .collect();
+    assert_eq!(outs[0], want);
+}
+
 /// Shared memory via nested compute: an inner `let buf = compute [t] ...`
 /// materializes a per-block shared buffer. Threads then read `buf` at
 /// permuted indices (reversal) and a reduce sums the whole tile — both
@@ -348,6 +378,183 @@ fn macro_shared_memory_tile() {
         let total: BabyBear = tile.iter().map(|&x| bb(x)).sum();
         for j in 0..t {
             want[i * t + j] = (bb(tile[t - 1 - j]) * bb(2) + total).as_canonical_u32();
+        }
+    }
+    assert_eq!(outs[0], want);
+}
+
+/// `#[scatter(...)]`: results are stored through a bijective quasi-affine
+/// map. `i -> (i % 4, i / 4)` scatters a length-12 vector into a `[4, 3]`
+/// tensor (the transpose of the natural `[3, 4]` reshape).
+#[test]
+fn macro_scatter_reshape_transpose() {
+    let n = 12usize;
+    let a = pseudo_field_elems(n, 12);
+
+    let mut ib = IRBuilder::new();
+    let a_in = ib.input("a", ScalarType::BabyBear, vec![n]);
+    let body = kernel!(
+        ib,
+        #[scatter(i -> (i % 4, i / 4), [4, 3])]
+        compute[n]
+            | i
+            | { a_in[i] * 2bb }
+    );
+    let module = ib.finish("scatter_transpose_macro", body);
+
+    let outs = run_module(module, std::slice::from_ref(&a));
+    assert_eq!(outs.len(), 1);
+
+    let mut want = vec![0u32; n];
+    for i in 0..n {
+        want[(i % 4) * 3 + i / 4] = (bb(a[i]) * bb(2)).as_canonical_u32();
+    }
+    assert_eq!(outs[0], want);
+}
+
+/// `N == M` scatter with the output bounds omitted: a pure permutation.
+/// Reversal needs constants and negation: `i -> #(n - 1) - i`.
+#[test]
+fn macro_scatter_reverse_permutation() {
+    let n = 1000usize;
+    let a = pseudo_field_elems(n, 13);
+
+    let mut ib = IRBuilder::new();
+    let a_in = ib.input("a", ScalarType::BabyBear, vec![n]);
+    let body = kernel!(
+        ib,
+        #[scatter(i -> #(n - 1) - i)]
+        compute[n]
+            | i
+            | { a_in[i] + 1bb }
+    );
+    let module = ib.finish("scatter_reverse_macro", body);
+
+    let outs = run_module(module, std::slice::from_ref(&a));
+    assert_eq!(outs.len(), 1);
+
+    let mut want = vec![0u32; n];
+    for i in 0..n {
+        want[n - 1 - i] = (bb(a[i]) + bb(1)).as_canonical_u32();
+    }
+    assert_eq!(outs[0], want);
+}
+
+/// Even/odd deinterleave as a 1-D quasi-affine permutation:
+/// `i -> (i % 2) * (n / 2) + i / 2` (evens to the first half, odds to the
+/// second).
+#[test]
+fn macro_scatter_deinterleave() {
+    let n = 512usize;
+    let a = pseudo_field_elems(n, 14);
+
+    let mut ib = IRBuilder::new();
+    let a_in = ib.input("a", ScalarType::BabyBear, vec![n]);
+    let body = kernel!(
+        ib,
+        #[scatter(i -> i % 2 * #(n / 2) + i / 2)]
+        compute[n]
+            | i
+            | { a_in[i] * 3bb }
+    );
+    let module = ib.finish("scatter_deinterleave_macro", body);
+
+    let outs = run_module(module, std::slice::from_ref(&a));
+    assert_eq!(outs.len(), 1);
+
+    let mut want = vec![0u32; n];
+    for i in 0..n {
+        want[i % 2 * (n / 2) + i / 2] = (bb(a[i]) * bb(3)).as_canonical_u32();
+    }
+    assert_eq!(outs[0], want);
+}
+
+/// Scatter over a nested compute: the map sees the full logical index tuple
+/// `(i, j)` of the `[r, c]` output and transposes it into `[c, r]`.
+#[test]
+fn macro_scatter_nested_transpose() {
+    let (r, c) = (10usize, 7usize);
+    let x = pseudo_field_elems(r * c, 15);
+
+    let mut ib = IRBuilder::new();
+    let x_in = ib.input("x", ScalarType::BabyBear, vec![r, c]);
+    let body = kernel!(ib,
+        #[scatter((i, j) -> (j, i), [c, r])]
+        compute [r] |i| { compute [c] |j| { x_in[i, j] * 2bb } }
+    );
+    let module = ib.finish("scatter_nested_transpose_macro", body);
+
+    let outs = run_module(module, std::slice::from_ref(&x));
+    assert_eq!(outs.len(), 1);
+
+    let mut want = vec![0u32; r * c];
+    for i in 0..r {
+        for j in 0..c {
+            want[j * r + i] = (bb(x[i * c + j]) * bb(2)).as_canonical_u32();
+        }
+    }
+    assert_eq!(outs[0], want);
+}
+
+/// `#[scatter(...)]` on the trailing inner compute of a grid kernel: the map
+/// permutes where each element of a block's row is stored, here reversing
+/// within the row. `out[i*t + (t-1-j)] = a[i*t + j] * 2`.
+#[test]
+fn macro_scatter_inner_compute() {
+    let (blocks, t) = (9usize, 48usize);
+    let n = blocks * t;
+    let a = pseudo_field_elems(n, 16);
+
+    let mut ib = IRBuilder::new();
+    let a_in = ib.input("a", ScalarType::BabyBear, vec![n]);
+    let body = kernel!(ib,
+        compute [blocks] |i| {
+            #[scatter(j -> #(t - 1) - j)]
+            compute [t] |j| { a_in[i * #t + j] * 2bb }
+        }
+    );
+    let module = ib.finish("scatter_inner_macro", body);
+
+    let outs = run_module(module, std::slice::from_ref(&a));
+    assert_eq!(outs.len(), 1);
+
+    let mut want = vec![0u32; n];
+    for i in 0..blocks {
+        for j in 0..t {
+            want[i * t + (t - 1 - j)] = (bb(a[i * t + j]) * bb(2)).as_canonical_u32();
+        }
+    }
+    assert_eq!(outs[0], want);
+}
+
+/// `#[scatter(...)]` on a let-bound tile: the shared-memory writes go through
+/// the map (a reversal), and readers index the physical layout. Reading slot
+/// `j` crosses threads, so the derived barrier is still required.
+#[test]
+fn macro_scatter_shared_tile() {
+    let (blocks, t) = (11usize, 64usize);
+    let n = blocks * t;
+    let a = pseudo_field_elems(n, 17);
+
+    let mut ib = IRBuilder::new();
+    let a_in = ib.input("a", ScalarType::BabyBear, vec![n]);
+    let body = kernel!(ib,
+        compute [blocks] |i| {
+            let buf = #[scatter(j -> #(t - 1) - j)]
+            compute [t] |j| { a_in[i * #t + j] };
+            compute [t] |j| { buf[j] + 1bb }
+        }
+    );
+    let module = ib.finish("scatter_tile_macro", body);
+
+    let outs = run_module(module, std::slice::from_ref(&a));
+    assert_eq!(outs.len(), 1);
+
+    // Slot j of the tile holds body(t-1-j), so out[i*t+j] = a[i*t+(t-1-j)]+1.
+    let mut want = vec![0u32; n];
+    for i in 0..blocks {
+        for j in 0..t {
+            want[i * t + j] = (bb(a[i * t + (t - 1 - j)]) + bb(1)).as_canonical_u32();
         }
     }
     assert_eq!(outs[0], want);

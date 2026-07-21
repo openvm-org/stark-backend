@@ -4,9 +4,14 @@ The graph IR represents a raw computation graph over a GPU device. It has the fo
 
 ```
 struct KernelNode {
-  inputs: Vec<BufId>, outputs: Vec<BufId>, modifies: Vec<bool>, fn: Box<dyn Fn(&[Any]) -> Vec<Any>>,
+  inputs: Vec<BufId>, outputs: Vec<BufId>, modifies: Vec<bool>, fn: Box<dyn Fn(&[*mut ()], &[*mut ()])>,
   name: String
 }
+```
+
+The kernel `fn` takes the raw pointers of the input buffers as its first argument and those of the output buffers as its second argument.
+
+```
 
 struct MemcpyNode {
   src: BufId, 

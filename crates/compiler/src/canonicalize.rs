@@ -17,10 +17,11 @@
 //! All rewrites preserve types, and the [`TypeMap`] is extended for every
 //! node they create.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use crate::{
     ir::{infer_types, IRBuilder, Module, Node, NodeId, ScalarType, Type, TypeMap, VarId},
+    quast::{NodeEmitter, Quast, ScatterStore},
     CompileError,
 };
 
@@ -61,9 +62,13 @@ pub struct InnerLet {
     pub iter_var: VarId,
     pub result: ResultExpr,
     pub elem: ScalarType,
-    /// Logical row-major shape of the tile (e.g. `[bound]`, or `[bound, k]`
-    /// for a pack body).
+    /// Physical row-major shape of the tile (e.g. `[bound]`, or `[bound, k]`
+    /// for a pack body), after applying any scatter.
     pub shape: Vec<usize>,
+    /// Store map composed from the tile's `#[scatter(...)]` attribute:
+    /// logical flat index -> physical flat index (`None` = identity).
+    /// Readers index the physical layout.
+    pub scatter: Option<ScatterStore>,
 }
 
 /// A canonical top-level compute: `compute [outer_bound] |i| { body }` where
@@ -84,6 +89,9 @@ pub struct CanonKernel {
     /// Logical result type as written by the user (before nest flattening),
     /// one member per entry of `results`.
     pub member_types: Vec<Type>,
+    /// Store map composed from the compute's `#[scatter(...)]` attribute:
+    /// logical flat index -> physical flat index (`None` = identity).
+    pub scatter_store: Option<ScatterStore>,
     pub name: String,
 }
 
@@ -305,6 +313,7 @@ impl CanonCx<'_> {
                     bound: 1,
                     var,
                     body: id,
+                    scatter: None,
                 });
                 let ty = Type::Tensor(elem, vec![1]);
                 self.types.insert(wrapped, ty.clone());
@@ -318,9 +327,23 @@ impl CanonCx<'_> {
             bound: outer_bound,
             var: outer_var,
             body,
+            scatter,
         } = self.b.node(compute_id).clone()
         else {
             unreachable!()
+        };
+
+        // Compose the scatter attribute into a flat store map while the
+        // logical (pre-flattening) shape is still known.
+        let mut scatter_store = match scatter {
+            None => None,
+            Some(sc) => {
+                let mut logical = vec![outer_bound];
+                logical.extend_from_slice(self.ty(body)?.shape());
+                let mut sc = *sc;
+                sc.bind_and_validate(&logical)?;
+                Some(sc.store_map(self.b.fresh_var())?)
+            }
         };
 
         // Peel lets wrapping the body: scalars are inlined at use sites,
@@ -335,8 +358,47 @@ impl CanonCx<'_> {
                 bound: m,
                 var: j,
                 body: inner_body,
+                scatter: inner_scatter,
             } => {
+                // An inner scatter permutes elements within one outer
+                // iteration's block. Build its store map against the logical
+                // (pre-flattening) shape, then lift it to the global flat
+                // index and compose with the outer scatter, which addresses
+                // the inner-scattered layout.
+                let inner_store = match inner_scatter {
+                    None => None,
+                    Some(sc) => {
+                        let mut logical = vec![m];
+                        logical.extend_from_slice(self.ty(inner_body)?.shape());
+                        let mut sc = *sc;
+                        sc.bind_and_validate(&logical)?;
+                        let block_len = logical.iter().product::<usize>();
+                        Some((sc.store_map(self.b.fresh_var())?, block_len))
+                    }
+                };
                 let (m, j, inner_body) = self.flatten_nests(m, j, inner_body)?;
+                if let Some((inner, block_len)) = inner_store {
+                    let f = self.b.fresh_var();
+                    let fq = Quast::sym(f);
+                    let within = inner
+                        .expr
+                        .substitute(&BTreeMap::from([(inner.flat, fq.rem_c(block_len as i64))]));
+                    let lifted = fq
+                        .floordiv(block_len as i64)
+                        .mul_c(block_len as i64)
+                        .add(&within);
+                    let composed = match scatter_store.take() {
+                        None => lifted,
+                        Some(o) => o.expr.substitute(&BTreeMap::from([(o.flat, lifted)])),
+                    };
+                    let bounds = BTreeMap::from([(f, (outer_bound * block_len) as u64)]);
+                    let expr = composed.simplify(&bounds)?;
+                    scatter_store = Some(ScatterStore {
+                        flat: f,
+                        expr,
+                        bounds,
+                    });
+                }
                 let inner_body = self.peel_scalar_lets(inner_body, &mut inline_lets)?;
                 (Some((m, j)), inner_body)
             }
@@ -375,6 +437,7 @@ impl CanonCx<'_> {
             results,
             inline_lets,
             member_types,
+            scatter_store,
             name: format!("k{let_id}"),
         });
         Ok((0..num_outs)
@@ -409,7 +472,20 @@ impl CanonCx<'_> {
                     bound,
                     var: iter_var,
                     body: tile_body,
+                    scatter,
                 } => {
+                    // Compose the tile's scatter into a flat store map while
+                    // the logical (pre-flattening) shape is still known.
+                    let tile_scatter = match scatter {
+                        None => None,
+                        Some(sc) => {
+                            let mut logical = vec![bound];
+                            logical.extend_from_slice(self.ty(tile_body)?.shape());
+                            let mut sc = *sc;
+                            sc.bind_and_validate(&logical)?;
+                            Some(sc.store_map(self.b.fresh_var())?)
+                        }
+                    };
                     let (elem, shape) = match self.ty(value)? {
                         Type::Tensor(e, s) => (e, s),
                         other => {
@@ -429,6 +505,7 @@ impl CanonCx<'_> {
                         result,
                         elem,
                         shape,
+                        scatter: tile_scatter,
                     });
                     id = body;
                 }
@@ -489,18 +566,30 @@ impl CanonCx<'_> {
                 bound: k,
                 var: l,
                 body: inner,
+                scatter,
             } = self.b.node(body).clone()
             else {
                 return Ok((m, j, body));
             };
+            if scatter.is_some() {
+                return Err(CompileError::Canonicalize(
+                    "scatter is only supported on top-level computes".into(),
+                ));
+            }
             let t = self.b.fresh_var();
             let t_node = self.b.intern(Node::Var(t));
-            let k_const = self.b.const_u32(k as u32);
-            let j_val = self.b.div(t_node, k_const);
-            let l_val = self.b.rem(t_node, k_const);
-            for n in [t_node, k_const, j_val, l_val] {
-                self.types.insert(n, Type::Scalar(ScalarType::U32));
-            }
+            self.types.insert(t_node, Type::Scalar(ScalarType::U32));
+            // Index recovery as quasi-affine expressions of the flat index.
+            let env = BTreeMap::from([(t, t_node)]);
+            let bounds = BTreeMap::from([(t, (m * k) as u64)]);
+            let flat = Quast::sym(t);
+            let mut em = NodeEmitter {
+                b: &mut *self.b,
+                types: &mut self.types,
+                env: &env,
+            };
+            let j_val = flat.floordiv(k as i64).emit(&bounds, &mut em)?;
+            let l_val = flat.rem_c(k as i64).emit(&bounds, &mut em)?;
             let mut map = HashMap::new();
             map.insert(j, j_val);
             map.insert(l, l_val);
@@ -562,12 +651,18 @@ fn subst_rec(
                 .collect();
             b.index(t2, &ix2)
         }
-        Node::Compute { bound, var, body } => {
+        Node::Compute {
+            bound,
+            var,
+            body,
+            scatter,
+        } => {
             let body2 = subst_rec(b, body, map, types, memo);
             b.intern(Node::Compute {
                 bound,
                 var,
                 body: body2,
+                scatter,
             })
         }
         Node::Reduce {

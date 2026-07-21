@@ -15,6 +15,12 @@
 //! - `if c then e else e'` — select (both branches are evaluated);
 //! - `compute [bound] |i| { e }` / `reduce [bound] |i| { e }` — the parallel primitives; `bound` is
 //!   a host Rust expression;
+//! - `#[scatter(params -> exprs, [bounds])] compute ...` — stores the compute's results through a
+//!   bijective quasi-affine map from logical to physical coordinates. `params` is one identifier
+//!   per logical output dimension (parenthesized when more than one); `exprs` is one quasi-affine
+//!   expression per physical dimension (`+ - * / %` and unary `-`, where `* / %` take a constant
+//!   operand: an integer literal or a `#`-splice); the physical `[bounds]` may be omitted when the
+//!   rank is unchanged. E.g. `#[scatter(i -> (i / 4, i % 4), [3, 4])]`;
 //! - `t[i, j, ...]` — tensor indexing;
 //! - `+ - * / % < <= ==` with the usual precedence;
 //! - `(a, b, ...)` — tuple; `[a, b, ...]` — pack (array literal);
@@ -30,7 +36,7 @@
 //! expands to an expression of type `NodeId` that borrows it mutably.
 
 use proc_macro::TokenStream;
-use proc_macro2::TokenStream as TokenStream2;
+use proc_macro2::{Span, TokenStream as TokenStream2};
 use quote::{format_ident, quote};
 use syn::{
     braced, bracketed, parenthesized,
@@ -44,6 +50,7 @@ mod kw {
     syn::custom_keyword!(compute);
     syn::custom_keyword!(reduce);
     syn::custom_keyword!(then);
+    syn::custom_keyword!(scatter);
 }
 
 enum DslExpr {
@@ -81,12 +88,35 @@ enum DslExpr {
         bound: Expr,
         var: Ident,
         body: Box<DslExpr>,
+        scatter: Option<ScatterAttr>,
     },
     Reduce {
         bound: Expr,
         var: Ident,
         body: Box<DslExpr>,
     },
+}
+
+/// `#[scatter(params -> exprs, [bounds])]` on top of a `compute`.
+struct ScatterAttr {
+    params: Vec<Ident>,
+    exprs: Vec<QExpr>,
+    bounds: Option<Vec<Expr>>,
+}
+
+/// A quasi-affine scatter expression. Constant subtrees (no parameters) are
+/// evaluated as host `i64` expressions.
+enum QExpr {
+    Param(Ident),
+    Lit(i64),
+    /// `#x` / `#(expr)`: i64 constant from a host expression.
+    Splice(Expr),
+    Add(Box<QExpr>, Box<QExpr>),
+    Sub(Box<QExpr>, Box<QExpr>),
+    Neg(Box<QExpr>),
+    Mul(Box<QExpr>, Box<QExpr>),
+    Div(Box<QExpr>, Box<QExpr>),
+    Rem(Box<QExpr>, Box<QExpr>),
 }
 
 impl Parse for DslExpr {
@@ -126,14 +156,23 @@ fn parse_expr(input: ParseStream) -> syn::Result<DslExpr> {
             else_val: Box::new(else_val),
         });
     }
+    // `#[` cannot start a plain expression (`#` splices are never followed by
+    // a bracket), so this is unambiguously a scatter attribute.
+    if input.peek(Token![#]) && input.peek2(syn::token::Bracket) {
+        let attr = parse_scatter_attr(input)?;
+        if !input.peek(kw::compute) {
+            return Err(input.error("`#[scatter(...)]` must be followed by `compute`"));
+        }
+        return parse_binder(input, Some(attr));
+    }
     if input.peek(kw::compute) || input.peek(kw::reduce) {
-        return parse_binder(input);
+        return parse_binder(input, None);
     }
     parse_cmp(input)
 }
 
 /// `compute [bound] |i| { body }` or `reduce [bound] |i| { body }`.
-fn parse_binder(input: ParseStream) -> syn::Result<DslExpr> {
+fn parse_binder(input: ParseStream, scatter: Option<ScatterAttr>) -> syn::Result<DslExpr> {
     let is_compute = input.peek(kw::compute);
     if is_compute {
         input.parse::<kw::compute>()?;
@@ -153,10 +192,139 @@ fn parse_binder(input: ParseStream) -> syn::Result<DslExpr> {
         return Err(brace.error("unexpected tokens after body expression"));
     }
     Ok(if is_compute {
-        DslExpr::Compute { bound, var, body }
+        DslExpr::Compute {
+            bound,
+            var,
+            body,
+            scatter,
+        }
     } else {
         DslExpr::Reduce { bound, var, body }
     })
+}
+
+/// `#[scatter(params -> exprs, [bounds])]`.
+fn parse_scatter_attr(input: ParseStream) -> syn::Result<ScatterAttr> {
+    input.parse::<Token![#]>()?;
+    let bracket;
+    bracketed!(bracket in input);
+    bracket.parse::<kw::scatter>()?;
+    let paren;
+    parenthesized!(paren in bracket);
+    let params: Vec<Ident> = if paren.peek(syn::token::Paren) {
+        let p;
+        parenthesized!(p in paren);
+        let list: Punctuated<Ident, Token![,]> = p.parse_terminated(Ident::parse, Token![,])?;
+        list.into_iter().collect()
+    } else {
+        vec![paren.parse()?]
+    };
+    paren.parse::<Token![->]>()?;
+    // A leading paren is a tuple of expressions only if the group is followed
+    // by `,` or the end of the attribute; otherwise it is grouping, as in
+    // `(#n - 1) - i`.
+    let exprs: Vec<QExpr> = if paren.peek(syn::token::Paren) && {
+        let ahead = paren.fork();
+        ahead.parse::<proc_macro2::TokenTree>()?;
+        ahead.is_empty() || ahead.peek(Token![,])
+    } {
+        let p;
+        parenthesized!(p in paren);
+        let list: Punctuated<QExpr, Token![,]> = p.parse_terminated(parse_qexpr, Token![,])?;
+        list.into_iter().collect()
+    } else {
+        vec![parse_qexpr(&paren)?]
+    };
+    let bounds = if paren.peek(Token![,]) {
+        paren.parse::<Token![,]>()?;
+        let b;
+        bracketed!(b in paren);
+        let list: Punctuated<Expr, Token![,]> = b.parse_terminated(Expr::parse, Token![,])?;
+        Some(list.into_iter().collect())
+    } else {
+        None
+    };
+    if !paren.is_empty() {
+        return Err(paren.error("unexpected tokens in scatter attribute"));
+    }
+    if !bracket.is_empty() {
+        return Err(bracket.error("unexpected tokens in scatter attribute"));
+    }
+    Ok(ScatterAttr {
+        params,
+        exprs,
+        bounds,
+    })
+}
+
+fn parse_qexpr(input: ParseStream) -> syn::Result<QExpr> {
+    let mut lhs = parse_qmul(input)?;
+    loop {
+        let ctor: fn(Box<QExpr>, Box<QExpr>) -> QExpr = if input.peek(Token![+]) {
+            input.parse::<Token![+]>()?;
+            QExpr::Add
+        } else if input.peek(Token![-]) {
+            input.parse::<Token![-]>()?;
+            QExpr::Sub
+        } else {
+            return Ok(lhs);
+        };
+        let rhs = parse_qmul(input)?;
+        lhs = ctor(Box::new(lhs), Box::new(rhs));
+    }
+}
+
+fn parse_qmul(input: ParseStream) -> syn::Result<QExpr> {
+    let mut lhs = parse_qatom(input)?;
+    loop {
+        let ctor: fn(Box<QExpr>, Box<QExpr>) -> QExpr = if input.peek(Token![*]) {
+            input.parse::<Token![*]>()?;
+            QExpr::Mul
+        } else if input.peek(Token![/]) {
+            input.parse::<Token![/]>()?;
+            QExpr::Div
+        } else if input.peek(Token![%]) {
+            input.parse::<Token![%]>()?;
+            QExpr::Rem
+        } else {
+            return Ok(lhs);
+        };
+        let rhs = parse_qatom(input)?;
+        lhs = ctor(Box::new(lhs), Box::new(rhs));
+    }
+}
+
+fn parse_qatom(input: ParseStream) -> syn::Result<QExpr> {
+    if input.peek(Token![-]) {
+        input.parse::<Token![-]>()?;
+        return Ok(QExpr::Neg(Box::new(parse_qatom(input)?)));
+    }
+    if input.peek(LitInt) {
+        let lit: LitInt = input.parse()?;
+        return Ok(QExpr::Lit(lit.base10_parse()?));
+    }
+    if input.peek(Token![#]) {
+        input.parse::<Token![#]>()?;
+        let expr: Expr = if input.peek(syn::token::Paren) {
+            let paren;
+            parenthesized!(paren in input);
+            paren.parse()?
+        } else {
+            let ident: Ident = input.parse()?;
+            syn::parse_quote!(#ident)
+        };
+        return Ok(QExpr::Splice(expr));
+    }
+    if input.peek(syn::token::Paren) {
+        let paren;
+        parenthesized!(paren in input);
+        let e = parse_qexpr(&paren)?;
+        if !paren.is_empty() {
+            return Err(paren.error("unexpected tokens in scatter expression"));
+        }
+        return Ok(e);
+    }
+    Ok(QExpr::Param(input.parse()?))
 }
 
 fn parse_cmp(input: ParseStream) -> syn::Result<DslExpr> {
@@ -389,13 +557,137 @@ fn gen_expr(e: &DslExpr) -> TokenStream2 {
                 __cc_b.bind(__cc_v, |__cc_b, #var| #b)
             })
         }
-        DslExpr::Compute { bound, var, body } => {
+        DslExpr::Compute {
+            bound,
+            var,
+            body,
+            scatter,
+        } => {
             let b = gen_expr(body);
-            quote!(__cc_b.compute((#bound) as usize, |__cc_b, #var| #b))
+            let Some(sc) = scatter else {
+                return quote!(__cc_b.compute((#bound) as usize, |__cc_b, #var| #b));
+            };
+            let n = sc.params.len();
+            let out_opt = match &sc.bounds {
+                None => quote!(::core::option::Option::None),
+                Some(bs) => {
+                    quote!(::core::option::Option::Some(
+                        ::std::vec![#((#bs) as usize),*]
+                    ))
+                }
+            };
+            let params = &sc.params;
+            let idxs = 0..n;
+            let exprs: Vec<TokenStream2> = sc.exprs.iter().map(gen_qexpr).collect();
+            quote!({
+                let __cc_sc = __cc_b.scatter_map(#n, #out_opt, |__cc_qs, _cc_cst| {
+                    #(let #params = __cc_qs[#idxs].clone();)*
+                    ::std::vec![#(#exprs),*]
+                });
+                __cc_b.compute_scatter((#bound) as usize, __cc_sc, |__cc_b, #var| #b)
+            })
         }
         DslExpr::Reduce { bound, var, body } => {
             let b = gen_expr(body);
             quote!(__cc_b.reduce_add((#bound) as usize, |__cc_b, #var| #b))
+        }
+    }
+}
+
+/// Generates an expression of type `Quast`. The scatter params are in scope
+/// as `Quast` values and `_cc_cst: fn(i64) -> Quast` builds constants.
+fn gen_qexpr(e: &QExpr) -> TokenStream2 {
+    if qexpr_is_const(e) {
+        let c = gen_qconst(e);
+        return quote!(_cc_cst(#c));
+    }
+    let qerr = |msg| syn::Error::new(Span::call_site(), msg).to_compile_error();
+    match e {
+        QExpr::Param(id) => quote!(#id.clone()),
+        QExpr::Lit(_) | QExpr::Splice(_) => unreachable!("constant handled above"),
+        QExpr::Add(a, b) => {
+            let (a, b) = (gen_qexpr(a), gen_qexpr(b));
+            quote!(#a.add(&#b))
+        }
+        QExpr::Sub(a, b) => {
+            let (a, b) = (gen_qexpr(a), gen_qexpr(b));
+            quote!(#a.sub(&#b))
+        }
+        QExpr::Neg(a) => {
+            let a = gen_qexpr(a);
+            quote!(#a.neg())
+        }
+        QExpr::Mul(a, b) => {
+            let (e, c) = if qexpr_is_const(b) {
+                (a, b)
+            } else if qexpr_is_const(a) {
+                (b, a)
+            } else {
+                return qerr("scatter `*` requires a constant operand");
+            };
+            let (e, c) = (gen_qexpr(e), gen_qconst(c));
+            quote!(#e.mul_c(#c))
+        }
+        QExpr::Div(a, b) => {
+            if !qexpr_is_const(b) {
+                return qerr("scatter `/` requires a constant divisor");
+            }
+            let (a, c) = (gen_qexpr(a), gen_qconst(b));
+            quote!(#a.floordiv(#c))
+        }
+        QExpr::Rem(a, b) => {
+            if !qexpr_is_const(b) {
+                return qerr("scatter `%` requires a constant divisor");
+            }
+            let (a, c) = (gen_qexpr(a), gen_qconst(b));
+            quote!(#a.rem_c(#c))
+        }
+    }
+}
+
+fn qexpr_is_const(e: &QExpr) -> bool {
+    match e {
+        QExpr::Param(_) => false,
+        QExpr::Lit(_) | QExpr::Splice(_) => true,
+        QExpr::Neg(a) => qexpr_is_const(a),
+        QExpr::Add(a, b)
+        | QExpr::Sub(a, b)
+        | QExpr::Mul(a, b)
+        | QExpr::Div(a, b)
+        | QExpr::Rem(a, b) => qexpr_is_const(a) && qexpr_is_const(b),
+    }
+}
+
+/// A constant scatter subtree as a host `i64` expression, with floor
+/// division semantics matching `Quast`.
+fn gen_qconst(e: &QExpr) -> TokenStream2 {
+    match e {
+        QExpr::Param(_) => unreachable!("const subtrees have no params"),
+        QExpr::Lit(v) => quote!(#v),
+        QExpr::Splice(expr) => quote!(((#expr) as i64)),
+        QExpr::Add(a, b) => {
+            let (a, b) = (gen_qconst(a), gen_qconst(b));
+            quote!((#a + #b))
+        }
+        QExpr::Sub(a, b) => {
+            let (a, b) = (gen_qconst(a), gen_qconst(b));
+            quote!((#a - #b))
+        }
+        QExpr::Neg(a) => {
+            let a = gen_qconst(a);
+            quote!((-#a))
+        }
+        QExpr::Mul(a, b) => {
+            let (a, b) = (gen_qconst(a), gen_qconst(b));
+            quote!((#a * #b))
+        }
+        QExpr::Div(a, b) => {
+            let (a, b) = (gen_qconst(a), gen_qconst(b));
+            quote!((#a).div_euclid(#b))
+        }
+        QExpr::Rem(a, b) => {
+            let (a, b) = (gen_qconst(a), gen_qconst(b));
+            quote!((#a).rem_euclid(#b))
         }
     }
 }

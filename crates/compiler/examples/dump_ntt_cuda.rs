@@ -9,6 +9,8 @@ fn main() {
     let program = crypto_compiler::canonicalize::canonicalize(module).unwrap();
     let mut kprog = crypto_compiler::lower::lower(&program).unwrap();
     crypto_compiler::passes::layout_infer(&mut kprog);
-    crypto_compiler::passes::insert_sync(&mut kprog);
-    println!("{}", crypto_compiler::codegen::generate_cuda(&kprog));
+    println!(
+        "{}",
+        crypto_compiler::codegen::generate_cuda(&kprog).unwrap()
+    );
 }

@@ -4,7 +4,7 @@
 //! `dlopen`. See `design.md` for the overall architecture.
 //!
 //! Pipeline: [`ir::Module`] --canonicalize--> [`canonicalize::Program`]
-//! --lower--> [`kernel_ir::KernelProgram`] --layout_infer/insert_sync-->
+//! --lower--> [`kernel_ir::KernelProgram`] --layout_infer-->
 //! --codegen--> CUDA C++ --nvcc/dlopen--> [`runtime::KernelModule`].
 
 pub use crypto_compiler_macros::kernel;
@@ -17,6 +17,7 @@ pub mod kernel_ir;
 pub mod kernels;
 pub mod lower;
 pub mod passes;
+pub mod quast;
 pub mod runtime;
 
 use thiserror::Error;
@@ -29,6 +30,10 @@ pub enum CompileError {
     Canonicalize(String),
     #[error("lowering error: {0}")]
     Lower(String),
+    #[error("codegen error: {0}")]
+    Codegen(String),
+    #[error("quasi-affine expression error: {0}")]
+    Quast(String),
     #[error("nvcc failed: {0}")]
     Nvcc(String),
     #[error("dlopen failed: {0}")]
@@ -48,7 +53,6 @@ pub fn compile_and_load(
     let program = canonicalize::canonicalize(module)?;
     let mut kprog = lower::lower(&program)?;
     passes::layout_infer(&mut kprog);
-    passes::insert_sync(&mut kprog);
-    let source = codegen::generate_cuda(&kprog);
+    let source = codegen::generate_cuda(&kprog)?;
     runtime::KernelModule::load(&kprog, &source, options)
 }

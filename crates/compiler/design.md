@@ -261,4 +261,11 @@ For the initial implementation there should be distinct passes as functions on t
 6. codegen
 
 
+## Layout inference and optimization
+
+Now add an optimize layout pass on the backend kernel_ir. It should extract a LayoutTree. A LayoutTree is an abstract representation of the program that's
+  either a ParNode { reads: Vec<(, writes: ... }, or a Block { input:  .
+  1. analyze the first write of a shared buffer, if it is a LinearLayout, track it to maybe promote to registers
+  2. analyze the subsequent reads of the shared buffer, if it can be expressed via warp shuffles, then keep it in registers
+  3. if it cannot, then
 

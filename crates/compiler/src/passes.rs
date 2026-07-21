@@ -1,17 +1,19 @@
-//! KernelIR passes: layout inference and synchronization insertion.
+//! KernelIR passes: layout inference.
+//!
+//! Synchronization is not a pass anymore: codegen derives `__syncthreads()`
+//! barriers from the pars' declared reads and writes.
 
-use std::collections::BTreeSet;
-
-use crate::kernel_ir::{AddressSpace, KExpr, KernelProgram, LinearLayout, ParAttr, Stmt};
+use crate::kernel_ir::{AddressSpace, KernelProgram, LinearLayout, ParAttr, Stmt};
 
 fn ceil_log2(n: usize) -> usize {
     n.max(1).next_power_of_two().trailing_zeros() as usize
 }
 
 /// Fills in the layout attributes left empty by lowering. The initial
-/// implementation assigns every `par [N]` the identity (strided)
-/// factorization `i = s * blockDim + t` with `seq_size = ceil(N / block)`,
-/// and every shared buffer the identity map `i -> i`.
+/// implementation assigns every per-block `par [N]` the identity (strided)
+/// factorization `i = s * blockDim + t` with `seq_size = ceil(N / block)`
+/// (grid-spanning pars have one point per thread, `seq_size = 1`), and every
+/// shared buffer the identity map `i -> i`.
 pub fn layout_infer(p: &mut KernelProgram) {
     for buf in &mut p.buffers {
         if buf.space == AddressSpace::Shared {
@@ -19,85 +21,25 @@ pub fn layout_infer(p: &mut KernelProgram) {
         }
     }
     for kernel in &mut p.kernels {
-        infer_par_attrs(&mut kernel.body, kernel.block);
-    }
-}
-
-fn infer_par_attrs(stmts: &mut [Stmt], block: usize) {
-    for stmt in stmts {
-        match stmt {
-            Stmt::Par {
-                bound, attr, body, ..
-            } => {
-                let seq_size = bound.div_ceil(block);
+        let block = kernel.block;
+        for stmt in kernel.stmts_mut() {
+            if let Stmt::Par {
+                bound,
+                spans_grid,
+                attr,
+                ..
+            } = stmt
+            {
+                let seq_size = if *spans_grid {
+                    1
+                } else {
+                    bound.div_ceil(block)
+                };
                 *attr = Some(ParAttr {
                     seq_size,
                     layout: LinearLayout::identity(ceil_log2(seq_size) + ceil_log2(block)),
                 });
-                infer_par_attrs(body, block);
             }
-            Stmt::Loop { body, .. } => infer_par_attrs(body, block),
-            _ => {}
-        }
-    }
-}
-
-/// Inserts `Sync` barriers between `Par` statements where a par reads a
-/// shared buffer written by an earlier par since the last barrier (RAW).
-/// Each shared buffer is written by exactly one par (single assignment), so
-/// WAW/WAR hazards cannot occur.
-pub fn insert_sync(p: &mut KernelProgram) {
-    let shared: BTreeSet<usize> = p
-        .buffers
-        .iter()
-        .enumerate()
-        .filter(|(_, b)| b.space == AddressSpace::Shared)
-        .map(|(i, _)| i)
-        .collect();
-    if shared.is_empty() {
-        return;
-    }
-    for kernel in &mut p.kernels {
-        let mut dirty: BTreeSet<usize> = BTreeSet::new();
-        let mut body = Vec::with_capacity(kernel.body.len());
-        for stmt in kernel.body.drain(..) {
-            if let Stmt::Par { body: pbody, .. } = &stmt {
-                let mut reads = BTreeSet::new();
-                let mut writes = BTreeSet::new();
-                collect_shared_accesses(pbody, &shared, &mut reads, &mut writes);
-                if !reads.is_disjoint(&dirty) {
-                    body.push(Stmt::Sync);
-                    dirty.clear();
-                }
-                dirty.extend(writes);
-            }
-            body.push(stmt);
-        }
-        kernel.body = body;
-    }
-}
-
-fn collect_shared_accesses(
-    stmts: &[Stmt],
-    shared: &BTreeSet<usize>,
-    reads: &mut BTreeSet<usize>,
-    writes: &mut BTreeSet<usize>,
-) {
-    for stmt in stmts {
-        match stmt {
-            Stmt::Def {
-                expr: KExpr::Load { buf, .. },
-                ..
-            } if shared.contains(buf) => {
-                reads.insert(*buf);
-            }
-            Stmt::Store { buf, .. } if shared.contains(buf) => {
-                writes.insert(*buf);
-            }
-            Stmt::Loop { body, .. } | Stmt::Par { body, .. } => {
-                collect_shared_accesses(body, shared, reads, writes);
-            }
-            _ => {}
         }
     }
 }
@@ -107,16 +49,29 @@ mod tests {
     use super::*;
     use crate::{
         canonicalize::canonicalize,
-        ir::{IRBuilder, ScalarType},
-        kernel_ir::LaunchShape,
+        ir::{IRBuilder, ReduceOp, ScalarType},
+        kernel_ir::{BufferKind, Kernel},
         lower::lower,
     };
 
-    /// The shared-memory tile pattern lowers to a Grid kernel with an
-    /// `Alloc`ed shared buffer and a `Sync` between the producing and the
-    /// consuming `Par`.
+    fn stmt_kinds(kernel: &Kernel) -> Vec<&'static str> {
+        kernel
+            .grid
+            .body
+            .iter()
+            .map(|&id| match kernel.stmt(id) {
+                Stmt::BufDecl { .. } => "bufdecl",
+                Stmt::Par { .. } => "par",
+                Stmt::Loop { .. } => "loop",
+            })
+            .collect()
+    }
+
+    /// The shared-memory tile pattern lowers to a grid kernel with a
+    /// `BufDecl`ed shared buffer, and codegen derives a barrier between the
+    /// producing and the consuming `Par`.
     #[test]
-    fn shared_tile_gets_alloc_and_sync() {
+    fn shared_tile_gets_bufdecl_and_sync() {
         let (blocks, t) = (4usize, 8usize);
         let mut b = IRBuilder::new();
         let a = b.input("a", ScalarType::BabyBear, vec![blocks * t]);
@@ -140,24 +95,12 @@ mod tests {
         let program = canonicalize(module).unwrap();
         let mut kprog = lower(&program).unwrap();
         layout_infer(&mut kprog);
-        insert_sync(&mut kprog);
 
         assert_eq!(kprog.kernels.len(), 1);
         let kernel = &kprog.kernels[0];
-        assert!(matches!(kernel.launch, LaunchShape::Grid { n } if n == blocks));
-
-        let kinds: Vec<&'static str> = kernel
-            .body
-            .iter()
-            .map(|s| match s {
-                Stmt::Alloc { .. } => "alloc",
-                Stmt::Par { .. } => "par",
-                Stmt::Sync => "sync",
-                _ => "other",
-            })
-            .filter(|&k| k != "other")
-            .collect();
-        assert_eq!(kinds, ["alloc", "par", "sync", "par"]);
+        assert_eq!(kernel.grid.bound, blocks);
+        assert_eq!(kernel.block, t);
+        assert_eq!(stmt_kinds(kernel), ["bufdecl", "par", "par"]);
 
         let shared: Vec<_> = kprog
             .buffers
@@ -168,7 +111,7 @@ mod tests {
         assert_eq!(shared[0].shape, vec![t]);
         assert!(shared[0].layout.as_ref().unwrap().is_identity());
 
-        let source = crate::codegen::generate_cuda(&kprog);
+        let source = crate::codegen::generate_cuda(&kprog).unwrap();
         assert!(source.contains("__shared__ uint32_t"));
         assert!(source.contains("__syncthreads();"));
     }
@@ -209,13 +152,51 @@ mod tests {
         let program = canonicalize(module).unwrap();
         let mut kprog = lower(&program).unwrap();
         layout_infer(&mut kprog);
-        insert_sync(&mut kprog);
 
-        let syncs = kprog.kernels[0]
-            .body
+        let source = crate::codegen::generate_cuda(&kprog).unwrap();
+        assert_eq!(source.matches("__syncthreads();").count(), 1);
+    }
+
+    /// A reduce whose body loads from memory is hoisted out of its par: a
+    /// register accumulator, an init par, a sequential loop around an
+    /// accumulate par, and the consumer par reading the accumulator.
+    #[test]
+    fn reduce_with_loads_hoists_to_register_loop() {
+        let (n, k) = (8usize, 4usize);
+        let mut b = IRBuilder::new();
+        let a = b.input("a", ScalarType::BabyBear, vec![k * n]);
+        let body = b.compute(n, |b, i| {
+            b.reduce(ReduceOp::Add, k, |b, j| {
+                let nc = b.const_u32(n as u32);
+                let base = b.mul(j, nc);
+                let ix = b.add(base, i);
+                b.index(a, &[ix])
+            })
+        });
+        let module = b.finish("colsum", body);
+
+        let program = canonicalize(module).unwrap();
+        let mut kprog = lower(&program).unwrap();
+        layout_infer(&mut kprog);
+
+        assert_eq!(kprog.kernels.len(), 1);
+        let kernel = &kprog.kernels[0];
+        assert_eq!(stmt_kinds(kernel), ["bufdecl", "par", "loop", "par"]);
+
+        let regs: Vec<_> = kprog
+            .buffers
             .iter()
-            .filter(|s| matches!(s, Stmt::Sync))
-            .count();
-        assert_eq!(syncs, 1);
+            .filter(|b| b.kind == BufferKind::Register)
+            .collect();
+        assert_eq!(regs.len(), 1);
+        assert_eq!(regs[0].shape, vec![n]);
+
+        let loop_id = kernel.grid.body[2];
+        let Stmt::Loop { bound, body, .. } = kernel.stmt(loop_id) else {
+            panic!("expected loop");
+        };
+        assert_eq!(*bound, k);
+        assert_eq!(body.len(), 1);
+        assert!(matches!(kernel.stmt(body[0]), Stmt::Par { .. }));
     }
 }
