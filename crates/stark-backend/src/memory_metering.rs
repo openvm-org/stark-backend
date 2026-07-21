@@ -32,6 +32,10 @@ pub struct ProvingMemoryCounts {
     pub main_cells_without_rot: usize,
     /// Metered row-interaction slots after power-of-two padding.
     pub interaction_cells: usize,
+    /// Height-weighted round0 intermediate slots:
+    /// `Σ_AIR padded_height · zerocheck_round0_buffer_size`. `0` means unavailable, so the
+    /// estimate falls back to the full round0 temporary-memory limit.
+    pub constraint_eval_cells: usize,
 }
 
 impl ProvingMemoryCounts {
@@ -39,11 +43,13 @@ impl ProvingMemoryCounts {
         main_cells_with_rot: usize,
         main_cells_without_rot: usize,
         interaction_cells: usize,
+        constraint_eval_cells: usize,
     ) -> Self {
         Self {
             main_cells_with_rot,
             main_cells_without_rot,
             interaction_cells,
+            constraint_eval_cells,
         }
     }
 
@@ -181,11 +187,15 @@ impl ProvingMemoryConfig {
     /// Round0 uses `gkr_mem_contribution`: GKR leaves plus the largest strategy
     /// workspace (typically `/4`), without GKR-only `tmp_block_sums`. The GKR
     /// estimate instead uses default precompute-M (`/16` plus `tmp_block_sums`).
+    /// Missing `constraint_eval_cells` (`0`) makes `round0_spill` use the full limit.
     ///
     /// ```text
     /// round0_max_temp_bytes = gkr_mem_contribution(interaction_cells)
-    /// working_set (save memory) = max(main, round0_max_temp_bytes)
-    /// working_set (no save memory) = main + max(round0_max_temp_bytes, 6 GiB)
+    /// num_cosets = max(max_constraint_degree - 1, 1)
+    /// full_constraint_eval_buffer = constraint_eval_cells * num_cosets * sizeof(F)
+    /// round0_spill = min(full_constraint_eval_buffer, round0_max_temp_bytes)
+    /// working_set (save memory) = max(main, round0_spill)
+    /// working_set (no save memory) = main + max(round0_spill, 6 GiB)
     /// batch_constraint = working_set + 192 MiB
     /// ```
     #[inline]
@@ -205,20 +215,33 @@ impl ProvingMemoryConfig {
             bytes_with_rot + bytes_without_rot
         };
 
-        let round0_max_temp_bytes = if counts.interaction_cells == 0 {
-            0
-        } else {
-            let leaf_bytes = 2 * self.extension_degree * self.base_field_size;
-            let logical_len = (counts.interaction_cells + 1).next_power_of_two();
-            let leaves = counts.interaction_cells * leaf_bytes;
-            let work_buffer = max(logical_len / 4, GKR_MIN_WORK_BUFFER_LEN) * leaf_bytes;
-            leaves + work_buffer
+        let round0_spill = {
+            let round0_max_temp_bytes = if counts.interaction_cells == 0 {
+                0
+            } else {
+                let leaf_bytes = 2 * self.extension_degree * self.base_field_size;
+                let logical_len = (counts.interaction_cells + 1).next_power_of_two();
+                let leaves = counts.interaction_cells * leaf_bytes;
+                let work_buffer = max(logical_len / 4, GKR_MIN_WORK_BUFFER_LEN) * leaf_bytes;
+                leaves + work_buffer
+            };
+
+            if counts.constraint_eval_cells == 0 {
+                round0_max_temp_bytes
+            } else {
+                let num_cosets = self.max_constraint_degree.saturating_sub(1).max(1);
+                let full_constraint_eval_buffer_bytes = counts
+                    .constraint_eval_cells
+                    .saturating_mul(num_cosets)
+                    .saturating_mul(self.base_field_size);
+                full_constraint_eval_buffer_bytes.min(round0_max_temp_bytes)
+            }
         };
 
         let batch_constraint_working_set_bytes = if self.zerocheck_save_memory {
-            max(main_bytes, round0_max_temp_bytes)
+            max(main_bytes, round0_spill)
         } else {
-            main_bytes + max(round0_max_temp_bytes, BATCH_MLE_MEMORY_FLOOR)
+            main_bytes + max(round0_spill, BATCH_MLE_MEMORY_FLOOR)
         };
         batch_constraint_working_set_bytes + BATCH_CONSTRAINT_MEMORY_OVERHEAD
     }
@@ -333,7 +356,7 @@ mod tests {
         let params = default_test_params_small();
         let config =
             ProvingMemoryConfig::from_params::<u32, [u32; 8]>(&params, 4, false, false, true);
-        let counts = ProvingMemoryCounts::new(10, 20, 5);
+        let counts = ProvingMemoryCounts::new(10, 20, 5, 0);
 
         let estimate = config.estimate(counts);
 
@@ -356,7 +379,7 @@ mod tests {
     #[test]
     fn cached_rs_code_matrix_is_additive() {
         let config = test_memory_config();
-        let counts = ProvingMemoryCounts::new(10, 20, 5);
+        let counts = ProvingMemoryCounts::new(10, 20, 5, 0);
 
         let estimate = config.estimate(counts);
 
@@ -370,7 +393,7 @@ mod tests {
     #[test]
     fn batch_constraint_memory_uses_integer_formula() {
         let config = test_memory_config();
-        let counts = ProvingMemoryCounts::new(7, 11, 0);
+        let counts = ProvingMemoryCounts::new(7, 11, 0, 0);
         let weighted_bytes = |main_cells: usize, need_rot: bool| {
             let weight = (1.0 + config.max_constraint_degree as f64 / 2.0)
                 * config.extension_degree as f64
@@ -406,7 +429,7 @@ mod tests {
     #[test]
     fn stacked_matrix_and_whir_components_are_counted_separately() {
         let mut config = test_memory_config();
-        let counts = ProvingMemoryCounts::new(10, 20, 5);
+        let counts = ProvingMemoryCounts::new(10, 20, 5, 0);
         let stacked_height = 1usize << config.log_stacked_height;
         let expected_stacked =
             counts.main_cells().next_multiple_of(stacked_height) * config.base_field_size;

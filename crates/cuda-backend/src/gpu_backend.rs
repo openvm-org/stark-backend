@@ -6,8 +6,8 @@ use openvm_stark_backend::{
     poly_common::Squarable,
     proof::*,
     prover::{
-        DeviceMultiStarkProvingKey, MultiRapProver, OpeningProver, ProverBackend, ProverDevice,
-        ProvingContext, TraceCommitter,
+        DeviceMultiStarkProvingKey, DeviceStarkProvingKey, MultiRapProver, OpeningProver,
+        ProverBackend, ProverDevice, ProvingContext, TraceCommitter,
     },
 };
 use tracing::instrument;
@@ -50,6 +50,10 @@ impl<HS: GpuHashScheme> ProverBackend for GenericGpuBackend<HS> {
     type Matrix = DeviceMatrix<F>;
     type PcsData = StackedPcsDataGpu<F, HS::Digest>;
     type OtherAirData = AirDataGpu;
+
+    fn constraint_eval_buffer_size(pk: &DeviceStarkProvingKey<Self>) -> usize {
+        pk.other_data.zerocheck_round0.inner.buffer_size as usize
+    }
 }
 
 impl<HS: GpuHashScheme> TraceCommitter<GenericGpuBackend<HS>> for GpuDevice
