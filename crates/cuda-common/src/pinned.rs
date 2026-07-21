@@ -19,9 +19,11 @@
 //! after the source has been staged, so code not using the pool may free a
 //! source buffer right after enqueueing its copy. From *pinned* memory the
 //! call returns immediately with the DMA still in flight, so a returned
-//! buffer must not be zeroed or reused until previously enqueued work has
-//! drained. The cleaner therefore calls `cudaDeviceSynchronize` (batched over
-//! every buffer waiting in its queue) before touching buffer contents.
+//! buffer must not be zeroed or reused until the copies reading it have
+//! drained. Callers should mark the last copy out of a buffer with
+//! [PinnedBuffer::record_last_use]; the cleaner then waits on exactly those
+//! events. Without a recorded event it falls back to synchronizing the device
+//! that was current when the guard dropped.
 
 use std::{
     collections::BTreeMap,
@@ -30,7 +32,11 @@ use std::{
     sync::{mpsc, Mutex, OnceLock},
 };
 
-use crate::{error::CudaError, stream::device_synchronize};
+use crate::{
+    common::{get_device, set_device_by_id},
+    error::CudaError,
+    stream::{device_synchronize, CudaEvent, CudaStream},
+};
 
 #[link(name = "cudart")]
 extern "C" {
@@ -38,11 +44,17 @@ extern "C" {
     fn cudaHostUnregister(ptr: *mut c_void) -> i32;
 }
 
-/// Page-locks `len` bytes at `ptr` in a single `cudaHostRegister` call.
-/// Returns `false` (leaving the buffer pageable) if registration fails.
+/// Registered memory is pinned for all CUDA contexts, so copies issued from
+/// any device get the fast path; without this flag, contexts other than the
+/// registering one (the cleaner's) would treat the buffer as pageable.
+const CUDA_HOST_REGISTER_PORTABLE: u32 = 0x1;
+
+/// Page-locks `len` bytes at `ptr` in a single `cudaHostRegister` call, for
+/// all CUDA contexts. Returns `false` (leaving the buffer pageable) if
+/// registration fails.
 pub fn register_region(ptr: *mut u8, len: usize) -> bool {
     // SAFETY: [ptr, ptr+len) is a live allocation owned by the caller.
-    let rc = unsafe { cudaHostRegister(ptr as *mut c_void, len, 0) };
+    let rc = unsafe { cudaHostRegister(ptr as *mut c_void, len, CUDA_HOST_REGISTER_PORTABLE) };
     if rc != 0 {
         tracing::debug!(
             "cudaHostRegister failed: {}; buffer stays pageable",
@@ -73,6 +85,9 @@ pub struct PinnedBuffer {
     dirty_len: usize,
     /// Whether `data` is currently page-locked.
     registered: bool,
+    /// Events recorded after the last copies reading `data`; the cleaner
+    /// waits on these before re-zeroing and reusing it.
+    last_use: Vec<CudaEvent>,
 }
 
 impl PinnedBuffer {
@@ -87,6 +102,22 @@ impl PinnedBuffer {
     /// `len..` have not been written since [take].
     pub fn set_dirty_len(&mut self, len: usize) {
         self.dirty_len = len;
+    }
+
+    /// Records the point on `stream` after which the buffer is no longer
+    /// read, i.e. right after enqueueing the last copy out of it there. The
+    /// cleaner then waits on exactly the recorded events — instead of a
+    /// whole-device synchronize — before reusing the buffer, which is also
+    /// what makes reuse safe when several devices are active.
+    ///
+    /// Call from the thread that enqueued the copies, with the same device
+    /// current (CUDA requires the event and stream to share a context). If
+    /// several streams consume the buffer, record on each of them.
+    pub fn record_last_use(&mut self, stream: &CudaStream) -> Result<(), CudaError> {
+        let event = CudaEvent::new()?;
+        event.record_on(stream)?;
+        self.last_use.push(event);
+        Ok(())
     }
 }
 
@@ -113,6 +144,11 @@ impl Drop for PinnedBuffer {
             data,
             dirty_len: self.dirty_len,
             registered: self.registered,
+            last_use: std::mem::take(&mut self.last_use),
+            // Fallback sync target when no event was recorded: per this
+            // crate's convention (GpuDeviceCtx::for_device) the copies were
+            // issued from the dropping thread, on its current device.
+            device: get_device().unwrap_or(0),
         };
         // The cleaner owning the receiver never exits, so send only fails if
         // the buffer raced process teardown; clean up inline then.
@@ -125,8 +161,16 @@ impl Drop for PinnedBuffer {
 /// Best-effort drain of the copies still reading `returned`, then [release].
 /// For use outside the cleaner (whose batch loop amortizes the waiting).
 fn wait_and_release(returned: Returned) {
-    if let Err(e) = device_synchronize() {
-        tracing::debug!("cudaDeviceSynchronize failed: {e}");
+    let result = if returned.last_use.is_empty() {
+        set_device_by_id(returned.device).and_then(|_| device_synchronize())
+    } else {
+        returned
+            .last_use
+            .iter()
+            .try_for_each(CudaEvent::synchronize)
+    };
+    if let Err(e) = result {
+        tracing::debug!("draining copies from returned buffer failed: {e}");
     }
     release(returned);
 }
@@ -146,6 +190,11 @@ struct Returned {
     data: Vec<u8>,
     dirty_len: usize,
     registered: bool,
+    /// Events recorded after the last copies reading `data`.
+    last_use: Vec<CudaEvent>,
+    /// Device current when the guard dropped; whole-device sync fallback
+    /// target when `last_use` is empty.
+    device: i32,
 }
 
 /// Registered, all-zero buffers ready for reuse, keyed by allocation size.
@@ -174,25 +223,48 @@ fn cleaner() -> &'static Mutex<mpsc::Sender<Returned>> {
                             Err(_) => break,
                         }
                     }
-                    // The H2D copies reading these buffers were enqueued
-                    // before the owners gave them back; wait for them (and
-                    // anything else in flight) before touching contents.
                     let _span =
                         tracing::info_span!("pinned_cleaner_batch", batch = batch_idx.to_string())
                             .entered();
                     batch_idx += 1;
-                    if let Err(e) = device_synchronize() {
-                        tracing::debug!(
-                            "cudaDeviceSynchronize failed: {e}; dropping {} pooled buffers",
-                            batch.len()
-                        );
-                        for returned in batch {
+                    // The H2D copies reading each buffer were enqueued before
+                    // its owner gave it back; wait for them before touching
+                    // contents:
+                    //  - recorded last-use events cover exactly those copies;
+                    //  - a registered buffer without events falls back to a whole-device sync of
+                    //    the device recorded at drop (memoized per batch);
+                    //  - a never-registered buffer was pageable during use, and a pageable
+                    //    cudaMemcpyAsync returns only after the source is staged, so it is already
+                    //    quiescent.
+                    let mut synced_devices = BTreeMap::new();
+                    for returned in batch {
+                        let drained = if !returned.last_use.is_empty() {
+                            returned
+                                .last_use
+                                .iter()
+                                .try_for_each(CudaEvent::synchronize)
+                                .map_err(|e| tracing::debug!("cudaEventSynchronize failed: {e}"))
+                                .is_ok()
+                        } else if !returned.registered {
+                            true
+                        } else {
+                            *synced_devices.entry(returned.device).or_insert_with(|| {
+                                set_device_by_id(returned.device)
+                                    .and_then(|_| device_synchronize())
+                                    .map_err(|e| {
+                                        tracing::debug!(
+                                            "synchronizing device {} failed: {e}",
+                                            returned.device
+                                        )
+                                    })
+                                    .is_ok()
+                            })
+                        };
+                        if drained {
+                            recycle(returned);
+                        } else {
                             release(returned);
                         }
-                        continue;
-                    }
-                    for returned in batch {
-                        recycle(returned);
                     }
                 }
             })
@@ -235,6 +307,7 @@ pub fn take(min_size: usize) -> PinnedBuffer {
             data,
             dirty_len: size,
             registered: true,
+            last_use: Vec::new(),
         };
     }
     // Pool miss: when no recycled buffer of that size is available,
@@ -243,6 +316,7 @@ pub fn take(min_size: usize) -> PinnedBuffer {
         data: vec![0u8; size],
         dirty_len: size,
         registered: false,
+        last_use: Vec::new(),
     }
 }
 
@@ -310,6 +384,27 @@ mod tests {
         buf.fill(0xAB);
         // Oversized dirty_len must be clamped, not panic.
         buf.set_dirty_len(usize::MAX);
+        drop(buf);
+        wait_for_pooled(SIZE);
+        let buf = take(SIZE);
+        assert!(buf.is_pinned(), "pool hit should be page-locked");
+        assert_eq!(
+            buf.as_ptr() as usize,
+            ptr,
+            "pool hit should reuse the allocation"
+        );
+        assert!(buf.iter().all(|&b| b == 0), "recycled buffer not re-zeroed");
+    }
+
+    #[test]
+    fn recorded_last_use_event_gates_reuse() {
+        let _lock = lock_tests();
+        const SIZE: usize = 1 << 14;
+        let stream = crate::stream::CudaStream::new_non_blocking().unwrap();
+        let mut buf = take(SIZE);
+        let ptr = buf.as_ptr() as usize;
+        buf.fill(0xCD);
+        buf.record_last_use(&stream).unwrap();
         drop(buf);
         wait_for_pooled(SIZE);
         let buf = take(SIZE);
