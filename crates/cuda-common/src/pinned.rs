@@ -24,6 +24,9 @@
 //! [PinnedBuffer::record_last_use]; the cleaner then waits on exactly those
 //! events. Without a recorded event it falls back to synchronizing the device
 //! that was current when the guard dropped.
+//!
+//! The pool retains at most [set_max_pooled_bytes] bytes (default 4 GiB);
+//! past that, returning a buffer evicts pooled ones, largest first.
 
 use std::{
     collections::BTreeMap,
@@ -193,11 +196,63 @@ struct Returned {
     device: i32,
 }
 
+/// Default value for [set_max_pooled_bytes].
+const DEFAULT_MAX_POOLED_BYTES: usize = 4 << 30; // 4 GiB
+
 /// Registered, all-zero buffers ready for reuse, keyed by allocation size.
-/// Invariant: every pooled buffer is page-locked and quiescent.
-fn pool() -> &'static Mutex<BTreeMap<usize, Vec<Vec<u8>>>> {
-    static POOL: OnceLock<Mutex<BTreeMap<usize, Vec<Vec<u8>>>>> = OnceLock::new();
-    POOL.get_or_init(|| Mutex::new(BTreeMap::new()))
+/// Invariants: every pooled buffer is page-locked and quiescent, empty size
+/// classes are removed, and `total_bytes` is the sum over all pooled buffers.
+struct Pool {
+    by_size: BTreeMap<usize, Vec<Vec<u8>>>,
+    total_bytes: usize,
+    max_bytes: usize,
+}
+
+fn pool() -> &'static Mutex<Pool> {
+    static POOL: OnceLock<Mutex<Pool>> = OnceLock::new();
+    POOL.get_or_init(|| {
+        Mutex::new(Pool {
+            by_size: BTreeMap::new(),
+            total_bytes: 0,
+            max_bytes: DEFAULT_MAX_POOLED_BYTES,
+        })
+    })
+}
+
+/// Caps the bytes of pinned memory the pool may retain (default 4 GiB).
+/// A returned buffer that would push the total over the cap evicts pooled
+/// buffers instead, largest size class first, and a buffer larger than the
+/// whole cap is never pooled. Lowering the cap evicts immediately.
+pub fn set_max_pooled_bytes(max_bytes: usize) {
+    let evicted = {
+        let mut pool = pool().lock().unwrap();
+        pool.max_bytes = max_bytes;
+        evict_to_fit(&mut pool, 0)
+    };
+    for mut buf in evicted {
+        unregister_region(buf.as_mut_ptr());
+    }
+}
+
+/// Pops pooled buffers, largest size class first, until a buffer of
+/// `incoming` bytes fits under the cap (no-op if it never can). The caller
+/// unregisters the evicted buffers, ideally outside the pool lock.
+fn evict_to_fit(pool: &mut Pool, incoming: usize) -> Vec<Vec<u8>> {
+    let mut evicted = Vec::new();
+    if incoming > pool.max_bytes {
+        return evicted;
+    }
+    while pool.total_bytes + incoming > pool.max_bytes {
+        let Some((&class, bufs)) = pool.by_size.iter_mut().next_back() else {
+            break;
+        };
+        evicted.push(bufs.pop().expect("empty size classes are removed"));
+        if bufs.is_empty() {
+            pool.by_size.remove(&class);
+        }
+        pool.total_bytes -= class;
+    }
+    evicted
 }
 
 /// A running cleaner thread and the channel feeding it.
@@ -317,31 +372,45 @@ fn recycle(mut returned: Returned) {
     }
     let dirty_len = returned.dirty_len.min(returned.data.len());
     returned.data[..dirty_len].fill(0);
-    pool()
-        .lock()
-        .unwrap()
-        .entry(returned.data.len())
-        .or_default()
-        .push(returned.data);
+    let size = returned.data.len();
+    let mut evicted;
+    {
+        let mut pool = pool().lock().unwrap();
+        evicted = evict_to_fit(&mut pool, size);
+        if pool.total_bytes + size <= pool.max_bytes {
+            pool.total_bytes += size;
+            pool.by_size.entry(size).or_default().push(returned.data);
+        } else {
+            // Larger than the whole cap: never pooled.
+            evicted.push(returned.data);
+        }
+    }
+    for mut buf in evicted {
+        // Pooled buffers are quiescent, so unregistering evictees is safe.
+        unregister_region(buf.as_mut_ptr());
+    }
 }
 
 /// Returns an all-zero buffer of at least `min_size` bytes (rounded up to the
 /// next power of two), page-locked if it came from the pool.
 pub fn take(min_size: usize) -> PinnedBuffer {
     let size = min_size.next_power_of_two();
-    if let Some(data) = pool()
-        .lock()
-        .unwrap()
-        .get_mut(&size)
-        .and_then(|bufs| bufs.pop())
     {
-        debug_assert_eq!(data.len(), size);
-        return PinnedBuffer {
-            data,
-            dirty_len: size,
-            registered: true,
-            last_use: Vec::new(),
-        };
+        let mut pool = pool().lock().unwrap();
+        if let Some(bufs) = pool.by_size.get_mut(&size) {
+            let data = bufs.pop().expect("empty size classes are removed");
+            if bufs.is_empty() {
+                pool.by_size.remove(&size);
+            }
+            pool.total_bytes -= size;
+            debug_assert_eq!(data.len(), size);
+            return PinnedBuffer {
+                data,
+                dirty_len: size,
+                registered: true,
+                last_use: Vec::new(),
+            };
+        }
     }
     // Pool miss: when no recycled buffer of that size is available,
     // take returns a plain, unpinned allocation instead of pinning one on the spot.
@@ -357,12 +426,13 @@ pub fn take(min_size: usize) -> PinnedBuffer {
 /// queued for the cleaner; [shutdown] drains those first.
 pub fn clear() {
     let mut pool = pool().lock().unwrap();
-    for (_, bufs) in pool.iter_mut() {
+    for (_, bufs) in pool.by_size.iter_mut() {
         for mut buf in bufs.drain(..) {
             unregister_region(buf.as_mut_ptr());
         }
     }
-    pool.clear();
+    pool.by_size.clear();
+    pool.total_bytes = 0;
 }
 
 #[cfg(test)]
@@ -386,6 +456,7 @@ mod tests {
         while pool()
             .lock()
             .unwrap()
+            .by_size
             .get(&size)
             .is_none_or(|bufs| bufs.is_empty())
         {
@@ -439,7 +510,7 @@ mod tests {
         drop(buf); // queued to the cleaner
         shutdown();
         assert!(
-            pool().lock().unwrap().is_empty(),
+            pool().lock().unwrap().by_size.is_empty(),
             "shutdown left buffers pooled"
         );
         // The pool keeps working afterwards: the next drop respawns the cleaner.
@@ -448,6 +519,32 @@ mod tests {
         drop(buf);
         wait_for_pooled(SIZE);
         assert!(take(SIZE).is_pinned());
+    }
+
+    #[test]
+    fn byte_cap_evicts_largest_first() {
+        let _lock = lock_tests();
+        const SIZE: usize = 1 << 16;
+        const MARKER: usize = 1 << 10;
+        // Start from a drained, empty pool so the accounting is deterministic.
+        shutdown();
+        set_max_pooled_bytes(2 * SIZE + MARKER);
+        let bufs: Vec<_> = (0..3).map(|_| take(SIZE)).collect();
+        drop(bufs);
+        // The channel is FIFO, so once this later-returned marker is pooled,
+        // all three SIZE buffers have been processed.
+        drop(take(MARKER));
+        wait_for_pooled(MARKER);
+        {
+            let pool = pool().lock().unwrap();
+            assert_eq!(
+                pool.by_size.get(&SIZE).map(|bufs| bufs.len()),
+                Some(2),
+                "third buffer should have evicted one of the first two"
+            );
+            assert_eq!(pool.total_bytes, 2 * SIZE + MARKER);
+        }
+        set_max_pooled_bytes(DEFAULT_MAX_POOLED_BYTES);
     }
 
     #[test]
