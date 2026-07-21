@@ -9,11 +9,11 @@
 //! are often provisioned at full capacity while only partially written,
 //! so neither registration nor re-zeroing may sit on the caller's critical path.
 //!
-//! Dropped buffers are therefore handed via [give_back] to a background cleaner
-//! thread which registers them once (cudaHostRegister), zeroes the prefix the
-//! previous owner wrote, and only then returns them to the pool.
-//! [take] hands out ready (registered, all-zero) buffers on a pool hit;
-//! on a miss it falls back to a fresh pageable allocation.
+//! [take] hands out [PinnedBuffer] guards: ready (registered, all-zero)
+//! buffers on a pool hit; on a miss it falls back to a fresh pageable
+//! allocation. Dropping the guard hands the buffer to a background cleaner
+//! thread which registers it once (cudaHostRegister), zeroes the prefix the
+//! previous owner wrote, and only then returns it to the pool.
 //!
 //! Lifetime hazard: `cudaMemcpyAsync` from *pageable* memory returns only
 //! after the source has been staged, so code not using the pool may free a
@@ -24,8 +24,9 @@
 //! every buffer waiting in its queue) before touching buffer contents.
 
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::BTreeMap,
     ffi::c_void,
+    ops::{Deref, DerefMut},
     sync::{mpsc, Mutex, OnceLock},
 };
 
@@ -36,9 +37,6 @@ extern "C" {
     fn cudaHostRegister(ptr: *mut c_void, size: usize, flags: u32) -> i32;
     fn cudaHostUnregister(ptr: *mut c_void) -> i32;
 }
-
-/// A returned buffer together with its dirty-prefix length.
-type ReturnedBuffer = (Vec<u8>, usize);
 
 /// Page-locks `len` bytes at `ptr` in a single `cudaHostRegister` call.
 /// Returns `false` (leaving the buffer pageable) if registration fails.
@@ -62,24 +60,86 @@ pub fn unregister_region(ptr: *mut u8) {
     unsafe { cudaHostUnregister(ptr as *mut c_void) };
 }
 
+/// A host staging buffer owned by the pool, handed out by [take].
+///
+/// Dereferences to `[u8]`. The allocation can never grow or move, so the base
+/// pointer a registration was made for stays valid for the buffer's whole
+/// life, and dropping the guard is the only way to release the allocation —
+/// it goes back through the pool's cleaner, never straight to the allocator
+/// while page-locked.
+pub struct PinnedBuffer {
+    data: Vec<u8>,
+    /// Upper bound on the prefix of `data` written since [take].
+    dirty_len: usize,
+    /// Whether `data` is currently page-locked.
+    registered: bool,
+}
+
+impl PinnedBuffer {
+    /// Whether the buffer is page-locked. False for pool-miss buffers, which
+    /// stay pageable until their first trip through the cleaner.
+    pub fn is_pinned(&self) -> bool {
+        self.registered
+    }
+
+    /// Narrows the prefix the cleaner re-zeroes before pooling the buffer
+    /// (by default the whole buffer). The caller asserts that bytes at
+    /// `len..` have not been written since [take].
+    pub fn set_dirty_len(&mut self, len: usize) {
+        self.dirty_len = len;
+    }
+}
+
+impl Deref for PinnedBuffer {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        &self.data
+    }
+}
+
+impl DerefMut for PinnedBuffer {
+    fn deref_mut(&mut self) -> &mut [u8] {
+        &mut self.data
+    }
+}
+
+impl Drop for PinnedBuffer {
+    fn drop(&mut self) {
+        let data = std::mem::take(&mut self.data);
+        if data.is_empty() {
+            return;
+        }
+        let returned = Returned {
+            data,
+            dirty_len: self.dirty_len,
+            registered: self.registered,
+        };
+        // The cleaner owning the receiver never exits, so send only fails if
+        // the buffer raced process teardown; dropping it then is fine.
+        let _ = cleaner().lock().unwrap().send(returned);
+    }
+}
+
+/// A buffer on its way back to the pool.
+struct Returned {
+    data: Vec<u8>,
+    dirty_len: usize,
+    registered: bool,
+}
+
 /// Registered, all-zero buffers ready for reuse, keyed by allocation size.
+/// Invariant: every pooled buffer is page-locked and quiescent.
 fn pool() -> &'static Mutex<BTreeMap<usize, Vec<Vec<u8>>>> {
     static POOL: OnceLock<Mutex<BTreeMap<usize, Vec<Vec<u8>>>>> = OnceLock::new();
     POOL.get_or_init(|| Mutex::new(BTreeMap::new()))
 }
 
-/// Base pointers of buffers whose `cudaHostRegister` succeeded.
-fn registered() -> &'static Mutex<HashSet<usize>> {
-    static REGISTERED: OnceLock<Mutex<HashSet<usize>>> = OnceLock::new();
-    REGISTERED.get_or_init(|| Mutex::new(HashSet::new()))
-}
-
 /// Cleaner thread: registers (first cycle) and re-zeroes buffers off the
 /// critical path, then makes them available to [`take`].
-fn cleaner() -> &'static Mutex<mpsc::Sender<ReturnedBuffer>> {
-    static TX: OnceLock<Mutex<mpsc::Sender<ReturnedBuffer>>> = OnceLock::new();
+fn cleaner() -> &'static Mutex<mpsc::Sender<Returned>> {
+    static TX: OnceLock<Mutex<mpsc::Sender<Returned>>> = OnceLock::new();
     TX.get_or_init(|| {
-        let (tx, rx) = mpsc::channel::<ReturnedBuffer>();
+        let (tx, rx) = mpsc::channel::<Returned>();
         std::thread::Builder::new()
             .name("pinned-cleaner".into())
             .spawn(move || {
@@ -107,23 +167,8 @@ fn cleaner() -> &'static Mutex<mpsc::Sender<ReturnedBuffer>> {
                         );
                         continue;
                     }
-                    for (mut buffer, dirty_len) in batch {
-                        let ptr = buffer.as_mut_ptr();
-                        let is_new = !registered().lock().unwrap().contains(&(ptr as usize));
-                        if is_new {
-                            if !register_region(ptr, buffer.len()) {
-                                continue;
-                            }
-                            registered().lock().unwrap().insert(ptr as usize);
-                        }
-                        let dirty_len = dirty_len.min(buffer.len());
-                        buffer[..dirty_len].fill(0);
-                        pool()
-                            .lock()
-                            .unwrap()
-                            .entry(buffer.len())
-                            .or_default()
-                            .push(buffer);
+                    for returned in batch {
+                        recycle(returned);
                     }
                 }
             })
@@ -132,44 +177,57 @@ fn cleaner() -> &'static Mutex<mpsc::Sender<ReturnedBuffer>> {
     })
 }
 
+/// Registers `returned` if this is its first cycle, re-zeroes its dirty
+/// prefix, and pools it. The buffer must be quiescent (no copies in flight).
+fn recycle(mut returned: Returned) {
+    if !returned.registered {
+        if !register_region(returned.data.as_mut_ptr(), returned.data.len()) {
+            return; // stays pageable; drop normally
+        }
+        returned.registered = true;
+    }
+    let dirty_len = returned.dirty_len.min(returned.data.len());
+    returned.data[..dirty_len].fill(0);
+    pool()
+        .lock()
+        .unwrap()
+        .entry(returned.data.len())
+        .or_default()
+        .push(returned.data);
+}
+
 /// Returns an all-zero buffer of at least `min_size` bytes (rounded up to the
 /// next power of two), page-locked if it came from the pool.
-pub fn take(min_size: usize) -> Vec<u8> {
+pub fn take(min_size: usize) -> PinnedBuffer {
     let size = min_size.next_power_of_two();
-    if let Some(buffer) = pool()
+    if let Some(data) = pool()
         .lock()
         .unwrap()
         .get_mut(&size)
         .and_then(|bufs| bufs.pop())
     {
-        debug_assert_eq!(buffer.len(), size);
-        return buffer;
+        debug_assert_eq!(data.len(), size);
+        return PinnedBuffer {
+            data,
+            dirty_len: size,
+            registered: true,
+        };
     }
     // Pool miss: when no recycled buffer of that size is available,
     // take returns a plain, unpinned allocation instead of pinning one on the spot.
-    vec![0u8; size]
-}
-
-/// Hands `buffer` to the cleaner for registration, re-zeroing, and reuse.
-/// `dirty_len` is an upper bound on the prefix of `buffer` that may have
-/// been written since it left [`take`]; the rest must still be zero.
-pub fn give_back(buffer: Vec<u8>, dirty_len: usize) {
-    if buffer.is_empty() || !buffer.len().is_power_of_two() {
-        return; // not a pool-shaped buffer; drop normally
+    PinnedBuffer {
+        data: vec![0u8; size],
+        dirty_len: size,
+        registered: false,
     }
-    // The cleaner owning the receiver never exits, so send only fails if
-    // the buffer raced process teardown; dropping it then is fine.
-    let _ = cleaner().lock().unwrap().send((buffer, dirty_len));
 }
 
 /// Unregisters and frees all pooled buffers (test hygiene; optional).
 pub fn clear() {
     let mut pool = pool().lock().unwrap();
-    let mut reg = registered().lock().unwrap();
     for (_, bufs) in pool.iter_mut() {
         for mut buf in bufs.drain(..) {
-            reg.remove(&(buf.as_ptr() as usize));
-            unsafe { cudaHostUnregister(buf.as_mut_ptr() as *mut c_void) };
+            unregister_region(buf.as_mut_ptr());
         }
     }
     pool.clear();
@@ -180,6 +238,14 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::*;
+
+    /// Serializes tests: they share the process-global pool and cleaner, so
+    /// distinct buffer sizes alone don't isolate them.
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    fn lock_tests() -> std::sync::MutexGuard<'static, ()> {
+        TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
 
     /// Waits until the cleaner (batching window + device sync) has returned a
     /// buffer of exactly `size` bytes to the pool.
@@ -201,6 +267,7 @@ mod tests {
 
     #[test]
     fn take_rounds_up_to_next_power_of_two_and_zero_fills() {
+        let _lock = lock_tests();
         for (min_size, expected) in [(1, 1), (3, 4), (1024, 1024), (1025, 2048)] {
             let buf = take(min_size);
             assert_eq!(buf.len(), expected, "take({min_size})");
@@ -212,18 +279,17 @@ mod tests {
     // pool entries are never shared.
     #[test]
     fn round_trip_recycles_registered_rezeroed_buffer() {
+        let _lock = lock_tests();
         const SIZE: usize = 1 << 13;
         let mut buf = take(SIZE);
         let ptr = buf.as_ptr() as usize;
         buf.fill(0xAB);
         // Oversized dirty_len must be clamped, not panic.
-        give_back(buf, usize::MAX);
+        buf.set_dirty_len(usize::MAX);
+        drop(buf);
         wait_for_pooled(SIZE);
-        assert!(
-            registered().lock().unwrap().contains(&ptr),
-            "pooled buffer was not page-locked"
-        );
         let buf = take(SIZE);
+        assert!(buf.is_pinned(), "pool hit should be page-locked");
         assert_eq!(
             buf.as_ptr() as usize,
             ptr,
