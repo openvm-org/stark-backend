@@ -1,7 +1,13 @@
-use std::{ffi::c_void, fmt::Debug, ptr};
+use std::{
+    ffi::c_void,
+    fmt::Debug,
+    ops::{Bound, RangeBounds},
+    ptr,
+};
 
 use crate::{
-    error::{check, CudaError},
+    copy::cuda_memcpy_on,
+    error::{check, CudaError, MemCopyError},
     memory_manager::{d_free, d_malloc_on},
     stream::{cudaStream_t, GpuDeviceCtx},
 };
@@ -206,6 +212,92 @@ impl<T> DeviceBuffer<T> {
             size: self.len * size_of::<T>(),
         }
     }
+
+    /// Returns a mutable device-side view over the elements indexed by `range`.
+    ///
+    /// Range semantics follow Rust standard slicing: an inclusive start / an
+    /// exclusive end. Unbounded start defaults to `0`; unbounded end defaults
+    /// to `self.len()`. Panics if the resulting `[lo, hi)` is out of bounds
+    /// or has `lo > hi`.
+    ///
+    /// The returned [`DeviceBufferMutSlice`] borrows `self` mutably, so the
+    /// borrow checker prevents overlapping mutable views for its lifetime.
+    pub fn mut_slice<R>(&mut self, range: R) -> DeviceBufferMutSlice<'_, T>
+    where
+        R: RangeBounds<usize>,
+    {
+        let len = self.len;
+        let lo = match range.start_bound() {
+            Bound::Included(&i) => i,
+            Bound::Excluded(&i) => i.checked_add(1).expect("mut_slice: range start overflow"),
+            Bound::Unbounded => 0,
+        };
+        let hi = match range.end_bound() {
+            Bound::Included(&i) => i.checked_add(1).expect("mut_slice: range end overflow"),
+            Bound::Excluded(&i) => i,
+            Bound::Unbounded => len,
+        };
+        assert!(lo <= hi, "mut_slice: lo ({}) > hi ({})", lo, hi);
+        assert!(hi <= len, "mut_slice: hi ({}) > len ({})", hi, len);
+        DeviceBufferMutSlice { buf: self, lo, hi }
+    }
+}
+
+/// A mutable device-side range `[lo, hi)` inside a [`DeviceBuffer<T>`].
+///
+/// Obtained via [`DeviceBuffer::mut_slice`]. Holds a `&mut DeviceBuffer<T>`
+/// so the borrow checker prevents overlapping mutable views of the same
+/// buffer for the lifetime of the slice.
+#[derive(Debug)]
+pub struct DeviceBufferMutSlice<'a, T> {
+    buf: &'a mut DeviceBuffer<T>,
+    lo: usize,
+    hi: usize,
+}
+
+impl<'a, T> DeviceBufferMutSlice<'a, T> {
+    /// Number of elements in the slice.
+    pub fn len(&self) -> usize {
+        self.hi - self.lo
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.hi == self.lo
+    }
+
+    /// Copies `src` (host memory) into the slice on `device_ctx`'s stream via
+    /// `cudaMemcpyAsync`.
+    ///
+    /// Errors with [`MemCopyError::SizeMismatch`] if `src.len() != self.len()`.
+    ///
+    /// `src` must be pageable (ordinary heap) memory: `cudaMemcpyAsync` then
+    /// stages the source before returning, so `src` may be freed immediately.
+    /// Pinned host memory would make the copy truly asynchronous and require
+    /// `src` to outlive a stream sync.
+    pub fn copy_from_host(
+        &mut self,
+        src: &[T],
+        device_ctx: &GpuDeviceCtx,
+    ) -> Result<(), MemCopyError> {
+        let count = self.hi - self.lo;
+        if src.len() != count {
+            return Err(MemCopyError::SizeMismatch {
+                operation: "DeviceBufferMutSlice::copy_from_host",
+                src_len: src.len(),
+                dst_len: count,
+            });
+        }
+        if count == 0 {
+            return Ok(());
+        }
+        let dst_ptr = unsafe { self.buf.as_mut_ptr().add(self.lo) as *mut c_void };
+        let src_ptr = src.as_ptr() as *const c_void;
+        let size_bytes = std::mem::size_of::<T>() * count;
+        unsafe {
+            cuda_memcpy_on::<false, true>(dst_ptr, src_ptr, size_bytes, device_ctx)?;
+        }
+        Ok(())
+    }
 }
 
 impl<T> Drop for DeviceBuffer<T> {
@@ -269,5 +361,33 @@ mod tests {
         let d_array = v.to_device_on(&device_ctx).unwrap();
         d_array.fill_zero_on(&device_ctx).unwrap();
         assert_eq!(d_array.to_host_on(&device_ctx).unwrap(), vec![0; v.len()]);
+    }
+
+    #[test]
+    fn test_device_buffer_mut_slice_copy_from_host() {
+        let device_ctx = test_ctx();
+        let mut d_array = [0u64; 10].to_device_on(&device_ctx).unwrap();
+
+        // Overwrite the middle range [3, 7) with new values.
+        let patch: [u64; 4] = [10, 20, 30, 40];
+        d_array
+            .mut_slice(3..7)
+            .copy_from_host(&patch, &device_ctx)
+            .unwrap();
+
+        let host = d_array.to_host_on(&device_ctx).unwrap();
+        assert_eq!(host, vec![0, 0, 0, 10, 20, 30, 40, 0, 0, 0]);
+    }
+
+    #[test]
+    fn test_device_buffer_mut_slice_size_mismatch() {
+        let device_ctx = test_ctx();
+        let mut d_array = DeviceBuffer::<u64>::with_capacity_on(4, &device_ctx);
+        let src = [1u64, 2, 3];
+        let err = d_array
+            .mut_slice(0..4)
+            .copy_from_host(&src, &device_ctx)
+            .unwrap_err();
+        assert!(matches!(err, MemCopyError::SizeMismatch { .. }));
     }
 }
