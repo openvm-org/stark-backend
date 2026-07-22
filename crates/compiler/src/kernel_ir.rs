@@ -1,30 +1,33 @@
 //! KernelIR: the lower-level, imperative representation.
 //!
-//! A kernel is a [`Grid`] of statements. Statements ([`Stmt`]) are the
-//! memory- and scheduling-aware layer: sequential loops, buffer
-//! declarations and [`Stmt::Par`] blocks. A par is a *primitive compute
-//! block*: a block of pure single-threaded math on registers that neither
-//! touches memory nor synchronizes. All memory traffic of a par is declared
-//! up front as `reads` / `writes` accesses; the loaded values enter its
-//! [`SSABlock`] as block operands and the stored values leave it as yields.
+//! A kernel is a single SSA IR: operations ([`SSAOp`]) reference values
+//! ([`SSARes`]) and may own a nested region ([`SSABlock`]). The kernel body
+//! is the [`Grid`]'s block, whose first operand is the grid index
+//! (`blockIdx.x`); it holds the memory- and scheduling-aware ops —
+//! sequential [`SSAOpCode::Loop`]s, buffer materializations
+//! ([`SSAOpCode::Alloc`]) and [`SSAOpCode::Par`] blocks.
 //!
-//! Inside a par, scalar math is a small SSA IR ([`SSAOp`] / [`SSABlock`]):
-//! ops reference values ([`SSARes`]) and may nest an MLIR-style `scf.for`
-//! loop ([`ElemSSAOp::Loop`]) whose induction variable is the first block
-//! operand and whose carried values are threaded through
-//! operands/yields/results. Values form a single kernel-wide id space, so
-//! ops may also reference dominating kernel-level values: the grid index
-//! ([`Grid::var`]) and enclosing [`Stmt::Loop`] induction variables.
+//! A par is a *primitive compute block*: a block of pure single-threaded
+//! math on registers that neither touches memory nor synchronizes. All
+//! memory traffic of a par is declared up front as `reads` / `writes`
+//! accesses; the loaded values enter its block as operands and the stored
+//! values leave it as yields. Inside a par, only scalar ops appear; an
+//! MLIR-style `scf.for` reuses [`SSAOpCode::Loop`] with the loop-carried
+//! values threaded through operands/yields/results.
 //!
-//! Nothing here is self-referential: the [`Kernel`] owns flat arenas of ops
-//! and statements, and every structure stores typed ids into them.
+//! Values form a single kernel-wide id space, so ops may reference any
+//! dominating value: the grid index and enclosing loop induction variables.
+//! Region ops are closed over their operands: every value a region op or its
+//! block uses from an enclosing scope is listed in the op's operands.
+//! Nothing here is self-referential: the [`Kernel`] owns a flat arena of
+//! ops, and every block stores typed ids into it.
 //!
-//! Layout attributes ([`ParAttr`] on [`Stmt::Par`], [`BufferDecl::layout`])
-//! are `None` right after lowering and are filled in by the `layout_infer`
-//! pass. Synchronization is not represented: codegen derives barriers from
-//! the pars' declared reads and writes.
+//! Layout attributes ([`ParAttr`] on [`SSAOpCode::Par`],
+//! [`BufferDecl::layout`]) are `None` right after lowering and are filled in
+//! by the `layout_infer` pass. Synchronization is not represented: codegen
+//! derives barriers from the pars' declared reads and writes.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use smallvec::SmallVec;
 
@@ -34,16 +37,12 @@ use crate::{
 };
 
 /// SSA value inside one kernel (a single kernel-wide id space).
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct SSARes(pub u32);
 
 /// Id of an [`SSAOp`] in the kernel's op arena.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct SSANode(pub u32);
-
-/// Id of a [`Stmt`] in the kernel's statement arena.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
-pub struct StmtNode(pub u32);
 
 /// Id of a [`BufferDecl`] in the program's buffer table.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -107,11 +106,11 @@ pub enum BufferKind {
     Output(usize),
     /// Lives at `offset` bytes inside the scratch allocation.
     Scratch { offset: usize },
-    /// Kernel-local shared memory, materialized by a `Stmt::BufDecl`.
+    /// Kernel-local shared memory, materialized by an [`SSAOpCode::Alloc`].
     Shared,
-    /// Kernel-local registers, materialized by a `Stmt::BufDecl`. Only
-    /// accessible at a par's own logical index (each par point owns one
-    /// element).
+    /// Kernel-local registers, materialized by an [`SSAOpCode::Alloc`].
+    /// Only accessible at a par's own logical index (each par point owns
+    /// one element).
     Register,
 }
 
@@ -142,18 +141,57 @@ impl BufferDecl {
         // All scalar types are stored as u32.
         self.len() * 4
     }
+
+    /// Number of physical u32 slots after applying the alloc layout (a
+    /// non-identity layout maps into a power-of-two range).
+    pub fn phys_len(&self) -> usize {
+        match &self.layout {
+            Some(l) if !l.is_identity() => 1usize << l.bases.len(),
+            _ => self.len(),
+        }
+    }
 }
 
-/// An elementary SSA operation. Operands and results live in
+/// Opcode of an [`SSAOp`]. Operands and results live in
 /// [`SSAOp::operands`] / [`SSAOp::results`].
 #[derive(Clone, Debug)]
-pub enum ElemSSAOp {
-    /// MLIR-style `scf.for` over `0..bound`. The op's operands are the
-    /// initial values of the loop-carried variables; the block's operands
-    /// are `[induction var, carried...]`, its yields are the next carried
-    /// values, and the op's results are the carried values after the last
-    /// iteration.
+pub enum SSAOpCode {
+    /// Sequential loop over `0..bound`; the block's first operand is the
+    /// induction variable. At the statement level (grid or loop block) it
+    /// carries no values (no results), is uniform across the block, and pars
+    /// inside may sync; its operands are the values captured from enclosing
+    /// scopes. Inside a par it is an MLIR-style `scf.for`: the op's operands
+    /// are the initial values of the loop-carried variables followed by the
+    /// captures (`operands[i]` initializes `results[i]`), the block's
+    /// operands are `[induction var, carried...]`, its yields are the next
+    /// carried values, and the op's results are the carried values after
+    /// the last iteration.
     Loop { bound: usize },
+    /// Primitive compute block over `bound` logical indices: loads `reads`,
+    /// runs its block per index, stores the yields to `writes`. The op's
+    /// operands are the values captured from enclosing scopes (including
+    /// access-index symbols other than the par's own index); its results
+    /// represent the writes, one per write, in order. The block's operands
+    /// are `[par index, one value per read, in order]`; its yields are one
+    /// per write, in order. `attr` (from `layout_infer`) factors the domain
+    /// onto sequential steps x threads.
+    Par {
+        bound: usize,
+        /// Grid-spanning par: the logical index is
+        /// `blockIdx.x * blockDim.x + threadIdx.x` and the grid covers the
+        /// whole domain. Otherwise the par iterates its domain per block.
+        spans_grid: bool,
+        attr: Option<ParAttr>,
+        reads: Vec<Access>,
+        writes: Vec<Access>,
+    },
+    /// Materializes a shared or register buffer in the kernel.
+    Alloc { buf: BufId },
+    /// Block-wide barrier (`__syncthreads()`). Statement level only; no
+    /// operands, results or region. Inserted by `passes::insert_sync`
+    /// before any par that reads a shared buffer written since the last
+    /// barrier.
+    Sync,
     /// No operands; one result.
     ConstU32(u32),
     /// BabyBear constant (canonical representation); one result.
@@ -169,17 +207,19 @@ pub enum ElemSSAOp {
 pub struct SSAOp {
     pub operands: SmallVec<[SSARes; 2]>,
     pub results: SmallVec<[SSARes; 1]>,
-    pub opcode: ElemSSAOp,
-    /// Nested region; empty except for [`ElemSSAOp::Loop`].
+    pub opcode: SSAOpCode,
+    /// Nested region; empty except for [`SSAOpCode::Loop`] and
+    /// [`SSAOpCode::Par`].
     pub block: SSABlock,
 }
 
-/// A straight-line region of SSA ops. Loads are not representable here: a
-/// par's memory reads enter through the block operands.
+/// A region of SSA ops. Loads are not representable inside a par's block:
+/// its memory reads enter through the block operands.
 #[derive(Clone, Debug, Default)]
 pub struct SSABlock {
     /// Values bound on entry. For a par block: `[par index, one value per
     /// read, in order]`. For a loop block: `[induction var, carried...]`.
+    /// For the grid block: `[grid index]`.
     pub operands: SmallVec<[SSARes; 2]>,
     pub body: SmallVec<[SSANode; 8]>,
     /// Values leaving the block. For a par block: one per write, in order.
@@ -194,7 +234,7 @@ pub enum IndexMap {
     Linear(LinearLayout),
     /// A quasi-affine expression whose symbols are kernel values by the
     /// `VarId(i) <-> SSARes(i)` convention: the par's own index, enclosing
-    /// `Stmt::Loop` induction variables and the grid index.
+    /// loop induction variables and the grid index.
     Affine {
         expr: Quast,
         /// Bounds of the symbols appearing in `expr`.
@@ -209,40 +249,24 @@ pub struct Access {
     pub index: IndexMap,
 }
 
-#[derive(Clone, Debug)]
-pub enum Stmt {
-    /// Sequential loop `for (var = 0; var < bound; ++var)` around nested
-    /// statements; uniform across the block, so pars inside may sync.
-    Loop {
-        var: SSARes,
-        bound: usize,
-        body: Vec<StmtNode>,
-    },
-    /// Primitive compute block over `bound` logical indices: loads `reads`,
-    /// runs `block` per index, stores `yields` to `writes`. `attr` (from
-    /// `layout_infer`) factors the domain onto sequential steps x threads.
-    Par {
-        bound: usize,
-        /// Grid-spanning par: the logical index is
-        /// `blockIdx.x * blockDim.x + threadIdx.x` and the grid covers the
-        /// whole domain. Otherwise the par iterates its domain per block.
-        spans_grid: bool,
-        attr: Option<ParAttr>,
-        reads: Vec<Access>,
-        writes: Vec<Access>,
-        block: SSABlock,
-    },
-    /// Materializes a shared or register buffer in the kernel.
-    BufDecl { buf: BufId },
+impl Access {
+    /// Kernel values used as symbols by the index expression (by the
+    /// `VarId(i) <-> SSARes(i)` convention).
+    pub fn index_syms(&self, out: &mut BTreeSet<SSARes>) {
+        if let IndexMap::Affine { expr, .. } = &self.index {
+            let mut syms = BTreeSet::new();
+            expr.syms(&mut syms);
+            out.extend(syms.into_iter().map(|v| SSARes(v.0)));
+        }
+    }
 }
 
-/// The kernel body: `bound` blocks (`gridDim.x`), with `var` bound to
-/// `blockIdx.x` as a kernel-level SSA value.
+/// The kernel body: `bound` blocks (`gridDim.x`), with the block's first
+/// operand bound to `blockIdx.x` as a kernel-level SSA value.
 #[derive(Clone, Debug)]
 pub struct Grid {
     pub bound: usize,
-    pub var: SSARes,
-    pub body: Vec<StmtNode>,
+    pub block: SSABlock,
 }
 
 #[derive(Clone, Debug)]
@@ -254,28 +278,31 @@ pub struct Kernel {
     /// Buffers appearing in the kernel signature, with write flag.
     pub params: Vec<(BufId, bool)>,
     ops: Vec<SSAOp>,
-    stmts: Vec<Stmt>,
     next_val: u32,
 }
 
 impl Kernel {
-    /// A new kernel with `grid.var` bound to the first fresh value.
+    /// A new kernel with the grid index bound to the first fresh value.
     pub fn new(name: String, grid_bound: usize, block: usize) -> Self {
         let mut k = Kernel {
             name,
             grid: Grid {
                 bound: grid_bound,
-                var: SSARes(0),
-                body: Vec::new(),
+                block: SSABlock::default(),
             },
             block,
             params: Vec::new(),
             ops: Vec::new(),
-            stmts: Vec::new(),
             next_val: 0,
         };
-        k.grid.var = k.fresh_val();
+        let var = k.fresh_val();
+        k.grid.block.operands.push(var);
         k
+    }
+
+    /// The grid index (`blockIdx.x`), the grid block's first operand.
+    pub fn grid_var(&self) -> SSARes {
+        self.grid.block.operands[0]
     }
 
     pub fn fresh_val(&mut self) -> SSARes {
@@ -298,26 +325,8 @@ impl Kernel {
         &self.ops
     }
 
-    pub fn push_stmt(&mut self, stmt: Stmt) -> StmtNode {
-        let id = StmtNode(self.stmts.len() as u32);
-        self.stmts.push(stmt);
-        id
-    }
-
-    pub fn stmt(&self, id: StmtNode) -> &Stmt {
-        &self.stmts[id.0 as usize]
-    }
-
-    pub fn stmt_mut(&mut self, id: StmtNode) -> &mut Stmt {
-        &mut self.stmts[id.0 as usize]
-    }
-
-    pub fn stmts(&self) -> &[Stmt] {
-        &self.stmts
-    }
-
-    pub fn stmts_mut(&mut self) -> &mut [Stmt] {
-        &mut self.stmts
+    pub fn ops_mut(&mut self) -> &mut [SSAOp] {
+        &mut self.ops
     }
 }
 

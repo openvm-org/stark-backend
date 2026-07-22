@@ -13,10 +13,11 @@
 //! terms and cancels `floor` chains — e.g. the composition
 //! `linearize(delinearize(f))` collapses back to `f`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{
-    ir::{NodeId, TypeMap, VarId},
+    ir::{NodeId, VarId},
+    passes::type_infer::TypeMap,
     CompileError,
 };
 
@@ -86,6 +87,21 @@ impl Quast {
                 a.eval(env).div_euclid(*c)
             }
             Quast::Neg(a) => -a.eval(env),
+        }
+    }
+
+    /// Inserts every symbol appearing in the expression into `out`.
+    pub fn syms(&self, out: &mut BTreeSet<VarId>) {
+        match self {
+            Quast::Sym(v) => {
+                out.insert(*v);
+            }
+            Quast::Const(_) => {}
+            Quast::Add(a, b) => {
+                a.syms(out);
+                b.syms(out);
+            }
+            Quast::Mul(a, _) | Quast::FloorDiv(a, _) | Quast::Neg(a) => a.syms(out),
         }
     }
 
@@ -225,6 +241,42 @@ pub trait QuastEmitter {
     fn mul(&mut self, a: Self::Val, b: Self::Val) -> Self::Val;
     fn div(&mut self, a: Self::Val, b: Self::Val) -> Self::Val;
     fn rem(&mut self, a: Self::Val, b: Self::Val) -> Self::Val;
+}
+
+/// [`QuastEmitter`] producing C-style expression strings; symbols resolve
+/// to SSA value names by the `VarId(i) <-> SSARes(i)` convention.
+pub struct CStrEmitter;
+
+impl QuastEmitter for CStrEmitter {
+    type Val = String;
+
+    fn sym(&mut self, v: VarId) -> String {
+        format!("v{}", v.0)
+    }
+
+    fn cst(&mut self, c: u32) -> String {
+        format!("{c}u")
+    }
+
+    fn add(&mut self, a: String, b: String) -> String {
+        format!("({a} + {b})")
+    }
+
+    fn sub(&mut self, a: String, b: String) -> String {
+        format!("({a} - {b})")
+    }
+
+    fn mul(&mut self, a: String, b: String) -> String {
+        format!("({a} * {b})")
+    }
+
+    fn div(&mut self, a: String, b: String) -> String {
+        format!("({a} / {b})")
+    }
+
+    fn rem(&mut self, a: String, b: String) -> String {
+        format!("({a} % {b})")
+    }
 }
 
 /// Emits a normal-form atom: a symbol or a floor division.

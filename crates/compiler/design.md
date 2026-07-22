@@ -217,6 +217,7 @@ Block = (KernelIR+)
 Starting with a `TExpr`:
 1. type inference
 2. perform algebraic rewrites, optimizations 
+2.5 plan scratch buffers
 3. canonicalize to standard form (at most one nested compute)
 4. lower to `KernelIR` (initially attrs are empty)
   - lowers reduce to combination of for and compute
@@ -225,7 +226,8 @@ Starting with a `KernelIR`:
 1. Layout inference, inferring `par_attr` and `alloc_attr`
 2. various optimization passes, such as remove layout 
 3. insert sync 
-4. codegen
+4. plan shared memory
+4. codegen 
 
 
 A `par_attr` is a linear layout mapping physical and sequential indices to the logical index. 
@@ -268,4 +270,5 @@ Now add an optimize layout pass on the backend kernel_ir. It should extract a La
   1. analyze the first write of a shared buffer, if it is a LinearLayout, track it to maybe promote to registers
   2. analyze the subsequent reads of the shared buffer, if it can be expressed via warp shuffles, then keep it in registers
   3. if it cannot, then
+
 

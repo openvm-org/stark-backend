@@ -40,9 +40,21 @@ fn bb(x: u32) -> BabyBear {
 }
 
 /// Compiles `module`, binds inputs/outputs, runs it and returns the outputs.
+/// Dumps both IR levels and the generated CUDA under
+/// `target/ir-dumps/gpu_macro/`.
 fn run_module(module: crypto_compiler::ir::Module, inputs: &[Vec<u32>]) -> Vec<Vec<u32>> {
     let ctx = GpuDeviceCtx::for_current_device().unwrap();
-    let mut km = compile_and_load(module, &CompileOptions::default()).unwrap();
+    let options = CompileOptions {
+        dump_ir: Some(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../target/ir-dumps/gpu_macro"
+            )
+            .into(),
+        ),
+        ..Default::default()
+    };
+    let mut km = compile_and_load(module, &options).unwrap();
     assert_eq!(km.num_inputs(), inputs.len());
 
     let in_bufs: Vec<DeviceBuffer<u32>> = inputs

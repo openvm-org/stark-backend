@@ -3,7 +3,7 @@
 //! [`KernelModule`] that integrates with `openvm-cuda-common` buffers and
 //! streams.
 
-use std::{ffi::c_void, fs, process::Command};
+use std::{ffi::c_void, fs, path::PathBuf, process::Command};
 
 use libloading::Library;
 use openvm_cuda_common::{
@@ -20,6 +20,8 @@ pub struct CompileOptions {
     /// GPU architecture, e.g. `sm_120` or `native`.
     pub arch: String,
     pub extra_nvcc_flags: Vec<String>,
+    /// Directory to write `{name}.hir` / `{name}.kir` IR dumps into.
+    pub dump_ir: Option<PathBuf>,
 }
 
 impl Default for CompileOptions {
@@ -28,6 +30,7 @@ impl Default for CompileOptions {
             nvcc: std::env::var("NVCC").unwrap_or_else(|_| "nvcc".into()),
             arch: std::env::var("CRYPTO_COMPILER_CUDA_ARCH").unwrap_or_else(|_| "native".into()),
             extra_nvcc_flags: Vec::new(),
+            dump_ir: std::env::var_os("CRYPTO_COMPILER_DUMP_IR").map(PathBuf::from),
         }
     }
 }

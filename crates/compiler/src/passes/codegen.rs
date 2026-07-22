@@ -17,23 +17,22 @@
 //!
 //! Every SSA value is a `uint32_t` named `v{n}`; buffers are `b{n}` (global
 //! pointers and shared arrays) or `r{n}` (per-thread register arrays, one
-//! slot per sequential step of the accessing pars). Barriers are not part of
-//! the IR: a `__syncthreads()` is emitted before any par that reads a shared
-//! buffer written since the last barrier, and a sequential loop marks its
-//! body's shared writes dirty up front to cover the back edge.
+//! slot per sequential step of the accessing pars). Barriers are `Sync` ops
+//! placed by `passes::insert_sync`; codegen emits a `__syncthreads()` for
+//! each.
 //!
 //! BabyBear arithmetic operates on the canonical `u32` representation; the
 //! modulus is a compile-time constant so nvcc strength-reduces the `%`.
 
-use std::{collections::BTreeSet, fmt::Write};
+use std::fmt::Write;
 
 use crate::{
     ir::{BinOp, ScalarType, VarId},
     kernel_ir::{
-        Access, AddressSpace, BufId, BufferKind, ElemSSAOp, IndexMap, Kernel, KernelProgram,
-        LinearLayout, SSABlock, SSANode, SSARes, Stmt, StmtNode,
+        Access, BufId, BufferKind, IndexMap, Kernel, KernelProgram, LinearLayout, SSABlock,
+        SSANode, SSAOpCode, SSARes,
     },
-    quast::{Quast, QuastEmitter},
+    quast::{CStrEmitter, Quast},
     CompileError,
 };
 
@@ -56,7 +55,8 @@ static __device__ __forceinline__ uint32_t bb_mul(uint32_t a, uint32_t b) {
 }
 "#;
 
-pub fn generate_cuda(p: &KernelProgram) -> Result<String, CompileError> {
+/// Generates the CUDA C++ translation unit for a [`KernelProgram`].
+pub fn codegen(p: &KernelProgram) -> Result<String, CompileError> {
     let mut s = String::new();
     s.push_str(PRELUDE);
     s.push('\n');
@@ -84,11 +84,10 @@ fn gen_kernel(s: &mut String, p: &KernelProgram, k: &Kernel) -> Result<(), Compi
         .collect::<Vec<_>>()
         .join(", ");
     writeln!(s, "__global__ void {}({params}) {{", k.name).unwrap();
-    if kernel_uses(k, k.grid.var) {
-        writeln!(s, "    const uint32_t {} = blockIdx.x;", val(k.grid.var)).unwrap();
+    if kernel_uses(k, k.grid_var()) {
+        writeln!(s, "    const uint32_t {} = blockIdx.x;", val(k.grid_var())).unwrap();
     }
-    let mut dirty = BTreeSet::new();
-    gen_stmts(s, p, k, &k.grid.body, 1, &mut dirty)?;
+    gen_stmts(s, p, k, &k.grid.block.body, 1)?;
     writeln!(s, "}}").unwrap();
     Ok(())
 }
@@ -96,14 +95,18 @@ fn gen_kernel(s: &mut String, p: &KernelProgram, k: &Kernel) -> Result<(), Compi
 /// Whether the kernel references `res` in any op or access index.
 fn kernel_uses(k: &Kernel, res: SSARes) -> bool {
     let sym = VarId(res.0);
-    k.ops().iter().any(|op| op.operands.contains(&res))
-        || k.stmts().iter().any(|stmt| match stmt {
-            Stmt::Par { reads, writes, .. } => reads.iter().chain(writes).any(|a| match &a.index {
-                IndexMap::Affine { expr, .. } => quast_uses(expr, sym),
-                IndexMap::Linear(_) => false,
-            }),
-            _ => false,
-        })
+    k.ops().iter().any(|op| {
+        op.operands.contains(&res)
+            || match &op.opcode {
+                SSAOpCode::Par { reads, writes, .. } => {
+                    reads.iter().chain(writes).any(|a| match &a.index {
+                        IndexMap::Affine { expr, .. } => quast_uses(expr, sym),
+                        IndexMap::Linear(_) => false,
+                    })
+                }
+                _ => false,
+            }
+    })
 }
 
 fn quast_uses(q: &Quast, v: VarId) -> bool {
@@ -115,26 +118,30 @@ fn quast_uses(q: &Quast, v: VarId) -> bool {
     }
 }
 
+/// Emits a statement-level block body: `Alloc`, `Sync`, sequential `Loop`
+/// and `Par` ops.
 fn gen_stmts(
     s: &mut String,
     p: &KernelProgram,
     k: &Kernel,
-    stmts: &[StmtNode],
+    stmts: &[SSANode],
     depth: usize,
-    dirty: &mut BTreeSet<BufId>,
 ) -> Result<(), CompileError> {
     let pad = "    ".repeat(depth);
     for &sid in stmts {
-        match k.stmt(sid) {
-            Stmt::BufDecl { buf } => {
+        let op = k.op(sid);
+        match &op.opcode {
+            SSAOpCode::Alloc { buf } => {
                 let decl = p.buffer(*buf);
                 match decl.kind {
                     BufferKind::Shared => {
-                        let phys_len = match &decl.layout {
-                            Some(l) if !l.is_identity() => 1usize << l.bases.len(),
-                            _ => decl.len(),
-                        };
-                        writeln!(s, "{pad}__shared__ uint32_t b{}[{phys_len}];", buf.0).unwrap();
+                        writeln!(
+                            s,
+                            "{pad}__shared__ uint32_t b{}[{}];",
+                            buf.0,
+                            decl.phys_len()
+                        )
+                        .unwrap();
                     }
                     BufferKind::Register => {
                         writeln!(s, "{pad}uint32_t r{}[{}];", buf.0, register_slots(k, *buf))
@@ -148,27 +155,22 @@ fn gen_stmts(
                     }
                 }
             }
-            Stmt::Loop { var, bound, body } => {
-                // Mark the body's shared writes dirty up front: iteration
-                // i+1 may read what iteration i wrote.
-                collect_shared_writes(p, k, body, dirty);
-                let v = val(*var);
+            SSAOpCode::Sync => {
+                writeln!(s, "{pad}__syncthreads();").unwrap();
+            }
+            SSAOpCode::Loop { bound } => {
+                let v = val(op.block.operands[0]);
                 writeln!(s, "{pad}for (uint32_t {v} = 0u; {v} < {bound}u; ++{v}) {{").unwrap();
-                gen_stmts(s, p, k, body, depth + 1, dirty)?;
+                gen_stmts(s, p, k, &op.block.body, depth + 1)?;
                 writeln!(s, "{pad}}}").unwrap();
             }
-            Stmt::Par {
+            SSAOpCode::Par {
                 bound,
                 spans_grid,
                 attr,
                 reads,
                 writes,
-                block,
             } => {
-                if reads.iter().any(|a| dirty.contains(&a.buf)) {
-                    writeln!(s, "{pad}__syncthreads();").unwrap();
-                    dirty.clear();
-                }
                 gen_par(
                     s,
                     p,
@@ -178,49 +180,23 @@ fn gen_stmts(
                     attr,
                     reads,
                     writes,
-                    block,
+                    &op.block,
                     depth,
                 )?;
-                for a in writes {
-                    if p.buffer(a.buf).space == AddressSpace::Shared {
-                        dirty.insert(a.buf);
-                    }
-                }
             }
+            other => unreachable!("scalar op {other:?} at statement level"),
         }
     }
     Ok(())
 }
 
-/// Shared buffers written by any par under `stmts`.
-fn collect_shared_writes(
-    p: &KernelProgram,
-    k: &Kernel,
-    stmts: &[StmtNode],
-    out: &mut BTreeSet<BufId>,
-) {
-    for &sid in stmts {
-        match k.stmt(sid) {
-            Stmt::Par { writes, .. } => {
-                for a in writes {
-                    if p.buffer(a.buf).space == AddressSpace::Shared {
-                        out.insert(a.buf);
-                    }
-                }
-            }
-            Stmt::Loop { body, .. } => collect_shared_writes(p, k, body, out),
-            Stmt::BufDecl { .. } => {}
-        }
-    }
-}
-
 /// Register slots a buffer needs per thread: one per sequential step of the
 /// pars accessing it.
 fn register_slots(k: &Kernel, buf: BufId) -> usize {
-    k.stmts()
+    k.ops()
         .iter()
-        .filter_map(|stmt| match stmt {
-            Stmt::Par {
+        .filter_map(|op| match &op.opcode {
+            SSAOpCode::Par {
                 attr,
                 reads,
                 writes,
@@ -348,10 +324,10 @@ fn gen_ops(s: &mut String, k: &Kernel, body: &[SSANode], depth: usize) -> Result
     for &nid in body {
         let op = k.op(nid);
         match &op.opcode {
-            ElemSSAOp::ConstU32(c) | ElemSSAOp::ConstField(c) => {
+            SSAOpCode::ConstU32(c) | SSAOpCode::ConstField(c) => {
                 writeln!(s, "{pad}const uint32_t {} = {c}u;", val(op.results[0])).unwrap();
             }
-            ElemSSAOp::Bin(bop, ty) => {
+            SSAOpCode::Bin(bop, ty) => {
                 let a = val(op.operands[0]);
                 let b = val(op.operands[1]);
                 writeln!(
@@ -362,7 +338,7 @@ fn gen_ops(s: &mut String, k: &Kernel, body: &[SSANode], depth: usize) -> Result
                 )
                 .unwrap();
             }
-            ElemSSAOp::Select => {
+            SSAOpCode::Select => {
                 writeln!(
                     s,
                     "{pad}const uint32_t {} = {} ? {} : {};",
@@ -373,7 +349,7 @@ fn gen_ops(s: &mut String, k: &Kernel, body: &[SSANode], depth: usize) -> Result
                 )
                 .unwrap();
             }
-            ElemSSAOp::Loop { bound } => {
+            SSAOpCode::Loop { bound } => {
                 // The results double as the mutable loop-carried slots.
                 for (i, res) in op.results.iter().enumerate() {
                     writeln!(s, "{pad}uint32_t {} = {};", val(*res), val(op.operands[i])).unwrap();
@@ -398,6 +374,9 @@ fn gen_ops(s: &mut String, k: &Kernel, body: &[SSANode], depth: usize) -> Result
                     writeln!(s, "{pad}    {} = {};", val(op.results[i]), val(*y)).unwrap();
                 }
                 writeln!(s, "{pad}}}").unwrap();
+            }
+            other @ (SSAOpCode::Par { .. } | SSAOpCode::Alloc { .. } | SSAOpCode::Sync) => {
+                unreachable!("statement-level op {other:?} inside a par block")
             }
         }
     }
@@ -456,7 +435,7 @@ fn access_str(
     }
     let logical = match &access.index {
         IndexMap::Linear(ll) => ll_apply_str(ll, &val(vid)),
-        IndexMap::Affine { expr, bounds } => expr.emit(bounds, &mut StrEmitter)?,
+        IndexMap::Affine { expr, bounds } => expr.emit(bounds, &mut CStrEmitter)?,
     };
     Ok(match &decl.layout {
         Some(l) if !l.is_identity() => {
@@ -480,42 +459,6 @@ fn ll_apply_str(layout: &LinearLayout, x: &str) -> String {
         .map(|(i, &b)| format!("((({x} >> {i}) & 1u) * {b}u)"))
         .collect::<Vec<_>>()
         .join(" ^ ")
-}
-
-/// [`QuastEmitter`] producing C expression strings; symbols resolve to SSA
-/// value names by the `VarId(i) <-> SSARes(i)` convention.
-struct StrEmitter;
-
-impl QuastEmitter for StrEmitter {
-    type Val = String;
-
-    fn sym(&mut self, v: VarId) -> String {
-        format!("v{}", v.0)
-    }
-
-    fn cst(&mut self, c: u32) -> String {
-        format!("{c}u")
-    }
-
-    fn add(&mut self, a: String, b: String) -> String {
-        format!("({a} + {b})")
-    }
-
-    fn sub(&mut self, a: String, b: String) -> String {
-        format!("({a} - {b})")
-    }
-
-    fn mul(&mut self, a: String, b: String) -> String {
-        format!("({a} * {b})")
-    }
-
-    fn div(&mut self, a: String, b: String) -> String {
-        format!("({a} / {b})")
-    }
-
-    fn rem(&mut self, a: String, b: String) -> String {
-        format!("({a} % {b})")
-    }
 }
 
 /// C expression for a buffer pointer inside `run`, respecting constness.

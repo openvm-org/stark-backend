@@ -17,10 +17,11 @@
 //! All rewrites preserve types, and the [`TypeMap`] is extended for every
 //! node they create.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::{
-    ir::{infer_types, IRBuilder, Module, Node, NodeId, ScalarType, Type, TypeMap, VarId},
+    ir::{IRBuilder, Module, Node, NodeId, ScalarType, Type, VarId},
+    passes::type_infer::TypeMap,
     quast::{NodeEmitter, Quast, ScatterStore},
     CompileError,
 };
@@ -105,8 +106,10 @@ pub struct Program {
     pub env: HashMap<VarId, CanonValue>,
 }
 
-pub fn canonicalize(module: Module) -> Result<Program, CompileError> {
-    let types = infer_types(&module)?;
+/// Rewrites `module` into canonical form. `types` is the module's typing
+/// info from [`type_infer`](super::type_infer()); the rewrites extend it for
+/// every node they create.
+pub fn canonicalize(module: Module, types: TypeMap) -> Result<Program, CompileError> {
     let Module {
         name,
         mut builder,
@@ -597,6 +600,117 @@ impl CanonCx<'_> {
             m *= k;
             j = t;
         }
+    }
+}
+
+/// Whether `program` is in canonical form (the shape [`canonicalize`]
+/// guarantees): distinct, resolvable non-input outputs; tensor-typed kernel
+/// members matching the result arity; and result/tile bodies that are pure
+/// scalar expressions.
+pub fn is_canonicalized(program: &Program) -> bool {
+    let b = &program.module.builder;
+    if program.outputs.is_empty() {
+        return false;
+    }
+    for (i, r) in program.outputs.iter().enumerate() {
+        if program.outputs[..i].contains(r) {
+            return false;
+        }
+        match *r {
+            TensorRef::Input(_) => return false,
+            TensorRef::Let { let_id, out_idx } => {
+                let Some(k) = program.kernels.get(let_id) else {
+                    return false;
+                };
+                if out_idx >= k.results.len() {
+                    return false;
+                }
+            }
+        }
+    }
+    for ck in &program.kernels {
+        if ck.results.len() != ck.member_types.len()
+            || ck
+                .member_types
+                .iter()
+                .any(|t| !matches!(t, Type::Tensor(..)))
+        {
+            return false;
+        }
+        let mut visited = HashSet::new();
+        let roots = ck
+            .results
+            .iter()
+            .chain(ck.inner_lets.iter().map(|il| &il.result));
+        for r in roots {
+            let scalars: &[NodeId] = match r {
+                ResultExpr::Scalar(n) => std::slice::from_ref(n),
+                ResultExpr::Pack(elems) => elems,
+            };
+            for &n in scalars {
+                if !is_scalar_form(b, program, ck, n, &mut visited) {
+                    return false;
+                }
+            }
+        }
+    }
+    true
+}
+
+/// Whether `id` is a canonical scalar expression: no residual
+/// compute/tuple/proj/pack nodes in scalar positions. An `Index`'s tensor
+/// operand is a tensor reference, not a scalar position, so only its indices
+/// are walked.
+fn is_scalar_form(
+    b: &IRBuilder,
+    program: &Program,
+    ck: &CanonKernel,
+    id: NodeId,
+    visited: &mut HashSet<NodeId>,
+) -> bool {
+    if !visited.insert(id) {
+        return true;
+    }
+    match b.node(id) {
+        Node::ConstU32(_) | Node::ConstField(_) | Node::Input(_) => true,
+        Node::Var(v) => {
+            if let Some(&n) = ck.inline_lets.get(v) {
+                return is_scalar_form(b, program, ck, n, visited);
+            }
+            match program.env.get(v) {
+                Some(CanonValue::Scalar(n)) => is_scalar_form(b, program, ck, *n, visited),
+                Some(CanonValue::Tensors(_)) => false,
+                // Iteration and binder variables are scalar.
+                None => true,
+            }
+        }
+        Node::Bin(_, x, y) => {
+            is_scalar_form(b, program, ck, *x, visited)
+                && is_scalar_form(b, program, ck, *y, visited)
+        }
+        Node::Select {
+            cond,
+            then_val,
+            else_val,
+        } => {
+            is_scalar_form(b, program, ck, *cond, visited)
+                && is_scalar_form(b, program, ck, *then_val, visited)
+                && is_scalar_form(b, program, ck, *else_val, visited)
+        }
+        Node::Index { tensor, indices } => {
+            matches!(
+                b.node(*tensor),
+                Node::Input(_) | Node::Var(_) | Node::Proj(..)
+            ) && indices
+                .iter()
+                .all(|&ix| is_scalar_form(b, program, ck, ix, visited))
+        }
+        Node::Reduce { body, .. } => is_scalar_form(b, program, ck, *body, visited),
+        Node::Let { value, body, .. } => {
+            is_scalar_form(b, program, ck, *value, visited)
+                && is_scalar_form(b, program, ck, *body, visited)
+        }
+        Node::Compute { .. } | Node::Tuple(_) | Node::Proj(..) | Node::Pack(_) => false,
     }
 }
 

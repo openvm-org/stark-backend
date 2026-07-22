@@ -7,33 +7,42 @@
 //!   blocks with per-block `Par` statements.
 //! - Let-bound inner computes become shared-memory buffers written by their own `Par`.
 //! - A par is a primitive compute block: all loads are declared up front as read accesses with
-//!   quasi-affine indices and enter its SSA block as operands; stores leave as yields. Index
-//!   expressions are extracted as [`Quast`]s over the par / grid / loop induction variables, so
-//!   data-dependent indexing is rejected here.
+//!   quasi-affine indices and enter its SSA block as operands; stores leave as yields, mirrored as
+//!   the op's results. Region ops (par, loop) list every value they capture from enclosing scopes
+//!   in their operands. Index expressions are extracted as [`Quast`]s over the par / grid / loop
+//!   induction variables, so data-dependent indexing is rejected here.
 //! - A reduce whose body loads from memory is hoisted out of its par into a register accumulator
 //!   ([`BufferKind::Register`]) initialized by one `Par` and updated by a `Par` inside a sequential
-//!   [`Stmt::Loop`]. A load-free reduce stays inside the par as an [`ElemSSAOp::Loop`].
-//! - Scratch buffers are placed with a liveness-based first-fit allocator.
+//!   [`SSAOpCode::Loop`]. A load-free reduce stays inside the par as a carried-value loop.
+//! - Scratch buffers take the offsets assigned by the [`GlobalScratchPlan`] computed before
+//!   lowering.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use smallvec::{smallvec, SmallVec};
 
 use crate::{
-    canonicalize::{CanonKernel, CanonValue, Program, ResultExpr, TensorRef},
     ir::{BinOp, IRBuilder, Node, NodeId, ReduceOp, ScalarType, Type, VarId},
     kernel_ir::{
-        Access, AddressSpace, BufId, BufferDecl, BufferKind, ElemSSAOp, IndexMap, Kernel,
-        KernelProgram, SSABlock, SSANode, SSAOp, SSARes, Stmt, StmtNode,
+        Access, AddressSpace, BufId, BufferDecl, BufferKind, IndexMap, Kernel, KernelProgram,
+        SSABlock, SSANode, SSAOp, SSAOpCode, SSARes,
+    },
+    passes::{
+        canonicalize::{is_canonicalized, CanonKernel, CanonValue, Program, ResultExpr, TensorRef},
+        plan_global_scratch::GlobalScratchPlan,
+        utils::resolve_tensor_ref,
     },
     quast::{self, Quast, ScatterStore},
     CompileError,
 };
 
 const BLOCK_SIZE: usize = 256;
-const SCRATCH_ALIGN: usize = 256;
 
-pub fn lower(program: &Program) -> Result<KernelProgram, CompileError> {
+pub fn lower_to_kir(
+    program: &Program,
+    scratch: &GlobalScratchPlan,
+) -> Result<KernelProgram, CompileError> {
+    debug_assert!(is_canonicalized(program));
     let b = &program.module.builder;
 
     // --- Buffer declarations -------------------------------------------
@@ -76,7 +85,9 @@ pub fn lower(program: &Program) -> Result<KernelProgram, CompileError> {
             let tref = TensorRef::Let { let_id, out_idx };
             let kind = match output_pos.get(&tref) {
                 Some(&pos) => BufferKind::Output(pos),
-                None => BufferKind::Scratch { offset: 0 },
+                None => BufferKind::Scratch {
+                    offset: scratch.offsets[&tref],
+                },
             };
             let id = BufId(buffers.len() as u32);
             buffers.push(BufferDecl {
@@ -117,7 +128,6 @@ pub fn lower(program: &Program) -> Result<KernelProgram, CompileError> {
 
     // --- Lower kernel bodies -------------------------------------------
     let mut kernels = Vec::new();
-    let mut reads_per_kernel: Vec<BTreeSet<BufId>> = Vec::new();
     let mod_name = sanitize(&program.module.name);
     for (let_id, ck) in program.kernels.iter().enumerate() {
         let flat = ck.inner.is_none() && ck.inner_lets.is_empty();
@@ -138,7 +148,7 @@ pub fn lower(program: &Program) -> Result<KernelProgram, CompileError> {
 
         let k = Kernel::new(format!("{mod_name}_{}", ck.name), grid_bound, block);
         let mut sym_bounds = BTreeMap::new();
-        sym_bounds.insert(VarId(k.grid.var.0), grid_bound as u64);
+        sym_bounds.insert(VarId(k.grid_var().0), grid_bound as u64);
         let mut cx = LowerCx {
             b,
             program,
@@ -147,7 +157,7 @@ pub fn lower(program: &Program) -> Result<KernelProgram, CompileError> {
             shared_bufs: &shared_maps[let_id],
             ck,
             k,
-            sinks: vec![Vec::new()],
+            sinks: vec![SmallVec::new()],
             sym_bounds,
             hoisted: HashMap::new(),
             loads_memo: HashMap::new(),
@@ -166,7 +176,7 @@ pub fn lower(program: &Program) -> Result<KernelProgram, CompileError> {
             writes,
             ..
         } = cx;
-        k.grid.body = sinks.pop().expect("statement sink");
+        k.grid.block.body = sinks.pop().expect("statement sink");
         assert!(sinks.is_empty(), "unbalanced statement scopes");
 
         let mut params: Vec<(BufId, bool)> = Vec::new();
@@ -181,18 +191,14 @@ pub fn lower(program: &Program) -> Result<KernelProgram, CompileError> {
         params.sort();
         k.params = params;
 
-        reads_per_kernel.push(reads);
         kernels.push(k);
     }
-
-    // --- Scratch planning (liveness + first-fit) ------------------------
-    let scratch_bytes = plan_scratch(&mut buffers, &buf_map, program, &reads_per_kernel);
 
     Ok(KernelProgram {
         name: mod_name,
         buffers,
         kernels,
-        scratch_bytes,
+        scratch_bytes: scratch.total_bytes,
         input_bufs,
         output_bufs,
     })
@@ -216,12 +222,12 @@ fn bin_of(op: ReduceOp) -> BinOp {
     }
 }
 
-fn init_const(op: ReduceOp, ty: ScalarType) -> Result<ElemSSAOp, CompileError> {
+fn init_const(op: ReduceOp, ty: ScalarType) -> Result<SSAOpCode, CompileError> {
     match (op, ty) {
-        (ReduceOp::Add, ScalarType::BabyBear) => Ok(ElemSSAOp::ConstField(0)),
-        (ReduceOp::Mul, ScalarType::BabyBear) => Ok(ElemSSAOp::ConstField(1)),
-        (ReduceOp::Add, ScalarType::U32) => Ok(ElemSSAOp::ConstU32(0)),
-        (ReduceOp::Mul, ScalarType::U32) => Ok(ElemSSAOp::ConstU32(1)),
+        (ReduceOp::Add, ScalarType::BabyBear) => Ok(SSAOpCode::ConstField(0)),
+        (ReduceOp::Mul, ScalarType::BabyBear) => Ok(SSAOpCode::ConstField(1)),
+        (ReduceOp::Add, ScalarType::U32) => Ok(SSAOpCode::ConstU32(0)),
+        (ReduceOp::Mul, ScalarType::U32) => Ok(SSAOpCode::ConstU32(1)),
         (_, ScalarType::Bool) => Err(CompileError::Lower("cannot reduce over Bool".into())),
     }
 }
@@ -240,6 +246,58 @@ fn store_index(scatter: Option<&ScatterStore>, base: &Quast, k: usize, l: usize)
     }
 }
 
+/// The values a region op captures from enclosing scopes: uses of its block
+/// (and nested blocks) plus its access-index symbols, minus everything the
+/// region defines. Sorted by id.
+fn region_captures(k: &Kernel, opcode: &SSAOpCode, block: &SSABlock) -> SmallVec<[SSARes; 2]> {
+    let mut defined = HashSet::new();
+    let mut free = BTreeSet::new();
+    collect_free(k, block, &mut defined, &mut free);
+    collect_access_syms(opcode, &defined, &mut free);
+    free.into_iter().collect()
+}
+
+fn collect_free(
+    k: &Kernel,
+    block: &SSABlock,
+    defined: &mut HashSet<SSARes>,
+    free: &mut BTreeSet<SSARes>,
+) {
+    defined.extend(block.operands.iter().copied());
+    for &id in &block.body {
+        let op = k.op(id);
+        for &u in &op.operands {
+            if !defined.contains(&u) {
+                free.insert(u);
+            }
+        }
+        collect_free(k, &op.block, defined, free);
+        collect_access_syms(&op.opcode, defined, free);
+        defined.extend(op.results.iter().copied());
+    }
+    for &y in &block.yields {
+        if !defined.contains(&y) {
+            free.insert(y);
+        }
+    }
+}
+
+/// Access-index symbols of a par not defined within it (the par's own index
+/// is; the grid index and loop induction variables are not).
+fn collect_access_syms(opcode: &SSAOpCode, defined: &HashSet<SSARes>, free: &mut BTreeSet<SSARes>) {
+    if let SSAOpCode::Par { reads, writes, .. } = opcode {
+        let mut syms = BTreeSet::new();
+        for a in reads.iter().chain(writes) {
+            a.index_syms(&mut syms);
+        }
+        for v in syms {
+            if !defined.contains(&v) {
+                free.insert(v);
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Kernel body emission
 // ---------------------------------------------------------------------------
@@ -253,10 +311,10 @@ struct LowerCx<'a> {
     shared_bufs: &'a HashMap<VarId, BufId>,
     ck: &'a CanonKernel,
     k: Kernel,
-    /// Stack of statement sinks; the top receives new statements.
-    sinks: Vec<Vec<StmtNode>>,
+    /// Stack of statement-level op sinks; the top receives new ops.
+    sinks: Vec<SmallVec<[SSANode; 8]>>,
     /// Bounds of the kernel-level values usable as index symbols (grid var,
-    /// par indices, `Stmt::Loop` induction variables), by the
+    /// par indices, sequential-loop induction variables), by the
     /// `VarId(i) <-> SSARes(i)` convention.
     sym_bounds: BTreeMap<VarId, u64>,
     /// Register accumulator per hoisted reduce node.
@@ -266,7 +324,7 @@ struct LowerCx<'a> {
     /// is exponential: every `Var` occurrence re-descends into its (shared)
     /// let-bound value.
     hoist_seen: HashSet<NodeId>,
-    /// `Stmt::Loop` induction variables of enclosing hoisted reduces.
+    /// Sequential-loop induction variables of enclosing hoisted reduces.
     loop_vars: HashMap<VarId, SSARes>,
     reads: BTreeSet<BufId>,
     writes: BTreeSet<BufId>,
@@ -294,7 +352,7 @@ impl<'a> LowerCx<'a> {
         // Grid kernel: outer = blockIdx.x, per-block pars.
         for il in &ck.inner_lets {
             let buf = self.shared_bufs[&il.var];
-            self.push_stmt(Stmt::BufDecl { buf });
+            self.push_alloc(buf);
             self.hoist_result_reduces(&il.result, il.bound, Some(il.iter_var))?;
             self.build_par(il.bound, Some(il.iter_var), |bx| {
                 let base = Quast::sym(VarId(bx.vid.0));
@@ -302,7 +360,7 @@ impl<'a> LowerCx<'a> {
             })?;
         }
 
-        let g = self.k.grid.var;
+        let g = self.k.grid_var();
         match ck.inner {
             Some((m, j)) => {
                 for result in &ck.results {
@@ -329,9 +387,19 @@ impl<'a> LowerCx<'a> {
         }
     }
 
-    fn push_stmt(&mut self, stmt: Stmt) {
-        let id = self.k.push_stmt(stmt);
+    /// Pushes a statement-level op into the current sink.
+    fn push_stmt(&mut self, op: SSAOp) {
+        let id = self.k.push_op(op);
         self.sinks.last_mut().expect("statement sink").push(id);
+    }
+
+    fn push_alloc(&mut self, buf: BufId) {
+        self.push_stmt(SSAOp {
+            operands: smallvec![],
+            results: smallvec![],
+            opcode: SSAOpCode::Alloc { buf },
+            block: SSABlock::default(),
+        });
     }
 
     /// Emits `f` as the body of a new `Par` statement over `bound` logical
@@ -373,17 +441,27 @@ impl<'a> LowerCx<'a> {
         } = bx;
         let body = bodies.pop().expect("par body");
         assert!(bodies.is_empty(), "unbalanced SSA blocks");
-        self.push_stmt(Stmt::Par {
+        let opcode = SSAOpCode::Par {
             bound,
             spans_grid,
             attr: None,
             reads,
             writes,
-            block: SSABlock {
-                operands,
-                body,
-                yields,
-            },
+        };
+        let block = SSABlock {
+            operands,
+            body,
+            yields,
+        };
+        let captures = region_captures(&self.k, &opcode, &block);
+        let results = (0..block.yields.len())
+            .map(|_| self.k.fresh_val())
+            .collect();
+        self.push_stmt(SSAOp {
+            operands: captures,
+            results,
+            opcode,
+            block,
         });
         self.sym_bounds.remove(&VarId(vid.0));
         Ok(())
@@ -463,8 +541,8 @@ impl<'a> LowerCx<'a> {
 
     /// Emits the hoisted pattern for a reduce with loads: a register
     /// accumulator over the par domain, an init par, and a sequential
-    /// [`Stmt::Loop`] around an accumulate par (which re-binds `par_var` so
-    /// the body sees the same logical index as the consumer par).
+    /// [`SSAOpCode::Loop`] around an accumulate par (which re-binds `par_var`
+    /// so the body sees the same logical index as the consumer par).
     #[allow(clippy::too_many_arguments)]
     fn emit_hoisted_reduce(
         &mut self,
@@ -488,7 +566,7 @@ impl<'a> LowerCx<'a> {
             space: AddressSpace::Register,
             layout: None,
         });
-        self.push_stmt(Stmt::BufDecl { buf: acc });
+        self.push_alloc(acc);
 
         self.build_par(par_bound, None, |bx| {
             let v = bx.push_elem(init, smallvec![]);
@@ -499,7 +577,7 @@ impl<'a> LowerCx<'a> {
         let r = self.k.fresh_val();
         self.loop_vars.insert(var, r);
         self.sym_bounds.insert(VarId(r.0), bound as u64);
-        self.sinks.push(Vec::new());
+        self.sinks.push(SmallVec::new());
         self.hoist_reduces(body, par_bound, par_var)?;
         self.build_par(par_bound, par_var, |bx| {
             let idx = Quast::sym(VarId(bx.vid.0));
@@ -510,10 +588,18 @@ impl<'a> LowerCx<'a> {
             Ok(())
         })?;
         let body_stmts = self.sinks.pop().expect("loop sink");
-        self.push_stmt(Stmt::Loop {
-            var: r,
-            bound,
+        let opcode = SSAOpCode::Loop { bound };
+        let block = SSABlock {
+            operands: smallvec![r],
             body: body_stmts,
+            yields: smallvec![],
+        };
+        let captures = region_captures(&self.k, &opcode, &block);
+        self.push_stmt(SSAOp {
+            operands: captures,
+            results: smallvec![],
+            opcode,
+            block,
         });
 
         self.loop_vars.remove(&var);
@@ -596,7 +682,7 @@ struct BlockCx<'x, 'a> {
 }
 
 impl BlockCx<'_, '_> {
-    fn push_elem(&mut self, opcode: ElemSSAOp, operands: SmallVec<[SSARes; 2]>) -> SSARes {
+    fn push_elem(&mut self, opcode: SSAOpCode, operands: SmallVec<[SSARes; 2]>) -> SSARes {
         let res = self.cx.k.fresh_val();
         let node = self.cx.k.push_op(SSAOp {
             operands,
@@ -609,7 +695,7 @@ impl BlockCx<'_, '_> {
     }
 
     fn bin(&mut self, op: BinOp, ty: ScalarType, a: SSARes, b: SSARes) -> SSARes {
-        self.push_elem(ElemSSAOp::Bin(op, ty), smallvec![a, b])
+        self.push_elem(SSAOpCode::Bin(op, ty), smallvec![a, b])
     }
 
     /// Declares a read access and returns the block operand holding the
@@ -714,7 +800,7 @@ impl BlockCx<'_, '_> {
                     return Ok(if self.cx.flat {
                         self.vid
                     } else {
-                        self.cx.k.grid.var
+                        self.cx.k.grid_var()
                     });
                 } else if let Some(&val) = self.var_vals.get(&v) {
                     return Ok(val);
@@ -732,8 +818,8 @@ impl BlockCx<'_, '_> {
                     )));
                 }
             }
-            Node::ConstU32(c) => self.push_elem(ElemSSAOp::ConstU32(c), smallvec![]),
-            Node::ConstField(c) => self.push_elem(ElemSSAOp::ConstField(c), smallvec![]),
+            Node::ConstU32(c) => self.push_elem(SSAOpCode::ConstU32(c), smallvec![]),
+            Node::ConstField(c) => self.push_elem(SSAOpCode::ConstField(c), smallvec![]),
             Node::Bin(op, x, y) => {
                 let ty = self.cx.scalar_ty(x)?;
                 let lhs = self.emit(x)?;
@@ -748,7 +834,7 @@ impl BlockCx<'_, '_> {
                 let c = self.emit(cond)?;
                 let t = self.emit(then_val)?;
                 let e = self.emit(else_val)?;
-                self.push_elem(ElemSSAOp::Select, smallvec![c, t, e])
+                self.push_elem(SSAOpCode::Select, smallvec![c, t, e])
             }
             Node::Index { tensor, indices } => {
                 let shared = match self.cx.b.node(tensor) {
@@ -841,15 +927,21 @@ impl BlockCx<'_, '_> {
         self.var_vals.remove(&var);
 
         let result = self.cx.k.fresh_val();
+        let opcode = SSAOpCode::Loop { bound };
+        let block = SSABlock {
+            operands: smallvec![iv, carried],
+            body: loop_body,
+            yields: smallvec![combined],
+        };
+        // The carried init comes first (`operands[i]` initializes
+        // `results[i]`), the captures after.
+        let mut operands: SmallVec<[SSARes; 2]> = smallvec![init];
+        operands.extend(region_captures(&self.cx.k, &opcode, &block));
         let node = self.cx.k.push_op(SSAOp {
-            operands: smallvec![init],
+            operands,
             results: smallvec![result],
-            opcode: ElemSSAOp::Loop { bound },
-            block: SSABlock {
-                operands: smallvec![iv, carried],
-                body: loop_body,
-                yields: smallvec![combined],
-            },
+            opcode,
+            block,
         });
         self.bodies.last_mut().expect("op sink").push(node);
         Ok(result)
@@ -865,7 +957,7 @@ impl BlockCx<'_, '_> {
                     Ok(if self.cx.flat {
                         Quast::sym(VarId(self.vid.0))
                     } else {
-                        Quast::sym(VarId(self.cx.k.grid.var.0))
+                        Quast::sym(VarId(self.cx.k.grid_var().0))
                     })
                 } else if self.par_var == Some(v) {
                     Ok(Quast::sym(VarId(self.vid.0)))
@@ -962,142 +1054,92 @@ impl BlockCx<'_, '_> {
     }
 }
 
-/// Resolves a tensor-typed HIR expression to a top-level tensor reference.
-fn resolve_tensor_ref(
-    b: &IRBuilder,
-    env: &HashMap<VarId, CanonValue>,
-    id: NodeId,
-) -> Result<TensorRef, CompileError> {
-    match b.node(id) {
-        Node::Input(k) => Ok(TensorRef::Input(*k)),
-        Node::Var(v) => match env.get(v) {
-            Some(CanonValue::Tensors(refs)) if refs.len() == 1 => Ok(refs[0]),
-            Some(CanonValue::Tensors(_)) => Err(CompileError::Lower(
-                "tuple-valued variable used where a single tensor is expected".into(),
-            )),
-            Some(CanonValue::Scalar(_)) => Err(CompileError::Lower(
-                "scalar variable indexed as a tensor".into(),
-            )),
-            None => Err(CompileError::Lower(format!(
-                "indexed variable {v:?} is not bound to a top-level tensor; \
-                 inner tensors are not supported yet"
-            ))),
-        },
-        Node::Proj(t, k) => match b.node(*t) {
-            Node::Var(v) => match env.get(v) {
-                Some(CanonValue::Tensors(refs)) => refs.get(*k).copied().ok_or_else(|| {
-                    CompileError::Lower(format!("projection index {k} out of bounds"))
-                }),
-                _ => Err(CompileError::Lower(
-                    "projection from a non-tuple variable".into(),
-                )),
-            },
-            Node::Tuple(elems) => {
-                let e = *elems
-                    .get(*k)
-                    .ok_or_else(|| CompileError::Lower(format!("projection index {k} OOB")))?;
-                resolve_tensor_ref(b, env, e)
-            }
-            _ => Err(CompileError::Lower(
-                "projection from an unsupported expression".into(),
-            )),
-        },
-        other => Err(CompileError::Lower(format!(
-            "cannot index expression {other:?}; only module inputs and \
-             top-level let results can be indexed"
-        ))),
-    }
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::passes::{
+        layout_infer,
+        utils::test_util::{lowered, stmt_kinds},
+        verify,
+    };
 
-// ---------------------------------------------------------------------------
-// Scratch planning
-// ---------------------------------------------------------------------------
+    /// A reduce whose body loads from memory is hoisted out of its par: a
+    /// register accumulator, an init par, a sequential loop around an
+    /// accumulate par, and the consumer par reading the accumulator.
+    #[test]
+    fn reduce_with_loads_hoists_to_register_loop() {
+        let (n, k) = (8usize, 4usize);
+        let mut b = IRBuilder::new();
+        let a = b.input("a", ScalarType::BabyBear, vec![k * n]);
+        let body = b.compute(n, |b, i| {
+            b.reduce(ReduceOp::Add, k, |b, j| {
+                let nc = b.const_u32(n as u32);
+                let base = b.mul(j, nc);
+                let ix = b.add(base, i);
+                b.index(a, &[ix])
+            })
+        });
+        let module = b.finish("colsum", body);
 
-/// Assigns scratch offsets with an interval-liveness first-fit allocator and
-/// returns the total scratch size in bytes. A scratch buffer is live from the
-/// kernel that writes it through the last kernel that reads it.
-fn plan_scratch(
-    buffers: &mut [BufferDecl],
-    buf_map: &HashMap<TensorRef, BufId>,
-    program: &Program,
-    reads_per_kernel: &[BTreeSet<BufId>],
-) -> usize {
-    // def kernel and last read per scratch buffer
-    let mut intervals: BTreeMap<BufId, (usize, usize)> = BTreeMap::new();
-    for (let_id, kernel) in program.kernels.iter().enumerate() {
-        for out_idx in 0..kernel.results.len() {
-            let buf = buf_map[&TensorRef::Let { let_id, out_idx }];
-            if matches!(buffers[buf.0 as usize].kind, BufferKind::Scratch { .. }) {
-                intervals.insert(buf, (let_id, let_id));
-            }
-        }
-    }
-    for (k_idx, reads) in reads_per_kernel.iter().enumerate() {
-        for buf in reads {
-            if let Some(iv) = intervals.get_mut(buf) {
-                iv.1 = iv.1.max(k_idx);
-            }
-        }
+        let mut kprog = lowered(module);
+        layout_infer(&mut kprog);
+        verify(&kprog).unwrap();
+
+        assert_eq!(kprog.kernels.len(), 1);
+        let kernel = &kprog.kernels[0];
+        assert_eq!(stmt_kinds(kernel), ["alloc", "par", "loop", "par"]);
+
+        let regs: Vec<_> = kprog
+            .buffers
+            .iter()
+            .filter(|b| b.kind == BufferKind::Register)
+            .collect();
+        assert_eq!(regs.len(), 1);
+        assert_eq!(regs[0].shape, vec![n]);
+
+        let loop_id = kernel.grid.block.body[2];
+        let loop_op = kernel.op(loop_id);
+        let SSAOpCode::Loop { bound } = loop_op.opcode else {
+            panic!("expected loop");
+        };
+        assert_eq!(bound, k);
+        assert_eq!(loop_op.block.body.len(), 1);
+        // The accumulate par captures the loop's induction variable; the
+        // loop itself captures nothing beyond it.
+        assert!(loop_op.operands.is_empty());
+        let inner = kernel.op(loop_op.block.body[0]);
+        assert!(matches!(inner.opcode, SSAOpCode::Par { .. }));
+        assert_eq!(inner.operands.as_slice(), &loop_op.block.operands[..1]);
     }
 
-    let mut free: Vec<(usize, usize)> = Vec::new(); // (offset, size), sorted
-    let mut active: Vec<(usize, usize, usize)> = Vec::new(); // (end, offset, size)
-    let mut high = 0usize;
+    /// A load-free reduce lowers to a loop-carried `scf.for` inside the
+    /// par — accepted as primitive — whose operands are the carried init
+    /// followed by the captured par index.
+    #[test]
+    fn load_free_reduce_stays_inline_and_verifies() {
+        let (n, m) = (8usize, 4usize);
+        let mut b = IRBuilder::new();
+        let body = b.compute(n, |b, i| b.reduce(ReduceOp::Add, m, |b, j| b.mul(i, j)));
+        let module = b.finish("triangle", body);
 
-    let mut by_def: BTreeMap<usize, Vec<BufId>> = BTreeMap::new();
-    for (&buf, &(def, _)) in &intervals {
-        by_def.entry(def).or_default().push(buf);
-    }
+        let mut kprog = lowered(module);
+        layout_infer(&mut kprog);
+        verify(&kprog).unwrap();
 
-    for (&def, bufs) in &by_def {
-        // Release allocations that died before this kernel.
-        let mut still_active = Vec::new();
-        for (end, offset, size) in active.drain(..) {
-            if end < def {
-                free_insert(&mut free, offset, size);
-            } else {
-                still_active.push((end, offset, size));
-            }
-        }
-        active = still_active;
-
-        for &buf in bufs {
-            let size = buffers[buf.0 as usize]
-                .size_bytes()
-                .next_multiple_of(SCRATCH_ALIGN);
-            let offset = match free.iter().position(|&(_, hole_size)| hole_size >= size) {
-                Some(i) => {
-                    let (off, hole_size) = free[i];
-                    if hole_size == size {
-                        free.remove(i);
-                    } else {
-                        free[i] = (off + size, hole_size - size);
-                    }
-                    off
-                }
-                None => {
-                    let off = high;
-                    high += size;
-                    off
-                }
-            };
-            buffers[buf.0 as usize].kind = BufferKind::Scratch { offset };
-            active.push((intervals[&buf].1, offset, size));
-        }
-    }
-    high
-}
-
-fn free_insert(free: &mut Vec<(usize, usize)>, offset: usize, size: usize) {
-    let pos = free.partition_point(|&(o, _)| o < offset);
-    free.insert(pos, (offset, size));
-    // Coalesce with the next hole, then with the previous one.
-    if pos + 1 < free.len() && free[pos].0 + free[pos].1 == free[pos + 1].0 {
-        free[pos].1 += free[pos + 1].1;
-        free.remove(pos + 1);
-    }
-    if pos > 0 && free[pos - 1].0 + free[pos - 1].1 == free[pos].0 {
-        free[pos - 1].1 += free[pos].1;
-        free.remove(pos);
+        let kernel = &kprog.kernels[0];
+        assert_eq!(stmt_kinds(kernel), ["par"]);
+        let par = kernel.op(kernel.grid.block.body[0]);
+        let par_vid = par.block.operands[0];
+        let sloop = par
+            .block
+            .body
+            .iter()
+            .map(|&id| kernel.op(id))
+            .find(|op| matches!(op.opcode, SSAOpCode::Loop { .. }))
+            .expect("inline scf.for");
+        assert_eq!(sloop.results.len(), 1);
+        assert_eq!(sloop.block.operands.len(), 2);
+        assert_eq!(sloop.operands.len(), 2);
+        assert_eq!(sloop.operands[1], par_vid);
     }
 }
