@@ -4,47 +4,135 @@ use std::collections::HashMap;
 
 use crate::kernel_ir::{BufId, BufferKind, Kernel, KernelProgram, SSANode, SSAOpCode};
 
-/// Packed placement of shared buffers within each kernel's shared-memory
-/// allocation, in alloc order (mirroring the declaration order codegen
-/// emits).
+/// Liveness-based placement of shared buffers within each kernel's shared-
+/// memory allocation: buffers whose live ranges do not overlap share the
+/// same byte offset, so the peak footprint equals the maximum concurrently-
+/// live shared bytes.
 pub struct SharedMemPlan {
     /// Byte offset of each shared buffer within its kernel's allocation.
     pub offsets: HashMap<BufId, usize>,
-    /// Total shared bytes of each kernel, indexed like
+    /// Peak concurrent shared bytes of each kernel, indexed like
     /// [`KernelProgram::kernels`].
     pub per_kernel: Vec<usize>,
 }
 
-/// Lays out each kernel's shared buffers back to back in alloc order.
-pub fn plan_shared_mem(p: &KernelProgram) -> SharedMemPlan {
+/// `(buf, alloc_pos, last_use_pos, size_bytes)` intervals sorted by
+/// `alloc_pos`.
+type Interval = (BufId, usize, usize, usize);
+
+/// Records the program-order range in which each shared buffer's memory is
+/// in use: an interval starts at its first write (`Par` store or
+/// `ConvertLayout` dst) and extends to its last read or write; the `Alloc`
+/// itself is only a pointer declaration, so buffers whose writes are
+/// separated by another buffer's whole lifetime can share the same slot.
+/// Accesses inside a loop are pinned to the loop's end so the buffer
+/// survives every iteration.
+fn compute_liveness(p: &KernelProgram, k: &Kernel) -> Vec<Interval> {
+    fn note(
+        p: &KernelProgram,
+        buf: BufId,
+        at: usize,
+        write: bool,
+        ranges: &mut HashMap<BufId, (Option<usize>, usize)>,
+    ) {
+        if p.buffer(buf).kind != BufferKind::Shared {
+            return;
+        }
+        let r = ranges.entry(buf).or_insert((None, at));
+        if write && r.0.is_none() {
+            r.0 = Some(at);
+        }
+        r.1 = r.1.max(at);
+    }
     fn walk(
         p: &KernelProgram,
         k: &Kernel,
         stmts: &[SSANode],
-        total: &mut usize,
-        offsets: &mut HashMap<BufId, usize>,
+        pos: &mut usize,
+        ranges: &mut HashMap<BufId, (Option<usize>, usize)>,
     ) {
         for &sid in stmts {
             let op = k.op(sid);
+            let at = *pos;
+            *pos += 1;
             match &op.opcode {
-                SSAOpCode::Alloc { buf } => {
-                    let decl = p.buffer(*buf);
-                    if decl.kind == BufferKind::Shared {
-                        offsets.insert(*buf, *total);
-                        *total += decl.phys_len() * 4;
+                SSAOpCode::Alloc { .. } | SSAOpCode::Sync => {}
+                SSAOpCode::ConvertLayout { dst, src, .. } => {
+                    note(p, *dst, at, true, ranges);
+                    note(p, *src, at, false, ranges);
+                }
+                SSAOpCode::Par { reads, writes, .. } => {
+                    for a in reads.iter() {
+                        note(p, a.buf, at, false, ranges);
+                    }
+                    for a in writes.iter() {
+                        note(p, a.buf, at, true, ranges);
                     }
                 }
-                SSAOpCode::Loop { .. } => walk(p, k, &op.block.body, total, offsets),
+                SSAOpCode::Loop { .. } => {
+                    let start = *pos;
+                    walk(p, k, &op.block.body, pos, ranges);
+                    let end = *pos - 1;
+                    for r in ranges.values_mut() {
+                        if r.1 >= start {
+                            r.1 = r.1.max(end);
+                        }
+                    }
+                }
                 _ => {}
             }
         }
     }
+    let mut ranges: HashMap<BufId, (Option<usize>, usize)> = HashMap::new();
+    let mut pos = 0usize;
+    walk(p, k, &k.grid.block.body, &mut pos, &mut ranges);
+
+    let mut intervals: Vec<Interval> = ranges
+        .into_iter()
+        .filter_map(|(buf, (start, end))| {
+            start.map(|s| (buf, s, end, p.buffer(buf).phys_len() * 4))
+        })
+        .collect();
+    intervals.sort_by_key(|&(_, start, _, _)| start);
+    intervals
+}
+
+/// Assigns each buffer the smallest byte offset such that its live range
+/// does not overlap any other buffer currently occupying that region —
+/// standard first-fit interval graph coloring for offline linear scan.
+fn assign_offsets(intervals: &[Interval]) -> (HashMap<BufId, usize>, usize) {
+    let mut offsets: HashMap<BufId, usize> = HashMap::new();
+    // Active buffers as (offset, size, end_pos), sorted by offset.
+    let mut active: Vec<(usize, usize, usize)> = Vec::new();
+    let mut peak = 0usize;
+    for &(buf, start, end, size) in intervals {
+        active.retain(|&(_, _, e)| e >= start);
+        active.sort_by_key(|&(o, _, _)| o);
+        let mut cursor = 0usize;
+        let mut chosen = None;
+        for &(o, sz, _) in &active {
+            if o >= cursor + size {
+                chosen = Some(cursor);
+                break;
+            }
+            cursor = cursor.max(o + sz);
+        }
+        let offset = chosen.unwrap_or(cursor);
+        offsets.insert(buf, offset);
+        active.push((offset, size, end));
+        peak = peak.max(offset + size);
+    }
+    (offsets, peak)
+}
+
+pub fn plan_shared_mem(p: &KernelProgram) -> SharedMemPlan {
     let mut offsets = HashMap::new();
     let mut per_kernel = Vec::with_capacity(p.kernels.len());
     for k in &p.kernels {
-        let mut total = 0;
-        walk(p, k, &k.grid.block.body, &mut total, &mut offsets);
-        per_kernel.push(total);
+        let intervals = compute_liveness(p, k);
+        let (kern_offsets, peak) = assign_offsets(&intervals);
+        offsets.extend(kern_offsets);
+        per_kernel.push(peak);
     }
     SharedMemPlan {
         offsets,

@@ -25,14 +25,14 @@ use crate::{
     ir::{BinOp, IRBuilder, Node, NodeId, ReduceOp, ScalarType, Type, VarId},
     kernel_ir::{
         Access, AddressSpace, BufId, BufferDecl, BufferKind, IndexMap, Kernel, KernelProgram,
-        SSABlock, SSANode, SSAOp, SSAOpCode, SSARes,
+        ParAttr, SSABlock, SSANode, SSAOp, SSAOpCode, SSARes,
     },
     passes::{
         canonicalize::{is_canonicalized, CanonKernel, CanonValue, Program, ResultExpr, TensorRef},
         plan_global_scratch::GlobalScratchPlan,
         utils::resolve_tensor_ref,
     },
-    quast::{self, Quast, ScatterStore},
+    quast::{self, ParSpec, Quast, ScatterStore},
     CompileError,
 };
 
@@ -130,10 +130,17 @@ pub fn lower_to_kir(
     let mut kernels = Vec::new();
     let mod_name = sanitize(&program.module.name);
     for (let_id, ck) in program.kernels.iter().enumerate() {
+        if let Some(t) = ck.threads {
+            if !t.is_power_of_two() || t > 1024 {
+                return Err(CompileError::Lower(format!(
+                    "#[grid(threads = {t})] must be a power of two in 1..=1024"
+                )));
+            }
+        }
         let flat = ck.inner.is_none() && ck.inner_lets.is_empty();
         let (grid_bound, block) = if flat {
             let n = ck.outer_bound;
-            let block = n.min(BLOCK_SIZE);
+            let block = ck.threads.unwrap_or_else(|| n.min(BLOCK_SIZE));
             (n.div_ceil(block), block)
         } else {
             let max_par = ck
@@ -143,7 +150,8 @@ pub fn lower_to_kir(
                 .chain(ck.inner.map(|(m, _)| m))
                 .max()
                 .unwrap_or(1);
-            (ck.outer_bound, max_par.min(BLOCK_SIZE))
+            let block = ck.threads.unwrap_or_else(|| max_par.min(BLOCK_SIZE));
+            (ck.outer_bound, block)
         };
 
         let k = Kernel::new(format!("{mod_name}_{}", ck.name), grid_bound, block);
@@ -166,6 +174,7 @@ pub fn lower_to_kir(
             reads: BTreeSet::new(),
             writes: BTreeSet::new(),
             flat,
+            cur_spec: None,
         };
         cx.emit_kernel(let_id)?;
 
@@ -330,6 +339,9 @@ struct LowerCx<'a> {
     writes: BTreeSet<BufId>,
     /// Flat kernel: every par spans the grid.
     flat: bool,
+    /// `#[par]` spec of the compute currently being lowered; applied to every
+    /// par built over its domain (including hoisted-reduce helper pars).
+    cur_spec: Option<ParSpec>,
 }
 
 impl<'a> LowerCx<'a> {
@@ -353,16 +365,19 @@ impl<'a> LowerCx<'a> {
         for il in &ck.inner_lets {
             let buf = self.shared_bufs[&il.var];
             self.push_alloc(buf);
+            self.cur_spec = il.par.clone();
             self.hoist_result_reduces(&il.result, il.bound, Some(il.iter_var))?;
             self.build_par(il.bound, Some(il.iter_var), |bx| {
                 let base = Quast::sym(VarId(bx.vid.0));
                 bx.store_result(buf, &base, &il.result, il.scatter.as_ref())
             })?;
+            self.cur_spec = None;
         }
 
         let g = self.k.grid_var();
         match ck.inner {
             Some((m, j)) => {
+                self.cur_spec = ck.inner_par.clone();
                 for result in &ck.results {
                     self.hoist_result_reduces(result, m, Some(j))?;
                 }
@@ -402,12 +417,41 @@ impl<'a> LowerCx<'a> {
         });
     }
 
+    /// Converts the `#[par]` spec into a [`ParAttr`] once the block size is
+    /// fixed: `thread < block`, `seq < bound / block`.
+    fn spec_attr(&self, spec: &ParSpec, bound: usize) -> Result<ParAttr, CompileError> {
+        let block = self.k.block;
+        if !bound.is_power_of_two() || !block.is_power_of_two() || bound < block {
+            return Err(CompileError::Lower(format!(
+                "#[par] compute bound {bound} must be a power-of-two multiple of the \
+                 block size {block}"
+            )));
+        }
+        let seq_size = bound / block;
+        let bounds = BTreeMap::from([(spec.thread, block as u64), (spec.seq, seq_size as u64)]);
+        let layout = spec.expr.to_linear_layout(&bounds).ok_or_else(|| {
+            CompileError::Lower(format!(
+                "#[par] map is not XOR-linear over thread < {block}, seq < {seq_size}"
+            ))
+        })?;
+        if layout.bases.len() != bound.trailing_zeros() as usize || layout.inverse().is_none() {
+            return Err(CompileError::Lower(
+                "#[par] map must be a bijection on the compute domain".into(),
+            ));
+        }
+        Ok(ParAttr { seq_size, layout })
+    }
+
     /// Emits `f` as the body of a new `Par` statement over `bound` logical
     /// indices, binding `var` (if given) to the par index.
     fn build_par<F>(&mut self, bound: usize, var: Option<VarId>, f: F) -> Result<(), CompileError>
     where
         F: FnOnce(&mut BlockCx<'_, 'a>) -> Result<(), CompileError>,
     {
+        let attr = match &self.cur_spec {
+            Some(spec) => Some(self.spec_attr(spec, bound)?),
+            None => None,
+        };
         let vid = self.k.fresh_val();
         self.sym_bounds.insert(VarId(vid.0), bound as u64);
         let spans_grid = self.flat;
@@ -444,7 +488,7 @@ impl<'a> LowerCx<'a> {
         let opcode = SSAOpCode::Par {
             bound,
             spans_grid,
-            attr: None,
+            attr,
             reads,
             writes,
         };
@@ -1057,10 +1101,13 @@ impl BlockCx<'_, '_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::passes::{
-        layout_infer,
-        utils::test_util::{lowered, stmt_kinds},
-        verify,
+    use crate::{
+        ir::Module,
+        passes::{
+            canonicalize, layout_infer, plan_global_scratch, type_infer,
+            utils::test_util::{lowered, stmt_kinds},
+            verify,
+        },
     };
 
     /// A reduce whose body loads from memory is hoisted out of its par: a
@@ -1141,5 +1188,131 @@ mod tests {
         assert_eq!(sloop.block.operands.len(), 2);
         assert_eq!(sloop.operands.len(), 2);
         assert_eq!(sloop.operands[1], par_vid);
+    }
+
+    fn lower_result(module: Module) -> Result<KernelProgram, CompileError> {
+        let types = type_infer(&module).unwrap();
+        let program = canonicalize(module, types).unwrap();
+        let scratch = plan_global_scratch(&program).unwrap();
+        lower_to_kir(&program, &scratch)
+    }
+
+    /// `#[grid(threads = 32)]` fixes the block size and `#[par((t, s) -> ...)]`
+    /// lowers to a `ParAttr` mapping `x = s * block + t` to the logical index;
+    /// `layout_infer` must not overwrite it with the identity.
+    #[test]
+    fn par_spec_lowers_to_par_attr() {
+        let mut b = IRBuilder::new();
+        let a = b.input("a", ScalarType::BabyBear, vec![512]);
+        let body = crate::kernel!(
+            b,
+            #[grid(threads = 32)]
+            compute[1]
+                | _g
+                | {
+                    #[par((t, s) -> t * 16 + s)]
+                    compute[512]
+                        | j
+                        | { a[j] }
+                }
+        );
+        let module = b.finish("regtile", body);
+
+        let mut kprog = lowered(module);
+        layout_infer(&mut kprog);
+        verify(&kprog).unwrap();
+
+        let kernel = &kprog.kernels[0];
+        assert_eq!(kernel.block, 32);
+        assert_eq!(stmt_kinds(kernel), ["par"]);
+        let par = kernel.op(kernel.grid.block.body[0]);
+        let SSAOpCode::Par { bound, attr, .. } = &par.opcode else {
+            panic!("expected par");
+        };
+        assert_eq!(*bound, 512);
+        let attr = attr.as_ref().expect("par attr");
+        assert_eq!(attr.seq_size, 16);
+        assert_eq!(attr.layout.offset, 0);
+        // Thread bits (x-bits 0..5) map to logical bits 4..9, seq bits to 0..4.
+        assert_eq!(attr.layout.bases, vec![16, 32, 64, 128, 256, 1, 2, 4, 8]);
+    }
+
+    #[test]
+    fn grid_threads_must_be_power_of_two() {
+        let mut b = IRBuilder::new();
+        let a = b.input("a", ScalarType::BabyBear, vec![512]);
+        let body = crate::kernel!(
+            b,
+            #[grid(threads = 33)]
+            compute[1]
+                | _g
+                | { compute[512] | j | { a[j] } }
+        );
+        let module = b.finish("badthreads", body);
+        let err = lower_result(module).unwrap_err();
+        assert!(matches!(&err, CompileError::Lower(m) if m.contains("power of two")));
+    }
+
+    #[test]
+    fn par_map_with_carries_is_rejected() {
+        let mut b = IRBuilder::new();
+        let a = b.input("a", ScalarType::BabyBear, vec![512]);
+        let body = crate::kernel!(
+            b,
+            #[grid(threads = 32)]
+            compute[1]
+                | _g
+                | {
+                    #[par((t, s) -> t + s)]
+                    compute[512]
+                        | j
+                        | { a[j] }
+                }
+        );
+        let module = b.finish("badmap", body);
+        let err = lower_result(module).unwrap_err();
+        assert!(matches!(&err, CompileError::Lower(m) if m.contains("XOR-linear")));
+    }
+
+    #[test]
+    fn non_bijective_par_map_is_rejected() {
+        let mut b = IRBuilder::new();
+        let a = b.input("a", ScalarType::BabyBear, vec![512]);
+        let body = crate::kernel!(
+            b,
+            #[grid(threads = 32)]
+            compute[1]
+                | _g
+                | {
+                    #[par((t, _s) -> t * 16)]
+                    compute[512]
+                        | j
+                        | { a[j] }
+                }
+        );
+        let module = b.finish("singular", body);
+        let err = lower_result(module).unwrap_err();
+        assert!(matches!(&err, CompileError::Lower(m) if m.contains("bijection")));
+    }
+
+    #[test]
+    fn par_bound_smaller_than_block_is_rejected() {
+        let mut b = IRBuilder::new();
+        let a = b.input("a", ScalarType::BabyBear, vec![8]);
+        let body = crate::kernel!(
+            b,
+            #[grid(threads = 32)]
+            compute[1]
+                | _g
+                | {
+                    #[par((t, s) -> t + s)]
+                    compute[8]
+                        | j
+                        | { a[j] }
+                }
+        );
+        let module = b.finish("tiny", body);
+        let err = lower_result(module).unwrap_err();
+        assert!(matches!(&err, CompileError::Lower(m) if m.contains("power-of-two multiple")));
     }
 }

@@ -10,7 +10,7 @@
 
 use rustc_hash::FxHashMap;
 
-use crate::quast::{Quast, Scatter};
+use crate::quast::{ParSpec, Quast, Scatter};
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct NodeId(pub(crate) u32);
@@ -102,12 +102,16 @@ pub enum Node {
     },
     /// Parallel map: `compute [bound] |var| { body }`. An optional
     /// [`Scatter`] stores results through a bijective quasi-affine map from
-    /// logical to physical coordinates.
+    /// logical to physical coordinates. An optional [`ParSpec`] assigns
+    /// logical indices to physical (thread, seq) coordinates, and `threads`
+    /// (`#[grid(threads = N)]`) overrides the kernel's block size.
     Compute {
         bound: usize,
         var: VarId,
         body: NodeId,
         scatter: Option<Box<Scatter>>,
+        par: Option<Box<ParSpec>>,
+        threads: Option<usize>,
     },
     /// Parallel associative reduction: `reduce [bound] |var| { body }`.
     Reduce {
@@ -266,15 +270,7 @@ impl IRBuilder {
 
     /// `compute [bound] |i| { f(i) }`
     pub fn compute(&mut self, bound: usize, f: impl FnOnce(&mut Self, NodeId) -> NodeId) -> NodeId {
-        let var = self.fresh_var();
-        let var_node = self.intern(Node::Var(var));
-        let body = f(self, var_node);
-        self.intern(Node::Compute {
-            bound,
-            var,
-            body,
-            scatter: None,
-        })
+        self.compute_with(bound, None, None, None, f)
     }
 
     /// `#[scatter(...)] compute [bound] |i| { f(i) }`: results are stored
@@ -285,6 +281,20 @@ impl IRBuilder {
         scatter: Scatter,
         f: impl FnOnce(&mut Self, NodeId) -> NodeId,
     ) -> NodeId {
+        self.compute_with(bound, Some(scatter), None, None, f)
+    }
+
+    /// `compute` with any combination of attributes: a [`Scatter`] store
+    /// map, a [`ParSpec`] compute layout and a `#[grid(threads = N)]`
+    /// block-size hint.
+    pub fn compute_with(
+        &mut self,
+        bound: usize,
+        scatter: Option<Scatter>,
+        par: Option<ParSpec>,
+        threads: Option<usize>,
+        f: impl FnOnce(&mut Self, NodeId) -> NodeId,
+    ) -> NodeId {
         let var = self.fresh_var();
         let var_node = self.intern(Node::Var(var));
         let body = f(self, var_node);
@@ -292,7 +302,9 @@ impl IRBuilder {
             bound,
             var,
             body,
-            scatter: Some(Box::new(scatter)),
+            scatter: scatter.map(Box::new),
+            par: par.map(Box::new),
+            threads,
         })
     }
 
@@ -315,6 +327,20 @@ impl IRBuilder {
             out_shape,
             bounds: Default::default(),
         }
+    }
+
+    /// Builds a [`ParSpec`]: allocates the thread and seq symbols (thread
+    /// first, so it packs into the low bits of the physical index) and
+    /// passes them to `f` together with a constant constructor
+    /// ([`Quast::cst`]) to build the logical-index expression.
+    pub fn par_map(
+        &mut self,
+        f: impl FnOnce(&Quast, &Quast, fn(i64) -> Quast) -> Quast,
+    ) -> ParSpec {
+        let thread = self.fresh_var();
+        let seq = self.fresh_var();
+        let expr = f(&Quast::sym(thread), &Quast::sym(seq), Quast::cst);
+        ParSpec { thread, seq, expr }
     }
 
     /// `reduce [bound] |i| { f(i) }` with the given associative operator.

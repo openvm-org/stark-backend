@@ -1,5 +1,5 @@
-//! BabyBear NTT throughput: the crypto-compiler JIT kernels (flat and
-//! shared-memory) vs the production supra NTT
+//! BabyBear NTT throughput: the crypto-compiler JIT kernels (flat, shared-
+//! memory, register-tiled) vs the production supra NTT
 //! (`openvm_cuda_backend::ntt::batch_ntt`). Requires a CUDA GPU.
 //!
 //! Run with: `cargo bench -p crypto-compiler --bench ntt`
@@ -9,7 +9,7 @@ use std::time::Instant;
 use crypto_compiler::{
     compile_and_load,
     ir::Module,
-    kernels::{ntt_module, ntt_shared_module, ntt_twiddles},
+    kernels::{ntt_module, ntt_reg_module, ntt_shared_module, ntt_twiddles},
     runtime::{CompileOptions, KernelModule},
 };
 use openvm_cuda_backend::{ntt::batch_ntt, prelude::F};
@@ -81,18 +81,22 @@ fn bench_size(ctx: &GpuDeviceCtx, log_n: usize) {
     let d_tw = ntt_twiddles(log_n).as_slice().to_device_on(ctx).unwrap();
     let d_out_flat = DeviceBuffer::<u32>::with_capacity_on(n, ctx);
     let d_out_sh = DeviceBuffer::<u32>::with_capacity_on(n, ctx);
+    let d_out_reg = DeviceBuffer::<u32>::with_capacity_on(n, ctx);
     let (km_flat, _) = setup_jit(ntt_module(log_n), ctx, &d_in, &d_tw, &d_out_flat);
     let (km_sh, sh_compile_s) = setup_jit(ntt_shared_module(log_n), ctx, &d_in, &d_tw, &d_out_sh);
+    let (km_reg, reg_compile_s) = setup_jit(ntt_reg_module(log_n), ctx, &d_in, &d_tw, &d_out_reg);
 
     // Supra NTT: Montgomery-form BabyBear, in-place, natural-order input.
     let input_f: Vec<F> = input.iter().map(|&x| F::new(x)).collect();
     let d_f = input_f.as_slice().to_device_on(ctx).unwrap();
 
-    // One-time cross-check: all three must produce the same NTT.
+    // One-time cross-check: all four must produce the same NTT.
     km_flat.run(&ctx.stream).expect("flat JIT NTT run");
     km_sh.run(&ctx.stream).expect("shared JIT NTT run");
+    km_reg.run(&ctx.stream).expect("reg JIT NTT run");
     let got_flat: Vec<u32> = d_out_flat.to_host_on(ctx).unwrap();
     let got_sh: Vec<u32> = d_out_sh.to_host_on(ctx).unwrap();
+    let got_reg: Vec<u32> = d_out_reg.to_host_on(ctx).unwrap();
     batch_ntt(&d_f, log_n as u32, 0, 1, true, false, ctx);
     let got_supra: Vec<u32> = d_f
         .to_host_on(ctx)
@@ -108,6 +112,10 @@ fn bench_size(ctx: &GpuDeviceCtx, log_n: usize) {
         got_sh, got_supra,
         "shared JIT vs supra NTT mismatch at n=2^{log_n}"
     );
+    assert_eq!(
+        got_reg, got_supra,
+        "reg JIT vs supra NTT mismatch at n=2^{log_n}"
+    );
 
     let iters = ((1usize << 28) / n).clamp(10, 400);
     let warmup = (iters / 10).max(3);
@@ -118,26 +126,31 @@ fn bench_size(ctx: &GpuDeviceCtx, log_n: usize) {
     let sh_ms = measure(ctx, warmup, iters, || {
         km_sh.run(&ctx.stream).expect("shared JIT NTT run");
     });
+    let reg_ms = measure(ctx, warmup, iters, || {
+        km_reg.run(&ctx.stream).expect("reg JIT NTT run");
+    });
     // Repeated in-place transforms of (field-valued) garbage: identical work.
     let supra_ms = measure(ctx, warmup, iters, || {
         batch_ntt(&d_f, log_n as u32, 0, 1, true, false, ctx);
     });
 
     let gelems = |ms: f64| n as f64 / (ms * 1e-3) / 1e9;
+    let nvcc_s = sh_compile_s + reg_compile_s;
     println!(
-        "| 2^{log_n:<2} | {flat_ms:>9.3} | {sh_ms:>10.3} | {supra_ms:>10.3} | {:>10.2} | {:>10.2} | {:>7.1}x | {:>8.2}x | {sh_compile_s:>7.1} |",
+        "| 2^{log_n:<2} | {flat_ms:>9.3} | {sh_ms:>10.3} | {reg_ms:>7.3} | {supra_ms:>10.3} | {:>9.2} | {:>10.2} | {:>10.2} | {:>7.2}x | {:>7.2}x | {nvcc_s:>7.1} |",
         gelems(sh_ms),
+        gelems(reg_ms),
         gelems(supra_ms),
-        flat_ms / sh_ms,
-        sh_ms / supra_ms,
+        sh_ms / reg_ms,
+        reg_ms / supra_ms,
     );
 }
 
 fn main() {
     let ctx = GpuDeviceCtx::for_current_device().expect("CUDA context");
     println!("BabyBear forward NTT, natural-order input and output, single column");
-    println!("| n     | flat (ms) | shared (ms) | supra (ms) | sh Gelem/s | su Gelem/s | flat/sh | sh/supra | nvcc (s) |");
-    println!("|-------|-----------|-------------|------------|------------|------------|---------|----------|----------|");
+    println!("| n     | flat (ms) | shared (ms) | reg (ms) | supra (ms) | sh Gelem/s | reg Gelem/s | su Gelem/s | sh/reg | reg/supra | nvcc (s) |");
+    println!("|-------|-----------|-------------|----------|------------|------------|-------------|------------|--------|-----------|----------|");
     for &log_n in LOG_SIZES {
         bench_size(&ctx, log_n);
     }

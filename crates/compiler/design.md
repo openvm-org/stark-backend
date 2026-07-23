@@ -256,19 +256,32 @@ Since the expression/statements are separate enums, there should be multiple nod
 
 For the initial implementation there should be distinct passes as functions on their respective IR managers
 1. type inference 
-2. canonicalize_texpr
+2. canonicalize
 3. lower_to_kernel_ir
 4. layout_infer
 5. insert_sync
 6. codegen
+7. plan shared mem
 
 
-## Layout inference and optimization
+#### Layout infer pass 
 
-Now add an optimize layout pass on the backend kernel_ir. It should extract a LayoutTree. A LayoutTree is an abstract representation of the program that's
-  either a ParNode { reads: Vec<(, writes: ... }, or a Block { input:  .
-  1. analyze the first write of a shared buffer, if it is a LinearLayout, track it to maybe promote to registers
-  2. analyze the subsequent reads of the shared buffer, if it can be expressed via warp shuffles, then keep it in registers
-  3. if it cannot, then
+After the lowering to kernel ir, the program consists of a sequence of primitive par ops, buffer declarations, loops and access relations. Each buffer is an abstract buffer written to by exactly one par op (aside from the global inputs and outputs). par blocks read and write to buffers using a Quast expression of the form `f(i, s)` where `i` ranges over the threads and `s` the local index, this Quast may be converted to a LinearLayout. 
+
+The Layout infer pass aims to promote as many buffers and possible to use registers. It implements the following algorithm:
+
+1. convert as much accesses to LinearLayouts as possible.
+2. if the write access expression of a buffer is not convertible to a LinearLayout, it's address space is shared (and mapping from logical to physical is the identity)
+3. if the write access expression is a LinearLayout, then its address space is Register. Since the write access expression is `Buf[f(i, s)] = ...`, then the layout, which is the map from physical, and spatial indices to logical index, is just `f`. 
+4. if the read of a buffer is shared, with access expression `f(i, s)`, then insert a convert layout op that produces the register buffer from the shared buffer, where the register buffer has layout `f(i, s)`. 
+5. if the read of a buffer has register layout `f(i, s)`, and the read expression is `g(i, s)`, then there are 2 cases:
+  - `f == g`, then don't do anything
+  - since `g` and `f` are both linear layouts, use the optimal convert layout algorithm from the triton paper:
+    - determine if there's a convert layout between `f` to `g` that could be done with only local movements or warp shuffles, if so, then do so 
+    - if not, then convert layout from `f` to `g` using shared memory
+
+
+#### Smart memory planning 
+
 
 

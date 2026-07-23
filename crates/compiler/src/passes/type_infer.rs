@@ -173,6 +173,7 @@ impl TypeCx<'_> {
                 var,
                 body,
                 scatter,
+                ..
             } => {
                 self.var_types.insert(var, Type::Scalar(ScalarType::U32));
                 let tb = self.infer(body)?;

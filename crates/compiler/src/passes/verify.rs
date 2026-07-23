@@ -107,6 +107,11 @@ fn check_primitive(k: &Kernel, block: &SSABlock, in_par: bool) -> Result<(), Com
                     return Err(verr(format!("{}: sync inside a par", k.name)));
                 }
             }
+            SSAOpCode::ConvertLayout { .. } => {
+                if in_par {
+                    return Err(verr(format!("{}: convert_layout inside a par", k.name)));
+                }
+            }
             _ => {}
         }
     }

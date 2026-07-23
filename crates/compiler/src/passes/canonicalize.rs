@@ -22,7 +22,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use crate::{
     ir::{IRBuilder, Module, Node, NodeId, ScalarType, Type, VarId},
     passes::type_infer::TypeMap,
-    quast::{NodeEmitter, Quast, ScatterStore},
+    quast::{NodeEmitter, ParSpec, Quast, ScatterStore},
     CompileError,
 };
 
@@ -70,6 +70,8 @@ pub struct InnerLet {
     /// logical flat index -> physical flat index (`None` = identity).
     /// Readers index the physical layout.
     pub scatter: Option<ScatterStore>,
+    /// `#[par((t, s) -> ...)]` compute layout of the tile, if any.
+    pub par: Option<ParSpec>,
 }
 
 /// A canonical top-level compute: `compute [outer_bound] |i| { body }` where
@@ -93,6 +95,10 @@ pub struct CanonKernel {
     /// Store map composed from the compute's `#[scatter(...)]` attribute:
     /// logical flat index -> physical flat index (`None` = identity).
     pub scatter_store: Option<ScatterStore>,
+    /// `#[par((t, s) -> ...)]` compute layout of the trailing inner compute.
+    pub inner_par: Option<ParSpec>,
+    /// `#[grid(threads = N)]` block-size hint from the outer compute.
+    pub threads: Option<usize>,
     pub name: String,
 }
 
@@ -317,6 +323,8 @@ impl CanonCx<'_> {
                     var,
                     body: id,
                     scatter: None,
+                    par: None,
+                    threads: None,
                 });
                 let ty = Type::Tensor(elem, vec![1]);
                 self.types.insert(wrapped, ty.clone());
@@ -331,10 +339,17 @@ impl CanonCx<'_> {
             var: outer_var,
             body,
             scatter,
+            par: outer_par,
+            threads,
         } = self.b.node(compute_id).clone()
         else {
             unreachable!()
         };
+        if outer_par.is_some() {
+            return Err(CompileError::Canonicalize(
+                "#[par(...)] is only supported on inner (thread-level) computes".into(),
+            ));
+        }
 
         // Compose the scatter attribute into a flat store map while the
         // logical (pre-flattening) shape is still known.
@@ -356,13 +371,20 @@ impl CanonCx<'_> {
         let body = self.peel_body_lets(body, &mut inline_lets, &mut inner_lets)?;
 
         // If the body is an inner compute, flatten any deeper nests into it.
-        let (inner, result_root) = match self.b.node(body).clone() {
+        let (inner, inner_par, result_root) = match self.b.node(body).clone() {
             Node::Compute {
                 bound: m,
                 var: j,
                 body: inner_body,
                 scatter: inner_scatter,
+                par: inner_par,
+                threads: inner_threads,
             } => {
+                if inner_threads.is_some() {
+                    return Err(CompileError::Canonicalize(
+                        "#[grid(threads = ...)] is only supported on the outer compute".into(),
+                    ));
+                }
                 // An inner scatter permutes elements within one outer
                 // iteration's block. Build its store map against the logical
                 // (pre-flattening) shape, then lift it to the global flat
@@ -379,7 +401,13 @@ impl CanonCx<'_> {
                         Some((sc.store_map(self.b.fresh_var())?, block_len))
                     }
                 };
+                let m0 = m;
                 let (m, j, inner_body) = self.flatten_nests(m, j, inner_body)?;
+                if inner_par.is_some() && m != m0 {
+                    return Err(CompileError::Canonicalize(
+                        "#[par(...)] on a compute with nested computes is not supported".into(),
+                    ));
+                }
                 if let Some((inner, block_len)) = inner_store {
                     let f = self.b.fresh_var();
                     let fq = Quast::sym(f);
@@ -403,9 +431,9 @@ impl CanonCx<'_> {
                     });
                 }
                 let inner_body = self.peel_scalar_lets(inner_body, &mut inline_lets)?;
-                (Some((m, j)), inner_body)
+                (Some((m, j)), inner_par.map(|p| *p), inner_body)
             }
-            _ => (None, body),
+            _ => (None, None, body),
         };
 
         // Split the result into one expression per output buffer.
@@ -441,6 +469,8 @@ impl CanonCx<'_> {
             inline_lets,
             member_types,
             scatter_store,
+            inner_par,
+            threads,
             name: format!("k{let_id}"),
         });
         Ok((0..num_outs)
@@ -476,7 +506,14 @@ impl CanonCx<'_> {
                     var: iter_var,
                     body: tile_body,
                     scatter,
+                    par,
+                    threads,
                 } => {
+                    if threads.is_some() {
+                        return Err(CompileError::Canonicalize(
+                            "#[grid(threads = ...)] is only supported on the outer compute".into(),
+                        ));
+                    }
                     // Compose the tile's scatter into a flat store map while
                     // the logical (pre-flattening) shape is still known.
                     let tile_scatter = match scatter {
@@ -497,8 +534,14 @@ impl CanonCx<'_> {
                             )))
                         }
                     };
+                    let bound0 = bound;
                     let (bound, iter_var, tile_body) =
                         self.flatten_nests(bound, iter_var, tile_body)?;
+                    if par.is_some() && bound != bound0 {
+                        return Err(CompileError::Canonicalize(
+                            "#[par(...)] on a compute with nested computes is not supported".into(),
+                        ));
+                    }
                     let tile_body = self.peel_scalar_lets(tile_body, inline_lets)?;
                     let result = self.classify_result(tile_body)?;
                     inner_lets.push(InnerLet {
@@ -509,6 +552,7 @@ impl CanonCx<'_> {
                         elem,
                         shape,
                         scatter: tile_scatter,
+                        par: par.map(|p| *p),
                     });
                     id = body;
                 }
@@ -570,6 +614,8 @@ impl CanonCx<'_> {
                 var: l,
                 body: inner,
                 scatter,
+                par,
+                threads,
             } = self.b.node(body).clone()
             else {
                 return Ok((m, j, body));
@@ -577,6 +623,13 @@ impl CanonCx<'_> {
             if scatter.is_some() {
                 return Err(CompileError::Canonicalize(
                     "scatter is only supported on top-level computes".into(),
+                ));
+            }
+            if par.is_some() || threads.is_some() {
+                return Err(CompileError::Canonicalize(
+                    "#[par]/#[grid] attributes are not supported on computes below the \
+                     thread level"
+                        .into(),
                 ));
             }
             let t = self.b.fresh_var();
@@ -770,6 +823,8 @@ fn subst_rec(
             var,
             body,
             scatter,
+            par,
+            threads,
         } => {
             let body2 = subst_rec(b, body, map, types, memo);
             b.intern(Node::Compute {
@@ -777,6 +832,8 @@ fn subst_rec(
                 var,
                 body: body2,
                 scatter,
+                par,
+                threads,
             })
         }
         Node::Reduce {

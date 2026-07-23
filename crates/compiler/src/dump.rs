@@ -23,11 +23,11 @@ use std::{
 use crate::{
     ir::{BinOp, IRBuilder, Module, Node, NodeId, ReduceOp, ScalarType, VarId},
     kernel_ir::{
-        Access, BufId, BufferDecl, BufferKind, IndexMap, Kernel, KernelProgram, SSABlock, SSANode,
-        SSAOp, SSAOpCode, SSARes,
+        Access, BufId, BufferDecl, BufferKind, IndexMap, Kernel, KernelProgram, LinearLayout,
+        SSABlock, SSANode, SSAOp, SSAOpCode, SSARes,
     },
     passes::SharedMemPlan,
-    quast::{CStrEmitter, Quast, Scatter},
+    quast::{CStrEmitter, ParSpec, Quast, Scatter},
 };
 
 /// Writes `{name}.hir` and `{name}.kir` under `dir` (created if needed).
@@ -329,10 +329,19 @@ impl<'a> HirPrinter<'a> {
                 var,
                 body,
                 scatter,
+                par,
+                threads,
             } => {
-                let (bound, var, body) = (*bound, *var, *body);
+                let (bound, var, body, threads) = (*bound, *var, *body, *threads);
                 let sc = scatter.as_deref().map(scatter_str);
+                let pr = par.as_deref().map(par_str);
                 write!(self.out, "compute[{bound}] |v{}|", var.0).unwrap();
+                if let Some(t) = threads {
+                    write!(self.out, " threads({t})").unwrap();
+                }
+                if let Some(pr) = pr {
+                    write!(self.out, " {pr}").unwrap();
+                }
                 if let Some(sc) = sc {
                     write!(self.out, " {sc}").unwrap();
                 }
@@ -475,6 +484,15 @@ fn scatter_str(sc: &Scatter) -> String {
     s
 }
 
+fn par_str(p: &ParSpec) -> String {
+    format!(
+        "par (v{}, v{}) -> {}",
+        p.thread.0,
+        p.seq.0,
+        quast_str(&p.expr, &BTreeMap::new())
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Kernel IR
 // ---------------------------------------------------------------------------
@@ -494,6 +512,14 @@ pub fn dump_kernel_ir(p: &KernelProgram, shared: &SharedMemPlan) -> String {
     s
 }
 
+fn ll_str(l: &LinearLayout) -> String {
+    if l.offset == 0 {
+        format!("{:?}", l.bases)
+    } else {
+        format!("{:?}^{}", l.bases, l.offset)
+    }
+}
+
 fn buffer_str(decl: &BufferDecl, shared_off: Option<usize>) -> String {
     let kind = match (decl.kind, shared_off) {
         (BufferKind::Input(k), _) => format!("input#{k}"),
@@ -511,7 +537,7 @@ fn buffer_str(decl: &BufferDecl, shared_off: Option<usize>) -> String {
     match &decl.layout {
         None => {}
         Some(l) if l.is_identity() => s.push_str(" layout=id"),
-        Some(l) => write!(s, " layout={:?}", l.bases).unwrap(),
+        Some(l) => write!(s, " layout={}", ll_str(l)).unwrap(),
     }
     s
 }
@@ -565,6 +591,14 @@ fn dump_stmts(s: &mut String, k: &Kernel, stmts: &[SSANode], depth: usize) {
             SSAOpCode::Sync => {
                 writeln!(s, "{pad}sync").unwrap();
             }
+            SSAOpCode::ConvertLayout { dst, src, map } => {
+                let map = if map.is_identity() {
+                    "id".to_string()
+                } else {
+                    ll_str(map)
+                };
+                writeln!(s, "{pad}convert_layout b{} <- b{} map={map}", dst.0, src.0).unwrap();
+            }
             SSAOpCode::Loop { bound } => {
                 writeln!(s, "{pad}loop[{bound}]{} {{", captures_str(op, 0)).unwrap();
                 writeln!(s, "{pad}^{}:", val(op.block.operands[0])).unwrap();
@@ -589,7 +623,7 @@ fn dump_stmts(s: &mut String, k: &Kernel, stmts: &[SSANode], depth: usize) {
                 if let Some(attr) = attr {
                     write!(head, " seq={}", attr.seq_size).unwrap();
                     if !attr.layout.is_identity() {
-                        write!(head, " layout={:?}", attr.layout.bases).unwrap();
+                        write!(head, " layout={}", ll_str(&attr.layout)).unwrap();
                     }
                 }
                 writeln!(s, "{head} {{").unwrap();
@@ -694,7 +728,10 @@ fn dump_ops(s: &mut String, k: &Kernel, body: &[SSANode], depth: usize) {
                 writeln!(s, "{pad}  yield({})", vals(&op.block.yields)).unwrap();
                 writeln!(s, "{pad}}}").unwrap();
             }
-            other @ (SSAOpCode::Par { .. } | SSAOpCode::Alloc { .. } | SSAOpCode::Sync) => {
+            other @ (SSAOpCode::Par { .. }
+            | SSAOpCode::Alloc { .. }
+            | SSAOpCode::Sync
+            | SSAOpCode::ConvertLayout { .. }) => {
                 unreachable!("statement-level op {other:?} inside a par block")
             }
         }
@@ -704,7 +741,7 @@ fn dump_ops(s: &mut String, k: &Kernel, body: &[SSANode], depth: usize) {
 fn access_str(access: &Access, vid: SSARes) -> String {
     let index = match &access.index {
         IndexMap::Linear(ll) if ll.is_identity() => val(vid),
-        IndexMap::Linear(ll) => format!("layout{:?}({})", ll.bases, val(vid)),
+        IndexMap::Linear(ll) => format!("layout{}({})", ll_str(ll), val(vid)),
         IndexMap::Affine { expr, bounds } => quast_str(expr, bounds),
     };
     format!("b{}[{index}]", access.buf.0)
@@ -818,6 +855,31 @@ mod tests {
         assert!(hir.contains("scatter (v0) ->"), "{hir}");
         assert!(hir.contains("into [4, 3]"), "{hir}");
         assert!(hir.contains("{ a[v1] }"), "{hir}");
+    }
+
+    /// `#[grid(threads = ...)]` and `#[par((t, s) -> ...)]` parse through the
+    /// macro, land on the HIR compute node and print back.
+    #[test]
+    fn hir_dump_shows_par_and_threads() {
+        let mut b = IRBuilder::new();
+        let a = b.input("a", ScalarType::BabyBear, vec![512]);
+        let body = crate::kernel!(
+            b,
+            #[grid(threads = 32)]
+            compute[1]
+                | _g
+                | {
+                    #[par((t, s) -> t * 16 + s)]
+                    compute[512]
+                        | j
+                        | { a[j] }
+                }
+        );
+        let module = b.finish("par_mod", body);
+        let hir = dump_hir(&module);
+        assert!(hir.contains("compute[1] |v0| threads(32)"), "{hir}");
+        assert!(hir.contains("par (v1, v2) -> "), "{hir}");
+        assert!(hir.contains("compute[512] |v3|"), "{hir}");
     }
 
     /// Sharing must keep the dump linear in the number of unique nodes even

@@ -22,6 +22,18 @@ smallvec = { workspace = true }
 tempfile = { workspace = true }
 thiserror = { workspace = true }
 
+# The `planner` feature enables the CP-SAT-based memory planner. `cp_sat`
+# links against Google OR-Tools; install it per
+# https://developers.google.com/optimization/install (prebuilt binaries) and
+# either drop it in one of `/usr/local`, `/usr`, `/opt/homebrew`,
+# `/home/linuxbrew/.linuxbrew`, `/opt/ortools`, or set `ORTOOLS_PREFIX` to
+# the install prefix before building with `--features planner`.
+cp_sat = { version = "0.4", optional = true }
+
+[features]
+default = []
+planner = ["dep:cp_sat"]
+
 [dev-dependencies]
 openvm-cuda-backend = { workspace = true }
 p3-dft = { workspace = true }
@@ -30,3 +42,7 @@ p3-symmetric = { workspace = true }
 [[bench]]
 name = "ntt"
 harness = false
+
+[[example]]
+name = "ntt_scale_graph"
+required-features = ["planner"]

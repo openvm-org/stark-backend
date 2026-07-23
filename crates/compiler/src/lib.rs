@@ -12,11 +12,15 @@
 pub use crypto_compiler_macros::kernel;
 
 pub mod dump;
+#[cfg(feature = "planner")]
+pub mod graph_exe;
 pub mod graph_ir;
 pub mod ir;
 pub mod kernel_ir;
 pub mod kernels;
 pub mod passes;
+#[cfg(feature = "planner")]
+pub mod planner;
 pub mod quast;
 pub mod runtime;
 

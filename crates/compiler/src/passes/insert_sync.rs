@@ -7,9 +7,13 @@ use crate::kernel_ir::{
 };
 
 /// Inserts [`SSAOpCode::Sync`] barriers: a par that reads a shared buffer
-/// written since the last barrier gets a `Sync` right before it. A
-/// sequential loop marks its body's shared writes dirty up front, since
-/// iteration i+1 may read what iteration i wrote (the back edge).
+/// written since the last barrier gets a `Sync` right before it, and a
+/// write to a shared buffer whose memory may still be read by a concurrent
+/// thread also gets one — this second case matters when
+/// [`crate::passes::plan_shared_mem`] aliases disjoint-lifetime shared
+/// buffers into the same physical region. A sequential loop marks its
+/// body's shared writes dirty up front, since iteration i+1 may read what
+/// iteration i wrote (the back edge).
 pub fn insert_sync(p: &mut KernelProgram) {
     /// Walks a statement block; `sid` is its owning loop (`None` for the
     /// grid block). Records `(block, index)` sync insertion points.
@@ -19,24 +23,67 @@ pub fn insert_sync(p: &mut KernelProgram) {
         sid: Option<SSANode>,
         body: &[SSANode],
         dirty: &mut BTreeSet<BufId>,
+        reads_since_sync: &mut bool,
         points: &mut Vec<(Option<SSANode>, usize)>,
     ) {
         for (i, &nid) in body.iter().enumerate() {
             let op = k.op(nid);
+            let mut synced = false;
+            let mut sync_here = |dirty: &mut BTreeSet<BufId>, reads_since_sync: &mut bool| {
+                if !synced {
+                    points.push((sid, i));
+                    dirty.clear();
+                    *reads_since_sync = false;
+                }
+                synced = true;
+            };
             match &op.opcode {
                 SSAOpCode::Loop { .. } => {
                     collect_shared_writes(p, k, &op.block.body, dirty);
-                    walk(p, k, Some(nid), &op.block.body, dirty, points);
+                    walk(
+                        p,
+                        k,
+                        Some(nid),
+                        &op.block.body,
+                        dirty,
+                        reads_since_sync,
+                        points,
+                    );
                 }
                 SSAOpCode::Par { reads, writes, .. } => {
                     if reads.iter().any(|a| dirty.contains(&a.buf)) {
-                        points.push((sid, i));
-                        dirty.clear();
+                        sync_here(dirty, reads_since_sync);
+                    }
+                    if writes
+                        .iter()
+                        .any(|a| p.buffer(a.buf).space == AddressSpace::Shared)
+                        && *reads_since_sync
+                    {
+                        sync_here(dirty, reads_since_sync);
+                    }
+                    for a in reads {
+                        if p.buffer(a.buf).space == AddressSpace::Shared {
+                            *reads_since_sync = true;
+                        }
                     }
                     for a in writes {
                         if p.buffer(a.buf).space == AddressSpace::Shared {
                             dirty.insert(a.buf);
                         }
+                    }
+                }
+                SSAOpCode::ConvertLayout { dst, src, .. } => {
+                    if dirty.contains(src) {
+                        sync_here(dirty, reads_since_sync);
+                    }
+                    if p.buffer(*dst).space == AddressSpace::Shared && *reads_since_sync {
+                        sync_here(dirty, reads_since_sync);
+                    }
+                    if p.buffer(*src).space == AddressSpace::Shared {
+                        *reads_since_sync = true;
+                    }
+                    if p.buffer(*dst).space == AddressSpace::Shared {
+                        dirty.insert(*dst);
                     }
                 }
                 _ => {}
@@ -48,7 +95,16 @@ pub fn insert_sync(p: &mut KernelProgram) {
         let mut points = Vec::new();
         let k = &p.kernels[ki];
         let mut dirty = BTreeSet::new();
-        walk(p, k, None, &k.grid.block.body, &mut dirty, &mut points);
+        let mut reads_since_sync = false;
+        walk(
+            p,
+            k,
+            None,
+            &k.grid.block.body,
+            &mut dirty,
+            &mut reads_since_sync,
+            &mut points,
+        );
         // Per-block indices ascend in walk order, so applying in reverse
         // keeps every recorded index valid.
         let k = &mut p.kernels[ki];
@@ -84,6 +140,11 @@ fn collect_shared_writes(
                     }
                 }
             }
+            SSAOpCode::ConvertLayout { dst, .. } => {
+                if p.buffer(*dst).space == AddressSpace::Shared {
+                    out.insert(*dst);
+                }
+            }
             SSAOpCode::Loop { .. } => collect_shared_writes(p, k, &op.block.body, out),
             _ => {}
         }
@@ -102,9 +163,10 @@ mod tests {
         },
     };
 
-    /// The shared-memory tile pattern lowers to a grid kernel with an
-    /// `Alloc`ed shared buffer, and `insert_sync` places a barrier between
-    /// the producing and the consuming `Par`.
+    /// The shared-memory tile pattern lowers to a grid kernel where the
+    /// producer par writes to a promoted register tile, a
+    /// [`SSAOpCode::ConvertLayout`] mirrors it to shared for the bouncing
+    /// consumer, and `insert_sync` places a barrier before the consumer.
     #[test]
     fn shared_tile_gets_alloc_and_sync() {
         let (blocks, t) = (4usize, 8usize);
@@ -136,12 +198,15 @@ mod tests {
         let kernel = &kprog.kernels[0];
         assert_eq!(kernel.grid.bound, blocks);
         assert_eq!(kernel.block, t);
-        assert_eq!(stmt_kinds(kernel), ["alloc", "par", "sync", "par"]);
+        assert_eq!(
+            stmt_kinds(kernel),
+            ["alloc", "alloc", "par", "convert", "sync", "par"]
+        );
 
-        // Both pars index through the grid var, so both capture it; each
-        // has one write, mirrored as one result.
+        // The producer par writes the register tile; its grid-var capture
+        // and result count still match one write.
         let g = kernel.grid_var();
-        for &sid in &kernel.grid.block.body[1..] {
+        for &sid in &kernel.grid.block.body {
             let op = kernel.op(sid);
             let SSAOpCode::Par { writes, .. } = &op.opcode else {
                 continue;
@@ -156,7 +221,7 @@ mod tests {
             .iter()
             .filter(|b| b.space == AddressSpace::Shared)
             .collect();
-        assert_eq!(shared.len(), 1);
+        assert_eq!(shared.len(), 1, "the bouncing consumer gets one mirror");
         assert_eq!(shared[0].shape, vec![t]);
         assert!(shared[0].layout.as_ref().unwrap().is_identity());
 
@@ -189,8 +254,13 @@ mod tests {
                 });
                 b.bind(t2, |b, t2| {
                     b.compute(t, |b, j| {
-                        let x = b.index(t1, &[j]);
-                        let y = b.index(t2, &[j]);
+                        // Reversed reads keep both tiles in shared memory
+                        // (`t - 1 - j` is affine-XOR, not linear, so the
+                        // readers cannot be served from registers).
+                        let last = b.const_u32(t as u32 - 1);
+                        let rev = b.sub(last, j);
+                        let x = b.index(t1, &[rev]);
+                        let y = b.index(t2, &[rev]);
                         b.add(x, y)
                     })
                 })
@@ -203,9 +273,14 @@ mod tests {
         insert_sync(&mut kprog);
         verify(&kprog).unwrap();
 
+        // Each tile becomes register + mirror; only one barrier is needed
+        // before the reader that bounces both mirrors.
         assert_eq!(
             stmt_kinds(&kprog.kernels[0]),
-            ["alloc", "par", "alloc", "par", "sync", "par"]
+            [
+                "alloc", "alloc", "par", "convert", "alloc", "alloc", "par", "convert", "sync",
+                "par"
+            ]
         );
         let source = codegen(&kprog).unwrap();
         assert_eq!(source.matches("__syncthreads();").count(), 1);

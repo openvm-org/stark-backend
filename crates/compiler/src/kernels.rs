@@ -379,6 +379,170 @@ pub fn ntt_shared_module(log_n: usize) -> Module {
     b.finish(format!("ntt_shared_{n}"), prev)
 }
 
+/// Bits per register-tiled NTT group: `2^13 = 8192` element tiles under
+/// `#[grid(threads = 512)]`, so each of the 512 threads owns 16 contiguous
+/// logical elements. Under the `(th, s) -> th * 16 + s` par layout, butterfly
+/// partners with `half < 16` stay in register slots (Slot), `half ∈ [16, 256]`
+/// stay within a warp (Shuffle), and `half >= 512` cross warps and go through
+/// a shared-memory mirror (Bounce) — so the group naturally runs its first
+/// nine stages in registers and its last four in shared memory.
+const NTT_REG_BITS: usize = 13;
+const NTT_REG_THREADS: usize = 512;
+const NTT_REG_PER_THREAD: i64 = 1 << (NTT_REG_BITS - 9);
+
+/// Chains the butterfly stages of one register-tiled NTT group as let-bound
+/// inner computes, each carrying `#[par((th, s) -> th * 16 + s)]`.
+#[allow(clippy::too_many_arguments)]
+fn ntt_group_stages_reg(
+    b: &mut IRBuilder,
+    prev: NodeId,
+    t: usize,
+    bg: usize,
+    start: usize,
+    p_low: NodeId,
+    w: NodeId,
+    log_n: usize,
+) -> NodeId {
+    let tile = 1usize << bg;
+    let m = 1usize << t;
+    let half = 1usize << (t - 1);
+    let fstride = 1usize << start;
+    let step = 1usize << (log_n - start - t);
+    let par = b.par_map(|th, s, _| th.mul_c(NTT_REG_PER_THREAD).add(s));
+    // Select-form butterfly: each thread reads its own slot `prev[j]` and
+    // its partner `prev[j ^ half]`, then blends based on the half bit. The
+    // partner-read access map is XOR by `half`, so classify_convert sees
+    // an identity linear part with an offset — a slot permutation for
+    // `half < 16` and an invertible-lane-block warp shuffle for `half >= 16`
+    // under the (th, s) -> th*16 + s layout.
+    let stage = b.compute_with(tile, None, Some(par), None, |b, j| {
+        kernel!(b,
+            let own = prev[j];
+            let partner = prev[j + #half - j % #m / #half * #m];
+            let w_val = w[(p_low + (j % #half) * #fstride) * #step];
+            let lo = j % #m < #half;
+            if lo then own + w_val * partner else partner - w_val * own
+        )
+    });
+    if t == bg {
+        stage
+    } else {
+        b.bind(stage, |b, v| {
+            ntt_group_stages_reg(b, v, t + 1, bg, start, p_low, w, log_n)
+        })
+    }
+}
+
+/// Register-tiled radix-2 DIT NTT of size `2^log_n` over BabyBear.
+///
+/// Same interface and result as [`ntt_module`], but the `log_n` butterfly
+/// stages are grouped into 13-bit register tiles under `#[grid(threads =
+/// 512)]` with `#[par((th, s) -> th * 16 + s)]`, so each of the 512 threads
+/// owns 16 contiguous logical elements. Inside one group the compiler
+/// resolves partners `j ^ half` at register level for `half < 512` (Slot
+/// for `half < 16`, warp Shuffle for `16 <= half < 512`) and through a
+/// shared-memory mirror for `half >= 512`; those mirrors have disjoint live
+/// ranges, so [`plan_shared_mem`] packs them into one reusable region. Any
+/// leftover `< 13`-bit tail is split further via the shared-style scheme of
+/// [`ntt_shared_module`].
+///
+/// [`plan_shared_mem`]: crate::passes::plan_shared_mem
+pub fn ntt_reg_module(log_n: usize) -> Module {
+    assert!(log_n >= 1, "NTT size must be at least 2");
+    let n = 1usize << log_n;
+    let n_reg = log_n / NTT_REG_BITS;
+    let leftover = log_n - n_reg * NTT_REG_BITS;
+    let mut bits = vec![NTT_REG_BITS; n_reg];
+    if leftover > 0 {
+        // The leftover runs shared-style; splitting it further keeps each
+        // tile within the shared-memory-per-block budget.
+        bits.extend(split_bits(leftover));
+    }
+    let groups = bits.len();
+    let starts: Vec<usize> = bits
+        .iter()
+        .scan(0, |acc, &width| {
+            let s = *acc;
+            *acc += width;
+            Some(s)
+        })
+        .collect();
+
+    let mut b = IRBuilder::new();
+    let a = b.input("a", ScalarType::BabyBear, vec![n]);
+    let w = b.input("w", ScalarType::BabyBear, vec![n / 2]);
+
+    let mut pi = starts.clone();
+    let mut prev = a;
+    for g in 0..groups {
+        let (bg, start) = (bits[g], starts[g]);
+        let tile = 1usize << bg;
+        let is_reg = bg == NTT_REG_BITS;
+        let n_blocks = n >> bg;
+        let threads = if is_reg { Some(NTT_REG_THREADS) } else { None };
+        let group = b.compute_with(n_blocks, None, None, threads, |b, i| {
+            // The gather uses the default (identity) par regardless of
+            // the group being register-tiled — that gives contiguous
+            // per-thread writes into the tile, and layout_infer inserts
+            // the shared-memory bounce that any subsequent
+            // `#[par((th, s) -> ...)]` reader needs. The register-first
+            // default is what makes the bounce a *single* mirror instead
+            // of forcing the whole tile back to shared.
+            let gather = if g == 0 {
+                let hi_bits = log_n - bg;
+                let sc = 1usize << hi_bits;
+                b.compute(
+                    tile,
+                    |b, j| kernel!(b, a[bitrev_expr(j, bg) * #sc + bitrev_expr(i, hi_bits)]),
+                )
+            } else {
+                let pg = 1usize << pi[g];
+                let pgb = 1usize << (pi[g] + bg);
+                let cols = bits[g - 1];
+                b.compute(tile, |b, j| {
+                    let addr = kernel!(b, i / #pg * #pgb + i % #pg + j * #pg);
+                    index_flat2(b, prev, addr, cols)
+                })
+            };
+            let mut p_low = b.const_u32(0);
+            for k in 0..g {
+                let (pos, width) = (pi[k], bits[k]);
+                let scale = 1usize << starts[k];
+                p_low = kernel!(b, p_low + extract_bits(i, pos, width) * #scale);
+            }
+            b.bind(gather, |b, tile_var| {
+                if is_reg {
+                    ntt_group_stages_reg(b, tile_var, 1, bg, start, p_low, w, log_n)
+                } else {
+                    ntt_group_stages(b, tile_var, 1, bg, start, p_low, w, log_n)
+                }
+            })
+        });
+        prev = b.let_bound(group);
+        for k in 0..groups {
+            if k != g && pi[k] < pi[g] {
+                pi[k] += bg;
+            }
+        }
+        pi[g] = 0;
+    }
+
+    if groups > 1 {
+        let restored = b.compute(n, |b, p| {
+            let mut addr = b.const_u32(0);
+            for k in 0..groups {
+                let (pos, width) = (starts[k], bits[k]);
+                let scale = 1usize << pi[k];
+                addr = kernel!(b, addr + extract_bits(p, pos, width) * #scale);
+            }
+            index_flat2(b, prev, addr, bits[groups - 1])
+        });
+        prev = b.let_bound(restored);
+    }
+
+    b.finish(format!("ntt_reg_{n}"), prev)
+}
+
 /// Poseidon2-16 Merkle compression tree over `2^log_leaves` digests.
 ///
 /// Input: `leaves: [2^log_leaves, 8]` (the bottom digest layer). Each layer

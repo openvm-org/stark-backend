@@ -572,6 +572,208 @@ fn macro_scatter_shared_tile() {
     assert_eq!(outs[0], want);
 }
 
+/// Register promotion: tiles written and read at the par's own index chain
+/// through registers (no shared round-trip, no barrier). `t` is twice the
+/// block size, so each thread owns two register slots.
+#[test]
+fn macro_register_promoted_tile_chain() {
+    let (blocks, t) = (17usize, 512usize);
+    let n = blocks * t;
+    let a = pseudo_field_elems(n, 18);
+
+    let mut ib = IRBuilder::new();
+    let a_in = ib.input("a", ScalarType::BabyBear, vec![n]);
+    let body = kernel!(ib,
+        compute [blocks] |i| {
+            let b1 = compute [t] |j| { a_in[i * #t + j] * 2bb };
+            let b2 = compute [t] |j| { b1[j] + 1bb };
+            compute [t] |j| { b2[j] * b2[j] }
+        }
+    );
+    let module = ib.finish("register_chain_macro", body);
+
+    let outs = run_module(module, std::slice::from_ref(&a));
+    assert_eq!(outs.len(), 1);
+
+    let want: Vec<u32> = a
+        .iter()
+        .map(|&c| {
+            let v = bb(c) * bb(2) + bb(1);
+            (v * v).as_canonical_u32()
+        })
+        .collect();
+    assert_eq!(outs[0], want);
+}
+
+/// Warp-shuffle layout conversion: the tile is register-promoted and read
+/// through a rotation of the five lane bits, `j -> j/32*32 + (j%16)*2 +
+/// (j%32)/16`, which stays within each warp.
+#[test]
+fn macro_register_shuffle_lane_rotation() {
+    let (blocks, t) = (13usize, 512usize);
+    let n = blocks * t;
+    let a = pseudo_field_elems(n, 19);
+
+    let mut ib = IRBuilder::new();
+    let a_in = ib.input("a", ScalarType::BabyBear, vec![n]);
+    let body = kernel!(ib,
+        compute [blocks] |i| {
+            let buf = compute [t] |j| { a_in[i * #t + j] * 2bb };
+            compute [t] |j| { buf[j / 32 * 32 + j % 16 * 2 + j % 32 / 16] + 1bb }
+        }
+    );
+    let module = ib.finish("shuffle_rotation_macro", body);
+
+    let outs = run_module(module, std::slice::from_ref(&a));
+    assert_eq!(outs.len(), 1);
+
+    let mut want = vec![0u32; n];
+    for i in 0..blocks {
+        for j in 0..t {
+            let src = j / 32 * 32 + (j % 16) * 2 + (j % 32) / 16;
+            want[i * t + j] = (bb(a[i * t + src]) * bb(2) + bb(1)).as_canonical_u32();
+        }
+    }
+    assert_eq!(outs[0], want);
+}
+
+/// Shuffle conversion whose sent register slot depends on the lane:
+/// `j -> j + (j % 2) * 512` flips the sequential-slot bit for odd lanes
+/// (lanes stay fixed, so each thread exchanges its own two slots).
+#[test]
+fn macro_register_shuffle_slot_xor() {
+    let (blocks, t) = (7usize, 1024usize);
+    let n = blocks * t;
+    let a = pseudo_field_elems(n, 20);
+
+    let mut ib = IRBuilder::new();
+    let a_in = ib.input("a", ScalarType::BabyBear, vec![n]);
+    let body = kernel!(ib,
+        compute [blocks] |i| {
+            let buf = compute [t] |j| { a_in[i * #t + j] * 2bb };
+            compute [t] |j| { buf[j + j % 2 * 512 - (j % 2 + j / 512) / 2 * 1024] + 1bb }
+        }
+    );
+    let module = ib.finish("shuffle_slot_xor_macro", body);
+
+    let outs = run_module(module, std::slice::from_ref(&a));
+    assert_eq!(outs.len(), 1);
+
+    let mut want = vec![0u32; n];
+    for i in 0..blocks {
+        for j in 0..t {
+            let src = j ^ ((j % 2) * 512);
+            want[i * t + j] = (bb(a[i * t + src]) * bb(2) + bb(1)).as_canonical_u32();
+        }
+    }
+    assert_eq!(outs[0], want);
+}
+
+/// Mixed readers force the shared bounce: one reader matches the register
+/// layout, the other reads a reversal (not XOR-linear), so the promoted tile
+/// is mirrored back through shared memory for it.
+#[test]
+fn macro_register_tile_shared_bounce() {
+    let (blocks, t) = (21usize, 64usize);
+    let n = blocks * t;
+    let a = pseudo_field_elems(n, 21);
+
+    let mut ib = IRBuilder::new();
+    let a_in = ib.input("a", ScalarType::BabyBear, vec![n]);
+    let body = kernel!(ib,
+        compute [blocks] |i| {
+            let buf = compute [t] |j| { a_in[i * #t + j] * 2bb };
+            let c1 = compute [t] |j| { buf[j] + 1bb };
+            compute [t] |j| { buf[#t - 1 - j] + c1[j] }
+        }
+    );
+    let module = ib.finish("register_bounce_macro", body);
+
+    let outs = run_module(module, std::slice::from_ref(&a));
+    assert_eq!(outs.len(), 1);
+
+    let mut want = vec![0u32; n];
+    for i in 0..blocks {
+        for j in 0..t {
+            let rev = bb(a[i * t + (t - 1 - j)]) * bb(2);
+            let same = bb(a[i * t + j]) * bb(2) + bb(1);
+            want[i * t + j] = (rev + same).as_canonical_u32();
+        }
+    }
+    assert_eq!(outs[0], want);
+}
+
+/// `#[grid(threads = 32)]` with a `#[par((th, s) -> th*16 + s)]` compute:
+/// each of the 32 threads owns 16 contiguous logical indices, while the
+/// plain gather tile keeps the identity (coalesced) schedule.
+#[test]
+fn macro_grid_threads_par_layout() {
+    let (blocks, t) = (5usize, 512usize);
+    let n = blocks * t;
+    let a = pseudo_field_elems(n, 22);
+
+    let mut ib = IRBuilder::new();
+    let a_in = ib.input("a", ScalarType::BabyBear, vec![n]);
+    let body = kernel!(ib,
+        #[grid(threads = 32)]
+        compute [blocks] |i| {
+            let buf = compute [t] |j| { a_in[i * #t + j] * 2bb };
+            #[par((th, s) -> th * 16 + s)]
+            compute [t] |j| { buf[j] + 1bb }
+        }
+    );
+    let module = ib.finish("grid_par_macro", body);
+
+    let outs = run_module(module, std::slice::from_ref(&a));
+    assert_eq!(outs.len(), 1);
+
+    let want: Vec<u32> = a
+        .iter()
+        .map(|&c| (bb(c) * bb(2) + bb(1)).as_canonical_u32())
+        .collect();
+    assert_eq!(outs[0], want);
+}
+
+/// Butterfly-partner reads under a `#[par]` layout: with each thread holding
+/// 16 contiguous elements, `j ^ 8` stays within a thread's own slots and
+/// `j ^ 64` crosses lanes within a warp once the tile chain is
+/// register-promoted; either way the result must match the host reference.
+#[test]
+fn macro_par_tile_partner_xor() {
+    let (blocks, t) = (9usize, 512usize);
+    let n = blocks * t;
+    let a = pseudo_field_elems(n, 23);
+
+    let mut ib = IRBuilder::new();
+    let a_in = ib.input("a", ScalarType::BabyBear, vec![n]);
+    let body = kernel!(ib,
+        #[grid(threads = 32)]
+        compute [blocks] |i| {
+            let buf = compute [t] |j| { a_in[i * #t + j] * 2bb };
+            let c1 =
+                #[par((th, s) -> th * 16 + s)]
+                compute [t] |j| { buf[j] + buf[j + 8 - j % 16 / 8 * 16] };
+            #[par((th, s) -> th * 16 + s)]
+            compute [t] |j| { c1[j] * c1[j + 64 - j % 128 / 64 * 128] }
+        }
+    );
+    let module = ib.finish("par_partner_xor_macro", body);
+
+    let outs = run_module(module, std::slice::from_ref(&a));
+    assert_eq!(outs.len(), 1);
+
+    let mut want = vec![0u32; n];
+    for i in 0..blocks {
+        let c1: Vec<BabyBear> = (0..t)
+            .map(|j| bb(a[i * t + j]) * bb(2) + bb(a[i * t + (j ^ 8)]) * bb(2))
+            .collect();
+        for j in 0..t {
+            want[i * t + j] = (c1[j] * c1[j ^ 64]).as_canonical_u32();
+        }
+    }
+    assert_eq!(outs[0], want);
+}
+
 /// Pack (array literal) syntax: each row of the output is `[v*v, v + 2]`.
 #[test]
 fn macro_pack_rows() {

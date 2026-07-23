@@ -13,10 +13,14 @@
 //! terms and cancels `floor` chains — e.g. the composition
 //! `linearize(delinearize(f))` collapses back to `f`.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    rc::Rc,
+};
 
 use crate::{
     ir::{NodeId, VarId},
+    kernel_ir::LinearLayout,
     passes::type_infer::TypeMap,
     CompileError,
 };
@@ -30,12 +34,12 @@ fn err(msg: impl Into<String>) -> CompileError {
 pub enum Quast {
     Sym(VarId),
     Const(i64),
-    Add(Box<Quast>, Box<Quast>),
+    Add(Rc<Quast>, Rc<Quast>),
     /// Multiplication by an integer constant.
-    Mul(Box<Quast>, i64),
+    Mul(Rc<Quast>, i64),
     /// Floor division by a positive integer constant.
-    FloorDiv(Box<Quast>, i64),
-    Neg(Box<Quast>),
+    FloorDiv(Rc<Quast>, i64),
+    Neg(Rc<Quast>),
 }
 
 impl Quast {
@@ -48,23 +52,23 @@ impl Quast {
     }
 
     pub fn add(&self, other: &Quast) -> Quast {
-        Quast::Add(Box::new(self.clone()), Box::new(other.clone()))
+        Quast::Add(Rc::new(self.clone()), Rc::new(other.clone()))
     }
 
     pub fn sub(&self, other: &Quast) -> Quast {
-        Quast::Add(Box::new(self.clone()), Box::new(other.neg()))
+        Quast::Add(Rc::new(self.clone()), Rc::new(other.neg()))
     }
 
     pub fn neg(&self) -> Quast {
-        Quast::Neg(Box::new(self.clone()))
+        Quast::Neg(Rc::new(self.clone()))
     }
 
     pub fn mul_c(&self, c: i64) -> Quast {
-        Quast::Mul(Box::new(self.clone()), c)
+        Quast::Mul(Rc::new(self.clone()), c)
     }
 
     pub fn floordiv(&self, c: i64) -> Quast {
-        Quast::FloorDiv(Box::new(self.clone()), c)
+        Quast::FloorDiv(Rc::new(self.clone()), c)
     }
 
     /// `self % c` as `self - c * floor(self / c)`.
@@ -110,12 +114,10 @@ impl Quast {
         match self {
             Quast::Sym(v) => map.get(v).cloned().unwrap_or_else(|| self.clone()),
             Quast::Const(_) => self.clone(),
-            Quast::Add(a, b) => {
-                Quast::Add(Box::new(a.substitute(map)), Box::new(b.substitute(map)))
-            }
-            Quast::Mul(a, c) => Quast::Mul(Box::new(a.substitute(map)), *c),
-            Quast::FloorDiv(a, c) => Quast::FloorDiv(Box::new(a.substitute(map)), *c),
-            Quast::Neg(a) => Quast::Neg(Box::new(a.substitute(map))),
+            Quast::Add(a, b) => Quast::Add(Rc::new(a.substitute(map)), Rc::new(b.substitute(map))),
+            Quast::Mul(a, c) => Quast::Mul(Rc::new(a.substitute(map)), *c),
+            Quast::FloorDiv(a, c) => Quast::FloorDiv(Rc::new(a.substitute(map)), *c),
+            Quast::Neg(a) => Quast::Neg(Rc::new(a.substitute(map))),
         }
     }
 
@@ -391,17 +393,17 @@ impl LinComb {
             let term = if coeff == 1 {
                 atom.clone()
             } else {
-                Quast::Mul(Box::new(atom.clone()), coeff)
+                Quast::Mul(Rc::new(atom.clone()), coeff)
             };
             acc = Some(match acc {
                 None => term,
-                Some(a) => Quast::Add(Box::new(a), Box::new(term)),
+                Some(a) => Quast::Add(Rc::new(a), Rc::new(term)),
             });
         }
         match (acc, self.cst) {
             (None, c) => Quast::Const(c),
             (Some(a), 0) => a,
-            (Some(a), c) => Quast::Add(Box::new(a), Box::new(Quast::Const(c))),
+            (Some(a), c) => Quast::Add(Rc::new(a), Rc::new(Quast::Const(c))),
         }
     }
 
@@ -471,7 +473,7 @@ fn floordiv_lc(inner: LinComb, c: i64, bounds: &BTreeMap<VarId, u64>) -> LinComb
             return outer;
         }
     }
-    outer.add_term(Quast::FloorDiv(Box::new(rest_q), c), 1);
+    outer.add_term(Quast::FloorDiv(Rc::new(rest_q), c), 1);
     outer
 }
 
@@ -521,10 +523,66 @@ pub fn linearize(exprs: &[Quast], shape: &[usize]) -> Quast {
 }
 
 // ---------------------------------------------------------------------------
+// LinearLayout recovery
+// ---------------------------------------------------------------------------
+
+impl Quast {
+    /// Tries to express the map as a [`LinearLayout`] over the concatenated
+    /// bits of its symbols.
+    ///
+    /// Every symbol must have a power-of-two bound; the flat `k`-bit input
+    /// packs each symbol's bits in ascending [`VarId`] order (first symbol
+    /// in the low bits). The offset is read off the zero input, bases off
+    /// the one-hot inputs, and the candidate layout is verified against the
+    /// expression on the whole domain, so `None` is returned for any map
+    /// that is not XOR-affine (e.g. addition with carries), has a missing
+    /// or non-power-of-two bound, or whose domain exceeds
+    /// [`EXHAUSTIVE_LIMIT`].
+    pub fn to_linear_layout(&self, bounds: &BTreeMap<VarId, u64>) -> Option<LinearLayout> {
+        let mut syms = BTreeSet::new();
+        self.syms(&mut syms);
+        // (symbol, bit offset in the flat input, bit width)
+        let mut vars = Vec::new();
+        let mut k = 0usize;
+        for v in syms {
+            let bound = *bounds.get(&v)?;
+            if !bound.is_power_of_two() {
+                return None;
+            }
+            let width = bound.trailing_zeros() as usize;
+            vars.push((v, k, width));
+            k += width;
+        }
+        if k > EXHAUSTIVE_LIMIT.trailing_zeros() as usize {
+            return None;
+        }
+        let eval_at = |x: u64| -> Option<u64> {
+            let env = vars
+                .iter()
+                .map(|&(v, off, width)| (v, ((x >> off) & ((1u64 << width) - 1)) as i64))
+                .collect();
+            u64::try_from(self.eval(&env)).ok()
+        };
+        let offset = eval_at(0)?;
+        let bases = (0..k)
+            .map(|i| eval_at(1 << i).map(|b| b ^ offset))
+            .collect::<Option<Vec<_>>>()?;
+        let layout = LinearLayout { bases, offset };
+        for x in 0..(1u64 << k) {
+            if eval_at(x)? != layout.apply(x) {
+                return None;
+            }
+        }
+        Some(layout)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Scatter
 // ---------------------------------------------------------------------------
 
-/// Exhaustive bijectivity checking is skipped above this many points.
+/// Exhaustive map checking (scatter bijectivity, [`Quast::to_linear_layout`]
+/// verification) is limited to this many points.
 const EXHAUSTIVE_LIMIT: usize = 1 << 16;
 
 /// The `#[scatter(...)]` attribute of a compute: a bijective quasi-affine map
@@ -665,6 +723,22 @@ pub struct ScatterStore {
     pub flat: VarId,
     pub expr: Quast,
     pub bounds: BTreeMap<VarId, u64>,
+}
+
+/// The `#[par((t, s) -> f(t, s))]` attribute of a compute: its compute
+/// layout, mapping the physical coordinates — thread index `t` and per-thread
+/// sequential (repeat) index `s` — to the logical compute index. Must be
+/// convertible to a [`LinearLayout`](crate::kernel_ir::LinearLayout) once the
+/// bounds are known.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct ParSpec {
+    /// Thread-index symbol; allocated before `seq` so that it occupies the
+    /// low bits of the physical index in [`Quast::to_linear_layout`].
+    pub thread: VarId,
+    /// Per-thread sequential index symbol.
+    pub seq: VarId,
+    /// Logical index as a quasi-affine expression of `thread` and `seq`.
+    pub expr: Quast,
 }
 
 // ---------------------------------------------------------------------------
@@ -857,5 +931,66 @@ mod tests {
             let env = BTreeMap::from([(f, flat)]);
             assert_eq!(store.expr.eval(&env), (flat % 7) * 10 + flat / 7);
         }
+    }
+
+    #[test]
+    fn identity_quast_recovers_identity_layout() {
+        let f = Quast::sym(v(0));
+        let bounds = BTreeMap::from([(v(0), 16u64)]);
+        assert_eq!(f.to_linear_layout(&bounds), Some(LinearLayout::identity(4)));
+    }
+
+    #[test]
+    fn transpose_recovers_bit_rotation() {
+        // Transpose [8, 4] -> [4, 8]: f -> (f % 4) * 8 + f / 4 rotates the
+        // five index bits.
+        let f = Quast::sym(v(0));
+        let q = f.rem_c(4).mul_c(8).add(&f.floordiv(4));
+        let bounds = BTreeMap::from([(v(0), 32u64)]);
+        let layout = q.to_linear_layout(&bounds).unwrap();
+        assert_eq!(layout.bases, vec![8, 16, 1, 2, 4]);
+        for x in 0..32u64 {
+            assert_eq!(layout.apply(x), (x % 4) * 8 + x / 4);
+        }
+    }
+
+    #[test]
+    fn multi_symbol_linearization_concatenates_bits() {
+        // (i, j) -> i * 8 + j over i < 4, j < 8: i occupies the low input
+        // bits (ascending VarId order) but the high output bits.
+        let (i, j) = (v(0), v(1));
+        let q = Quast::sym(i).mul_c(8).add(&Quast::sym(j));
+        let bounds = BTreeMap::from([(i, 4u64), (j, 8u64)]);
+        let layout = q.to_linear_layout(&bounds).unwrap();
+        assert_eq!(layout.bases, vec![8, 16, 1, 2, 4]);
+    }
+
+    #[test]
+    fn non_power_of_two_bound_is_rejected() {
+        let f = Quast::sym(v(0));
+        assert_eq!(f.to_linear_layout(&BTreeMap::from([(v(0), 12u64)])), None);
+        // A missing bound is also rejected.
+        assert_eq!(f.to_linear_layout(&BTreeMap::new()), None);
+    }
+
+    #[test]
+    fn non_linear_maps_are_rejected() {
+        let bounds = BTreeMap::from([(v(0), 4u64), (v(1), 4u64)]);
+        // Constant offset: T(0) != 0.
+        let f = Quast::sym(v(0));
+        assert_eq!(f.add(&Quast::cst(1)).to_linear_layout(&bounds), None);
+        // i + j carries between bits, so it is not XOR-linear even though
+        // the one-hot evaluations look like the identity.
+        let q = Quast::sym(v(0)).add(&Quast::sym(v(1)));
+        assert_eq!(q.to_linear_layout(&bounds), None);
+        // f + f/2 carries within a single symbol's bits.
+        assert_eq!(f.add(&f.floordiv(2)).to_linear_layout(&bounds), None);
+    }
+
+    #[test]
+    fn oversized_domain_is_rejected() {
+        let f = Quast::sym(v(0));
+        let bounds = BTreeMap::from([(v(0), 1u64 << 20)]);
+        assert_eq!(f.to_linear_layout(&bounds), None);
     }
 }

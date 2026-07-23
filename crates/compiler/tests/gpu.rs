@@ -5,7 +5,8 @@ use crypto_compiler::{
     compile_and_load,
     ir::{IRBuilder, ScalarType},
     kernels::{
-        merkle_tree_module, ntt_module, ntt_shared_module, ntt_twiddles, Poseidon2Constants,
+        merkle_tree_module, ntt_module, ntt_reg_module, ntt_shared_module, ntt_twiddles,
+        Poseidon2Constants,
     },
     runtime::CompileOptions,
 };
@@ -111,6 +112,32 @@ fn shared_ntt_matches_p3_radix2dit() {
             .map(|x| x.as_canonical_u32())
             .collect();
         assert_eq!(outs[0], want, "shared NTT mismatch at log_n={log_n}");
+    }
+}
+
+/// The register-tiled NTT must match p3 at the single-group boundary
+/// (log_n = 13, one 13-bit reg group only), across the 1-bit and 2-bit
+/// shared leftovers (14 and 15), and at the target size for 512-thread
+/// blocks with an 8-bit shared tail (21). The 2-bit tail case in
+/// particular exercises the disjoint-lifetime shared-memory aliasing
+/// through [`plan_shared_mem`] and its accompanying barrier insertion.
+#[test]
+fn reg_ntt_matches_p3_radix2dit() {
+    for log_n in [13usize, 14, 15, 21] {
+        let n = 1usize << log_n;
+        let coeffs = pseudo_field_elems(n, 4);
+        let twiddles = ntt_twiddles(log_n);
+
+        let outs = run_module(ntt_reg_module(log_n), &[coeffs.clone(), twiddles]);
+        assert_eq!(outs.len(), 1);
+
+        let input_f: Vec<BabyBear> = coeffs.iter().map(|&c| bb(c)).collect();
+        let want: Vec<u32> = Radix2Dit::default()
+            .dft(input_f)
+            .iter()
+            .map(|x| x.as_canonical_u32())
+            .collect();
+        assert_eq!(outs[0], want, "reg NTT mismatch at log_n={log_n}");
     }
 }
 

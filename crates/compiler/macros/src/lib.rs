@@ -21,6 +21,12 @@
 //!   expression per physical dimension (`+ - * / %` and unary `-`, where `* / %` take a constant
 //!   operand: an integer literal or a `#`-splice); the physical `[bounds]` may be omitted when the
 //!   rank is unchanged. E.g. `#[scatter(i -> (i / 4, i % 4), [3, 4])]`;
+//! - `#[par((t, s) -> expr)] compute ...` — the compute layout: maps the physical thread index `t`
+//!   and per-thread repeat index `s` to the logical compute index through a quasi-affine expression
+//!   (same grammar as `scatter`), e.g. `#[par((t, s) -> t * 16 + s)]`. The map must be convertible
+//!   to a linear layout;
+//! - `#[grid(threads = N)] compute ...` — block-size hint on the outer compute: run the kernel with
+//!   `N` threads per block instead of the default;
 //! - `t[i, j, ...]` — tensor indexing;
 //! - `+ - * / % < <= ==` with the usual precedence;
 //! - `(a, b, ...)` — tuple; `[a, b, ...]` — pack (array literal);
@@ -51,6 +57,9 @@ mod kw {
     syn::custom_keyword!(reduce);
     syn::custom_keyword!(then);
     syn::custom_keyword!(scatter);
+    syn::custom_keyword!(par);
+    syn::custom_keyword!(grid);
+    syn::custom_keyword!(threads);
 }
 
 enum DslExpr {
@@ -88,7 +97,7 @@ enum DslExpr {
         bound: Expr,
         var: Ident,
         body: Box<DslExpr>,
-        scatter: Option<ScatterAttr>,
+        attrs: Box<ComputeAttrs>,
     },
     Reduce {
         bound: Expr,
@@ -97,11 +106,32 @@ enum DslExpr {
     },
 }
 
+/// Attributes collected in front of a `compute`.
+#[derive(Default)]
+struct ComputeAttrs {
+    scatter: Option<ScatterAttr>,
+    par: Option<ParAttr>,
+    threads: Option<Expr>,
+}
+
+impl ComputeAttrs {
+    fn is_empty(&self) -> bool {
+        self.scatter.is_none() && self.par.is_none() && self.threads.is_none()
+    }
+}
+
 /// `#[scatter(params -> exprs, [bounds])]` on top of a `compute`.
 struct ScatterAttr {
     params: Vec<Ident>,
     exprs: Vec<QExpr>,
     bounds: Option<Vec<Expr>>,
+}
+
+/// `#[par((thread, seq) -> expr)]` on top of a `compute`.
+struct ParAttr {
+    thread: Ident,
+    seq: Ident,
+    expr: QExpr,
 }
 
 /// A quasi-affine scatter expression. Constant subtrees (no parameters) are
@@ -157,22 +187,22 @@ fn parse_expr(input: ParseStream) -> syn::Result<DslExpr> {
         });
     }
     // `#[` cannot start a plain expression (`#` splices are never followed by
-    // a bracket), so this is unambiguously a scatter attribute.
+    // a bracket), so this is unambiguously a compute attribute.
     if input.peek(Token![#]) && input.peek2(syn::token::Bracket) {
-        let attr = parse_scatter_attr(input)?;
+        let attrs = parse_compute_attrs(input)?;
         if !input.peek(kw::compute) {
-            return Err(input.error("`#[scatter(...)]` must be followed by `compute`"));
+            return Err(input.error("compute attributes must be followed by `compute`"));
         }
-        return parse_binder(input, Some(attr));
+        return parse_binder(input, attrs);
     }
     if input.peek(kw::compute) || input.peek(kw::reduce) {
-        return parse_binder(input, None);
+        return parse_binder(input, ComputeAttrs::default());
     }
     parse_cmp(input)
 }
 
 /// `compute [bound] |i| { body }` or `reduce [bound] |i| { body }`.
-fn parse_binder(input: ParseStream, scatter: Option<ScatterAttr>) -> syn::Result<DslExpr> {
+fn parse_binder(input: ParseStream, attrs: ComputeAttrs) -> syn::Result<DslExpr> {
     let is_compute = input.peek(kw::compute);
     if is_compute {
         input.parse::<kw::compute>()?;
@@ -196,18 +226,47 @@ fn parse_binder(input: ParseStream, scatter: Option<ScatterAttr>) -> syn::Result
             bound,
             var,
             body,
-            scatter,
+            attrs: Box::new(attrs),
         }
     } else {
         DslExpr::Reduce { bound, var, body }
     })
 }
 
-/// `#[scatter(params -> exprs, [bounds])]`.
-fn parse_scatter_attr(input: ParseStream) -> syn::Result<ScatterAttr> {
-    input.parse::<Token![#]>()?;
-    let bracket;
-    bracketed!(bracket in input);
+/// A run of `#[...]` attributes in front of a `compute`.
+fn parse_compute_attrs(input: ParseStream) -> syn::Result<ComputeAttrs> {
+    let mut attrs = ComputeAttrs::default();
+    while input.peek(Token![#]) && input.peek2(syn::token::Bracket) {
+        input.parse::<Token![#]>()?;
+        let bracket;
+        bracketed!(bracket in input);
+        if bracket.peek(kw::scatter) {
+            if attrs.scatter.is_some() {
+                return Err(bracket.error("duplicate `scatter` attribute"));
+            }
+            attrs.scatter = Some(parse_scatter_attr(&bracket)?);
+        } else if bracket.peek(kw::par) {
+            if attrs.par.is_some() {
+                return Err(bracket.error("duplicate `par` attribute"));
+            }
+            attrs.par = Some(parse_par_attr(&bracket)?);
+        } else if bracket.peek(kw::grid) {
+            if attrs.threads.is_some() {
+                return Err(bracket.error("duplicate `grid` attribute"));
+            }
+            attrs.threads = Some(parse_grid_attr(&bracket)?);
+        } else {
+            return Err(bracket.error("expected `scatter`, `par`, or `grid`"));
+        }
+        if !bracket.is_empty() {
+            return Err(bracket.error("unexpected tokens in compute attribute"));
+        }
+    }
+    Ok(attrs)
+}
+
+/// `scatter(params -> exprs, [bounds])` (inside the `#[...]` bracket).
+fn parse_scatter_attr(bracket: ParseStream) -> syn::Result<ScatterAttr> {
     bracket.parse::<kw::scatter>()?;
     let paren;
     parenthesized!(paren in bracket);
@@ -247,14 +306,46 @@ fn parse_scatter_attr(input: ParseStream) -> syn::Result<ScatterAttr> {
     if !paren.is_empty() {
         return Err(paren.error("unexpected tokens in scatter attribute"));
     }
-    if !bracket.is_empty() {
-        return Err(bracket.error("unexpected tokens in scatter attribute"));
-    }
     Ok(ScatterAttr {
         params,
         exprs,
         bounds,
     })
+}
+
+/// `par((thread, seq) -> expr)` (inside the `#[...]` bracket).
+fn parse_par_attr(bracket: ParseStream) -> syn::Result<ParAttr> {
+    bracket.parse::<kw::par>()?;
+    let paren;
+    parenthesized!(paren in bracket);
+    let p;
+    parenthesized!(p in paren);
+    let thread: Ident = p.parse()?;
+    p.parse::<Token![,]>()?;
+    let seq: Ident = p.parse()?;
+    if !p.is_empty() {
+        return Err(p.error("`par` takes exactly two parameters: `(thread, seq)`"));
+    }
+    paren.parse::<Token![->]>()?;
+    let expr = parse_qexpr(&paren)?;
+    if !paren.is_empty() {
+        return Err(paren.error("unexpected tokens in par attribute"));
+    }
+    Ok(ParAttr { thread, seq, expr })
+}
+
+/// `grid(threads = N)` (inside the `#[...]` bracket).
+fn parse_grid_attr(bracket: ParseStream) -> syn::Result<Expr> {
+    bracket.parse::<kw::grid>()?;
+    let paren;
+    parenthesized!(paren in bracket);
+    paren.parse::<kw::threads>()?;
+    paren.parse::<Token![=]>()?;
+    let threads: Expr = paren.parse()?;
+    if !paren.is_empty() {
+        return Err(paren.error("unexpected tokens in grid attribute"));
+    }
+    Ok(threads)
 }
 
 fn parse_qexpr(input: ParseStream) -> syn::Result<QExpr> {
@@ -561,30 +652,57 @@ fn gen_expr(e: &DslExpr) -> TokenStream2 {
             bound,
             var,
             body,
-            scatter,
+            attrs,
         } => {
             let b = gen_expr(body);
-            let Some(sc) = scatter else {
+            if attrs.is_empty() {
                 return quote!(__cc_b.compute((#bound) as usize, |__cc_b, #var| #b));
-            };
-            let n = sc.params.len();
-            let out_opt = match &sc.bounds {
+            }
+            let sc = match &attrs.scatter {
                 None => quote!(::core::option::Option::None),
-                Some(bs) => {
+                Some(sc) => {
+                    let n = sc.params.len();
+                    let out_opt = match &sc.bounds {
+                        None => quote!(::core::option::Option::None),
+                        Some(bs) => {
+                            quote!(::core::option::Option::Some(
+                                ::std::vec![#((#bs) as usize),*]
+                            ))
+                        }
+                    };
+                    let params = &sc.params;
+                    let idxs = 0..n;
+                    let exprs: Vec<TokenStream2> = sc.exprs.iter().map(gen_qexpr).collect();
                     quote!(::core::option::Option::Some(
-                        ::std::vec![#((#bs) as usize),*]
+                        __cc_b.scatter_map(#n, #out_opt, |__cc_qs, _cc_cst| {
+                            #(let #params = __cc_qs[#idxs].clone();)*
+                            ::std::vec![#(#exprs),*]
+                        })
                     ))
                 }
             };
-            let params = &sc.params;
-            let idxs = 0..n;
-            let exprs: Vec<TokenStream2> = sc.exprs.iter().map(gen_qexpr).collect();
+            let par = match &attrs.par {
+                None => quote!(::core::option::Option::None),
+                Some(p) => {
+                    let (thread, seq) = (&p.thread, &p.seq);
+                    let expr = gen_qexpr(&p.expr);
+                    quote!(::core::option::Option::Some(
+                        __cc_b.par_map(|__cc_qt, __cc_qseq, _cc_cst| {
+                            let #thread = __cc_qt.clone();
+                            let #seq = __cc_qseq.clone();
+                            #expr
+                        })
+                    ))
+                }
+            };
+            let threads = match &attrs.threads {
+                None => quote!(::core::option::Option::None),
+                Some(t) => quote!(::core::option::Option::Some((#t) as usize)),
+            };
             quote!({
-                let __cc_sc = __cc_b.scatter_map(#n, #out_opt, |__cc_qs, _cc_cst| {
-                    #(let #params = __cc_qs[#idxs].clone();)*
-                    ::std::vec![#(#exprs),*]
-                });
-                __cc_b.compute_scatter((#bound) as usize, __cc_sc, |__cc_b, #var| #b)
+                let __cc_sc = #sc;
+                let __cc_par = #par;
+                __cc_b.compute_with((#bound) as usize, __cc_sc, __cc_par, #threads, |__cc_b, #var| #b)
             })
         }
         DslExpr::Reduce { bound, var, body } => {

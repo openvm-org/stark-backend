@@ -87,6 +87,7 @@ pub(crate) mod test_util {
                 SSAOpCode::Par { .. } => "par",
                 SSAOpCode::Loop { .. } => "loop",
                 SSAOpCode::Sync => "sync",
+                SSAOpCode::ConvertLayout { .. } => "convert",
                 _ => "scalar",
             })
             .collect()
