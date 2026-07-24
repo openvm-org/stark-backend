@@ -12,10 +12,36 @@ use openvm_cuda_common::{
 
 use crate::{
     compile_and_load,
-    ir::Module,
+    ir::{Module, ScalarType},
     runtime::{CompileOptions, KernelModule},
     CompileError,
 };
+
+/// BabyBear prime.
+const BB_P: u64 = 2_013_265_921;
+
+/// Convert canonical BabyBear `u32` `x` in `[0, P)` to Montgomery form
+/// (`x * R mod P`, `R = 2^32`). Used to encode BabyBear inputs at the DSL
+/// boundary; the emitted CUDA operates entirely in Montgomery form.
+pub fn to_monty(x: u32) -> u32 {
+    (((x as u64) << 32) % BB_P) as u32
+}
+
+/// Convert Montgomery-form BabyBear `u32` back to canonical `[0, P)`. This
+/// is the tightest possible one-limb Montgomery reduction — the same
+/// `mul_by_1` idiom used by sppark's `mont32_t::operator uint32_t()`.
+pub fn from_monty(x: u32) -> u32 {
+    const P: u64 = BB_P;
+    // t = x + ((x * M0) mod 2^32) * P; canonical value is t / R.
+    const M0: u64 = 0x77ff_ffff;
+    let red = (x as u64).wrapping_mul(M0) & 0xffff_ffff;
+    let t = x as u64 + red * P;
+    let mut out = (t >> 32) as u32;
+    if out as u64 >= P {
+        out = (out as u64 - P) as u32;
+    }
+    out
+}
 
 /// Per-iteration timing summary of a benchmarked kernel, in milliseconds.
 #[derive(Clone, Copy, Debug)]
@@ -84,6 +110,11 @@ impl ModuleRunner {
     /// Copies host input tensors into the pre-allocated device buffers on
     /// the runner's stream. Every inner buffer's length (in `u32`s) must
     /// match the module's declared input size.
+    ///
+    /// Callers pass **canonical** BabyBear (and FpExt) `u32`s in `[0, P)`.
+    /// The runner Montgomery-encodes them on the fly to match the emitted
+    /// kernel's on-device representation; `U32` and `Bool` inputs pass
+    /// through unchanged.
     pub fn set_inputs(&mut self, inputs: &[Vec<u32>]) {
         assert_eq!(
             inputs.len(),
@@ -100,9 +131,19 @@ impl ModuleRunner {
                 data.len(),
                 self.in_bufs[i].len()
             );
-            data.as_slice()
-                .copy_to_on(&mut self.in_bufs[i], &self.ctx)
-                .expect("H2D copy");
+            let ty = self.module.input_type(i);
+            // BabyBear (and FpExt whose four coefficients are BabyBears)
+            // uses Montgomery on device — convert per-limb before H2D.
+            if matches!(ty, ScalarType::BabyBear | ScalarType::FpExt) {
+                let mont: Vec<u32> = data.iter().map(|&v| to_monty(v)).collect();
+                mont.as_slice()
+                    .copy_to_on(&mut self.in_bufs[i], &self.ctx)
+                    .expect("H2D copy");
+            } else {
+                data.as_slice()
+                    .copy_to_on(&mut self.in_bufs[i], &self.ctx)
+                    .expect("H2D copy");
+            }
         }
     }
 
@@ -113,10 +154,23 @@ impl ModuleRunner {
 
     /// Copies every output buffer back to host, synchronizing the stream in
     /// the process (via `MemCopyD2H::to_host_on`).
+    ///
+    /// BabyBear (and FpExt) outputs are Montgomery-encoded on device;
+    /// this method decodes them back to canonical `u32` in `[0, P)` before
+    /// returning, so callers can compare directly against p3 references.
     pub fn read_outputs(&self) -> Vec<Vec<u32>> {
         self.out_bufs
             .iter()
-            .map(|b| b.to_host_on(&self.ctx).expect("D2H copy"))
+            .enumerate()
+            .map(|(i, b)| {
+                let raw: Vec<u32> = b.to_host_on(&self.ctx).expect("D2H copy");
+                let ty = self.module.output_type(i);
+                if matches!(ty, ScalarType::BabyBear | ScalarType::FpExt) {
+                    raw.into_iter().map(from_monty).collect()
+                } else {
+                    raw
+                }
+            })
             .collect()
     }
 

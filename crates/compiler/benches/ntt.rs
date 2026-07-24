@@ -10,6 +10,7 @@ use crypto_compiler::{
     compile_and_load,
     ir::Module,
     kernels::{ntt_module, ntt_reg_module, ntt_shared_module, ntt_twiddles},
+    runner::{from_monty, to_monty},
     runtime::{CompileOptions, KernelModule},
 };
 use openvm_cuda_backend::{ntt::batch_ntt, prelude::F};
@@ -76,9 +77,14 @@ fn bench_size(ctx: &GpuDeviceCtx, log_n: usize) {
     let n = 1usize << log_n;
     let input = pseudo_field_elems(n, 1);
 
-    // JIT NTTs: canonical u32 in/out, out-of-place, own twiddle input.
-    let d_in = input.as_slice().to_device_on(ctx).unwrap();
-    let d_tw = ntt_twiddles(log_n).as_slice().to_device_on(ctx).unwrap();
+    // JIT NTTs: Montgomery-form u32 in/out, out-of-place, own twiddle
+    // input. The DSL kernel operates on Montgomery-encoded BabyBear
+    // throughout, so callers of the raw `KernelModule` (as this bench
+    // does, bypassing `ModuleRunner`) must encode/decode themselves.
+    let input_mont: Vec<u32> = input.iter().map(|&x| to_monty(x)).collect();
+    let twiddles_mont: Vec<u32> = ntt_twiddles(log_n).iter().map(|&x| to_monty(x)).collect();
+    let d_in = input_mont.as_slice().to_device_on(ctx).unwrap();
+    let d_tw = twiddles_mont.as_slice().to_device_on(ctx).unwrap();
     let d_out_flat = DeviceBuffer::<u32>::with_capacity_on(n, ctx);
     let d_out_sh = DeviceBuffer::<u32>::with_capacity_on(n, ctx);
     let d_out_reg = DeviceBuffer::<u32>::with_capacity_on(n, ctx);
@@ -94,9 +100,26 @@ fn bench_size(ctx: &GpuDeviceCtx, log_n: usize) {
     km_flat.run(&ctx.stream).expect("flat JIT NTT run");
     km_sh.run(&ctx.stream).expect("shared JIT NTT run");
     km_reg.run(&ctx.stream).expect("reg JIT NTT run");
-    let got_flat: Vec<u32> = d_out_flat.to_host_on(ctx).unwrap();
-    let got_sh: Vec<u32> = d_out_sh.to_host_on(ctx).unwrap();
-    let got_reg: Vec<u32> = d_out_reg.to_host_on(ctx).unwrap();
+    // JIT outputs are Montgomery-encoded; decode before comparing against
+    // supra's (already-canonicalized-via-`as_canonical_u32`) output below.
+    let got_flat: Vec<u32> = d_out_flat
+        .to_host_on(ctx)
+        .unwrap()
+        .into_iter()
+        .map(from_monty)
+        .collect();
+    let got_sh: Vec<u32> = d_out_sh
+        .to_host_on(ctx)
+        .unwrap()
+        .into_iter()
+        .map(from_monty)
+        .collect();
+    let got_reg: Vec<u32> = d_out_reg
+        .to_host_on(ctx)
+        .unwrap()
+        .into_iter()
+        .map(from_monty)
+        .collect();
     batch_ntt(&d_f, log_n as u32, 0, 1, true, false, ctx);
     let got_supra: Vec<u32> = d_f
         .to_host_on(ctx)

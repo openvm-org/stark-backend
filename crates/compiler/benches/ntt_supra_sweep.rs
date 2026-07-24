@@ -15,6 +15,7 @@ use crypto_compiler::{
     compile_and_load,
     ir::Module,
     kernels::{ntt_partial_twiddles, ntt_supra_module},
+    runner::{from_monty, to_monty},
     runtime::{CompileOptions, KernelModule},
 };
 use openvm_cuda_backend::{ntt::batch_ntt, prelude::F};
@@ -101,11 +102,16 @@ fn bench_row(ctx: &GpuDeviceCtx, log_n: usize) -> (f64, Vec<f64>) {
     let n = 1usize << log_n;
     let input = pseudo_field_elems(n, 1);
 
-    let d_in = input.as_slice().to_device_on(ctx).unwrap();
-    let d_tw = ntt_partial_twiddles(log_n)
-        .as_slice()
-        .to_device_on(ctx)
-        .unwrap();
+    // DSL kernels operate on Montgomery-encoded BabyBear at the device
+    // boundary — encode both the coefficient and windowed-twiddle inputs
+    // once, then reuse for every config in the row.
+    let input_mont: Vec<u32> = input.iter().map(|&x| to_monty(x)).collect();
+    let twiddles_mont: Vec<u32> = ntt_partial_twiddles(log_n)
+        .iter()
+        .map(|&x| to_monty(x))
+        .collect();
+    let d_in = input_mont.as_slice().to_device_on(ctx).unwrap();
+    let d_tw = twiddles_mont.as_slice().to_device_on(ctx).unwrap();
 
     // Supra baseline (in-place, Montgomery form).
     let input_f: Vec<F> = input.iter().map(|&x| F::new(x)).collect();
@@ -146,7 +152,14 @@ fn bench_row(ctx: &GpuDeviceCtx, log_n: usize) -> (f64, Vec<f64>) {
             &d_out,
         );
         km.run(&ctx.stream).expect("supra JIT NTT run");
-        let got: Vec<u32> = d_out.to_host_on(ctx).unwrap();
+        // DSL kernel outputs Montgomery form; decode to canonical before
+        // comparing against supra's `as_canonical_u32`-flattened output.
+        let got: Vec<u32> = d_out
+            .to_host_on(ctx)
+            .unwrap()
+            .into_iter()
+            .map(from_monty)
+            .collect();
         assert_eq!(
             got, got_supra,
             "supra-module ({nthreads}, {z_count}) mismatch at n=2^{log_n}"

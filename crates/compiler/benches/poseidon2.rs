@@ -20,6 +20,7 @@ use crypto_compiler::{
     kernel,
     kernels::{poseidon2_permutation, Poseidon2Constants},
     poseidon2_parallel::{poseidon2_permute_par, WIDTH},
+    runner::to_monty,
     runtime::{CompileOptions, KernelModule},
 };
 use openvm_cuda_common::{
@@ -214,9 +215,13 @@ fn main() {
     let ctx = GpuDeviceCtx::for_current_device().expect("CUDA context");
     let consts = Poseidon2Constants::p3_default();
 
-    // Representative inputs.
-    let state_vec = splitmix(WIDTH, 1);
-    let value_vec = vec![splitmix(1, 2)[0]];
+    // Representative inputs. DSL kernels expect Montgomery-encoded BabyBear
+    // on device; this bench uses the raw `KernelModule` (bypassing
+    // `ModuleRunner`), so we Mont-encode here. The bench only checks
+    // serial-vs-parallel *equivalence*, so the exact input value doesn't
+    // matter; encoding preserves that equivalence.
+    let state_vec: Vec<u32> = splitmix(WIDTH, 1).into_iter().map(to_monty).collect();
+    let value_vec: Vec<u32> = vec![to_monty(splitmix(1, 2)[0])];
     let ext_val_vec = splitmix(D_EF, 3);
     let d_state: DeviceBuffer<u32> = state_vec.as_slice().to_device_on(&ctx).unwrap();
     let d_value: DeviceBuffer<u32> = value_vec.as_slice().to_device_on(&ctx).unwrap();

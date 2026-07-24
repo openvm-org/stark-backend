@@ -6,6 +6,7 @@
 use crypto_compiler::{
     compile_and_load,
     kernels::{ntt_partial_twiddles, ntt_supra_module},
+    runner::to_monty,
     runtime::CompileOptions,
 };
 use openvm_cuda_backend::{ntt::batch_ntt, prelude::F};
@@ -33,12 +34,16 @@ fn main() {
     let ctx = GpuDeviceCtx::for_current_device().expect("CUDA context");
     let input = pseudo_field_elems(n, 1);
 
-    // DSL: best config at 2^24 is (nthreads=128, z_count=1).
-    let d_in = input.as_slice().to_device_on(&ctx).unwrap();
-    let d_tw = ntt_partial_twiddles(log_n)
-        .as_slice()
-        .to_device_on(&ctx)
-        .unwrap();
+    // DSL: best config at 2^24 is (nthreads=128, z_count=1). Both the
+    // coefficient input and the windowed twiddle table go to device in
+    // Montgomery form to match the emitted kernel's data representation.
+    let input_mont: Vec<u32> = input.iter().map(|&x| to_monty(x)).collect();
+    let twiddles_mont: Vec<u32> = ntt_partial_twiddles(log_n)
+        .iter()
+        .map(|&x| to_monty(x))
+        .collect();
+    let d_in = input_mont.as_slice().to_device_on(&ctx).unwrap();
+    let d_tw = twiddles_mont.as_slice().to_device_on(&ctx).unwrap();
     let d_out = DeviceBuffer::<u32>::with_capacity_on(n, &ctx);
     let mut km = compile_and_load(
         &ntt_supra_module(log_n, 128, 1, false),

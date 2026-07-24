@@ -11,7 +11,7 @@ use openvm_cuda_common::{
     stream::{cudaStream_t, CudaStream, GpuDeviceCtx},
 };
 
-use crate::{kernel_ir::KernelProgram, CompileError};
+use crate::{ir::ScalarType, kernel_ir::KernelProgram, CompileError};
 
 #[derive(Clone, Debug)]
 pub struct CompileOptions {
@@ -66,6 +66,12 @@ pub struct KernelModule {
     /// [`KernelModule::set_scratch`] (external).
     scratch_bound: bool,
     source: String,
+    /// Scalar element type of each module input, in declaration order.
+    /// Populated from `kprog.input_bufs` so callers know which buffers hold
+    /// Montgomery-encoded BabyBear vs. plain `U32`/`Bool` data.
+    input_types: Vec<ScalarType>,
+    /// Scalar element type of each module output, in declaration order.
+    output_types: Vec<ScalarType>,
     /// The library must stay loaded while `prog` and the vtable exist.
     _lib: Library,
     _dir: tempfile::TempDir,
@@ -136,12 +142,24 @@ impl KernelModule {
         if prog.is_null() {
             return Err(CompileError::Load("make_module returned null".into()));
         }
+        let input_types: Vec<ScalarType> = kprog
+            .input_bufs
+            .iter()
+            .map(|&b| kprog.buffer(b).elem)
+            .collect();
+        let output_types: Vec<ScalarType> = kprog
+            .output_bufs
+            .iter()
+            .map(|&b| kprog.buffer(b).elem)
+            .collect();
         let module = Self {
             prog,
             vt,
             scratch: None,
             scratch_bound: false,
             source: source.to_string(),
+            input_types,
+            output_types,
             _lib: lib,
             _dir: dir,
         };
@@ -166,6 +184,19 @@ impl KernelModule {
     pub fn input_size(&self, i: usize) -> usize {
         assert!(i < self.num_inputs(), "input index out of range");
         unsafe { (self.vt.input_size)(self.prog, i as u64) as usize }
+    }
+
+    /// Scalar element type of input `i`. `BabyBear` inputs are expected in
+    /// Montgomery form (`x * R mod P`); `U32`/`Bool`/`FpExt` inputs pass
+    /// through unchanged. `FpExt` inputs carry four Montgomery-encoded
+    /// BabyBear coefficients per 16-byte element.
+    pub fn input_type(&self, i: usize) -> ScalarType {
+        self.input_types[i]
+    }
+
+    /// Scalar element type of output `i`. Mirrors [`Self::input_type`].
+    pub fn output_type(&self, i: usize) -> ScalarType {
+        self.output_types[i]
     }
 
     /// Size of output `i` in bytes.
