@@ -13,6 +13,35 @@ use crate::{
 /// Number of G outputs per z in round 0: G0, G1, G2
 pub const NUM_G: usize = 3;
 
+/// Per-window-group context for the batched MLE sumcheck round kernel.
+/// Must match `StackedMleGroupCtx` in `stacked_reduction.cu`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct StackedMleGroupCtx {
+    pub unstacked_cols: *const UnstackedSlice,
+    pub lambda_pows: *const EF,
+    pub output: *mut u64,
+    pub window_len: u32,
+    pub num_y: u32,
+    pub window_stride: u32,
+    pub _pad: u32,
+}
+
+/// Per-window-group context for the batched degenerate MLE sumcheck round kernel.
+/// Must match `StackedMleDegenGroupCtx` in `stacked_reduction.cu`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct StackedMleDegenGroupCtx {
+    pub eq_ub: *const EF,
+    pub unstacked_cols: *const UnstackedSlice,
+    pub lambda_pows: *const EF,
+    pub output: *mut u64,
+    pub eq_r: EF,
+    pub k_rot_r: EF,
+    pub window_len: u32,
+    pub shift_factor: u32,
+}
+
 extern "C" {
     pub fn _stacked_reduction_r0_required_temp_buffer_size(
         trace_height: u32,
@@ -80,6 +109,26 @@ extern "C" {
         window_len: u32,
         l_skip: u32,
         round: u32,
+        stream: cudaStream_t,
+    ) -> i32;
+
+    fn _stacked_reduction_sumcheck_mle_round_batched(
+        q_evals: *const *const EF,
+        eq_r_ns: *const EF,
+        k_rot_ns: *const EF,
+        group_block_offsets: *const u32,
+        group_ctxs: *const StackedMleGroupCtx,
+        num_groups: u32,
+        num_blocks: u32,
+        q_height: u32,
+        stream: cudaStream_t,
+    ) -> i32;
+
+    fn _stacked_reduction_sumcheck_mle_round_degenerate_batched(
+        q_evals: *const *const EF,
+        group_ctxs: *const StackedMleDegenGroupCtx,
+        num_groups: u32,
+        q_height: u32,
         stream: cudaStream_t,
     ) -> i32;
 }
@@ -242,6 +291,64 @@ pub unsafe fn stacked_reduction_sumcheck_mle_round(
         window_len as u32,
         num_y as u32,
         sm_count,
+        stream,
+    ))
+}
+
+/// Batched variant of [`stacked_reduction_sumcheck_mle_round`]: all non-degenerate window
+/// groups of a round in one launch. `group_block_offsets` is the prefix sum of per-group
+/// block counts (`num_groups + 1` entries, last = `num_blocks`), where each group's block
+/// count is `ceil(num_y / 256) * window_stride`.
+///
+/// # Safety
+/// - The safety requirements of [`stacked_reduction_sumcheck_mle_round`] apply per group.
+/// - `group_block_offsets` and `group_ctxs` must be device pointers valid for `num_groups + 1` and
+///   `num_groups` elements respectively.
+/// - For each group, `num_y * window_stride < 2^32` (u64 atomic accumulation bound).
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn stacked_reduction_sumcheck_mle_round_batched(
+    q_evals: &DeviceBuffer<*const EF>,
+    eq_r_ns: &EqEvalSegments<EF>,
+    k_rot_ns: &EqEvalSegments<EF>,
+    group_block_offsets: *const u32,
+    group_ctxs: *const StackedMleGroupCtx,
+    num_groups: usize,
+    num_blocks: usize,
+    q_height: usize,
+    stream: cudaStream_t,
+) -> Result<(), CudaError> {
+    check(_stacked_reduction_sumcheck_mle_round_batched(
+        q_evals.as_ptr(),
+        eq_r_ns.buffer.as_ptr(),
+        k_rot_ns.buffer.as_ptr(),
+        group_block_offsets,
+        group_ctxs,
+        num_groups as u32,
+        num_blocks as u32,
+        q_height as u32,
+        stream,
+    ))
+}
+
+/// Batched variant of [`stacked_reduction_sumcheck_mle_round_degenerate`]: one block per
+/// window group.
+///
+/// # Safety
+/// - The safety requirements of [`stacked_reduction_sumcheck_mle_round_degenerate`] apply per
+///   group.
+/// - `group_ctxs` must be a device pointer valid for `num_groups` elements.
+pub unsafe fn stacked_reduction_sumcheck_mle_round_degenerate_batched(
+    q_evals: &DeviceBuffer<*const EF>,
+    group_ctxs: *const StackedMleDegenGroupCtx,
+    num_groups: usize,
+    q_height: usize,
+    stream: cudaStream_t,
+) -> Result<(), CudaError> {
+    check(_stacked_reduction_sumcheck_mle_round_degenerate_batched(
+        q_evals.as_ptr(),
+        group_ctxs,
+        num_groups as u32,
+        q_height as u32,
         stream,
     ))
 }
