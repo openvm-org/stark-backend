@@ -38,7 +38,7 @@ use crate::{
     poly::evals_eq_hypercube,
     prelude::{D_EF, EF, F},
     sponge::GpuFiatShamirTranscript,
-    stacked_pcs::rs_code_matrix,
+    stacked_pcs::{rs_code_matrix, RsCodewordPrefetch},
     stacked_reduction::StackedPcsData2,
     WhirProverError,
 };
@@ -68,6 +68,7 @@ pub fn prove_whir_opening_gpu<HS, TS>(
     transcript: &mut TS,
     mut stacked_per_commit: Vec<StackedPcsData2<HS::Digest>>,
     u: &[EF],
+    mut prefetched_rs: Option<RsCodewordPrefetch>,
     device_ctx: &GpuDeviceCtx,
 ) -> Result<WhirProof<HS::SC>, WhirProverError>
 where
@@ -428,6 +429,16 @@ where
             // Vector to hold owned copies of backing matrices that are regenerated in the case they
             // were not cached
             let mut backing_mats_owned = vec![None; stacked_per_commit.len()];
+            // The common-main (first) commit's codeword may have been
+            // re-encoded ahead of time on the auxiliary stream: order the
+            // main stream after it and use it in place of the recompute.
+            if let Some(prefetch) = prefetched_rs.take() {
+                device_ctx
+                    .stream
+                    .wait(&prefetch.done)
+                    .map_err(WhirProverError::RsPrefetchWait)?;
+                backing_mats_owned[0] = Some(prefetch.matrix);
+            }
             let mut backing_matrices = Vec::with_capacity(stacked_per_commit.len());
             let mut trees = Vec::with_capacity(stacked_per_commit.len());
             for (d, backing_mat_owned) in zip(&mut stacked_per_commit, &mut backing_mats_owned) {
@@ -435,14 +446,21 @@ where
                 if let Some(matrix) = d.inner.tree.backing_matrix.as_ref() {
                     backing_matrices.push(matrix);
                 } else {
-                    let layout = d.layout();
-                    let traces = d.traces.iter().collect_vec();
-                    debug_assert!(!traces.is_empty());
-                    let backing_matrix =
-                        rs_code_matrix(log_blowup, layout, &traces, &d.inner.matrix, device_ctx)
-                            .map_err(WhirProverError::RsCodeMatrix)?;
-                    d.traces.clear();
-                    *backing_mat_owned = Some(backing_matrix);
+                    if backing_mat_owned.is_none() {
+                        let layout = d.layout();
+                        let traces = d.traces.iter().collect_vec();
+                        debug_assert!(!traces.is_empty());
+                        let backing_matrix = rs_code_matrix(
+                            log_blowup,
+                            layout,
+                            &traces,
+                            &d.inner.matrix,
+                            device_ctx,
+                        )
+                        .map_err(WhirProverError::RsCodeMatrix)?;
+                        d.traces.clear();
+                        *backing_mat_owned = Some(backing_matrix);
+                    }
                     backing_matrices.push(backing_mat_owned.as_ref().unwrap());
                 }
             }
@@ -706,6 +724,7 @@ mod tests {
             &mut prover_sponge,
             stacked_per_commit,
             &z_cube,
+            None,
             &device.device_ctx,
         )
         .unwrap();

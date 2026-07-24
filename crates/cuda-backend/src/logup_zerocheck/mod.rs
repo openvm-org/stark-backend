@@ -59,6 +59,7 @@ use crate::{
     poly::EqEvalLayers,
     prelude::{EF, F},
     sponge::GpuFiatShamirTranscript,
+    stacked_pcs::RsPrefetchRequest,
     utils::compute_barycentric_inv_lagrange_denoms,
 };
 
@@ -119,6 +120,7 @@ pub(crate) fn air_width_for_mat(need_rot: bool, mat_width: usize) -> u32 {
 
 #[allow(clippy::type_complexity)]
 #[instrument(level = "info", skip_all)]
+#[allow(clippy::too_many_arguments)]
 pub fn prove_zerocheck_and_logup_gpu<HS, TS>(
     transcript: &mut TS,
     mpk: &DeviceMultiStarkProvingKey<GenericGpuBackend<HS>>,
@@ -126,6 +128,7 @@ pub fn prove_zerocheck_and_logup_gpu<HS, TS>(
     save_memory: bool,
     monomial_num_y_threshold: u32,
     sm_count: u32,
+    rs_prefetch: Option<RsPrefetchRequest<'_>>,
     device_ctx: &GpuDeviceCtx,
 ) -> Result<(GkrProof<HS::SC>, BatchConstraintProof<HS::SC>, Vec<EF>), LogupZerocheckError>
 where
@@ -243,6 +246,19 @@ where
     prover.xi = xi;
 
     logup_gkr_span.exit();
+
+    // The fractional GKR peak has passed: start re-encoding the WHIR round-0
+    // RS codeword on the low-priority auxiliary stream, soaking the idle
+    // bubbles of the sumcheck phases below. Do NOT shrink `memory_limit_bytes`
+    // to "reserve" for the resident codeword: that budget is the batch-MLE
+    // working-buffer hint, and driving it below the value keygen picked pushes
+    // the round-0 batch-MLE onto a degenerate path whose D2H readback
+    // deadlocks. The codeword is a separate pool allocation already accounted
+    // by the allocator, which returns a recoverable OOM rather than corrupting
+    // the batch budget.
+    if let Some(request) = rs_prefetch {
+        request.launch(device_ctx)?;
+    }
 
     // Note: this span includes ple_fold, but that function has no cuda synchronization so it does
     // not include the kernel times for the actual folding

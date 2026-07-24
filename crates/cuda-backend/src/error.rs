@@ -92,6 +92,8 @@ pub enum LogupZerocheckError {
     BatchFoldMle(CudaError),
     #[error("fill_zero: {0}")]
     FillZero(CudaError),
+    #[error("rs codeword prefetch: {0}")]
+    RsPrefetch(#[from] RsPrefetchError),
 }
 
 #[derive(Error, Debug)]
@@ -149,6 +151,8 @@ pub enum StackTracesError {
 pub enum RsCodeMatrixError {
     #[error(transparent)]
     MemCopy(#[from] MemCopyError),
+    #[error("event: {0}")]
+    Event(CudaError),
     #[error("stack_traces_into_expanded error: {0}")]
     StackTraces(StackTracesError),
     #[error("batch_expand_pad error: {0}")]
@@ -161,6 +165,16 @@ pub enum RsCodeMatrixError {
     BitRev(CudaError),
 }
 
+/// Errors from launching the WHIR round-0 codeword prefetch on the auxiliary
+/// stream.
+#[derive(Error, Debug)]
+pub enum RsPrefetchError {
+    #[error("event: {0}")]
+    Event(CudaError),
+    #[error(transparent)]
+    RsCodeMatrix(#[from] RsCodeMatrixError),
+}
+
 #[derive(Error, Debug)]
 pub enum WhirProverError {
     #[error(transparent)]
@@ -169,6 +183,8 @@ pub enum WhirProverError {
     MerkleTree(MerkleTreeError),
     #[error("rs_code_matrix: {0}")]
     RsCodeMatrix(RsCodeMatrixError),
+    #[error("rs prefetch wait: {0}")]
+    RsPrefetchWait(CudaError),
     #[error("whir_algebraic_batch_traces: {0}")]
     AlgebraicBatch(CudaError),
     #[error("transpose_fp_to_fpext_vec: {0}")]
