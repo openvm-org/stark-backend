@@ -84,6 +84,86 @@ extern "C" {
         alpha: EF,
         stream: cudaStream_t,
     ) -> i32;
+
+    fn _bit_rev_zeta_fused(
+        d_inout: *mut std::ffi::c_void,
+        lg_domain_size: u32,
+        padded_poly_size: u32,
+        poly_count: u32,
+        l_skip: u32,
+        stream: cudaStream_t,
+    ) -> i32;
+
+    fn _bit_rev_expand_pad(
+        d_out: *mut std::ffi::c_void,
+        d_inp: *const std::ffi::c_void,
+        lg_domain_size: u32,
+        out_stride: u32,
+        in_stride: u32,
+        poly_count: u32,
+        src_len: u32,
+        stream: cudaStream_t,
+    ) -> i32;
+}
+
+/// Fused subset-zeta transform (coeff-to-eval stages over the low `l_skip` index bits)
+/// plus in-place bit-reversal permutation, per column. Produces the identical buffer
+/// contents as `mle_interpolate_stages(0..l_skip-1)` followed by [`bit_rev`], in one
+/// read+write pass.
+///
+/// # Safety
+/// - `d_inout` must be a device buffer of `poly_count` columns with stride `padded_poly_size >=
+///   2^lg_domain_size`.
+/// - Requires `l_skip <= 6` and `2^lg_domain_size >= 4096` (Z-tile kernel bounds); the launcher
+///   returns an error otherwise.
+pub unsafe fn bit_rev_zeta_fused(
+    d_inout: &DeviceBuffer<F>,
+    lg_domain_size: u32,
+    padded_poly_size: u32,
+    poly_count: u32,
+    l_skip: u32,
+    stream: cudaStream_t,
+) -> Result<(), CudaError> {
+    CudaError::from_result(_bit_rev_zeta_fused(
+        d_inout.as_mut_raw_ptr(),
+        lg_domain_size,
+        padded_poly_size,
+        poly_count,
+        l_skip,
+        stream,
+    ))
+}
+
+/// Fused zero-extend + bit-reversal: `out[bit_rev(i)] = if i < src_len { in[i] } else { 0 }`
+/// per column. Produces the identical buffer contents as `batch_expand_pad` followed by
+/// [`bit_rev`], in one pass. `d_out` and `d_inp` must not alias.
+///
+/// # Safety
+/// - `d_out` must have `poly_count` columns of stride `out_stride >= 2^lg_domain_size`; `d_inp`
+///   must have `poly_count` columns of stride `in_stride >= src_len`.
+/// - Requires `2^lg_domain_size >= 4096` (Z-tile kernel bounds); the launcher returns an error
+///   otherwise.
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn bit_rev_expand_pad(
+    d_out: &DeviceBuffer<F>,
+    d_inp: &DeviceBuffer<F>,
+    lg_domain_size: u32,
+    out_stride: u32,
+    in_stride: u32,
+    poly_count: u32,
+    src_len: u32,
+    stream: cudaStream_t,
+) -> Result<(), CudaError> {
+    CudaError::from_result(_bit_rev_expand_pad(
+        d_out.as_mut_raw_ptr(),
+        d_inp.as_raw_ptr(),
+        lg_domain_size,
+        out_stride,
+        in_stride,
+        poly_count,
+        src_len,
+        stream,
+    ))
 }
 
 pub unsafe fn bit_rev(

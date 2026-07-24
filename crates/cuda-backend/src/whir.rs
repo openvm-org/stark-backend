@@ -24,6 +24,7 @@ use crate::{
         batch_ntt_small::batch_ntt_small,
         matrix::{batch_expand_pad, split_ext_to_base_col_major_matrix},
         mle_interpolate::mle_interpolate_stage_ext,
+        ntt::bit_rev_expand_pad,
         poly::{eval_poly_ext_at_point_from_base, transpose_fp_to_fpext_vec},
         whir::{
             _whir_sumcheck_coeff_moments_required_temp_buffer_size, w_moments_accumulate,
@@ -317,26 +318,52 @@ where
             //   2^{m-k_whir}
             // - We resize each F-poly to RS domain size 2^{log_rs_domain_size - 1}, which is
             //   equivalent to resizing the EF-polynomial
+            // The zero-extension is fused with the bit-reversal the NTT needs, saving a
+            // full pass; small domains fall back to the two-pass form.
             unsafe {
-                batch_expand_pad(
-                    g_rs.as_mut_ptr(),
-                    g_coeffs.as_ptr(),
-                    D_EF as u32,
-                    codeword_height as u32,
-                    f_height as u32,
-                    device_ctx.stream.as_raw(),
-                )
-                .map_err(|error| WhirProverError::BatchExpandPad { error, whir_round })?;
+                if codeword_height >= 4096 {
+                    bit_rev_expand_pad(
+                        &g_rs,
+                        &g_coeffs,
+                        (log_rs_domain_size - 1) as u32,
+                        codeword_height as u32,
+                        f_height as u32,
+                        D_EF as u32,
+                        f_height as u32,
+                        device_ctx.stream.as_raw(),
+                    )
+                    .map_err(|error| WhirProverError::BatchExpandPad { error, whir_round })?;
 
-                batch_ntt(
-                    &g_rs,
-                    (log_rs_domain_size - 1) as u32,
-                    0u32,
-                    D_EF as u32,
-                    true,
-                    false,
-                    device_ctx,
-                );
+                    batch_ntt(
+                        &g_rs,
+                        (log_rs_domain_size - 1) as u32,
+                        0u32,
+                        D_EF as u32,
+                        false,
+                        false,
+                        device_ctx,
+                    );
+                } else {
+                    batch_expand_pad(
+                        g_rs.as_mut_ptr(),
+                        g_coeffs.as_ptr(),
+                        D_EF as u32,
+                        codeword_height as u32,
+                        f_height as u32,
+                        device_ctx.stream.as_raw(),
+                    )
+                    .map_err(|error| WhirProverError::BatchExpandPad { error, whir_round })?;
+
+                    batch_ntt(
+                        &g_rs,
+                        (log_rs_domain_size - 1) as u32,
+                        0u32,
+                        D_EF as u32,
+                        true,
+                        false,
+                        device_ctx,
+                    );
+                }
             }
 
             let g_tree = MerkleTreeGpu::<F, HS::Digest>::new_with_hash::<HS::MerkleHash>(
