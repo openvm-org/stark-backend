@@ -14,7 +14,11 @@ use crate::{
 };
 
 mod cuda;
+mod replay;
+mod trace;
 mod vm_pool;
+use replay::ReplayAllocator;
+use trace::AllocTracer;
 use vm_pool::VirtualMemoryPool;
 
 #[cfg(test)]
@@ -53,6 +57,8 @@ pub struct MemoryManager {
     allocated_ptrs: HashMap<NonNull<c_void>, AllocRecord>,
     current_size: usize,
     max_used_size: usize,
+    tracer: Option<AllocTracer>,
+    replay: Option<ReplayAllocator>,
 }
 
 /// # Safety
@@ -71,6 +77,8 @@ impl MemoryManager {
             allocated_ptrs: HashMap::new(),
             current_size: 0,
             max_used_size: 0,
+            tracer: AllocTracer::from_env(),
+            replay: ReplayAllocator::from_env(),
         }
     }
 
@@ -80,6 +88,30 @@ impl MemoryManager {
         stream: &StreamGuard,
     ) -> Result<*mut c_void, MemoryError> {
         assert!(size != 0, "Requested size must be non-zero");
+
+        if self.replay.as_ref().is_some_and(|r| size >= r.min_size)
+            && self.pool.page_size != usize::MAX
+        {
+            // Lazily allocate the replay workspace through the pool so it is
+            // tracked like any other allocation (counted once, not per serve).
+            if self.replay.as_ref().unwrap().workspace.is_none() {
+                let total = self
+                    .replay
+                    .as_ref()
+                    .unwrap()
+                    .total_size
+                    .next_multiple_of(self.pool.page_size);
+                let ws = self.pool.malloc_internal(total, stream)?;
+                self.current_size += total;
+                self.max_used_size = self.max_used_size.max(self.current_size);
+                self.replay.as_mut().unwrap().workspace = Some(ws);
+                tracing::warn!("VPMM_REPLAY: workspace of {} bytes allocated", total);
+            }
+            let key = stream.as_raw() as u64;
+            if let Some(ptr) = self.replay.as_mut().unwrap().try_alloc(size, key) {
+                return Ok(ptr);
+            }
+        }
 
         let mut tracked_size = size;
         let ptr = if size < self.pool.page_size {
@@ -115,8 +147,24 @@ impl MemoryManager {
     /// - The pointer `ptr` must be a valid, previously allocated device pointer.
     /// - The caller must ensure that `ptr` is not used after this function is called.
     /// - The caller must hold the `MEMORY_MANAGER` lock before calling this method.
-    unsafe fn d_free_under_lock(&mut self, ptr: *mut c_void) -> Result<StreamGuard, MemoryError> {
+    unsafe fn d_free_under_lock(
+        &mut self,
+        ptr: *mut c_void,
+    ) -> Result<Option<StreamGuard>, MemoryError> {
         let nn = NonNull::new(ptr).ok_or(MemoryError::NullPointer)?;
+
+        if let Some(replay) = &mut self.replay {
+            if replay.try_free(ptr) {
+                return Ok(None);
+            }
+            // The workspace base is also a live pool record covering the whole
+            // replay workspace: it must never reach `pool.free_internal`, or a
+            // caller double-free of the offset-0 served pointer would silently
+            // release the entire workspace while served buffers live inside it.
+            if replay.workspace == Some(ptr) {
+                return Err(MemoryError::InvalidPointer);
+            }
+        }
 
         if let Some(record) = self.allocated_ptrs.remove(&nn) {
             let size = record.size;
@@ -125,11 +173,11 @@ impl MemoryManager {
                 tracing::error!("cudaFreeAsync failed: ptr={:p}: {:?}", ptr, e);
                 MemoryError::from(e)
             })?;
-            Ok(record.stream)
+            Ok(Some(record.stream))
         } else {
             let (freed_size, guard) = self.pool.free_internal(ptr)?;
             self.current_size -= freed_size;
-            Ok(guard)
+            Ok(Some(guard))
         }
     }
 }
@@ -154,21 +202,41 @@ impl Default for MemoryManager {
 }
 
 pub fn d_malloc_on(size: usize, stream: &StreamGuard) -> Result<*mut c_void, MemoryError> {
+    let t0 = std::time::Instant::now();
     let manager = MEMORY_MANAGER.get().unwrap();
     let mut manager = manager.lock().map_err(|_| MemoryError::LockError)?;
-    manager.d_malloc_on(size, stream)
+    let ptr = manager.d_malloc_on(size, stream)?;
+    if let Some(tracer) = &mut manager.tracer {
+        tracer.record_alloc(ptr, size, stream.as_raw() as u64, t0.elapsed().as_nanos());
+    }
+    Ok(ptr)
 }
 
 /// # Safety
 /// The pointer `ptr` must be a valid, previously allocated device pointer.
 /// The caller must ensure that `ptr` is not used after this function is called.
 pub unsafe fn d_free(ptr: *mut c_void) -> Result<(), MemoryError> {
+    let t0 = std::time::Instant::now();
     let manager = MEMORY_MANAGER.get().unwrap();
     let mut manager = manager.lock().map_err(|_| MemoryError::LockError)?;
     let guard = manager.d_free_under_lock(ptr)?;
+    if let Some(tracer) = &mut manager.tracer {
+        let key = guard.as_ref().map(|g| g.as_raw() as u64).unwrap_or(0);
+        tracer.record_free(ptr, key, t0.elapsed().as_nanos());
+    }
     drop(manager);
     drop(guard);
     Ok(())
+}
+
+/// Returns `(current, peak)` GPU memory tracked by the global memory manager,
+/// in bytes. Returns zeros if the manager is unavailable.
+pub fn memory_stats() -> (usize, usize) {
+    MEMORY_MANAGER
+        .get()
+        .and_then(|m| m.lock().ok())
+        .map(|m| (m.current_size, m.max_used_size))
+        .unwrap_or((0, 0))
 }
 
 #[derive(Debug, Clone)]
@@ -182,7 +250,12 @@ impl MemTracker {
         let current = MEMORY_MANAGER
             .get()
             .and_then(|m| m.lock().ok())
-            .map(|m| m.current_size)
+            .map(|mut m| {
+                if let Some(tracer) = &mut m.tracer {
+                    tracer.record_marker("start", label);
+                }
+                m.current_size
+            })
             .unwrap_or_default();
 
         Self { current, label }
@@ -221,10 +294,17 @@ impl MemTracker {
 
     #[inline]
     pub fn tracing_info(&self, msg: impl Into<Option<&'static str>>) {
-        let Some(manager) = MEMORY_MANAGER.get().and_then(|m| m.lock().ok()) else {
+        let Some(mut manager) = MEMORY_MANAGER.get().and_then(|m| m.lock().ok()) else {
             tracing::error!("Memory manager not available");
             return;
         };
+        let msg = msg.into();
+        if let Some(tracer) = &mut manager.tracer {
+            match msg {
+                None => tracer.record_marker("end", self.label),
+                Some(m) => tracer.record_marker("mark", &format!("{}:{}", self.label, m)),
+            }
+        }
         let current = manager.current_size;
         let peak = manager.max_used_size;
         let used = current as isize - self.current as isize;
@@ -237,8 +317,7 @@ impl MemTracker {
             ByteSize::b(current as u64),
             ByteSize::b(peak as u64),
             ByteSize::b(pool_usage as u64),
-            msg.into()
-                .map_or(self.label.to_string(), |m| format!("{}:{}", self.label, m))
+            msg.map_or(self.label.to_string(), |m| format!("{}:{}", self.label, m))
         );
     }
 

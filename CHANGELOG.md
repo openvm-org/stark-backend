@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+### Added
+- (CUDA common) Static memory planner ([spec](./docs/static_alloc_spec.md)): declare allocations and their lifetimes up front via `AllocBuilder`/`DeviceBufFake` RAII handles, pack them into a single fixed workspace with an interference-graph packing pass, and serve fixed-offset buffers through `StaticAllocator::get` with run-time detection of use-after-lifetime. Includes allocation tracing (`VPMM_TRACE`), offline plan analysis tools, and a record-and-replay mode (`VPMM_REPLAY`) that serves a recorded workload's large allocations from a statically planned workspace with no prover code changes.
+
 ## v2.0.0 (2026-07-06)
 
 ### Added
