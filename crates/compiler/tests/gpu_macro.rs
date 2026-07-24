@@ -2,16 +2,11 @@
 //! Requires a CUDA GPU.
 
 use crypto_compiler::{
-    compile_and_load,
     ir::{IRBuilder, NodeId, ScalarType},
     kernel,
     kernels::{ntt_twiddles, poseidon2_permutation, Poseidon2Constants},
+    runner::{maybe_bench, ModuleRunner},
     runtime::CompileOptions,
-};
-use openvm_cuda_common::{
-    copy::{MemCopyD2H, MemCopyH2D},
-    d_buffer::DeviceBuffer,
-    stream::GpuDeviceCtx,
 };
 use p3_baby_bear::{default_babybear_poseidon2_16, BabyBear};
 use p3_dft::{Radix2Dit, TwoAdicSubgroupDft};
@@ -88,9 +83,9 @@ fn bb(x: u32) -> BabyBear {
 
 /// Compiles `module`, binds inputs/outputs, runs it and returns the outputs.
 /// Dumps both IR levels and the generated CUDA under
-/// `target/ir-dumps/gpu_macro/`.
+/// `target/ir-dumps/gpu_macro/`. If the `BENCH_KERNEL` env var is set, also
+/// benchmarks the kernel.
 fn run_module(module: crypto_compiler::ir::Module, inputs: &[Vec<u32>]) -> Vec<Vec<u32>> {
-    let ctx = GpuDeviceCtx::for_current_device().unwrap();
     let options = CompileOptions {
         dump_ir: Some(
             concat!(
@@ -101,29 +96,13 @@ fn run_module(module: crypto_compiler::ir::Module, inputs: &[Vec<u32>]) -> Vec<V
         ),
         ..Default::default()
     };
-    let mut km = compile_and_load(module, &options).unwrap();
-    assert_eq!(km.num_inputs(), inputs.len());
-
-    let in_bufs: Vec<DeviceBuffer<u32>> = inputs
-        .iter()
-        .map(|data| data.as_slice().to_device_on(&ctx).unwrap())
-        .collect();
-    for (i, buf) in in_bufs.iter().enumerate() {
-        assert_eq!(km.input_size(i), buf.len() * 4, "input {i} size");
-        km.set_input(i, buf).unwrap();
-    }
-    let out_bufs: Vec<DeviceBuffer<u32>> = (0..km.num_outputs())
-        .map(|i| DeviceBuffer::with_capacity_on(km.output_size(i) / 4, &ctx))
-        .collect();
-    for (i, buf) in out_bufs.iter().enumerate() {
-        km.set_output(i, buf).unwrap();
-    }
-    km.ensure_scratch(&ctx);
-    km.run(&ctx.stream).unwrap();
-    out_bufs
-        .iter()
-        .map(|b| b.to_host_on(&ctx).unwrap())
-        .collect()
+    let mut runner = ModuleRunner::new(&module, &options).unwrap();
+    assert_eq!(runner.num_inputs(), inputs.len());
+    runner.set_inputs(inputs);
+    runner.run();
+    let outs = runner.read_outputs();
+    maybe_bench(&mut runner);
+    outs
 }
 
 /// Zero `BabyBear` constant, for use inside `kernel!` bodies (`0bb` is a

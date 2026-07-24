@@ -15,9 +15,9 @@
 //! which module inputs. Static data lives in [`GraphNode::Const`], which
 //! carries either device or host bytes. See `graph-ir.md`.
 
-use std::{collections::BTreeMap, fmt};
+use std::{collections::BTreeMap, fmt, rc::Rc};
 
-use openvm_cuda_common::d_buffer::DeviceBuffer;
+use openvm_cuda_common::{d_buffer::DeviceBuffer, stream::cudaStream_t};
 
 use crate::{
     ir::{self, VarId},
@@ -45,9 +45,13 @@ pub struct BufInfo {
     pub elem_size: usize,
 }
 
-/// Type-erased kernel launch: receives raw pointers to the input buffers
-/// and to the output buffers, in that order.
-pub type KernelFn = Box<dyn Fn(&[*mut ()], &[*mut ()])>;
+/// Type-erased kernel launch: receives raw pointers to the input buffers,
+/// to the output buffers, and the CUDA stream to launch on. The closure
+/// should launch its work *asynchronously* on `stream` (no in-closure
+/// synchronization); [`crate::graph_exe::GraphExe::run`] issues launches in
+/// planner-chosen order on that same stream, so intra-graph dependencies are
+/// enforced by stream ordering.
+pub type KernelFn = Box<dyn Fn(&[*mut ()], &[*mut ()], cudaStream_t)>;
 
 pub struct KernelNode {
     pub inputs: Vec<BufId>,
@@ -70,15 +74,31 @@ impl fmt::Debug for KernelNode {
     }
 }
 
-#[derive(Copy, Clone, Debug)]
+/// Device-to-device (or intra-device) byte copy: `dst[dst_offset ..
+/// dst_offset + num_bytes] <- src[src_offset .. src_offset + num_bytes]`.
+///
+/// Offsets and length are [`Quast`] expressions so they can depend on the
+/// same symbolic variables buffer sizes are built from. For a full-buffer
+/// copy use [`GraphBuilder::insert_memcpy`], which sets both offsets to 0
+/// and `num_bytes` to `dst`'s declared size; for partial copies use
+/// [`GraphBuilder::insert_memcpy_range`].
+#[derive(Clone, Debug)]
 pub struct MemcpyNode {
     pub src: BufId,
+    pub src_offset: Quast,
     pub dst: BufId,
+    pub dst_offset: Quast,
+    pub num_bytes: Quast,
 }
 
-#[derive(Copy, Clone, Debug)]
+/// Byte-pattern fill of `buf[offset .. offset + num_bytes]` with the
+/// low-byte of `val` (see [`crate::graph_exe::GraphExe::run`] for the
+/// byte-uniformity check).
+#[derive(Clone, Debug)]
 pub struct MemSetNode {
     pub node: BufId,
+    pub offset: Quast,
+    pub num_bytes: Quast,
     pub val: u32,
 }
 
@@ -87,8 +107,12 @@ pub struct MemSetNode {
 /// order-aligned with `module.builder.inputs()`; `outputs` is one-to-one
 /// with the module's top-level outputs (a scalar body binds one output; a
 /// tuple body binds one BufId per element).
+///
+/// `module` is wrapped in an [`Rc`] so multiple `KernelModuleNode`s can
+/// share the same source module by pointer identity; downstream compilation
+/// (see `graph_exe`) deduplicates JIT builds keyed on that pointer.
 pub struct KernelModuleNode {
-    pub module: ir::Module,
+    pub module: Rc<ir::Module>,
     pub inputs: Vec<BufId>,
     pub outputs: Vec<BufId>,
 }
@@ -193,13 +217,20 @@ impl GraphBuilder {
     /// compiler pipeline, together with the graph buffers that feed its
     /// declared module inputs and receive its outputs.
     ///
+    /// The module is passed as an `Rc<ir::Module>` (or anything convertible
+    /// into one, so a bare `ir::Module` also works). Inserting two kernels
+    /// with the *same* `Rc` clone lets [`crate::graph_exe::GraphCompiler`]
+    /// JIT the module only once and reuse the compiled artifact across both
+    /// nodes.
+    ///
     /// `inputs.len()` must equal `module.builder.inputs().len()`.
     pub fn insert_kernel(
         &mut self,
-        module: ir::Module,
+        module: impl Into<Rc<ir::Module>>,
         inputs: impl IntoIterator<Item = BufId>,
         outputs: impl IntoIterator<Item = BufId>,
     ) {
+        let module: Rc<ir::Module> = module.into();
         let inputs: Vec<BufId> = inputs.into_iter().collect();
         assert_eq!(
             inputs.len(),
@@ -224,13 +255,19 @@ impl GraphBuilder {
 
     /// Adds a blackbox kernel: an opaque host closure with explicit input,
     /// output and in-place-modify buffer bindings.
+    ///
+    /// The closure receives the graph runner's [`cudaStream_t`] as its third
+    /// argument and should launch its work *asynchronously* on that stream —
+    /// do not synchronize inside the closure. Graph execution enforces
+    /// intra-graph ordering by launching every node on the same stream in
+    /// planner-chosen order.
     pub fn insert_blackbox_kernel(
         &mut self,
         name: impl Into<String>,
         inputs: impl Iterator<Item = BufId>,
         outputs: impl Iterator<Item = BufId>,
         modifies: impl Iterator<Item = bool>,
-        f: impl Fn(&[*mut ()], &[*mut ()]) + 'static,
+        f: impl Fn(&[*mut ()], &[*mut ()], cudaStream_t) + 'static,
     ) {
         let inputs: Vec<_> = inputs.collect();
         let modifies: Vec<_> = modifies.collect();
@@ -248,12 +285,63 @@ impl GraphBuilder {
         }));
     }
 
+    /// Full-buffer copy: `dst[..] <- src[..dst_size]`. Offsets are 0 and
+    /// `num_bytes` is `dst`'s declared byte size (matching this API's
+    /// pre-offset semantics). Use [`Self::insert_memcpy_range`] for partial
+    /// copies with explicit offsets.
     pub fn insert_memcpy(&mut self, src: BufId, dst: BufId) {
-        self.nodes.push(GraphNode::Memcpy(MemcpyNode { src, dst }));
+        let n = self.bufs[dst.0].size.clone();
+        self.nodes.push(GraphNode::Memcpy(MemcpyNode {
+            src,
+            src_offset: Quast::cst(0),
+            dst,
+            dst_offset: Quast::cst(0),
+            num_bytes: n,
+        }));
     }
 
+    /// Byte-range copy: `dst[dst_offset..dst_offset + num_bytes] <-
+    /// src[src_offset..src_offset + num_bytes]`. All three quantities are
+    /// symbolic [`Quast`] expressions; they're resolved to concrete byte
+    /// counts against the same variable binding used for buffer sizes.
+    pub fn insert_memcpy_range(
+        &mut self,
+        src: BufId,
+        src_offset: Quast,
+        dst: BufId,
+        dst_offset: Quast,
+        num_bytes: Quast,
+    ) {
+        self.nodes.push(GraphNode::Memcpy(MemcpyNode {
+            src,
+            src_offset,
+            dst,
+            dst_offset,
+            num_bytes,
+        }));
+    }
+
+    /// Full-buffer byte-pattern fill: `buf[..] <- low_byte(val)`. Offset is
+    /// 0 and `num_bytes` is `buf`'s declared byte size. Use
+    /// [`Self::insert_memset_range`] for partial fills.
     pub fn insert_memset(&mut self, node: BufId, val: u32) {
-        self.nodes.push(GraphNode::Memset(MemSetNode { node, val }));
+        let n = self.bufs[node.0].size.clone();
+        self.nodes.push(GraphNode::Memset(MemSetNode {
+            node,
+            offset: Quast::cst(0),
+            num_bytes: n,
+            val,
+        }));
+    }
+
+    /// Byte-range fill: `buf[offset..offset + num_bytes] <- low_byte(val)`.
+    pub fn insert_memset_range(&mut self, node: BufId, offset: Quast, num_bytes: Quast, val: u32) {
+        self.nodes.push(GraphNode::Memset(MemSetNode {
+            node,
+            offset,
+            num_bytes,
+            val,
+        }));
     }
 
     /// SSA-form textual dump of the graph. Inputs are listed as header
@@ -356,14 +444,19 @@ impl GraphBuilder {
                 format!("let ({}) = Const({data});", self.buf_decl(c.buf))
             }
             GraphNode::Memcpy(m) => format!(
-                "let ({}) = Memcpy({});",
+                "let ({}) = Memcpy({}, src_off={}, dst_off={}, n={});",
                 self.buf_decl(m.dst),
                 self.buf_name(m.src),
+                format_size(&m.src_offset, &self.symbols),
+                format_size(&m.dst_offset, &self.symbols),
+                format_size(&m.num_bytes, &self.symbols),
             ),
             GraphNode::Memset(m) => format!(
-                "let ({}) = Memset(val={:#x});",
+                "let ({}) = Memset(val={:#x}, off={}, n={});",
                 self.buf_decl(m.node),
                 m.val,
+                format_size(&m.offset, &self.symbols),
+                format_size(&m.num_bytes, &self.symbols),
             ),
         }
     }
@@ -500,7 +593,7 @@ mod tests {
             [x].into_iter(),
             [y].into_iter(),
             [false].into_iter(),
-            |_inputs, _outputs| {},
+            |_inputs, _outputs, _stream| {},
         );
 
         assert_eq!(b.bufs.len(), 3);
@@ -512,11 +605,11 @@ mod tests {
         assert_eq!(b.nodes.len(), 3);
         assert!(matches!(
             &b.nodes[0],
-            GraphNode::Memcpy(MemcpyNode { src, dst }) if *src == host && *dst == x
+            GraphNode::Memcpy(MemcpyNode { src, dst, .. }) if *src == host && *dst == x
         ));
         assert!(matches!(
             &b.nodes[1],
-            GraphNode::Memset(MemSetNode { node, val: 0 }) if *node == y
+            GraphNode::Memset(MemSetNode { node, val: 0, .. }) if *node == y
         ));
         match &b.nodes[2] {
             GraphNode::BlackboxKernel(k) => {
@@ -524,7 +617,7 @@ mod tests {
                 assert_eq!(k.inputs, vec![x]);
                 assert_eq!(k.outputs, vec![y]);
                 assert_eq!(k.modifies, vec![false]);
-                (k.func)(&[], &[]);
+                (k.func)(&[], &[], std::ptr::null_mut());
             }
             other => panic!("expected blackbox kernel node, got {other:?}"),
         }
@@ -600,6 +693,59 @@ mod tests {
     }
 
     #[test]
+    fn insert_memcpy_full_buffer_uses_dst_size_and_zero_offsets() {
+        let mut b = GraphBuilder::new();
+        let n = b.register_symbol("n");
+        let sz = Quast::sym(n).mul_c(4);
+        let src = buf(&mut b, "src", DeviceType::Cuda(0), sz.clone());
+        let dst = buf(&mut b, "dst", DeviceType::Cuda(0), sz.clone());
+        b.insert_memcpy(src, dst);
+        let env = BTreeMap::from([(n, 32)]);
+        match &b.nodes[0] {
+            GraphNode::Memcpy(m) => {
+                assert_eq!(m.src, src);
+                assert_eq!(m.dst, dst);
+                assert_eq!(m.src_offset.eval(&env), 0);
+                assert_eq!(m.dst_offset.eval(&env), 0);
+                assert_eq!(m.num_bytes.eval(&env), 128);
+            }
+            other => panic!("expected memcpy, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn insert_memcpy_range_carries_offsets_and_length() {
+        let mut b = GraphBuilder::new();
+        let src = buf(&mut b, "src", DeviceType::Cuda(0), Quast::cst(64));
+        let dst = buf(&mut b, "dst", DeviceType::Cuda(0), Quast::cst(64));
+        b.insert_memcpy_range(src, Quast::cst(16), dst, Quast::cst(8), Quast::cst(32));
+        match &b.nodes[0] {
+            GraphNode::Memcpy(m) => {
+                assert_eq!(m.src_offset.eval(&BTreeMap::new()), 16);
+                assert_eq!(m.dst_offset.eval(&BTreeMap::new()), 8);
+                assert_eq!(m.num_bytes.eval(&BTreeMap::new()), 32);
+            }
+            other => panic!("expected memcpy, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn insert_memset_range_carries_offset_and_length() {
+        let mut b = GraphBuilder::new();
+        let x = buf(&mut b, "x", DeviceType::Cuda(0), Quast::cst(128));
+        b.insert_memset_range(x, Quast::cst(32), Quast::cst(64), 0xff);
+        match &b.nodes[0] {
+            GraphNode::Memset(m) => {
+                assert_eq!(m.node, x);
+                assert_eq!(m.val, 0xff);
+                assert_eq!(m.offset.eval(&BTreeMap::new()), 32);
+                assert_eq!(m.num_bytes.eval(&BTreeMap::new()), 64);
+            }
+            other => panic!("expected memset, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn register_symbol_allocates_distinct_ids() {
         let mut b = GraphBuilder::new();
         let n = b.register_symbol("n");
@@ -619,7 +765,7 @@ mod tests {
             [x].into_iter(),
             [x].into_iter(),
             [].into_iter(),
-            |_, _| {},
+            |_, _, _| {},
         );
     }
 }

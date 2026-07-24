@@ -14,6 +14,8 @@ pub mod monomial;
 pub mod ntt;
 pub mod poly;
 pub mod sponge;
+#[cfg(feature = "graph-ir")]
+pub mod sponge_graph_ir;
 pub mod stacked_pcs;
 pub mod stacked_reduction;
 pub mod utils;

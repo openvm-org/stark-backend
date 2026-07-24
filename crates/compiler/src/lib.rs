@@ -12,6 +12,7 @@
 pub use crypto_compiler_macros::kernel;
 
 pub mod dump;
+pub mod field_ext;
 #[cfg(feature = "planner")]
 pub mod graph_exe;
 pub mod graph_ir;
@@ -21,7 +22,9 @@ pub mod kernels;
 pub mod passes;
 #[cfg(feature = "planner")]
 pub mod planner;
+pub mod poseidon2_parallel;
 pub mod quast;
+pub mod runner;
 pub mod runtime;
 
 use thiserror::Error;
@@ -58,12 +61,15 @@ pub enum CompileError {
 /// that directory (the IR dumps are written before codegen so they survive
 /// codegen failures).
 pub fn compile_and_load(
-    module: ir::Module,
+    module: &ir::Module,
     options: &runtime::CompileOptions,
 ) -> Result<runtime::KernelModule, CompileError> {
-    let hir = options.dump_ir.as_ref().map(|_| dump::dump_hir(&module));
-    let types = passes::type_infer(&module)?;
-    let program = passes::canonicalize(module, types)?;
+    let hir = options.dump_ir.as_ref().map(|_| dump::dump_hir(module));
+    let types = passes::type_infer(module)?;
+    // `canonicalize` mutates the module's builder in-place; clone so multiple
+    // callers (e.g. graph deduplication) can share the same source `Module`
+    // without conflict. `IRBuilder` and `Module` derive `Clone` for this.
+    let program = passes::canonicalize(module.clone(), types)?;
     let scratch = passes::plan_global_scratch(&program)?;
     let mut kprog = passes::lower_to_kir(&program, &scratch)?;
     passes::layout_infer(&mut kprog);

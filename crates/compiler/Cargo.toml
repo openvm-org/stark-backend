@@ -43,6 +43,14 @@ p3-symmetric = { workspace = true }
 name = "ntt"
 harness = false
 
+[[bench]]
+name = "ntt_supra_sweep"
+harness = false
+
+[[bench]]
+name = "poseidon2"
+harness = false
+
 [[example]]
 name = "ntt_scale_graph"
 required-features = ["planner"]

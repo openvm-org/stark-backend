@@ -71,6 +71,9 @@ mod errors;
 pub(crate) mod fold_ple;
 /// Fraction sumcheck via GKR
 mod fractional;
+/// Graph-IR mirror of [`fractional::fractional_sumcheck_gpu`].
+#[cfg(feature = "graph-ir")]
+pub mod fractional_ir;
 /// Logup interaction evaluations for GKR input
 mod gkr_input;
 mod mle_round;

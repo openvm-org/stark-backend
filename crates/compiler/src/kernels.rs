@@ -219,6 +219,159 @@ pub fn ntt_twiddles(log_n: usize) -> Vec<u32> {
         .collect()
 }
 
+/// Base-`W` digit width for windowed twiddle multiplication. `W = 2^5 = 32`
+/// matches supra's `WINDOW_SIZE`; changing this changes the trade-off
+/// between the number of per-lookup multiplies (`n_windows`) and the size
+/// of the `partial_twiddles` table (`n_windows * W`).
+const NTT_LG_WINDOW: usize = 5;
+const NTT_WINDOW: usize = 1 << NTT_LG_WINDOW;
+
+/// Number of base-`W` digits needed to encode any twiddle index in
+/// `[0, n/2)`. `log_n <= 1` has a single trivial twiddle `omega^0 = 1`, so
+/// one window covers it.
+fn ntt_n_windows(log_n: usize) -> usize {
+    if log_n <= 1 {
+        1
+    } else {
+        (log_n - 1).div_ceil(NTT_LG_WINDOW)
+    }
+}
+
+/// Windowed twiddle table for [`ntt_supra_module`]. Layout is
+/// `partial_twiddles[wi, wv]` in row-major order (shape `[n_windows, W]`),
+/// with `partial_twiddles[wi][wv] = omega^(wv * W^wi)` — one row per
+/// base-`W` digit, so `omega^k` is the product of the `n_windows` entries
+/// keyed by `k`'s base-`W` digits. Canonical representation.
+pub fn ntt_partial_twiddles(log_n: usize) -> Vec<u32> {
+    assert!(log_n >= 1);
+    let n_windows = ntt_n_windows(log_n);
+    let mut base = BabyBear::two_adic_generator(log_n);
+    let mut out = Vec::with_capacity(n_windows * NTT_WINDOW);
+    for _ in 0..n_windows {
+        let mut acc = BabyBear::ONE;
+        for _ in 0..NTT_WINDOW {
+            out.push(acc.as_canonical_u32());
+            acc *= base;
+        }
+        // base_{wi+1} = base_wi ^ W = (base_wi)^(2^LG_WINDOW), which we
+        // reach with `LG_WINDOW` squarings — cheaper than looking `acc`
+        // up as `base^W` since we already discarded that intermediate.
+        for _ in 0..NTT_LG_WINDOW {
+            base = base * base;
+        }
+    }
+    out
+}
+
+/// Source of bits contributing to the NTT stage's *pre-step* twiddle
+/// index `pre_idx = p_low + k * 2^start` (with `k = j & (2^h - 1)`).
+/// `node` is a scalar in which `n_bits` bits starting at bit
+/// `src_bit_lo` map to `pre_idx` bits `[pre_bit_lo, pre_bit_lo +
+/// n_bits)`. The actual twiddle index is `idx = pre_idx * 2^log_step`,
+/// so the mapping to `idx` bits is a per-stage shift by `log_step` that
+/// [`window_digit`] applies. Ranges are pairwise disjoint in `pre_idx`
+/// by construction (processed fields have non-overlapping `starts[k]`
+/// bit slots and the running `j` sits at `[start, start + h)` above
+/// them), so window digits are just concatenations of aligned slices.
+///
+/// Passing raw bit-fields of `i` and `j` instead of composing them into
+/// a runtime `p_low = sum(extract_bits(i, pi[k], bits[k]) * 2^starts[k])`
+/// integer keeps every operand in Quast's normalized form a `x % c` /
+/// `x / c` of a fresh sym — which fold_rems then recognizes cleanly.
+/// The composed form produces cross-terms like `-65535 * (i / 256)`
+/// that Quast can't fold against the paired `256 * i`, so `layout_infer`
+/// refuses the read as "operand may be negative".
+#[derive(Clone, Copy)]
+struct TwiddleSource {
+    node: NodeId,
+    src_bit_lo: usize,
+    n_bits: usize,
+    pre_bit_lo: usize,
+}
+
+/// The `wi`-th base-`W` digit of `idx = pre_idx * 2^log_step`,
+/// with `pre_idx` decomposed as `sources`. See [`TwiddleSource`].
+/// Returns `None` when the window is guaranteed to be all zero — either
+/// entirely below `log_step`'s zero-fill or entirely above every source's
+/// contribution — so callers can drop the lookup + multiply-by-1 pair
+/// instead of loading `partial_twiddles[wi, 0]` for a wasted `* 1`.
+fn window_digit(
+    b: &mut IRBuilder,
+    sources: &[TwiddleSource],
+    log_step: usize,
+    wi: usize,
+) -> Option<NodeId> {
+    let win_lo_abs = wi * NTT_LG_WINDOW;
+    let win_hi_abs = win_lo_abs + NTT_LG_WINDOW;
+    // Window range in `pre_idx` coordinates. Bits below `log_step` in
+    // `idx` are always zero (they're the `step` shift's low zero-fill),
+    // so a window that starts below `log_step` gets its low
+    // `log_step - win_lo_abs` bits from nothing.
+    if win_hi_abs <= log_step {
+        return None;
+    }
+    let win_lo = win_lo_abs.saturating_sub(log_step);
+    let win_hi = win_hi_abs - log_step;
+    let mut acc: Option<NodeId> = None;
+    for src in sources {
+        let src_pre_hi = src.pre_bit_lo + src.n_bits;
+        let lo = win_lo.max(src.pre_bit_lo);
+        let hi = win_hi.min(src_pre_hi);
+        if lo >= hi {
+            continue;
+        }
+        let src_off = src.src_bit_lo + (lo - src.pre_bit_lo);
+        let field = extract_bits(b, src.node, src_off, hi - lo);
+        // Position of these bits within `idx`: they start at
+        // `lo + log_step` and the window starts at `win_lo_abs`.
+        let shift = (lo + log_step) - win_lo_abs;
+        let contribution = if shift == 0 {
+            field
+        } else {
+            let mul = 1u32 << shift;
+            kernel!(b, field * #mul)
+        };
+        acc = Some(match acc {
+            None => contribution,
+            Some(prev) => kernel!(b, prev + contribution),
+        });
+    }
+    acc
+}
+
+/// DSL helper: emit the product-of-`n_windows`-lookups form of
+/// `omega^idx` against a `[n_windows, W]` windowed twiddle table.
+/// `sources` describes how the stage's *pre-step* index decomposes
+/// into aligned bit slices of runtime symbols (see [`TwiddleSource`]);
+/// `log_step` is the per-stage shift into full `idx`. Windows that
+/// [`window_digit`] proves are always zero (below `log_step`'s zero-fill
+/// or above every source's contribution) are elided, so early stages
+/// with a small `start + t - 1` bit exponent avoid the `* 1` lookups
+/// that a fixed unroll count would emit.
+fn windowed_twiddle_lookup(
+    b: &mut IRBuilder,
+    partial_twiddles: NodeId,
+    sources: &[TwiddleSource],
+    log_step: usize,
+    n_windows: usize,
+) -> NodeId {
+    let mut acc: Option<NodeId> = None;
+    for wi in 0..n_windows {
+        let Some(digit) = window_digit(b, sources, log_step, wi) else {
+            continue;
+        };
+        let pt = kernel!(b, partial_twiddles[#wi, digit]);
+        acc = Some(match acc {
+            None => pt,
+            Some(prev) => kernel!(b, prev * pt),
+        });
+    }
+    // No source contributed to any window: `omega^0 = 1`. Callers
+    // (e.g. stage 1 of group 0) still need a valid factor for their
+    // multiply chain.
+    acc.unwrap_or_else(|| kernel!(b, partial_twiddles[0, 0]))
+}
+
 /// Largest bit-field a single shared-memory NTT group handles. A group of
 /// `b` bits uses a `2^b`-element tile per stage, so `b = 8` means 256-thread
 /// blocks and `8 * 256 * 4B = 8KB` of shared memory per block.
@@ -541,6 +694,354 @@ pub fn ntt_reg_module(log_n: usize) -> Module {
     }
 
     b.finish(format!("ntt_reg_{n}"), prev)
+}
+
+/// Twiddle sources for the current NTT group's already-processed
+/// fields plus the running-stage's `j` (in *pre-step* coordinates —
+/// `windowed_twiddle_lookup` shifts by `log_step` per-stage). `p_fields`
+/// is one entry per processed field `k`: `TwiddleSource { node: i,
+/// src_bit_lo: pi[k], n_bits: bits[k], pre_bit_lo: starts[k] }`. The
+/// stage appends its own `(j, 0, t - 1, start)` slot before building
+/// each window digit.
+fn stage_sources(
+    p_fields: &[TwiddleSource],
+    j: NodeId,
+    start: usize,
+    h: usize,
+) -> Vec<TwiddleSource> {
+    let mut v: Vec<TwiddleSource> = p_fields.to_vec();
+    if h > 0 {
+        v.push(TwiddleSource {
+            node: j,
+            src_bit_lo: 0,
+            n_bits: h,
+            pre_bit_lo: start,
+        });
+    }
+    v
+}
+
+/// Chains the butterfly stages of one register-tiled NTT group under
+/// `#[par((th, s) -> th * per_thread + s)]`, matching the supra
+/// `_CT_NTT` layout: two elements per polynomial per thread (or
+/// `2 * z_count` when batching). `per_thread` is passed as an `i64` so
+/// the par-map's `mul_c` sees the constant directly. `w_partial` is
+/// the `[n_windows, W]` windowed twiddle table; `n_windows` fixes the
+/// per-butterfly lookup unroll count. Windowed lookup trades the
+/// single-load twiddle for `n_windows` loads and `n_windows - 1`
+/// multiplies, saving the memory bandwidth of the flat `[n/2]` table
+/// (32 MB at `log_n = 24`) and letting the tiny `n_windows * W` table
+/// stay warm in cache — matching supra's twiddle strategy.
+#[allow(clippy::too_many_arguments)]
+fn ntt_group_stages_supra(
+    b: &mut IRBuilder,
+    prev: NodeId,
+    t: usize,
+    bg: usize,
+    start: usize,
+    p_fields: &[TwiddleSource],
+    w_partial: NodeId,
+    log_n: usize,
+    per_thread: i64,
+    n_windows: usize,
+) -> NodeId {
+    let tile = 1usize << bg;
+    let m = 1usize << t;
+    let half = 1usize << (t - 1);
+    let log_step = log_n - start - t;
+    let par = b.par_map(|th, s, _| th.mul_c(per_thread).add(s));
+    // Stage 1 of a group with no already-processed fields has a trivial
+    // (omega^0 = 1) twiddle — skip the lookup and its multiply.
+    let trivial_twiddle = p_fields.is_empty() && t == 1;
+    let stage = b.compute_with(tile, None, Some(par), None, |b, j| {
+        if trivial_twiddle {
+            kernel!(b,
+                let own = prev[j];
+                let partner = prev[j + #half - j % #m / #half * #m];
+                let lo = j % #m < #half;
+                if lo then own + partner else partner - own
+            )
+        } else {
+            let sources = stage_sources(p_fields, j, start, t - 1);
+            let w_val = windowed_twiddle_lookup(b, w_partial, &sources, log_step, n_windows);
+            kernel!(b,
+                let own = prev[j];
+                let partner = prev[j + #half - j % #m / #half * #m];
+                let lo = j % #m < #half;
+                if lo then own + w_val * partner else partner - w_val * own
+            )
+        }
+    });
+    if t == bg {
+        stage
+    } else {
+        b.bind(stage, |b, v| {
+            ntt_group_stages_supra(
+                b,
+                v,
+                t + 1,
+                bg,
+                start,
+                p_fields,
+                w_partial,
+                log_n,
+                per_thread,
+                n_windows,
+            )
+        })
+    }
+}
+
+/// Shared-memory leftover stages for [`ntt_supra_module`] — same
+/// structure as [`ntt_group_stages`] but reads its twiddle through the
+/// windowed table so supra's module only needs one twiddle input.
+#[allow(clippy::too_many_arguments)]
+fn ntt_group_stages_supra_shared(
+    b: &mut IRBuilder,
+    prev: NodeId,
+    t: usize,
+    bg: usize,
+    start: usize,
+    p_fields: &[TwiddleSource],
+    w_partial: NodeId,
+    log_n: usize,
+    n_windows: usize,
+) -> NodeId {
+    let tile = 1usize << bg;
+    let m = 1usize << t;
+    let half = 1usize << (t - 1);
+    let log_step = log_n - start - t;
+    // Same trivial-twiddle short-circuit as the register-tiled helper.
+    let trivial_twiddle = p_fields.is_empty() && t == 1;
+    // Shared-tile stages don't run under a par-map, so the outer `j`
+    // becomes the identity thread index. We still build the twiddle
+    // through the same windowed helper as the register stages: the
+    // computed digit expressions read only bit-fields of `i` and `j`,
+    // each of which has a crisp bound for `layout_infer`.
+    let stage = b.compute(tile, |b, j| {
+        if trivial_twiddle {
+            kernel!(b,
+                let jm = j % #m;
+                let lo = jm < #half;
+                let base = j - jm / #half * #half;
+                let u = prev[base];
+                let v = prev[base + #half];
+                if lo then u + v else u - v
+            )
+        } else {
+            let sources = stage_sources(p_fields, j, start, t - 1);
+            let w_val = windowed_twiddle_lookup(b, w_partial, &sources, log_step, n_windows);
+            kernel!(b,
+                let jm = j % #m;
+                let lo = jm < #half;
+                let base = j - jm / #half * #half;
+                let u = prev[base];
+                let v = prev[base + #half];
+                let tw = v * w_val;
+                if lo then u + tw else u - tw
+            )
+        }
+    });
+    if t == bg {
+        stage
+    } else {
+        b.bind(stage, |b, v| {
+            ntt_group_stages_supra_shared(
+                b,
+                v,
+                t + 1,
+                bg,
+                start,
+                p_fields,
+                w_partial,
+                log_n,
+                n_windows,
+            )
+        })
+    }
+}
+
+/// Radix-2 DIT NTT modeled directly on supra's `_CT_NTT<z_count,
+/// coalesced>` (`crates/cuda-backend/cuda/supra/ntt.cu`) but generated
+/// end-to-end by the DSL pipeline. Each block covers
+/// `radix = 1 + log2(nthreads)` bits of the transform with
+/// `per_thread = 2 * z_count` elements per lane — mirroring supra's
+/// `fr_t r[2][z_count]` register slab. Under the
+/// `(th, s) -> th * per_thread + s` par layout:
+///
+/// - Butterfly partners with `half < per_thread` sit in the same thread's register slots (Slot
+///   conversion, no data movement).
+/// - `per_thread <= half < per_thread * 32` cross lanes within a warp;
+///   [`layout_infer`](crate::passes::layout_infer) resolves them as `__shfl_sync` shuffles — the
+///   exact equivalent of supra's `shfl_bfly` (`__shfl_xor_sync`).
+/// - Larger `half` crosses warps and falls back through a shared-memory mirror, matching supra's
+///   `xchg[threadIdx.x ^ laneMask]` path.
+///
+/// A leftover `< radix`-bit tail below the last full register group is
+/// processed with the shared-memory scheme of [`ntt_shared_module`]
+/// (same helper as [`ntt_reg_module`]), and a final flat kernel
+/// restores natural order when there is more than one group.
+///
+/// Parameters:
+///
+/// - `log_n`: log₂ of the transform size.
+/// - `nthreads`: threads per block. Must be a power of two ≤ 1024. Together with `z_count` this
+///   fixes the group width to `radix + log2(z_count) = log2(nthreads) + 1 + log2(z_count)` bits.
+/// - `z_count`: butterfly pairs per thread, matching supra's template `Z_COUNT`. Must be a power of
+///   two ≥ 1. `per_thread = 2 * z_count` and each register-tiled group covers `1 + log2(nthreads) +
+///   log2(z_count)` bits of the transform — the same block-level width supra gets by dividing
+///   `num_blocks` by `Z_COUNT`. A single flat 1D input carries the elements; there is no separate
+///   batch axis to model since the DSL indexes `a[i]` uniformly.
+/// - `coalesced`: accepted but currently a no-op. Our gather compute uses the default identity par
+///   so consecutive lanes already read consecutive addresses — supra's `coalesced_load` +
+///   `transpose<z_count>` is the same net effect that layout-conversion (Slot/Shuffle
+///   classification) achieves automatically here.
+pub fn ntt_supra_module(log_n: usize, nthreads: usize, z_count: usize, coalesced: bool) -> Module {
+    assert!(log_n >= 1, "NTT size must be at least 2");
+    assert!(
+        nthreads.is_power_of_two() && (1..=1024).contains(&nthreads),
+        "nthreads must be a power of two in 1..=1024"
+    );
+    assert!(
+        z_count.is_power_of_two() && z_count >= 1,
+        "z_count must be a power of two >= 1"
+    );
+    // `coalesced` is degenerate for `z_count == 1` (supra's
+    // `coalesced_load<1>` reduces to a plain load); for `z_count > 1`
+    // our gather compute already uses the default identity par, so
+    // consecutive lanes read consecutive addresses — the same
+    // coalescing supra achieves through `coalesced_load` +
+    // `transpose<z_count>`. The flag is accepted to preserve API
+    // parity with supra's template.
+    let _ = coalesced;
+    let per_thread = 2i64 * z_count as i64;
+    let radix_bits = 1 + nthreads.trailing_zeros() as usize + z_count.trailing_zeros() as usize;
+    let n = 1usize << log_n;
+
+    // Same group-splitting scheme as `ntt_reg_module`: a run of full
+    // `radix_bits`-bit register groups followed by a shared-style
+    // remainder, so any `log_n` compiles.
+    let n_reg = log_n / radix_bits;
+    let leftover = log_n - n_reg * radix_bits;
+    let mut bits = vec![radix_bits; n_reg];
+    if leftover > 0 {
+        bits.extend(split_bits(leftover));
+    }
+    let groups = bits.len();
+    let starts: Vec<usize> = bits
+        .iter()
+        .scan(0, |acc, &width| {
+            let s = *acc;
+            *acc += width;
+            Some(s)
+        })
+        .collect();
+
+    let n_windows = ntt_n_windows(log_n);
+    let mut b = IRBuilder::new();
+    let a = b.input("a", ScalarType::BabyBear, vec![n]);
+    // Windowed twiddles: shape `[n_windows, W]` with
+    // `w[wi, wv] = omega^(wv * W^wi)`. See [`ntt_partial_twiddles`].
+    let w = b.input("w", ScalarType::BabyBear, vec![n_windows, NTT_WINDOW]);
+
+    let mut pi = starts.clone();
+    let mut prev = a;
+    for g in 0..groups {
+        let (bg, start) = (bits[g], starts[g]);
+        let tile = 1usize << bg;
+        let is_reg = bg == radix_bits;
+        let n_blocks = n >> bg;
+        let threads = if is_reg { Some(nthreads) } else { None };
+        // Multi-group NTTs used to end with a full-N `restored` pass that
+        // read `prev` at a permuted address and wrote natural order — pure
+        // bandwidth. Fold it into the last group's store as a `#[scatter]`
+        // that sends logical `(i, j)` to its natural-order slot directly.
+        // The map inserts `j` at logical bits `[start, start + bg)` and
+        // fills the other fields from `i`'s bit-fields at `pi[k]` (shifted
+        // down by `bg` when they sit above the group's slot, since the
+        // gather originally "opened" that hole).
+        let scatter = if groups > 1 && g == groups - 1 {
+            let pi_snap = pi.clone();
+            let starts_snap = starts.clone();
+            let bits_snap = bits.clone();
+            let g_last = g;
+            let bg_last = bg;
+            let start_last = start;
+            Some(b.scatter_map(2, Some(vec![n]), move |p, _cst| {
+                let block_i = &p[0];
+                let tile_j = &p[1];
+                let mut expr = tile_j.mul_c(1i64 << start_last);
+                for k in 0..pi_snap.len() {
+                    if k == g_last {
+                        continue;
+                    }
+                    let i_pos = if pi_snap[k] < pi_snap[g_last] {
+                        pi_snap[k]
+                    } else {
+                        pi_snap[k] - bg_last
+                    };
+                    let field = block_i.floordiv(1i64 << i_pos).rem_c(1i64 << bits_snap[k]);
+                    expr = expr.add(&field.mul_c(1i64 << starts_snap[k]));
+                }
+                vec![expr]
+            }))
+        } else {
+            None
+        };
+        let group = b.compute_with(n_blocks, scatter, None, threads, |b, i| {
+            let gather = if g == 0 {
+                let hi_bits = log_n - bg;
+                let sc = 1usize << hi_bits;
+                b.compute(
+                    tile,
+                    |b, j| kernel!(b, a[bitrev_expr(j, bg) * #sc + bitrev_expr(i, hi_bits)]),
+                )
+            } else {
+                let pg = 1usize << pi[g];
+                let pgb = 1usize << (pi[g] + bg);
+                let cols = bits[g - 1];
+                b.compute(tile, |b, j| {
+                    let addr = kernel!(b, i / #pg * #pgb + i % #pg + j * #pg);
+                    index_flat2(b, prev, addr, cols)
+                })
+            };
+            // One `TwiddleSource` per already-processed field, mapping
+            // its physical position in `i` to its logical position
+            // (`starts[k]`) in the *pre-step* twiddle index. The stage
+            // helper appends its own `j`-slot and applies the per-stage
+            // `log_step` shift; window_digit then scans the aligned
+            // bit-fields for each base-`W` digit without ever composing
+            // a runtime `p_low` integer.
+            let p_fields: Vec<TwiddleSource> = (0..g)
+                .map(|k| TwiddleSource {
+                    node: i,
+                    src_bit_lo: pi[k],
+                    n_bits: bits[k],
+                    pre_bit_lo: starts[k],
+                })
+                .collect();
+            b.bind(gather, |b, tile_var| {
+                if is_reg {
+                    ntt_group_stages_supra(
+                        b, tile_var, 1, bg, start, &p_fields, w, log_n, per_thread, n_windows,
+                    )
+                } else {
+                    ntt_group_stages_supra_shared(
+                        b, tile_var, 1, bg, start, &p_fields, w, log_n, n_windows,
+                    )
+                }
+            })
+        });
+        prev = b.let_bound(group);
+        for k in 0..groups {
+            if k != g && pi[k] < pi[g] {
+                pi[k] += bg;
+            }
+        }
+        pi[g] = 0;
+    }
+
+    b.finish(format!("ntt_supra_{n}_t{nthreads}_z{z_count}"), prev)
 }
 
 /// Poseidon2-16 Merkle compression tree over `2^log_leaves` digests.

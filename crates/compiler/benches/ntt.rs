@@ -63,7 +63,7 @@ fn setup_jit(
     d_out: &DeviceBuffer<u32>,
 ) -> (KernelModule, f64) {
     let t0 = Instant::now();
-    let mut km = compile_and_load(module, &CompileOptions::default()).expect("JIT compile");
+    let mut km = compile_and_load(&module, &CompileOptions::default()).expect("JIT compile");
     let compile_s = t0.elapsed().as_secs_f64();
     km.set_input(0, d_in).unwrap();
     km.set_input(1, d_tw).unwrap();

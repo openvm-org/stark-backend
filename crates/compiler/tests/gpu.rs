@@ -2,18 +2,13 @@
 //! the GPU and compare against p3 CPU references. Requires a CUDA GPU.
 
 use crypto_compiler::{
-    compile_and_load,
     ir::{IRBuilder, ScalarType},
     kernels::{
-        merkle_tree_module, ntt_module, ntt_reg_module, ntt_shared_module, ntt_twiddles,
-        Poseidon2Constants,
+        merkle_tree_module, ntt_module, ntt_partial_twiddles, ntt_reg_module, ntt_shared_module,
+        ntt_supra_module, ntt_twiddles, Poseidon2Constants,
     },
+    runner::{maybe_bench, ModuleRunner},
     runtime::CompileOptions,
-};
-use openvm_cuda_common::{
-    copy::{MemCopyD2H, MemCopyH2D},
-    d_buffer::DeviceBuffer,
-    stream::GpuDeviceCtx,
 };
 use p3_baby_bear::{default_babybear_poseidon2_16, BabyBear};
 use p3_dft::{Radix2Dit, TwoAdicSubgroupDft};
@@ -43,35 +38,19 @@ fn bb(x: u32) -> BabyBear {
 
 /// Compiles `module`, binds inputs/outputs, runs it and returns the outputs.
 /// Dumps both IR levels and the generated CUDA under `target/ir-dumps/gpu/`.
+/// If the `BENCH_KERNEL` env var is set, also benchmarks the kernel.
 fn run_module(module: crypto_compiler::ir::Module, inputs: &[Vec<u32>]) -> Vec<Vec<u32>> {
-    let ctx = GpuDeviceCtx::for_current_device().unwrap();
     let options = CompileOptions {
         dump_ir: Some(concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/ir-dumps/gpu").into()),
         ..Default::default()
     };
-    let mut km = compile_and_load(module, &options).unwrap();
-    assert_eq!(km.num_inputs(), inputs.len());
-
-    let in_bufs: Vec<DeviceBuffer<u32>> = inputs
-        .iter()
-        .map(|data| data.as_slice().to_device_on(&ctx).unwrap())
-        .collect();
-    for (i, buf) in in_bufs.iter().enumerate() {
-        assert_eq!(km.input_size(i), buf.len() * 4, "input {i} size");
-        km.set_input(i, buf).unwrap();
-    }
-    let out_bufs: Vec<DeviceBuffer<u32>> = (0..km.num_outputs())
-        .map(|i| DeviceBuffer::with_capacity_on(km.output_size(i) / 4, &ctx))
-        .collect();
-    for (i, buf) in out_bufs.iter().enumerate() {
-        km.set_output(i, buf).unwrap();
-    }
-    km.ensure_scratch(&ctx);
-    km.run(&ctx.stream).unwrap();
-    out_bufs
-        .iter()
-        .map(|b| b.to_host_on(&ctx).unwrap())
-        .collect()
+    let mut runner = ModuleRunner::new(&module, &options).unwrap();
+    assert_eq!(runner.num_inputs(), inputs.len());
+    runner.set_inputs(inputs);
+    runner.run();
+    let outs = runner.read_outputs();
+    maybe_bench(&mut runner);
+    outs
 }
 
 #[test]
@@ -317,4 +296,55 @@ fn top_level_reduce_dot_product() {
         acc += bb(a[t]) * bb(b[t]);
     }
     assert_eq!(outs[0], vec![acc.as_canonical_u32()]);
+}
+
+/// The supra-mirroring NTT (`_CT_NTT<z_count, coalesced>`-shaped kernel)
+/// must match p3 across several `(log_n, nthreads, z_count)` triples.
+/// Each triple exercises a different balance of Slot / Shuffle / Bounce
+/// and, for `z_count > 1`, verifies that per-thread butterfly-pair
+/// batching (supra's `Z_COUNT` template parameter) is emitted correctly:
+///
+/// - `(log_n=9,  nthreads=256, z_count=1)`: single kernel, one register-tiled 9-bit group. The last
+///   three butterfly stages (`half ∈ {64, 128, 256}`) cross warp boundaries and fall through the
+///   shared mirror, matching supra's `s >= 6` shared-exchange path.
+/// - `(log_n=13, nthreads=64,  z_count=1)`: single-group case at the small end — `radix = 7` covers
+///   the whole transform.
+/// - `(log_n=17, nthreads=256, z_count=1)`: `radix = 9` covers the first 9 bits register-tiled; the
+///   trailing 8-bit tail runs through the shared-style scheme; a final flat kernel restores natural
+///   order.
+/// - `(log_n=11, nthreads=32,  z_count=4)`: `per_thread = 8`, block-width `1 + 5 + 2 = 8`, so the
+///   11-bit transform splits into an 8-bit register group and a 3-bit shared tail. Exercises the
+///   `z_count > 1` path where each stage's `rN[2]` becomes `rN[8]`.
+/// - `(log_n=13, nthreads=64,  z_count=2)`: `per_thread = 4`, block-width 8. Register group over
+///   bits 0..8; 5-bit shared tail plus restore.
+#[test]
+fn supra_ntt_matches_p3_radix2dit() {
+    for &(log_n, nthreads, z_count) in &[
+        (9usize, 256usize, 1usize),
+        (13, 64, 1),
+        (17, 256, 1),
+        (11, 32, 4),
+        (13, 64, 2),
+    ] {
+        let n = 1usize << log_n;
+        let coeffs = pseudo_field_elems(n, 5);
+        let twiddles = ntt_partial_twiddles(log_n);
+
+        let outs = run_module(
+            ntt_supra_module(log_n, nthreads, z_count, false),
+            &[coeffs.clone(), twiddles],
+        );
+        assert_eq!(outs.len(), 1);
+
+        let input_f: Vec<BabyBear> = coeffs.iter().map(|&c| bb(c)).collect();
+        let want: Vec<u32> = Radix2Dit::default()
+            .dft(input_f)
+            .iter()
+            .map(|x| x.as_canonical_u32())
+            .collect();
+        assert_eq!(
+            outs[0], want,
+            "supra NTT mismatch at log_n={log_n}, nthreads={nthreads}, z_count={z_count}"
+        );
+    }
 }

@@ -162,7 +162,7 @@ pub struct InputDecl {
 }
 
 /// Arena of hash-consed IR nodes plus module-level input declarations.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct IRBuilder {
     nodes: Vec<Node>,
     dedup: FxHashMap<Node, NodeId>,
@@ -452,6 +452,7 @@ impl IRBuilder {
 
 /// A complete kernel module: declared inputs and the expression that
 /// represents the entire sequence of computations.
+#[derive(Clone)]
 pub struct Module {
     pub name: String,
     pub builder: IRBuilder,

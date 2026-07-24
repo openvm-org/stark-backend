@@ -9,7 +9,13 @@
 //!
 //! Feature-gated behind `planner` (needs the CP-SAT planner + OR-Tools).
 
-use std::{collections::BTreeMap, ffi::c_void, mem::ManuallyDrop};
+use std::{
+    cell::RefCell,
+    collections::{BTreeMap, HashMap},
+    ffi::c_void,
+    mem::ManuallyDrop,
+    rc::Rc,
+};
 
 use openvm_cuda_common::{
     copy::cuda_memcpy_on,
@@ -22,8 +28,8 @@ use crate::{
     graph_ir::{
         BufId, BufInfo, ConstBuf, ConstNode, DeviceType, GraphBuilder, GraphNode, KernelNode,
     },
-    ir::VarId,
-    planner::{self, access_from_node, MemoryPlan, NodeAccess, PlanError},
+    ir::{self, VarId},
+    planner::{self, access_from_node, MemoryPlan, NodeAccess, PlanError, SchedulerMode},
     quast::Quast,
     runtime::{CompileOptions, KernelModule},
     CompileError,
@@ -43,6 +49,7 @@ pub struct GraphCompiler {
     device: DeviceType,
     env: BTreeMap<VarId, i64>,
     options: CompileOptions,
+    scheduler: SchedulerMode,
 }
 
 impl Default for GraphCompiler {
@@ -57,6 +64,7 @@ impl GraphCompiler {
             device: DeviceType::Cuda(0),
             env: BTreeMap::new(),
             options: CompileOptions::default(),
+            scheduler: SchedulerMode::default(),
         }
     }
 
@@ -78,6 +86,15 @@ impl GraphCompiler {
         self
     }
 
+    /// Picks the memory scheduler backend. Default is
+    /// [`SchedulerMode::CpSat`] with `max_secs = 30.0`, which requires the
+    /// `planner` feature's OR-Tools install; [`SchedulerMode::Heuristic`] is
+    /// the OR-Tools-free fallback described in [`planner::plan_heuristic`].
+    pub fn scheduler(mut self, scheduler: SchedulerMode) -> Self {
+        self.scheduler = scheduler;
+        self
+    }
+
     /// Consumes the graph, plans it and compiles every structured kernel.
     ///
     /// The pipeline runs in three phases:
@@ -96,12 +113,15 @@ impl GraphCompiler {
         // Phase 1: drain and compile every structured kernel.
         //
         // `compiled` mirrors the original node order. For structured kernels
-        // the module ownership is moved out and the compiled `KernelModule`
-        // is stored here; non-kernel nodes are kept as-is.
+        // the compiled `KernelModule` is wrapped in `Rc<RefCell<_>>` and
+        // cached by the source `Rc<ir::Module>`'s pointer identity, so two
+        // `Kernel` nodes that carry the same module clone share one JIT
+        // build. `KernelModule::set_input`/`set_output`/`set_scratch` take
+        // `&mut self`, hence the `RefCell` for the shared handle.
         enum PreExe {
             Kernel {
                 name: String,
-                module: KernelModule,
+                module: Rc<RefCell<KernelModule>>,
                 inputs: Vec<BufId>,
                 outputs: Vec<BufId>,
                 scratch: Option<BufId>,
@@ -110,27 +130,48 @@ impl GraphCompiler {
             Const(ConstNode),
             Memcpy {
                 src: BufId,
+                src_offset: usize,
                 dst: BufId,
+                dst_offset: usize,
+                num_bytes: usize,
             },
             Memset {
                 buf: BufId,
+                offset: usize,
+                num_bytes: usize,
                 val: u32,
             },
         }
         let nodes: Vec<GraphNode> = graph.nodes.drain(..).collect();
         let mut compiled: Vec<PreExe> = Vec::with_capacity(nodes.len());
+        // Cache of compiled kernel modules keyed by source `Rc<ir::Module>`
+        // pointer identity. Each entry maps to the shared JIT'd module *and*
+        // the scratch size (so repeat lookups skip re-querying the vtable).
+        let mut module_cache: HashMap<*const ir::Module, (Rc<RefCell<KernelModule>>, usize)> =
+            HashMap::new();
         for node in nodes {
             compiled.push(match node {
                 GraphNode::Kernel(k) => {
                     let name = k.module.name.clone();
-                    let module = compile_and_load(k.module, &self.options)?;
-                    // Allocate a synthetic scratch buffer alive during this
-                    // node's step. `elem_size=1` because it's a byte pool.
-                    let scratch = if module.scratch_size() > 0 {
+                    let key = Rc::as_ptr(&k.module);
+                    let (module_handle, scratch_size) = if let Some(hit) = module_cache.get(&key) {
+                        (hit.0.clone(), hit.1)
+                    } else {
+                        let km = compile_and_load(&k.module, &self.options)?;
+                        let scratch_size = km.scratch_size();
+                        let handle = Rc::new(RefCell::new(km));
+                        module_cache.insert(key, (handle.clone(), scratch_size));
+                        (handle, scratch_size)
+                    };
+                    // Each node keeps its own scratch buffer id: two kernels
+                    // sharing a module still need disjoint scratch storage
+                    // during their (sequential) launches so the planner can
+                    // model each lifetime independently.
+                    let scratch = if scratch_size > 0 {
                         let bid = graph.add_buf(BufInfo {
                             name: Some(format!("scratch<{name}>")),
                             device_type: self.device,
-                            size: Quast::cst(module.scratch_size() as i64),
+                            size: Quast::cst(scratch_size as i64),
                             elem_size: 1,
                         });
                         Some(bid)
@@ -139,7 +180,7 @@ impl GraphCompiler {
                     };
                     PreExe::Kernel {
                         name,
-                        module,
+                        module: module_handle,
                         inputs: k.inputs,
                         outputs: k.outputs,
                         scratch,
@@ -149,14 +190,21 @@ impl GraphCompiler {
                 GraphNode::Const(c) => PreExe::Const(c),
                 GraphNode::Memcpy(m) => PreExe::Memcpy {
                     src: m.src,
+                    src_offset: eval_nonneg(&m.src_offset, &self.env, "memcpy src_offset")?,
                     dst: m.dst,
+                    dst_offset: eval_nonneg(&m.dst_offset, &self.env, "memcpy dst_offset")?,
+                    num_bytes: eval_nonneg(&m.num_bytes, &self.env, "memcpy num_bytes")?,
                 },
                 GraphNode::Memset(m) => PreExe::Memset {
                     buf: m.node,
+                    offset: eval_nonneg(&m.offset, &self.env, "memset offset")?,
+                    num_bytes: eval_nonneg(&m.num_bytes, &self.env, "memset num_bytes")?,
                     val: m.val,
                 },
             });
         }
+        let num_unique_modules = module_cache.len();
+        drop(module_cache);
         let bufs = graph.bufs.clone();
 
         // Phase 2: build per-node access sets, injecting scratch as both a
@@ -181,18 +229,14 @@ impl GraphCompiler {
                 }
                 PreExe::Blackbox(k) => access_from_node(&GraphNode::BlackboxKernel(clone_kn(k))),
                 PreExe::Const(c) => access_from_node(&GraphNode::Const(clone_cn(c))),
-                PreExe::Memcpy { src, dst } => {
-                    access_from_node(&GraphNode::Memcpy(crate::graph_ir::MemcpyNode {
-                        src: *src,
-                        dst: *dst,
-                    }))
-                }
-                PreExe::Memset { buf, val } => {
-                    access_from_node(&GraphNode::Memset(crate::graph_ir::MemSetNode {
-                        node: *buf,
-                        val: *val,
-                    }))
-                }
+                PreExe::Memcpy { src, dst, .. } => NodeAccess {
+                    reads: vec![*src],
+                    writes: vec![*dst],
+                },
+                PreExe::Memset { buf, .. } => NodeAccess {
+                    reads: Vec::new(),
+                    writes: vec![*buf],
+                },
             })
             .collect();
 
@@ -225,15 +269,20 @@ impl GraphCompiler {
             .collect();
 
         // Phase 3: plan and validate.
-        let plan =
-            planner::plan_raw(&bufs, &accesses, &self.env, self.device, &exclude).map_err(|e| {
-                match e {
-                    PlanError::UnboundSizeSymbol { .. } | PlanError::NegativeSize { .. } => {
-                        CompileError::Type(format!("graph plan: {e}"))
-                    }
-                    PlanError::NoSolution(_) => CompileError::Runtime(format!("graph plan: {e}")),
-                }
-            })?;
+        let plan = planner::plan_raw(
+            &bufs,
+            &accesses,
+            &self.env,
+            self.device,
+            &exclude,
+            &self.scheduler,
+        )
+        .map_err(|e| match e {
+            PlanError::UnboundSizeSymbol { .. } | PlanError::NegativeSize { .. } => {
+                CompileError::Type(format!("graph plan: {e}"))
+            }
+            PlanError::NoSolution(_) => CompileError::Runtime(format!("graph plan: {e}")),
+        })?;
         let sizes = evaluate_sizes_bufs(&bufs, &self.env)?;
 
         // Assemble ExeNodes.
@@ -247,18 +296,21 @@ impl GraphCompiler {
                     outputs,
                     scratch,
                 } => {
-                    check_kernel_sizes(&module, &inputs, &outputs, &sizes)?;
-                    if let Some(sc) = scratch {
-                        // Scratch was sized from `module.scratch_size()` so
-                        // this should always hold, but we double-check
-                        // against the (possibly foreign-device) size
-                        // resolution here.
-                        if sizes[sc.0] < module.scratch_size() {
-                            return Err(CompileError::Runtime(format!(
-                                "kernel `{name}` scratch buffer sized {} bytes but module wants {}",
-                                sizes[sc.0],
-                                module.scratch_size()
-                            )));
+                    {
+                        let m = module.borrow();
+                        check_kernel_sizes(&m, &inputs, &outputs, &sizes)?;
+                        if let Some(sc) = scratch {
+                            // Scratch was sized from `module.scratch_size()`
+                            // so this should always hold, but we double-check
+                            // against the (possibly foreign-device) size
+                            // resolution here.
+                            if sizes[sc.0] < m.scratch_size() {
+                                return Err(CompileError::Runtime(format!(
+                                    "kernel `{name}` scratch buffer sized {} bytes but module wants {}",
+                                    sizes[sc.0],
+                                    m.scratch_size()
+                                )));
+                            }
                         }
                     }
                     ExeNode::Kernel(ExeKernel {
@@ -271,8 +323,71 @@ impl GraphCompiler {
                 }
                 PreExe::Blackbox(k) => ExeNode::Blackbox(k),
                 PreExe::Const(c) => ExeNode::Const(c),
-                PreExe::Memcpy { src, dst } => ExeNode::Memcpy { src, dst },
-                PreExe::Memset { buf, val } => ExeNode::Memset { buf, val },
+                PreExe::Memcpy {
+                    src,
+                    src_offset,
+                    dst,
+                    dst_offset,
+                    num_bytes,
+                } => {
+                    let src_end = src_offset.checked_add(num_bytes).ok_or_else(|| {
+                        CompileError::Runtime(format!(
+                            "memcpy: src_offset+num_bytes overflows usize \
+                             ({src_offset} + {num_bytes})"
+                        ))
+                    })?;
+                    if src_end > sizes[src.0] {
+                        return Err(CompileError::Runtime(format!(
+                            "memcpy: src range [{src_offset}..{src_end}) exceeds \
+                             buffer {src:?} size {}",
+                            sizes[src.0]
+                        )));
+                    }
+                    let dst_end = dst_offset.checked_add(num_bytes).ok_or_else(|| {
+                        CompileError::Runtime(format!(
+                            "memcpy: dst_offset+num_bytes overflows usize \
+                             ({dst_offset} + {num_bytes})"
+                        ))
+                    })?;
+                    if dst_end > sizes[dst.0] {
+                        return Err(CompileError::Runtime(format!(
+                            "memcpy: dst range [{dst_offset}..{dst_end}) exceeds \
+                             buffer {dst:?} size {}",
+                            sizes[dst.0]
+                        )));
+                    }
+                    ExeNode::Memcpy {
+                        src,
+                        src_offset,
+                        dst,
+                        dst_offset,
+                        num_bytes,
+                    }
+                }
+                PreExe::Memset {
+                    buf,
+                    offset,
+                    num_bytes,
+                    val,
+                } => {
+                    let end = offset.checked_add(num_bytes).ok_or_else(|| {
+                        CompileError::Runtime(format!(
+                            "memset: offset+num_bytes overflows usize ({offset} + {num_bytes})"
+                        ))
+                    })?;
+                    if end > sizes[buf.0] {
+                        return Err(CompileError::Runtime(format!(
+                            "memset: range [{offset}..{end}) exceeds buffer {buf:?} size {}",
+                            sizes[buf.0]
+                        )));
+                    }
+                    ExeNode::Memset {
+                        buf,
+                        offset,
+                        num_bytes,
+                        val,
+                    }
+                }
             });
         }
 
@@ -284,6 +399,7 @@ impl GraphCompiler {
             output_bufs,
             device: self.device,
             bufs,
+            num_unique_modules,
         })
     }
 }
@@ -295,7 +411,7 @@ fn clone_kn(k: &KernelNode) -> KernelNode {
         inputs: k.inputs.clone(),
         outputs: k.outputs.clone(),
         modifies: k.modifies.clone(),
-        func: Box::new(|_, _| {}),
+        func: Box::new(|_, _, _| {}),
         name: k.name.clone(),
     }
 }
@@ -327,7 +443,12 @@ fn writers_readers_from_accesses(
 
 struct ExeKernel {
     name: String,
-    module: KernelModule,
+    /// Shared handle to the JIT'd module. Multiple `ExeKernel`s can point at
+    /// the same underlying `KernelModule` when their source `Rc<ir::Module>`
+    /// was shared at graph construction time; execution is sequential so
+    /// re-binding inputs / outputs / scratch on the shared handle before
+    /// each launch is safe.
+    module: Rc<RefCell<KernelModule>>,
     inputs: Vec<BufId>,
     outputs: Vec<BufId>,
     /// Synthetic BufId for this module's private scratch, or `None` when
@@ -340,8 +461,19 @@ enum ExeNode {
     Kernel(ExeKernel),
     Blackbox(KernelNode),
     Const(ConstNode),
-    Memcpy { src: BufId, dst: BufId },
-    Memset { buf: BufId, val: u32 },
+    Memcpy {
+        src: BufId,
+        src_offset: usize,
+        dst: BufId,
+        dst_offset: usize,
+        num_bytes: usize,
+    },
+    Memset {
+        buf: BufId,
+        offset: usize,
+        num_bytes: usize,
+        val: u32,
+    },
 }
 
 /// A compiled, executable graph. Holds every JIT'd [`KernelModule`] and the
@@ -357,6 +489,9 @@ pub struct GraphExe {
     /// Preserved from the source graph for [`GraphExe::print`]: name and
     /// device_type per BufId.
     bufs: Vec<BufInfo>,
+    /// Number of distinct `KernelModule`s that were JIT-compiled. Two
+    /// `Kernel` nodes sharing the same `Rc<ir::Module>` count once.
+    num_unique_modules: usize,
 }
 
 impl GraphExe {
@@ -394,6 +529,16 @@ impl GraphExe {
     /// Target device the plan was built for.
     pub fn device(&self) -> DeviceType {
         self.device
+    }
+
+    /// Number of distinct compiled [`KernelModule`]s held by this exe.
+    ///
+    /// When callers reuse the same `Rc<ir::Module>` clone across multiple
+    /// [`GraphBuilder::insert_kernel`](crate::graph_ir::GraphBuilder::insert_kernel)
+    /// calls, the underlying module is JIT'd exactly once and shared, so
+    /// this count is less than the number of `Kernel` graph nodes.
+    pub fn num_unique_modules(&self) -> usize {
+        self.num_unique_modules
     }
 
     /// SSA-form textual dump of the compiled graph. Nodes are printed in
@@ -515,14 +660,26 @@ impl GraphExe {
                 };
                 format!("let ({}) = Const({data});", self.buf_decl(c.buf))
             }
-            ExeNode::Memcpy { src, dst } => format!(
-                "let ({}) = Memcpy({});",
+            ExeNode::Memcpy {
+                src,
+                src_offset,
+                dst,
+                dst_offset,
+                num_bytes,
+            } => format!(
+                "let ({}) = Memcpy({}, src_off={src_offset}, dst_off={dst_offset}, n={num_bytes});",
                 self.buf_decl(*dst),
                 self.buf_name(*src),
             ),
-            ExeNode::Memset { buf, val } => {
-                format!("let ({}) = Memset(val={:#x});", self.buf_decl(*buf), val,)
-            }
+            ExeNode::Memset {
+                buf,
+                offset,
+                num_bytes,
+                val,
+            } => format!(
+                "let ({}) = Memset(val={val:#x}, off={offset}, n={num_bytes});",
+                self.buf_decl(*buf),
+            ),
         }
     }
 
@@ -606,31 +763,35 @@ impl GraphExe {
         for &node_idx in &self.plan.order {
             match &mut self.nodes[node_idx] {
                 ExeNode::Kernel(k) => {
+                    // Re-binding inputs / outputs / scratch just before the
+                    // launch is safe even when this handle is shared with
+                    // another `ExeKernel`, because execution is sequential.
+                    let mut m = k.module.borrow_mut();
                     for (i, &bid) in k.inputs.iter().enumerate() {
                         let ptr = bufid_ptr(bid)?;
-                        let expected = k.module.input_size(i);
+                        let expected = m.input_size(i);
                         let fake = ManuallyDrop::new(unsafe {
                             DeviceBuffer::<u8>::from_raw_parts(ptr, expected)
                         });
-                        k.module.set_input(i, &fake)?;
+                        m.set_input(i, &fake)?;
                     }
                     for (i, &bid) in k.outputs.iter().enumerate() {
                         let ptr = bufid_ptr(bid)?;
-                        let expected = k.module.output_size(i);
+                        let expected = m.output_size(i);
                         let fake = ManuallyDrop::new(unsafe {
                             DeviceBuffer::<u8>::from_raw_parts(ptr, expected)
                         });
-                        k.module.set_output(i, &fake)?;
+                        m.set_output(i, &fake)?;
                     }
                     if let Some(sc) = k.scratch {
                         let ptr = bufid_ptr(sc)?;
-                        let want = k.module.scratch_size();
+                        let want = m.scratch_size();
                         let fake = ManuallyDrop::new(unsafe {
                             DeviceBuffer::<u8>::from_raw_parts(ptr, want)
                         });
-                        k.module.set_scratch(&fake)?;
+                        m.set_scratch(&fake)?;
                     }
-                    k.module.run(&ctx.stream)?;
+                    m.run(&ctx.stream)?;
                 }
                 ExeNode::Blackbox(k) => {
                     let ins: Vec<*mut ()> = k
@@ -643,7 +804,7 @@ impl GraphExe {
                         .iter()
                         .map(|&b| bufid_ptr(b).map(|p| p as *mut ()))
                         .collect::<Result<_, _>>()?;
-                    (k.func)(&ins, &outs);
+                    (k.func)(&ins, &outs, ctx.stream.as_raw());
                 }
                 ExeNode::Const(c) => {
                     let dst = bufid_ptr(c.buf)?;
@@ -678,21 +839,31 @@ impl GraphExe {
                         },
                     }
                 }
-                ExeNode::Memcpy { src, dst } => {
+                ExeNode::Memcpy {
+                    src,
+                    src_offset,
+                    dst,
+                    dst_offset,
+                    num_bytes,
+                } => {
                     let src_ptr = bufid_ptr(*src)?;
                     let dst_ptr = bufid_ptr(*dst)?;
-                    let n = self.sizes[dst.0];
                     unsafe {
                         cuda_memcpy_on::<true, true>(
-                            dst_ptr as *mut c_void,
-                            src_ptr as *const c_void,
-                            n,
+                            dst_ptr.add(*dst_offset) as *mut c_void,
+                            src_ptr.add(*src_offset) as *const c_void,
+                            *num_bytes,
                             ctx,
                         )
                         .map_err(memcpy_err)?;
                     }
                 }
-                ExeNode::Memset { buf, val } => {
+                ExeNode::Memset {
+                    buf,
+                    offset,
+                    num_bytes,
+                    val,
+                } => {
                     let val_bytes = val.to_le_bytes();
                     if val_bytes[0] != val_bytes[1]
                         || val_bytes[0] != val_bytes[2]
@@ -703,13 +874,12 @@ impl GraphExe {
                              fills are supported today"
                         )));
                     }
-                    let n = self.sizes[buf.0];
                     let ptr = bufid_ptr(*buf)?;
                     let code = unsafe {
                         cudaMemsetAsync(
-                            ptr as *mut c_void,
+                            ptr.add(*offset) as *mut c_void,
                             val_bytes[0] as i32,
-                            n,
+                            *num_bytes,
                             ctx.stream.as_raw(),
                         )
                     };
@@ -727,6 +897,27 @@ impl GraphExe {
 
 fn memcpy_err(e: openvm_cuda_common::error::MemCopyError) -> CompileError {
     CompileError::Runtime(format!("cudaMemcpy failed: {e:?}"))
+}
+
+/// Evaluates a [`Quast`] to a non-negative `usize`, reporting `what` as
+/// context on failure. Used for memcpy/memset offsets and lengths.
+fn eval_nonneg(q: &Quast, env: &BTreeMap<VarId, i64>, what: &str) -> Result<usize, CompileError> {
+    let mut syms = std::collections::BTreeSet::new();
+    q.syms(&mut syms);
+    for s in &syms {
+        if !env.contains_key(s) {
+            return Err(CompileError::Type(format!(
+                "{what} references unbound symbol {s:?}"
+            )));
+        }
+    }
+    let v = q.eval(env);
+    if v < 0 {
+        return Err(CompileError::Type(format!(
+            "{what} evaluates to a negative value {v}"
+        )));
+    }
+    Ok(v as usize)
 }
 
 fn evaluate_sizes_bufs(
@@ -797,4 +988,131 @@ fn check_kernel_sizes(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::rc::Rc;
+
+    use openvm_cuda_common::{
+        copy::{MemCopyD2H, MemCopyH2D},
+        d_buffer::DeviceBuffer,
+        stream::GpuDeviceCtx,
+    };
+
+    use super::*;
+    use crate::{
+        graph_ir::{BufInfo, GraphBuilder},
+        ir::{IRBuilder, ScalarType},
+    };
+
+    /// Two `Kernel` graph nodes that share the *same* `Rc<ir::Module>` are
+    /// JIT'd exactly once, and each node still receives its own input/output
+    /// bindings. The scaled outputs must equal 2 * input for both bindings.
+    #[test]
+    fn shared_module_compiled_once_and_runs_on_both_inputs() {
+        const N: usize = 16;
+        // Build one `scale_by_two` module and wrap it in an Rc; both graph
+        // kernel nodes will share this clone.
+        let module = {
+            let mut b = IRBuilder::new();
+            let a = b.input("a", ScalarType::BabyBear, vec![N]);
+            let body = b.compute(N, |b, i| {
+                let ai = b.index(a, &[i]);
+                let two = b.const_field(2);
+                b.mul(ai, two)
+            });
+            Rc::new(b.finish("scale_by_two_shared", body))
+        };
+
+        let bytes = (N * 4) as i64;
+        let mut g = GraphBuilder::new();
+        let mk = |g: &mut GraphBuilder, name: &str| -> BufId {
+            g.add_buf(BufInfo {
+                name: Some(name.to_string()),
+                device_type: DeviceType::Cuda(0),
+                size: Quast::cst(bytes),
+                elem_size: 4,
+            })
+        };
+        let in0 = mk(&mut g, "in0");
+        let in1 = mk(&mut g, "in1");
+        let out0 = mk(&mut g, "out0");
+        let out1 = mk(&mut g, "out1");
+        g.insert_kernel(module.clone(), [in0], [out0]);
+        g.insert_kernel(module.clone(), [in1], [out1]);
+
+        let mut exe = GraphCompiler::new()
+            .device(DeviceType::Cuda(0))
+            .compile_options(CompileOptions::default())
+            .compile(g)
+            .expect("graph compile");
+
+        // The two kernel nodes shared a module, so only one JIT build happened.
+        assert_eq!(exe.num_unique_modules(), 1);
+        assert_eq!(exe.num_inputs(), 2);
+        assert_eq!(exe.num_outputs(), 2);
+
+        // Match caller-supplied buffer order to the graph exe's ordering.
+        let ins_order: Vec<BufId> = (0..exe.num_inputs()).map(|i| exe.input_buf_id(i)).collect();
+        let outs_order: Vec<BufId> = (0..exe.num_outputs())
+            .map(|i| exe.output_buf_id(i))
+            .collect();
+
+        // Distinct inputs so we can check both outputs independently.
+        let host0: Vec<u32> = (0..N as u32).map(|i| i + 1).collect();
+        let host1: Vec<u32> = (0..N as u32).map(|i| 100 + i).collect();
+        let host_for = |b: BufId| -> &Vec<u32> {
+            if b == in0 {
+                &host0
+            } else if b == in1 {
+                &host1
+            } else {
+                panic!("unexpected input BufId {b:?}")
+            }
+        };
+        let want_for = |b: BufId| -> Vec<u32> {
+            let src = if b == out0 {
+                &host0
+            } else if b == out1 {
+                &host1
+            } else {
+                panic!("unexpected output BufId {b:?}")
+            };
+            src.iter()
+                .map(|&x| {
+                    // Multiplication happens in BabyBear; inputs stay well
+                    // below p/2 so `x * 2` never wraps.
+                    x * 2
+                })
+                .collect()
+        };
+
+        let ctx = GpuDeviceCtx::for_current_device().expect("GPU ctx");
+        let in_bufs: Vec<DeviceBuffer<u8>> = ins_order
+            .iter()
+            .map(|&b| {
+                let bytes: Vec<u8> = host_for(b).iter().flat_map(|x| x.to_le_bytes()).collect();
+                bytes.as_slice().to_device_on(&ctx).expect("H2D")
+            })
+            .collect();
+        let mut out_bufs: Vec<DeviceBuffer<u8>> = (0..exe.num_outputs())
+            .map(|i| DeviceBuffer::with_capacity_on(exe.output_size(i), &ctx))
+            .collect();
+        let mut scratch: DeviceBuffer<u8> =
+            DeviceBuffer::with_capacity_on(exe.scratch_bytes().max(1), &ctx);
+
+        exe.run(&ctx, &in_bufs, &mut out_bufs, &mut scratch)
+            .expect("graph run");
+
+        for (i, &out_bid) in outs_order.iter().enumerate() {
+            let bytes: Vec<u8> = out_bufs[i].to_host_on(&ctx).expect("D2H");
+            let got: Vec<u32> = bytes
+                .chunks_exact(4)
+                .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
+                .collect();
+            let want = want_for(out_bid);
+            assert_eq!(got, want, "output {i} mismatch (BufId {out_bid:?})");
+        }
+    }
 }

@@ -14,12 +14,17 @@ The kernel `fn` takes the raw pointers of the input buffers as its first argumen
 ```
 
 struct MemcpyNode {
-  src: BufId, 
-  dst: BufId
+  src: BufId,
+  src_offset: Quast,   // bytes into src
+  dst: BufId,
+  dst_offset: Quast,   // bytes into dst
+  num_bytes: Quast,    // bytes to copy
 }
 
 struct MemSetNode {
-  node: BufId, 
+  node: BufId,
+  offset: Quast,       // bytes into node
+  num_bytes: Quast,    // bytes to fill
   val: u32
 }
 
@@ -101,8 +106,15 @@ fn insert_kernel(&mut self, module: ir::Module,
                  outputs: impl IntoIterator<Item = BufId>) { ... }
 fn insert_blackbox_kernel(&mut self, name: ..., inputs: impl Iterator<Item = BufId>, outputs: ..., modifies: ..., f: ...) { ... }
 fn insert_const(&mut self, buf: BufId, data: ConstBuf) { ... }
-fn insert_memcpy(&mut self, ...) { ... }
-fn insert_memset(&mut self, ...)
+fn insert_memcpy(&mut self, src: BufId, dst: BufId) { ... }
+fn insert_memcpy_range(&mut self,
+                       src: BufId, src_offset: Quast,
+                       dst: BufId, dst_offset: Quast,
+                       num_bytes: Quast) { ... }
+fn insert_memset(&mut self, buf: BufId, val: u32) { ... }
+fn insert_memset_range(&mut self,
+                       buf: BufId, offset: Quast,
+                       num_bytes: Quast, val: u32) { ... }
 ```
 
 `register_symbol` allocates a fresh `VarId` and stores its printable name in

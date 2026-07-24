@@ -77,6 +77,7 @@ openvm-cuda-builder = { path = "crates/cuda-builder", default-features = false }
 openvm-cuda-common = { path = "crates/cuda-common", default-features = false }
 openvm-cuda-backend = { path = "crates/cuda-backend", default-features = false }
 openvm-backend-tests = { path = "crates/backend-tests", default-features = false }
+crypto-compiler = { path = "crates/compiler", default-features = false }
 crypto-compiler-macros = { path = "crates/compiler/macros" }
 
 # Plonky3 - we pin the exact version since this dependency is security critical
