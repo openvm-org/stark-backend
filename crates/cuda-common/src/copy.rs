@@ -3,6 +3,7 @@ use std::ffi::c_void;
 use crate::{
     d_buffer::DeviceBuffer,
     error::{check, MemCopyError},
+    pinned::PinnedBuffer,
     stream::{cudaStream_t, GpuDeviceCtx},
 };
 
@@ -101,6 +102,20 @@ impl<T> MemCopyH2D<T> for [T] {
 
 pub trait MemCopyD2H<T> {
     fn to_host_on(&self, device_ctx: &GpuDeviceCtx) -> Result<Vec<T>, MemCopyError>;
+
+    /// Copies the buffer's contents into `dst` (page-locked host memory) and
+    /// synchronizes the stream. Compared to [`Self::to_host_on`], the copy is a
+    /// direct DMA without the driver's pageable staging path, which matters for
+    /// small latency-critical readbacks (e.g. per-round sumcheck evaluations).
+    ///
+    /// Grows `dst` if needed. Returns the number of elements copied.
+    fn to_pinned_on(
+        &self,
+        dst: &mut PinnedBuffer<T>,
+        device_ctx: &GpuDeviceCtx,
+    ) -> Result<usize, MemCopyError>
+    where
+        T: Copy;
 }
 
 impl<T> MemCopyD2H<T> for DeviceBuffer<T> {
@@ -123,6 +138,29 @@ impl<T> MemCopyD2H<T> for DeviceBuffer<T> {
         }
 
         Ok(host_vec)
+    }
+
+    fn to_pinned_on(
+        &self,
+        dst: &mut PinnedBuffer<T>,
+        device_ctx: &GpuDeviceCtx,
+    ) -> Result<usize, MemCopyError>
+    where
+        T: Copy,
+    {
+        let n = self.len();
+        dst.ensure_capacity(n)?;
+        check(unsafe {
+            cudaMemcpyAsync(
+                dst.as_mut_ptr() as *mut c_void,
+                self.as_raw_ptr(),
+                std::mem::size_of::<T>() * n,
+                cudaMemcpyKind::cudaMemcpyDeviceToHost,
+                device_ctx.stream.as_raw(),
+            )
+        })?;
+        device_ctx.stream.to_host_sync()?;
+        Ok(n)
     }
 }
 

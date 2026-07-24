@@ -3,12 +3,7 @@
 //! This module provides batch evaluators for monomial evaluations across multiple AIRs,
 //! enabling efficient GPU kernel launches that process multiple traces in a single launch.
 
-use openvm_cuda_common::{
-    copy::MemCopyH2D,
-    d_buffer::DeviceBuffer,
-    error::{CudaError, MemCopyError},
-    stream::GpuDeviceCtx,
-};
+use openvm_cuda_common::{d_buffer::DeviceBuffer, error::CudaError, stream::GpuDeviceCtx};
 use openvm_stark_backend::prover::{fractional_sumcheck_gkr::Frac, DeviceMultiStarkProvingKey};
 use p3_field::PrimeCharacteristicRing;
 use tracing::debug;
@@ -23,7 +18,11 @@ use crate::{
     error::KernelError,
     gpu_backend::GenericGpuBackend,
     hash_scheme::GpuHashScheme,
-    logup_zerocheck::{batch_mle::TraceCtx, block_ctxs::build_block_ctxs},
+    logup_zerocheck::{
+        batch_mle::TraceCtx,
+        block_ctxs::build_block_ctxs,
+        stage::{RoundStager, StagedSlice},
+    },
     prelude::EF,
 };
 
@@ -111,12 +110,18 @@ pub(crate) fn compute_lambda_combinations<HS: GpuHashScheme>(
 /// The batch must contain at least one trace.
 ///
 /// The struct holds references to `TraceCtx` which guarantees the underlying
-/// device buffers (including `main_ptrs_dev`) remain valid for the struct's lifetime.
+/// device buffers (including the staged `main_ptrs` table) remain valid for the
+/// struct's lifetime.
+///
+/// Context tables are staged via [`RoundStager`]; the caller must
+/// [`RoundStager::commit`] the stager's current cycle before calling
+/// [`Self::evaluate`].
 pub(crate) struct ZerocheckMonomialBatch<'a> {
     traces: Vec<&'a TraceCtx>,
-    block_ctxs: DeviceBuffer<BlockCtx>,
-    air_ctxs: DeviceBuffer<MonomialAirCtx>,
-    air_offsets: DeviceBuffer<u32>,
+    block_ctxs: StagedSlice<BlockCtx>,
+    num_blocks: usize,
+    air_ctxs: StagedSlice<MonomialAirCtx>,
+    air_offsets: StagedSlice<u32>,
     /// Cheap clone: just `(device_id, Arc<CudaStream>)`.
     device_ctx: GpuDeviceCtx,
 }
@@ -134,8 +139,9 @@ impl<'a> ZerocheckMonomialBatch<'a> {
         traces: impl IntoIterator<Item = &'a TraceCtx>,
         pk: &DeviceMultiStarkProvingKey<GenericGpuBackend<HS>>,
         lambda_combinations: &[&DeviceBuffer<EF>],
+        stager: &mut RoundStager,
         device_ctx: &GpuDeviceCtx,
-    ) -> Result<Self, MemCopyError> {
+    ) -> Self {
         let traces: Vec<_> = traces.into_iter().collect();
         assert!(
             !traces.is_empty(),
@@ -176,7 +182,7 @@ impl<'a> ZerocheckMonomialBatch<'a> {
                 let eval_ctx = EvalCoreCtx {
                     d_selectors: t.sels_ptr,
                     d_preprocessed: t.prep_ptr,
-                    d_main: t.main_ptrs_dev.as_ptr(),
+                    d_main: t.main_ptrs,
                     d_public: t.public_ptr,
                 };
 
@@ -192,29 +198,25 @@ impl<'a> ZerocheckMonomialBatch<'a> {
             })
             .collect();
 
-        // Upload to device
-        let block_ctxs = block_ctxs_h.to_device_on(device_ctx)?;
-        let air_ctxs = air_ctxs_h.to_device_on(device_ctx)?;
-        let air_offsets = air_offsets.to_device_on(device_ctx)?;
+        // Stage for upload at the caller's next `commit`
+        let num_blocks = block_ctxs_h.len();
+        let block_ctxs = stager.push(&block_ctxs_h);
+        let air_ctxs = stager.push(&air_ctxs_h);
+        let air_offsets = stager.push(&air_offsets);
 
         debug!(
             num_airs = traces.len(),
-            num_blocks = block_ctxs.len(),
-            "ZerocheckMonomialBatch created"
+            num_blocks, "ZerocheckMonomialBatch created"
         );
 
-        Ok(Self {
+        Self {
             traces,
             block_ctxs,
+            num_blocks,
             air_ctxs,
             air_offsets,
             device_ctx: device_ctx.clone(),
-        })
-    }
-
-    /// Returns the trace indices in order.
-    pub fn trace_indices(&self) -> impl Iterator<Item = usize> + '_ {
-        self.traces.iter().map(|t| t.trace_idx)
+        }
     }
 
     /// Evaluates the batch and returns the output device buffer.
@@ -222,9 +224,15 @@ impl<'a> ZerocheckMonomialBatch<'a> {
     /// The buffer contains `num_airs * num_x` elements, laid out as
     /// `[air0_x0, air0_x1, ..., air1_x0, air1_x1, ...]`.
     /// See [`crate::logup_zerocheck`] module docs for async-free/peak memory behavior.
-    pub fn evaluate(&self, num_x: u32) -> Result<DeviceBuffer<EF>, KernelError> {
-        let num_blocks = self.block_ctxs.len();
-        let num_airs = self.air_ctxs.len();
+    ///
+    /// The `stager` cycle this batch staged into must be committed.
+    pub fn evaluate(
+        &self,
+        stager: &RoundStager,
+        num_x: u32,
+    ) -> Result<DeviceBuffer<EF>, KernelError> {
+        let num_blocks = self.num_blocks;
+        let num_airs = self.traces.len();
 
         debug!(
             %num_blocks,
@@ -238,21 +246,17 @@ impl<'a> ZerocheckMonomialBatch<'a> {
         let mut output =
             DeviceBuffer::<EF>::with_capacity_on(num_airs * num_x as usize, &self.device_ctx);
 
-        debug_assert_eq!(
-            self.air_offsets.len(),
-            num_airs + 1,
-            "air_offsets must have num_airs + 1 elements"
-        );
         // SAFETY: All device pointers in block_ctxs and air_ctxs were constructed from
         // valid DeviceBuffers that outlive this call (TraceCtx references, pk monomial data,
-        // lambda_combinations). The air_offsets buffer has length num_airs + 1 as required.
+        // lambda_combinations), and the staged tables were committed by the caller.
+        // The air_offsets table has length num_airs + 1 by construction.
         unsafe {
             zerocheck_monomial_batched(
                 &mut tmp_sums,
                 &mut output,
-                &self.block_ctxs,
-                &self.air_ctxs,
-                &self.air_offsets,
+                stager.ptr(self.block_ctxs),
+                stager.ptr(self.air_ctxs),
+                stager.ptr(self.air_offsets),
                 num_blocks as u32,
                 num_x,
                 num_airs as u32,
@@ -279,9 +283,9 @@ const WAVES_TARGET: u32 = 4;
 /// The batch must contain at least one trace.
 pub(crate) struct ZerocheckMonomialParYBatch<'a> {
     traces: Vec<&'a TraceCtx>,
-    block_ctxs: DeviceBuffer<BlockCtx>,
-    air_ctxs: DeviceBuffer<MonomialAirCtx>,
-    air_offsets: DeviceBuffer<u32>,
+    block_ctxs: StagedSlice<BlockCtx>,
+    air_ctxs: StagedSlice<MonomialAirCtx>,
+    air_offsets: StagedSlice<u32>,
     num_blocks: u32,
     chunk_size: u32,
     /// Cheap clone: just `(device_id, Arc<CudaStream>)`.
@@ -308,8 +312,9 @@ impl<'a> ZerocheckMonomialParYBatch<'a> {
         sm_count: u32,
         num_x: u32,
         max_monomials_per_thread: Option<u32>,
+        stager: &mut RoundStager,
         device_ctx: &GpuDeviceCtx,
-    ) -> Result<Self, MemCopyError> {
+    ) -> Self {
         let traces: Vec<_> = traces.into_iter().collect();
         assert!(
             !traces.is_empty(),
@@ -394,7 +399,7 @@ impl<'a> ZerocheckMonomialParYBatch<'a> {
                 let eval_ctx = EvalCoreCtx {
                     d_selectors: t.sels_ptr,
                     d_preprocessed: t.prep_ptr,
-                    d_main: t.main_ptrs_dev.as_ptr(),
+                    d_main: t.main_ptrs,
                     d_public: t.public_ptr,
                 };
 
@@ -410,17 +415,17 @@ impl<'a> ZerocheckMonomialParYBatch<'a> {
             })
             .collect();
 
-        // Upload to device
-        let block_ctxs = block_ctxs_h.to_device_on(device_ctx)?;
-        let air_ctxs = air_ctxs_h.to_device_on(device_ctx)?;
-        let air_offsets = air_offsets.to_device_on(device_ctx)?;
+        // Stage for upload at the caller's next `commit`
+        let block_ctxs = stager.push(&block_ctxs_h);
+        let air_ctxs = stager.push(&air_ctxs_h);
+        let air_offsets = stager.push(&air_offsets);
 
         debug!(
             num_airs = traces.len(),
             num_blocks, chunk_size, max_monomials, "ZerocheckMonomialParYBatch created"
         );
 
-        Ok(Self {
+        Self {
             traces,
             block_ctxs,
             air_ctxs,
@@ -428,12 +433,7 @@ impl<'a> ZerocheckMonomialParYBatch<'a> {
             num_blocks,
             chunk_size,
             device_ctx: device_ctx.clone(),
-        })
-    }
-
-    /// Returns the trace indices in order.
-    pub fn trace_indices(&self) -> impl Iterator<Item = usize> + '_ {
-        self.traces.iter().map(|t| t.trace_idx)
+        }
     }
 
     /// Evaluates the batch and returns the output device buffer.
@@ -441,8 +441,14 @@ impl<'a> ZerocheckMonomialParYBatch<'a> {
     /// The buffer contains `num_airs * num_x` elements, laid out as
     /// `[air0_x0, air0_x1, ..., air1_x0, air1_x1, ...]`.
     /// See [`crate::logup_zerocheck`] module docs for async-free/peak memory behavior.
-    pub fn evaluate(&self, num_x: u32) -> Result<DeviceBuffer<EF>, KernelError> {
-        let num_airs = self.air_ctxs.len();
+    ///
+    /// The `stager` cycle this batch staged into must be committed.
+    pub fn evaluate(
+        &self,
+        stager: &RoundStager,
+        num_x: u32,
+    ) -> Result<DeviceBuffer<EF>, KernelError> {
+        let num_airs = self.traces.len();
 
         debug!(
             num_blocks = %self.num_blocks,
@@ -459,21 +465,17 @@ impl<'a> ZerocheckMonomialParYBatch<'a> {
         let mut output =
             DeviceBuffer::<EF>::with_capacity_on(num_airs * num_x as usize, &self.device_ctx);
 
-        debug_assert_eq!(
-            self.air_offsets.len(),
-            num_airs + 1,
-            "air_offsets must have num_airs + 1 elements"
-        );
         // SAFETY: All device pointers in block_ctxs and air_ctxs were constructed from
         // valid DeviceBuffers that outlive this call (TraceCtx references, pk monomial data,
-        // lambda_combinations). The air_offsets buffer has length num_airs + 1 as required.
+        // lambda_combinations), and the staged tables were committed by the caller.
+        // The air_offsets table has length num_airs + 1 by construction.
         unsafe {
             zerocheck_monomial_par_y_batched(
                 &mut tmp_sums,
                 &mut output,
-                &self.block_ctxs,
-                &self.air_ctxs,
-                &self.air_offsets,
+                stager.ptr(self.block_ctxs),
+                stager.ptr(self.air_ctxs),
+                stager.ptr(self.air_offsets),
                 self.num_blocks,
                 num_x,
                 num_airs as u32,
@@ -587,11 +589,11 @@ const THREADS_PER_BLOCK_LOGUP: u32 = 128;
 /// compatible with standard reduction.
 pub(crate) struct LogupMonomialBatch<'a> {
     traces: Vec<&'a TraceCtx>,
-    block_ctxs: DeviceBuffer<BlockCtx>,
-    common_ctxs: DeviceBuffer<LogupMonomialCommonCtx>,
-    numer_ctxs: DeviceBuffer<LogupMonomialCtx>,
-    denom_ctxs: DeviceBuffer<LogupMonomialCtx>,
-    air_offsets: DeviceBuffer<u32>,
+    block_ctxs: StagedSlice<BlockCtx>,
+    common_ctxs: StagedSlice<LogupMonomialCommonCtx>,
+    numer_ctxs: StagedSlice<LogupMonomialCtx>,
+    denom_ctxs: StagedSlice<LogupMonomialCtx>,
+    air_offsets: StagedSlice<u32>,
     num_blocks: u32,
     device_ctx: GpuDeviceCtx,
 }
@@ -609,8 +611,9 @@ impl<'a> LogupMonomialBatch<'a> {
         traces: impl IntoIterator<Item = &'a TraceCtx>,
         pk: &DeviceMultiStarkProvingKey<GenericGpuBackend<HS>>,
         logup_combinations: &[&LogupCombinations],
+        stager: &mut RoundStager,
         device_ctx: &GpuDeviceCtx,
-    ) -> Result<Self, MemCopyError> {
+    ) -> Self {
         let traces: Vec<_> = traces.into_iter().collect();
         assert!(
             !traces.is_empty(),
@@ -661,7 +664,7 @@ impl<'a> LogupMonomialBatch<'a> {
                 let eval_ctx = EvalCoreCtx {
                     d_selectors: t.sels_ptr,
                     d_preprocessed: t.prep_ptr,
-                    d_main: t.main_ptrs_dev.as_ptr(),
+                    d_main: t.main_ptrs,
                     d_public: t.public_ptr,
                 };
 
@@ -709,19 +712,19 @@ impl<'a> LogupMonomialBatch<'a> {
             })
             .collect();
 
-        // Upload to device
-        let block_ctxs = block_ctxs_h.to_device_on(device_ctx)?;
-        let common_ctxs = common_ctxs_h.to_device_on(device_ctx)?;
-        let numer_ctxs = numer_ctxs_h.to_device_on(device_ctx)?;
-        let denom_ctxs = denom_ctxs_h.to_device_on(device_ctx)?;
-        let air_offsets = air_offsets.to_device_on(device_ctx)?;
+        // Stage for upload at the caller's next `commit`
+        let block_ctxs = stager.push(&block_ctxs_h);
+        let common_ctxs = stager.push(&common_ctxs_h);
+        let numer_ctxs = stager.push(&numer_ctxs_h);
+        let denom_ctxs = stager.push(&denom_ctxs_h);
+        let air_offsets = stager.push(&air_offsets);
 
         debug!(
             num_airs = traces.len(),
             num_blocks, "LogupMonomialBatch created"
         );
 
-        Ok(Self {
+        Self {
             traces,
             block_ctxs,
             common_ctxs,
@@ -730,12 +733,7 @@ impl<'a> LogupMonomialBatch<'a> {
             air_offsets,
             num_blocks,
             device_ctx: device_ctx.clone(),
-        })
-    }
-
-    /// Returns the trace indices in order.
-    pub fn trace_indices(&self) -> impl Iterator<Item = usize> + '_ {
-        self.traces.iter().map(|t| t.trace_idx)
+        }
     }
 
     /// Evaluates the batch and returns the output device buffer.
@@ -743,8 +741,14 @@ impl<'a> LogupMonomialBatch<'a> {
     /// The buffer contains `num_airs * num_x` FracExt elements, laid out as
     /// `[air0_x0, air0_x1, ..., air1_x0, air1_x1, ...]`.
     /// See [`crate::logup_zerocheck`] module docs for async-free/peak memory behavior.
-    pub fn evaluate(&self, num_x: u32) -> Result<DeviceBuffer<Frac<EF>>, KernelError> {
-        let num_airs = self.common_ctxs.len();
+    ///
+    /// The `stager` cycle this batch staged into must be committed.
+    pub fn evaluate(
+        &self,
+        stager: &RoundStager,
+        num_x: u32,
+    ) -> Result<DeviceBuffer<Frac<EF>>, KernelError> {
+        let num_airs = self.traces.len();
 
         debug!(
             num_blocks = %self.num_blocks,
@@ -760,23 +764,18 @@ impl<'a> LogupMonomialBatch<'a> {
         let mut output =
             DeviceBuffer::<Frac<EF>>::with_capacity_on(num_airs * num_x as usize, &self.device_ctx);
 
-        debug_assert_eq!(
-            self.air_offsets.len(),
-            num_airs + 1,
-            "air_offsets must have num_airs + 1 elements"
-        );
-
-        // SAFETY: All device pointers were constructed from valid DeviceBuffers that outlive this
-        // call.
+        // SAFETY: All device pointers were constructed from valid DeviceBuffers that outlive
+        // this call, and the staged tables were committed by the caller. The air_offsets
+        // table has length num_airs + 1 by construction.
         unsafe {
             logup_monomial_batched(
                 &mut tmp_sums,
                 &mut output,
-                &self.block_ctxs,
-                &self.common_ctxs,
-                &self.numer_ctxs,
-                &self.denom_ctxs,
-                &self.air_offsets,
+                stager.ptr(self.block_ctxs),
+                stager.ptr(self.common_ctxs),
+                stager.ptr(self.numer_ctxs),
+                stager.ptr(self.denom_ctxs),
+                stager.ptr(self.air_offsets),
                 self.num_blocks,
                 num_x,
                 num_airs as u32,

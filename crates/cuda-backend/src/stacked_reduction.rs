@@ -6,6 +6,7 @@ use openvm_cuda_common::{
     d_buffer::DeviceBuffer,
     error::MemCopyError,
     memory_manager::MemTracker,
+    pinned::PinnedBuffer,
     stream::GpuDeviceCtx,
 };
 use openvm_stark_backend::{
@@ -32,14 +33,15 @@ use crate::{
         poly::vector_scalar_multiply_ext,
         stacked_reduction::{
             _stacked_reduction_r0_required_temp_buffer_size, initialize_k_rot_from_eq_segments,
-            stacked_reduction_fold_ple, stacked_reduction_sumcheck_mle_round,
-            stacked_reduction_sumcheck_mle_round_degenerate, stacked_reduction_sumcheck_round0,
-            NUM_G,
+            stacked_reduction_fold_ple, stacked_reduction_sumcheck_mle_round_batched,
+            stacked_reduction_sumcheck_mle_round_degenerate_batched,
+            stacked_reduction_sumcheck_round0, StackedMleDegenGroupCtx, StackedMleGroupCtx, NUM_G,
         },
         sumcheck::{fold_mle, triangular_fold_mle},
     },
     gpu_backend::GenericGpuBackend,
     hash_scheme::GpuHashScheme,
+    logup_zerocheck::stage::RoundStager,
     poly::EqEvalSegments,
     prelude::{Digest, D_EF, EF, F},
     sponge::GpuFiatShamirTranscript,
@@ -50,6 +52,27 @@ use crate::{
 
 /// Degree of the sumcheck polynomial for stacked reduction.
 pub const STACKED_REDUCTION_S_DEG: usize = 2;
+
+/// Mirrors the window-stride auto-tuning of the former per-window
+/// `_stacked_reduction_sumcheck_mle_round` launcher (see stacked_reduction.cu):
+/// enough total blocks to keep SMs busy, while targeting 4..=16 window
+/// iterations per thread.
+fn tune_window_stride(y_blocks: u32, window_len: u32, sm_count: u32) -> u32 {
+    const MAX_GRID_DIM: u32 = 65535;
+    const WAVES_TARGET: u32 = 4;
+    const ITERS_MIN: u32 = 4;
+    const ITERS_MAX: u32 = 16;
+    let stride_occ = (sm_count * WAVES_TARGET).div_ceil(y_blocks);
+    let stride_loop_lo = window_len.div_ceil(ITERS_MAX);
+    let stride_loop_hi = window_len.div_ceil(ITERS_MIN);
+    let lo = 1.max(stride_occ.max(stride_loop_lo));
+    let hi = window_len.min(MAX_GRID_DIM).min(stride_loop_hi);
+    if lo <= hi {
+        lo
+    } else {
+        lo.min(window_len.min(MAX_GRID_DIM))
+    }
+}
 
 pub struct StackedReductionGpu<D = Digest> {
     device_ctx: GpuDeviceCtx,
@@ -106,6 +129,12 @@ pub struct StackedReductionGpu<D = Digest> {
 
     d_block_sums: DeviceBuffer<EF>,
     d_accum: DeviceBuffer<u64>,
+    /// Pinned readback buffer for the per-round accumulator (see `to_pinned_on`).
+    rb_accum: PinnedBuffer<u64>,
+    /// Pinned readback for the two per-round (eq, k_rot) stable scalars.
+    rb_scalars: PinnedBuffer<EF>,
+    /// Single-upload staging of the per-round window-group contexts.
+    stager: RoundStager,
     d_input_ptrs: DeviceBuffer<*const EF>,
     d_output_ptrs: DeviceBuffer<*mut EF>,
 
@@ -433,6 +462,10 @@ impl<D: Copy + Clone + Send + Sync + 'static> StackedReductionGpu<D> {
             num_windows * STACKED_REDUCTION_S_DEG * D_EF,
             &device_ctx,
         );
+        let rb_accum =
+            PinnedBuffer::<u64>::with_capacity(num_windows * STACKED_REDUCTION_S_DEG * D_EF)
+                .map_err(MemCopyError::from)?;
+        let rb_scalars = PinnedBuffer::<EF>::with_capacity(2).map_err(MemCopyError::from)?;
         let d_eq_ub = if unstacked_cols.is_empty() {
             DeviceBuffer::new()
         } else {
@@ -469,6 +502,9 @@ impl<D: Copy + Clone + Send + Sync + 'static> StackedReductionGpu<D> {
             d_eq_ub,
             d_block_sums: DeviceBuffer::new(),
             d_accum,
+            rb_accum,
+            rb_scalars,
+            stager: RoundStager::new(),
             d_input_ptrs,
             d_output_ptrs,
             mem,
@@ -819,33 +855,33 @@ impl<D: Copy + Clone + Send + Sync + 'static> StackedReductionGpu<D> {
 
         if self.n_max >= (round - 1) {
             // Move stable eq, k_rot to stable vectors
-            let mut tmp = [EF::ZERO];
             debug_assert_eq!(self.eq_stable.len(), l_skip + round - 1);
             debug_assert_eq!(self.k_rot_stable.len(), l_skip + round - 1);
             debug_assert!(self.eq_r_ns.buffer.len() > 1);
             debug_assert!(self.k_rot_ns.buffer.len() > 1);
-            // SAFETY: size of eq_r_ns, k_rot_ns is currently 2 * 2^{n_max - round + 1}
+            // SAFETY: size of eq_r_ns, k_rot_ns is currently 2 * 2^{n_max - round + 1}.
+            // Both single-element D2H copies go into pinned memory with one stream sync.
             unsafe {
-                // D2H copy of single EF element
                 cuda_memcpy_on::<true, false>(
-                    tmp.as_mut_ptr() as *mut c_void,
+                    self.rb_scalars.as_mut_ptr() as *mut c_void,
                     self.eq_r_ns.get_ptr(0) as *const c_void,
                     size_of::<EF>(),
                     &self.device_ctx,
                 )?;
-
-                self.eq_stable.push(tmp[0]);
-
-                // D2H copy of single EF element
                 cuda_memcpy_on::<true, false>(
-                    tmp.as_mut_ptr() as *mut c_void,
+                    self.rb_scalars.as_mut_ptr().add(1) as *mut c_void,
                     self.k_rot_ns.get_ptr(0) as *const c_void,
                     size_of::<EF>(),
                     &self.device_ctx,
                 )?;
-
-                self.k_rot_stable.push(tmp[0]);
             }
+            self.device_ctx
+                .stream
+                .to_host_sync()
+                .map_err(MemCopyError::from)?;
+            let scalars = self.rb_scalars.as_slice(2);
+            self.eq_stable.push(scalars[0]);
+            self.k_rot_stable.push(scalars[1]);
         }
         let accum_stride = STACKED_REDUCTION_S_DEG * D_EF;
         let num_windows = self.ht_diff_idxs.len() - 1;
@@ -864,8 +900,14 @@ impl<D: Copy + Clone + Send + Sync + 'static> StackedReductionGpu<D> {
                 .copy_to_on(&mut self.d_eq_ub, &self.device_ctx)?;
         }
 
+        // Build per-window-group contexts and launch each set as a single batched kernel
+        // (formerly one kernel launch per window).
+        let stacked_height = self.stacked_height(round);
+        let mut groups: Vec<StackedMleGroupCtx> = Vec::new();
+        let mut group_block_offsets: Vec<u32> = vec![0];
+        let mut degen_groups: Vec<StackedMleDegenGroupCtx> = Vec::new();
         for (window_idx, window) in self.ht_diff_idxs.windows(2).enumerate() {
-            let window_len = window[1] - window[0];
+            let window_len = (window[1] - window[0]) as u32;
             // SAFETY: in bounds by construction of ht_diff_idxs
             let unstacked_cols_ptr = unsafe { self.d_unstacked_cols.as_ptr().add(window[0]) };
             // 2 per column for (eq, k_rot)
@@ -881,57 +923,88 @@ impl<D: Copy + Clone + Send + Sync + 'static> StackedReductionGpu<D> {
                 // This includes all n < 0 cases
                 // In this case, the `s` poly contribution is a constant and we don't need to
                 // interpolate
-                let eq_r = self.eq_stable[log_height];
-                let k_rot_r = self.k_rot_stable[log_height];
                 // SAFETY: the full per-trace buffer was copied above, so this window slice stays
                 // valid while all queued kernels run asynchronously.
                 let eq_ub_ptr = unsafe { self.d_eq_ub.as_ptr().add(window[0]) };
-                let stacked_height = self.stacked_height(round);
-                unsafe {
-                    stacked_reduction_sumcheck_mle_round_degenerate(
-                        &self.d_q_eval_ptrs,
-                        eq_ub_ptr,
-                        eq_r,
-                        k_rot_r,
-                        unstacked_cols_ptr,
-                        lambda_pows_ptr,
-                        output_ptr,
-                        stacked_height,
-                        window_len,
-                        l_skip,
-                        round,
-                        self.device_ctx.stream.as_raw(),
-                    )
-                    .map_err(StackedReductionError::SumcheckMleRoundDegenerate)?;
-                }
+                degen_groups.push(StackedMleDegenGroupCtx {
+                    eq_ub: eq_ub_ptr,
+                    unstacked_cols: unstacked_cols_ptr,
+                    lambda_pows: lambda_pows_ptr,
+                    output: output_ptr,
+                    eq_r: self.eq_stable[log_height],
+                    k_rot_r: self.k_rot_stable[log_height],
+                    window_len,
+                    shift_factor: (l_skip + round) as u32,
+                });
             } else {
                 let hypercube_dim = log_height - l_skip - round;
-                let num_y = 1 << hypercube_dim;
-                // Allow the CUDA launcher to auto-tune grid.y (thread_window_stride) based on
-                // (num_y, window_len) and device SM count.
+                let num_y: u32 = 1 << hypercube_dim;
+                // Mirror the former per-window launcher: grid.x covers num_y at 256
+                // threads/block, and the window stride (former grid.y) is auto-tuned
+                // based on (num_y, window_len) and device SM count.
+                let y_blocks = num_y.div_ceil(256);
+                let window_stride = tune_window_stride(y_blocks, window_len, self.sm_count);
+                // Ensure that atomic add does not overflow u64
+                debug_assert!((num_y as u64) * (window_stride as u64) < 1 << 32);
+                groups.push(StackedMleGroupCtx {
+                    unstacked_cols: unstacked_cols_ptr,
+                    lambda_pows: lambda_pows_ptr,
+                    output: output_ptr,
+                    window_len,
+                    num_y,
+                    window_stride,
+                    _pad: 0,
+                });
+                group_block_offsets
+                    .push(group_block_offsets.last().unwrap() + y_blocks * window_stride);
+            }
+        }
 
-                let stacked_height = self.stacked_height(round);
-                unsafe {
-                    stacked_reduction_sumcheck_mle_round(
-                        &self.d_q_eval_ptrs,
-                        &self.eq_r_ns,
-                        &self.k_rot_ns,
-                        unstacked_cols_ptr,
-                        lambda_pows_ptr,
-                        output_ptr,
-                        stacked_height,
-                        window_len,
-                        num_y,
-                        self.sm_count,
-                        self.device_ctx.stream.as_raw(),
-                    )
-                    .map_err(StackedReductionError::SumcheckMleRound)?;
-                };
+        self.stager.begin_round(&self.device_ctx);
+        let s_offsets = self.stager.push(&group_block_offsets);
+        let s_groups = self.stager.push(&groups);
+        let s_degen = self.stager.push(&degen_groups);
+        self.stager.commit(&self.device_ctx)?;
+
+        if !groups.is_empty() {
+            let num_blocks = *group_block_offsets.last().unwrap() as usize;
+            // SAFETY: staged tables committed above; group pointers constructed in bounds
+            // as in the former per-window launches.
+            unsafe {
+                stacked_reduction_sumcheck_mle_round_batched(
+                    &self.d_q_eval_ptrs,
+                    &self.eq_r_ns,
+                    &self.k_rot_ns,
+                    self.stager.ptr(s_offsets),
+                    self.stager.ptr(s_groups),
+                    groups.len(),
+                    num_blocks,
+                    stacked_height,
+                    self.device_ctx.stream.as_raw(),
+                )
+                .map_err(StackedReductionError::SumcheckMleRound)?;
+            }
+        }
+        if !degen_groups.is_empty() {
+            // SAFETY: staged tables committed above; group pointers constructed in bounds
+            // as in the former per-window launches.
+            unsafe {
+                stacked_reduction_sumcheck_mle_round_degenerate_batched(
+                    &self.d_q_eval_ptrs,
+                    self.stager.ptr(s_degen),
+                    degen_groups.len(),
+                    stacked_height,
+                    self.device_ctx.stream.as_raw(),
+                )
+                .map_err(StackedReductionError::SumcheckMleRoundDegenerate)?;
             }
         }
 
         // D2H copy and reduce modulo P once after all window kernels have queued.
-        let h_accum = self.d_accum.to_host_on(&self.device_ctx)?;
+        let n = self
+            .d_accum
+            .to_pinned_on(&mut self.rb_accum, &self.device_ctx)?;
+        let h_accum = self.rb_accum.as_slice(n);
         let s_evals_batch = h_accum[..num_windows * accum_stride]
             .chunks_exact(accum_stride)
             .map(reduce_raw_u64_to_ef)

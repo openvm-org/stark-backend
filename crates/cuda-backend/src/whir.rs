@@ -4,7 +4,9 @@ use itertools::Itertools;
 use openvm_cuda_common::{
     copy::{MemCopyD2H, MemCopyH2D},
     d_buffer::DeviceBuffer,
+    error::MemCopyError,
     memory_manager::MemTracker,
+    pinned::PinnedBuffer,
     stream::GpuDeviceCtx,
 };
 use openvm_stark_backend::{
@@ -206,6 +208,7 @@ where
     let mut final_poly = None;
 
     let mut d_s_evals = DeviceBuffer::<EF>::with_capacity_on(2, device_ctx);
+    let mut rb_s_evals = PinnedBuffer::<EF>::with_capacity(2).map_err(MemCopyError::from)?;
     let mut d_sumcheck_tmp = DeviceBuffer::<EF>::new();
 
     mem.tracing_info("before_whir_rounds");
@@ -250,11 +253,12 @@ where
                     round,
                 })?;
             }
-            let s_evals = d_s_evals.to_host_on(device_ctx)?;
+            let n = d_s_evals.to_pinned_on(&mut rb_s_evals, device_ctx)?;
+            let s_evals: [EF; 2] = rb_s_evals.as_slice(n).try_into().unwrap();
             for &eval in &s_evals {
                 transcript.observe_ext(eval);
             }
-            whir_sumcheck_polys.push(s_evals.try_into().unwrap());
+            whir_sumcheck_polys.push(s_evals);
 
             folding_pow_witnesses.push(
                 transcript

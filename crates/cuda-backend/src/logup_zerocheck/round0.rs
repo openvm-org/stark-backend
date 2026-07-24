@@ -1,14 +1,5 @@
-use itertools::Itertools;
-use openvm_cuda_common::{
-    copy::MemCopyH2D, d_buffer::DeviceBuffer, error::CudaError, stream::GpuDeviceCtx,
-};
-use openvm_stark_backend::{
-    air_builders::symbolic::{
-        symbolic_expression::SymbolicExpression, SymbolicConstraints, SymbolicDagBuilder,
-        SymbolicExpressionDag,
-    },
-    prover::{fractional_sumcheck_gkr::Frac, DeviceStarkProvingKey},
-};
+use openvm_cuda_common::{d_buffer::DeviceBuffer, error::CudaError, stream::GpuDeviceCtx};
+use openvm_stark_backend::prover::{fractional_sumcheck_gkr::Frac, DeviceStarkProvingKey};
 use p3_field::PrimeCharacteristicRing;
 use tracing::{debug, warn};
 
@@ -21,7 +12,7 @@ use crate::{
     },
     gpu_backend::GenericGpuBackend,
     hash_scheme::GpuHashScheme,
-    logup_zerocheck::rules::{codec::Codec, SymbolicRulesGpu},
+    pkey::InteractionRound0Rules,
     prelude::{EF, F},
 };
 
@@ -30,6 +21,104 @@ const MAX_LOCKSTEP_NUM_COSETS: u32 = 4;
 
 fn uses_round0_coset_parallel(num_x: u32, skip_domain: u32) -> bool {
     num_x.saturating_mul(skip_domain) < ROUND0_COSET_PARALLEL_THRESHOLD
+}
+
+/// Shared scratch buffers for the round-0 kernels of one proof. Kernels on a single
+/// stream execute serially, so all per-AIR round-0 launches can share one scratch set,
+/// sized to the per-AIR maximum, instead of allocating (and stream-ordered freeing)
+/// per AIR — which under back-to-back launches would hold every AIR's scratch
+/// simultaneously in the memory pool.
+pub struct Round0Scratch {
+    intermediates: DeviceBuffer<F>,
+    zc_temp_sums: DeviceBuffer<EF>,
+    logup_temp_sums: DeviceBuffer<Frac<EF>>,
+}
+
+impl Round0Scratch {
+    pub fn new() -> Self {
+        Self {
+            intermediates: DeviceBuffer::new(),
+            zc_temp_sums: DeviceBuffer::new(),
+            logup_temp_sums: DeviceBuffer::new(),
+        }
+    }
+
+    pub(crate) fn ensure(
+        &mut self,
+        intermediates: usize,
+        zc_temp_sums: usize,
+        logup_temp_sums: usize,
+        device_ctx: &GpuDeviceCtx,
+    ) {
+        if self.intermediates.len() < intermediates {
+            self.intermediates = DeviceBuffer::with_capacity_on(intermediates, device_ctx);
+        }
+        if self.zc_temp_sums.len() < zc_temp_sums {
+            self.zc_temp_sums = DeviceBuffer::with_capacity_on(zc_temp_sums, device_ctx);
+        }
+        if self.logup_temp_sums.len() < logup_temp_sums {
+            self.logup_temp_sums = DeviceBuffer::with_capacity_on(logup_temp_sums, device_ctx);
+        }
+    }
+}
+
+/// `(intermediates, temp_sums)` scratch capacities for the zerocheck round-0 kernel.
+pub fn zerocheck_r0_scratch_capacities(
+    buffer_size: u32,
+    skip_domain: u32,
+    num_x: u32,
+    num_cosets: u32,
+    max_temp_bytes: usize,
+) -> (usize, usize) {
+    if num_cosets == 0 {
+        return (0, 0);
+    }
+    unsafe {
+        (
+            _zerocheck_r0_intermediates_buffer_size(
+                buffer_size,
+                skip_domain,
+                num_x,
+                num_cosets,
+                max_temp_bytes,
+            ),
+            _zerocheck_r0_temp_sums_buffer_size(
+                buffer_size,
+                skip_domain,
+                num_x,
+                num_cosets,
+                max_temp_bytes,
+            ),
+        )
+    }
+}
+
+/// `(intermediates, temp_sums)` scratch capacities for the logup round-0 kernel.
+pub fn logup_r0_scratch_capacities(
+    buffer_size: u32,
+    skip_domain: u32,
+    num_x: u32,
+    num_cosets: u32,
+    max_temp_bytes: usize,
+) -> (usize, usize) {
+    unsafe {
+        (
+            _logup_r0_intermediates_buffer_size(
+                buffer_size,
+                skip_domain,
+                num_x,
+                num_cosets,
+                max_temp_bytes,
+            ),
+            _logup_r0_temp_sums_buffer_size(
+                buffer_size,
+                skip_domain,
+                num_x,
+                num_cosets,
+                max_temp_bytes,
+            ),
+        )
+    }
 }
 
 fn validate_round0_num_cosets(
@@ -51,10 +140,11 @@ fn validate_round0_num_cosets(
 pub fn evaluate_round0_constraints_gpu<HS: GpuHashScheme>(
     pk: &DeviceStarkProvingKey<GenericGpuBackend<HS>>,
     selectors_cube: &DeviceBuffer<F>,
-    main_parts: &DeviceBuffer<*const F>,
+    main_parts: *const *const F,
     public_values: &DeviceBuffer<F>,
     eq_cube: *const EF,
     lambda_pows: &DeviceBuffer<EF>,
+    scratch: &mut Round0Scratch,
     skip_domain: u32,
     num_x: u32,
     height: u32,
@@ -74,34 +164,20 @@ pub fn evaluate_round0_constraints_gpu<HS: GpuHashScheme>(
     let rules = &pk.other_data.zerocheck_round0;
 
     let buffer_size: u32 = rules.inner.buffer_size;
-    let intermed_capacity = unsafe {
-        _zerocheck_r0_intermediates_buffer_size(
-            buffer_size,
-            skip_domain,
-            num_x,
-            num_cosets,
-            max_temp_bytes,
-        )
-    };
-    let mut intermediates = if intermed_capacity > 0 {
-        debug!("zerocheck:intermediates_capacity={intermed_capacity}");
-        DeviceBuffer::<F>::with_capacity_on(intermed_capacity, device_ctx)
-    } else {
-        DeviceBuffer::<F>::new()
-    };
-
-    let temp_sums_buffer_capacity = unsafe {
-        _zerocheck_r0_temp_sums_buffer_size(
-            buffer_size,
-            skip_domain,
-            num_x,
-            num_cosets,
-            max_temp_bytes,
-        )
-    };
+    let (intermed_capacity, temp_sums_buffer_capacity) = zerocheck_r0_scratch_capacities(
+        buffer_size,
+        skip_domain,
+        num_x,
+        num_cosets,
+        max_temp_bytes,
+    );
+    debug!("zerocheck:intermediates_capacity={intermed_capacity}");
     debug!("zerocheck:temp_sums_buffer_capacity={temp_sums_buffer_capacity}");
-    let mut temp_sums_buffer =
-        DeviceBuffer::<EF>::with_capacity_on(temp_sums_buffer_capacity, device_ctx);
+    // Shared scratch: launches on one stream execute serially, so all round-0 kernels of a
+    // proof can reuse the same scratch buffers (sized to the per-AIR maximum by the caller).
+    scratch.ensure(intermed_capacity, temp_sums_buffer_capacity, 0, device_ctx);
+    let intermediates = &mut scratch.intermediates;
+    let temp_sums_buffer = &mut scratch.zc_temp_sums;
     let used_temp_bytes =
         intermed_capacity * size_of::<F>() + temp_sums_buffer_capacity * size_of::<EF>();
     if used_temp_bytes > max_temp_bytes {
@@ -125,7 +201,7 @@ pub fn evaluate_round0_constraints_gpu<HS: GpuHashScheme>(
     //   all nodes are valid.
     unsafe {
         zerocheck_ntt_eval_constraints(
-            &mut temp_sums_buffer,
+            temp_sums_buffer,
             &mut sp_evals,
             selectors_cube,
             preprocessed_ptr,
@@ -136,7 +212,7 @@ pub fn evaluate_round0_constraints_gpu<HS: GpuHashScheme>(
             &rules.inner.d_rules,
             &rules.inner.d_used_nodes,
             buffer_size,
-            &mut intermediates,
+            intermediates,
             skip_domain,
             num_x,
             height,
@@ -150,21 +226,55 @@ pub fn evaluate_round0_constraints_gpu<HS: GpuHashScheme>(
     Ok(sp_evals)
 }
 
+/// Computes the challenge-dependent logup round0 weight vectors and denominator init
+/// from the keygen-cached [`InteractionRound0Rules`]. Mirrors the weight accumulation
+/// previously done alongside the per-prove DAG rebuild.
+pub fn compute_logup_round0_weights(
+    rules: &InteractionRound0Rules,
+    eq_3bs: &[EF],
+    beta_pows: &[EF],
+) -> (Vec<EF>, Vec<EF>, EF) {
+    debug_assert_eq!(
+        rules.count_rule_idxs.len(),
+        eq_3bs.len(),
+        "interaction count must match eq_3bs"
+    );
+    let mut numer_weights = vec![EF::ZERO; rules.rules_len];
+    let mut denom_weights = vec![EF::ZERO; rules.rules_len];
+    let mut denom_sum_init = EF::ZERO;
+    for (interaction_idx, &count_rule_idx) in rules.count_rule_idxs.iter().enumerate() {
+        numer_weights[count_rule_idx as usize] += eq_3bs[interaction_idx];
+        let (message_len, bus_index) = rules.interaction_meta[interaction_idx];
+        denom_sum_init +=
+            eq_3bs[interaction_idx] * beta_pows[message_len as usize] * F::from_u32(bus_index + 1);
+        for (message_idx, &message_rule_idx) in
+            rules.message_rule_idxs[interaction_idx].iter().enumerate()
+        {
+            denom_weights[message_rule_idx as usize] +=
+                eq_3bs[interaction_idx] * beta_pows[message_idx];
+        }
+    }
+    (numer_weights, denom_weights, denom_sum_init)
+}
+
 /// Evaluate interaction constraints (excluding plain AIR constraints) for a single AIR, given
 /// prepared trace input.
 ///
-/// `constraints` includes interaction expressions for the AIR.
+/// The interactions DAG is cached at keygen in [`InteractionRound0Rules`]; the caller
+/// computes the challenge-dependent weights via [`compute_logup_round0_weights`] and passes
+/// them as device pointers (e.g. staged via `RoundStager`).
 /// See [`crate::logup_zerocheck`] module docs for async-free/peak memory behavior.
 #[allow(clippy::too_many_arguments)]
 pub fn evaluate_round0_interactions_gpu<HS: GpuHashScheme>(
     pk: &DeviceStarkProvingKey<GenericGpuBackend<HS>>,
-    symbolic: &SymbolicConstraints<F>,
     selectors_cube: &DeviceBuffer<F>,
-    main_parts: &DeviceBuffer<*const F>,
+    main_parts: *const *const F,
     public_values: &DeviceBuffer<F>,
     eq_cube: *const EF,
-    beta_pows: &[EF],
-    eq_3bs: &[EF],
+    numer_weights: *const EF,
+    denom_weights: *const EF,
+    denom_sum_init: EF,
+    scratch: &mut Round0Scratch,
     skip_domain: u32,
     num_x: u32,
     height: u32,
@@ -173,95 +283,24 @@ pub fn evaluate_round0_interactions_gpu<HS: GpuHashScheme>(
     max_temp_bytes: usize,
     device_ctx: &GpuDeviceCtx,
 ) -> Result<DeviceBuffer<Frac<EF>>, Round0EvalError> {
-    // Check if this trace has interactions
-    if eq_3bs.is_empty() {
-        return Ok(DeviceBuffer::new());
-    }
     validate_round0_num_cosets(num_x, skip_domain, num_cosets)?;
     let stream = device_ctx.stream.as_raw();
     let large_domain = num_cosets * skip_domain;
 
-    // We create a new "interactions DAG" where the new .constraints are the interaction [count,
-    // message_0, message_1, ..] expressions themselves, while the .interactions are empty
-    // We track the indices with InteractionNode
-
-    // Copied from build_symbolic_constraints_dag to handle sorting of constraints
-    // NOTE: For logup round0, the kernel uses weights indexed by rule_idx, not constraint_idx.
-    // So we deduplicate constraint_idx and use dag_idx_to_rule_idx for weight mapping.
-    let (rules, d_numer_weights, d_denom_weights, denom_sum_init) = {
-        let mut dag_builder = SymbolicDagBuilder::new();
-        let mut sorted_used_dag_idxs = Vec::new();
-        for interaction in &symbolic.interactions {
-            let count = dag_builder.add_expr(&interaction.count);
-            sorted_used_dag_idxs.push(count);
-            sorted_used_dag_idxs.extend(
-                interaction
-                    .message
-                    .iter()
-                    .map(|field_expr| dag_builder.add_expr(field_expr)),
-            );
-        }
-        sorted_used_dag_idxs.sort();
-        // Deduplicate for the dag since logup round0 kernel doesn't use used_nodes
-        sorted_used_dag_idxs.dedup();
-        let dag = SymbolicExpressionDag {
-            nodes: dag_builder.nodes,
-            constraint_idx: sorted_used_dag_idxs,
-        };
-        let rules = SymbolicRulesGpu::new(&dag, true);
-        let mut numer_weights = vec![EF::ZERO; rules.rules.len()];
-        let mut denom_weights = vec![EF::ZERO; rules.rules.len()];
-        let mut denom_sum_init = EF::ZERO;
-        for (interaction_idx, interaction) in symbolic.interactions.iter().enumerate() {
-            // CAUTION: an expression node could be used in multiple interactions, and might even be
-            // used as `count` in one, but message field in another. We only care about their
-            // weighted sum with eq_3b, so we compute the weights ahead of time.
-            let count_dag_idx =
-                dag_builder.expr_to_idx[&(&interaction.count as *const SymbolicExpression<_>)];
-            let count_rule_idx = rules.dag_idx_to_rule_idx[&count_dag_idx];
-            numer_weights[count_rule_idx] += eq_3bs[interaction_idx];
-            denom_sum_init += eq_3bs[interaction_idx]
-                * beta_pows[interaction.message.len()]
-                * F::from_u32(interaction.bus_index as u32 + 1);
-
-            for (message_idx, message) in interaction.message.iter().enumerate() {
-                let message_dag_idx =
-                    dag_builder.expr_to_idx[&(message as *const SymbolicExpression<_>)];
-                let message_rule_idx = rules.dag_idx_to_rule_idx[&message_dag_idx];
-                denom_weights[message_rule_idx] += eq_3bs[interaction_idx] * beta_pows[message_idx];
-            }
-        }
-        let d_numer_weights = numer_weights.to_device_on(device_ctx)?;
-        let d_denom_weights = denom_weights.to_device_on(device_ctx)?;
-        (rules, d_numer_weights, d_denom_weights, denom_sum_init)
-    };
-
-    let encoded_rules = rules.rules.iter().map(|c| c.encode()).collect_vec();
-    let d_rules = encoded_rules.to_device_on(device_ctx)?;
-
-    let buffer_size: u32 = rules.buffer_size.try_into().unwrap();
-    let intermed_capacity = unsafe {
-        _logup_r0_intermediates_buffer_size(
-            buffer_size,
-            skip_domain,
-            num_x,
-            num_cosets,
-            max_temp_bytes,
-        )
-    };
-    let mut intermediates = if intermed_capacity > 0 {
-        debug!("logup_r0:intermediates_capacity={intermed_capacity}");
-        DeviceBuffer::<F>::with_capacity_on(intermed_capacity, device_ctx)
-    } else {
-        DeviceBuffer::<F>::new()
-    };
-
-    let temp_sums_buffer_capacity = unsafe {
-        _logup_r0_temp_sums_buffer_size(buffer_size, skip_domain, num_x, num_cosets, max_temp_bytes)
-    };
+    let rules = pk
+        .other_data
+        .interaction_round0
+        .as_ref()
+        .expect("AIR must have interactions for logup round0");
+    let d_rules = &rules.d_rules;
+    let buffer_size: u32 = rules.buffer_size;
+    let (intermed_capacity, temp_sums_buffer_capacity) =
+        logup_r0_scratch_capacities(buffer_size, skip_domain, num_x, num_cosets, max_temp_bytes);
+    debug!("logup_r0:intermediates_capacity={intermed_capacity}");
     debug!("logup_r0:tmp_sums_buffer_capacity={temp_sums_buffer_capacity}");
-    let mut temp_sums_buffer =
-        DeviceBuffer::<Frac<EF>>::with_capacity_on(temp_sums_buffer_capacity, device_ctx);
+    scratch.ensure(intermed_capacity, 0, temp_sums_buffer_capacity, device_ctx);
+    let intermediates = &mut scratch.intermediates;
+    let temp_sums_buffer = &mut scratch.logup_temp_sums;
     let used_temp_bytes =
         intermed_capacity * size_of::<F>() + temp_sums_buffer_capacity * size_of::<Frac<EF>>();
     if used_temp_bytes > max_temp_bytes {
@@ -280,19 +319,19 @@ pub fn evaluate_round0_interactions_gpu<HS: GpuHashScheme>(
 
     unsafe {
         logup_bary_eval_interactions_round0(
-            &mut temp_sums_buffer,
+            temp_sums_buffer,
             &mut s_evals,
             selectors_cube,
             preprocessed_ptr,
             main_parts,
             eq_cube,
             public_values,
-            &d_numer_weights,
-            &d_denom_weights,
+            numer_weights,
+            denom_weights,
             denom_sum_init,
-            &d_rules,
+            d_rules,
             buffer_size,
-            &mut intermediates,
+            intermediates,
             skip_domain,
             num_x,
             height,

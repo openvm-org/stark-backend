@@ -321,9 +321,10 @@ Let:
 - Assume `n` is large
 - Assume precompute-M is active
 
-Buffers used at peak (workspace only; excludes input `layer`/leaves):
+Buffers used at peak (workspace only; excludes input `layer`/leaves). The per-round
+readback staging (`copy_scratch`, `rb_evals`) lives in page-locked *host* memory
+(`PinnedBuffer`), so it does not count toward GPU memory:
 - `work_buffer`: `2^(n-w-2) * |Frac|` (precompute-M defers `w+1` folds before first write)
-- `copy_scratch`: `1 * |Frac|`
 - `d_sum_evals`: `2 * |EF|`
 - `tmp_block_sums`: `< 2^(n-7) * |EF|`
 - `eq_buffer` (`SqrtEqLayers`): `(2^floor(n/2) + 2^ceil(n/2) - 2) * |EF|`
@@ -332,12 +333,12 @@ Buffers used at peak (workspace only; excludes input `layer`/leaves):
 - `eq_r_prefix_buffer` + `eq_suffix_buffer`: `2^(w+1) * |EF|` (default `w=3` gives `16 * |EF|`)
 
 Workspace upper bound (sum of the buffers above), using `|Frac| = 2 * |EF|`:
-- `W < (2^(n-w-1) + 2^(n-7) + 2^(n+w-10) + 2^floor(n/2) + 2^ceil(n/2) + 4^w + 2^(w+1) + 2) * |EF|`
+- `W < (2^(n-w-1) + 2^(n-7) + 2^(n+w-10) + 2^floor(n/2) + 2^ceil(n/2) + 4^w + 2^(w+1)) * |EF|`
 
 Total GPU memory required (workspace + input leaves `2^n * |Frac| = 2^(n+1) * |EF|`):
-- `M_total < (2^(n+1) + 2^(n-w-1) + 2^(n-7) + 2^(n+w-10) + 2^floor(n/2) + 2^ceil(n/2) + 4^w + 2^(w+1) + 2) * |EF|`
+- `M_total < (2^(n+1) + 2^(n-w-1) + 2^(n-7) + 2^(n+w-10) + 2^floor(n/2) + 2^ceil(n/2) + 4^w + 2^(w+1)) * |EF|`
 - With default `w = 3` and `|EF| = 16` bytes:
-  - `M_total < (2^(n+1) + 2^(n-4) + 2^(n-6) + 2^floor(n/2) + 2^ceil(n/2) + 82) / 2^26 GiB`
+  - `M_total < (2^(n+1) + 2^(n-4) + 2^(n-6) + 2^floor(n/2) + 2^ceil(n/2) + 80) / 2^26 GiB`
   - `n = 27`: `M_total < 4.16 GiB`
   - `n = 28`: `M_total < 8.31 GiB`
   - `n = 29`: `M_total < 16.63 GiB`
