@@ -89,6 +89,16 @@ impl TypeCx<'_> {
                 .ok_or_else(|| CompileError::Type(format!("unbound variable {v:?}"))),
             Node::ConstU32(_) => Ok(Type::Scalar(ScalarType::U32)),
             Node::ConstField(_) => Ok(Type::Scalar(ScalarType::BabyBear)),
+            Node::ConstFpExt(_) => Ok(Type::Scalar(ScalarType::FpExt)),
+            Node::LiftFpExt(x) => {
+                let tx = self.scalar_of(x, "lift_fpext operand")?;
+                if tx != ScalarType::BabyBear {
+                    return Err(CompileError::Type(format!(
+                        "lift_fpext expects a BabyBear operand, got {tx:?}"
+                    )));
+                }
+                Ok(Type::Scalar(ScalarType::FpExt))
+            }
             Node::Bin(op, a, b) => {
                 let ta = self.scalar_of(a, "binary operand")?;
                 let tb = self.scalar_of(b, "binary operand")?;

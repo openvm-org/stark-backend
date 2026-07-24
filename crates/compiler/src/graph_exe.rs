@@ -23,7 +23,8 @@ use crate::{
         BufId, BufInfo, ConstBuf, ConstNode, DeviceType, GraphBuilder, GraphNode, KernelNode,
     },
     ir::VarId,
-    planner::{self, MemoryPlan, PlanError},
+    planner::{self, access_from_node, MemoryPlan, NodeAccess, PlanError},
+    quast::Quast,
     runtime::{CompileOptions, KernelModule},
     CompileError,
 };
@@ -78,25 +79,134 @@ impl GraphCompiler {
     }
 
     /// Consumes the graph, plans it and compiles every structured kernel.
+    ///
+    /// The pipeline runs in three phases:
+    ///
+    /// 1. **Compile-first**: drain the graph's nodes and JIT every `Kernel(Module)` up front so we
+    ///    know each module's own scratch requirement (`KernelModule::scratch_size()`).
+    /// 2. **Fold scratch into the plan**: for every kernel that needs scratch, register a synthetic
+    ///    device buffer of that size and mark it as both a read and a write of the kernel node —
+    ///    the CP-SAT model then packs it into the graph pool with a single-time-step lifetime, so
+    ///    scratches share memory with each other and with any graph buffer that's dead during that
+    ///    step.
+    /// 3. **Plan + assemble**: run [`planner::plan_raw`] on the augmented `(bufs, node accesses)`
+    ///    pair and package everything into a [`GraphExe`], carrying each kernel's scratch BufId (if
+    ///    any) so `run` can point the module at the pool offset via [`KernelModule::set_scratch`].
     pub fn compile(self, mut graph: GraphBuilder) -> Result<GraphExe, CompileError> {
+        // Phase 1: drain and compile every structured kernel.
+        //
+        // `compiled` mirrors the original node order. For structured kernels
+        // the module ownership is moved out and the compiled `KernelModule`
+        // is stored here; non-kernel nodes are kept as-is.
+        enum PreExe {
+            Kernel {
+                name: String,
+                module: KernelModule,
+                inputs: Vec<BufId>,
+                outputs: Vec<BufId>,
+                scratch: Option<BufId>,
+            },
+            Blackbox(KernelNode),
+            Const(ConstNode),
+            Memcpy {
+                src: BufId,
+                dst: BufId,
+            },
+            Memset {
+                buf: BufId,
+                val: u32,
+            },
+        }
+        let nodes: Vec<GraphNode> = graph.nodes.drain(..).collect();
+        let mut compiled: Vec<PreExe> = Vec::with_capacity(nodes.len());
+        for node in nodes {
+            compiled.push(match node {
+                GraphNode::Kernel(k) => {
+                    let name = k.module.name.clone();
+                    let module = compile_and_load(k.module, &self.options)?;
+                    // Allocate a synthetic scratch buffer alive during this
+                    // node's step. `elem_size=1` because it's a byte pool.
+                    let scratch = if module.scratch_size() > 0 {
+                        let bid = graph.add_buf(BufInfo {
+                            name: Some(format!("scratch<{name}>")),
+                            device_type: self.device,
+                            size: Quast::cst(module.scratch_size() as i64),
+                            elem_size: 1,
+                        });
+                        Some(bid)
+                    } else {
+                        None
+                    };
+                    PreExe::Kernel {
+                        name,
+                        module,
+                        inputs: k.inputs,
+                        outputs: k.outputs,
+                        scratch,
+                    }
+                }
+                GraphNode::BlackboxKernel(k) => PreExe::Blackbox(k),
+                GraphNode::Const(c) => PreExe::Const(c),
+                GraphNode::Memcpy(m) => PreExe::Memcpy {
+                    src: m.src,
+                    dst: m.dst,
+                },
+                GraphNode::Memset(m) => PreExe::Memset {
+                    buf: m.node,
+                    val: m.val,
+                },
+            });
+        }
         let bufs = graph.bufs.clone();
 
-        // 1. Plan memory.
-        let plan = planner::plan(&graph, &self.env, self.device).map_err(|e| match e {
-            PlanError::UnboundSizeSymbol { .. } | PlanError::NegativeSize { .. } => {
-                CompileError::Type(format!("graph plan: {e}"))
-            }
-            PlanError::NoSolution(_) => CompileError::Runtime(format!("graph plan: {e}")),
-        })?;
+        // Phase 2: build per-node access sets, injecting scratch as both a
+        // read and a write of the owning kernel (single-time-step lifetime).
+        let accesses: Vec<NodeAccess> = compiled
+            .iter()
+            .map(|p| match p {
+                PreExe::Kernel {
+                    inputs,
+                    outputs,
+                    scratch,
+                    ..
+                } => {
+                    let mut a = NodeAccess::default();
+                    a.reads.extend(inputs.iter().copied());
+                    a.writes.extend(outputs.iter().copied());
+                    if let Some(sc) = scratch {
+                        a.reads.push(*sc);
+                        a.writes.push(*sc);
+                    }
+                    a
+                }
+                PreExe::Blackbox(k) => access_from_node(&GraphNode::BlackboxKernel(clone_kn(k))),
+                PreExe::Const(c) => access_from_node(&GraphNode::Const(clone_cn(c))),
+                PreExe::Memcpy { src, dst } => {
+                    access_from_node(&GraphNode::Memcpy(crate::graph_ir::MemcpyNode {
+                        src: *src,
+                        dst: *dst,
+                    }))
+                }
+                PreExe::Memset { buf, val } => {
+                    access_from_node(&GraphNode::Memset(crate::graph_ir::MemSetNode {
+                        node: *buf,
+                        val: *val,
+                    }))
+                }
+            })
+            .collect();
 
-        // 2. Concrete buffer sizes.
-        let sizes = evaluate_sizes(&graph, &self.env)?;
-
-        // 3. Identify graph inputs / outputs (no writer / no reader).
-        let (writers_per_buf, readers_per_buf) = classify_buf_uses(&graph);
+        // Identify graph inputs / outputs from the augmented access sets,
+        // excluding synthetic scratch buffers (they're single-node so they
+        // have both a writer and a reader and would never qualify anyway).
+        // We compute these before planning so the planner can skip them —
+        // the caller supplies their storage at run time, so pool slots for
+        // them would go unused and inflate the peak.
+        let n_bufs = bufs.len();
+        let (writers_per_buf, readers_per_buf) = writers_readers_from_accesses(&accesses, n_bufs);
         let mut input_bufs = Vec::new();
         let mut output_bufs = Vec::new();
-        for (b, info) in graph.bufs.iter().enumerate() {
+        for (b, info) in bufs.iter().enumerate() {
             if info.device_type != self.device {
                 continue;
             }
@@ -108,33 +218,61 @@ impl GraphCompiler {
                 output_bufs.push(bid);
             }
         }
+        let exclude: Vec<BufId> = input_bufs
+            .iter()
+            .chain(output_bufs.iter())
+            .copied()
+            .collect();
 
-        // 4. Compile every structured kernel through the standard pipeline and package all nodes
-        //    into ExeNodes (owned move — the graph is consumed).
-        let mut nodes = Vec::with_capacity(graph.nodes.len());
-        for node in graph.nodes.drain(..) {
-            nodes.push(match node {
-                GraphNode::Kernel(k) => {
-                    let name = k.module.name.clone();
-                    let module = compile_and_load(k.module, &self.options)?;
-                    check_kernel_sizes(&module, &k.inputs, &k.outputs, &sizes)?;
+        // Phase 3: plan and validate.
+        let plan =
+            planner::plan_raw(&bufs, &accesses, &self.env, self.device, &exclude).map_err(|e| {
+                match e {
+                    PlanError::UnboundSizeSymbol { .. } | PlanError::NegativeSize { .. } => {
+                        CompileError::Type(format!("graph plan: {e}"))
+                    }
+                    PlanError::NoSolution(_) => CompileError::Runtime(format!("graph plan: {e}")),
+                }
+            })?;
+        let sizes = evaluate_sizes_bufs(&bufs, &self.env)?;
+
+        // Assemble ExeNodes.
+        let mut nodes = Vec::with_capacity(compiled.len());
+        for p in compiled {
+            nodes.push(match p {
+                PreExe::Kernel {
+                    name,
+                    module,
+                    inputs,
+                    outputs,
+                    scratch,
+                } => {
+                    check_kernel_sizes(&module, &inputs, &outputs, &sizes)?;
+                    if let Some(sc) = scratch {
+                        // Scratch was sized from `module.scratch_size()` so
+                        // this should always hold, but we double-check
+                        // against the (possibly foreign-device) size
+                        // resolution here.
+                        if sizes[sc.0] < module.scratch_size() {
+                            return Err(CompileError::Runtime(format!(
+                                "kernel `{name}` scratch buffer sized {} bytes but module wants {}",
+                                sizes[sc.0],
+                                module.scratch_size()
+                            )));
+                        }
+                    }
                     ExeNode::Kernel(ExeKernel {
                         name,
                         module,
-                        inputs: k.inputs,
-                        outputs: k.outputs,
+                        inputs,
+                        outputs,
+                        scratch,
                     })
                 }
-                GraphNode::BlackboxKernel(k) => ExeNode::Blackbox(k),
-                GraphNode::Const(c) => ExeNode::Const(c),
-                GraphNode::Memcpy(m) => ExeNode::Memcpy {
-                    src: m.src,
-                    dst: m.dst,
-                },
-                GraphNode::Memset(m) => ExeNode::Memset {
-                    buf: m.node,
-                    val: m.val,
-                },
+                PreExe::Blackbox(k) => ExeNode::Blackbox(k),
+                PreExe::Const(c) => ExeNode::Const(c),
+                PreExe::Memcpy { src, dst } => ExeNode::Memcpy { src, dst },
+                PreExe::Memset { buf, val } => ExeNode::Memset { buf, val },
             });
         }
 
@@ -150,11 +288,52 @@ impl GraphCompiler {
     }
 }
 
+fn clone_kn(k: &KernelNode) -> KernelNode {
+    // KernelNode's `func` is not Clone, but `access_from_node` only inspects
+    // the buffer fields. Build a shallow copy with a placeholder closure.
+    KernelNode {
+        inputs: k.inputs.clone(),
+        outputs: k.outputs.clone(),
+        modifies: k.modifies.clone(),
+        func: Box::new(|_, _| {}),
+        name: k.name.clone(),
+    }
+}
+
+fn clone_cn(c: &ConstNode) -> ConstNode {
+    ConstNode {
+        buf: c.buf,
+        // Cheap placeholder — access_from_node only reads `buf`.
+        data: ConstBuf::HostBuf(Vec::new()),
+    }
+}
+
+fn writers_readers_from_accesses(
+    accesses: &[NodeAccess],
+    n_bufs: usize,
+) -> (Vec<Vec<usize>>, Vec<Vec<usize>>) {
+    let mut w = vec![vec![]; n_bufs];
+    let mut r = vec![vec![]; n_bufs];
+    for (n, a) in accesses.iter().enumerate() {
+        for b in &a.writes {
+            w[b.0].push(n);
+        }
+        for b in &a.reads {
+            r[b.0].push(n);
+        }
+    }
+    (w, r)
+}
+
 struct ExeKernel {
     name: String,
     module: KernelModule,
     inputs: Vec<BufId>,
     outputs: Vec<BufId>,
+    /// Synthetic BufId for this module's private scratch, or `None` when
+    /// the compiled kernel needs no scratch. Its offset in the graph pool
+    /// is bound via [`KernelModule::set_scratch`] at run time.
+    scratch: Option<BufId>,
 }
 
 enum ExeNode {
@@ -305,12 +484,18 @@ impl GraphExe {
 
     fn format_exe_node_line(&self, node: &ExeNode) -> String {
         match node {
-            ExeNode::Kernel(k) => format!(
-                "let ({}) = Kernel({}, name=\"{}\");",
-                self.buf_decl_list(&k.outputs),
-                self.buf_ref_list(&k.inputs),
-                k.name,
-            ),
+            ExeNode::Kernel(k) => {
+                let mut attrs = format!("name=\"{}\"", k.name);
+                if let Some(sc) = k.scratch {
+                    attrs.push_str(&format!(", scratch={}", self.buf_decl(sc)));
+                }
+                format!(
+                    "let ({}) = Kernel({}, {});",
+                    self.buf_decl_list(&k.outputs),
+                    self.buf_ref_list(&k.inputs),
+                    attrs,
+                )
+            }
             ExeNode::Blackbox(k) => {
                 let mut attrs = format!("name=\"{}\"", k.name);
                 if k.modifies.iter().any(|&m| m) {
@@ -437,7 +622,14 @@ impl GraphExe {
                         });
                         k.module.set_output(i, &fake)?;
                     }
-                    k.module.ensure_scratch(ctx);
+                    if let Some(sc) = k.scratch {
+                        let ptr = bufid_ptr(sc)?;
+                        let want = k.module.scratch_size();
+                        let fake = ManuallyDrop::new(unsafe {
+                            DeviceBuffer::<u8>::from_raw_parts(ptr, want)
+                        });
+                        k.module.set_scratch(&fake)?;
+                    }
                     k.module.run(&ctx.stream)?;
                 }
                 ExeNode::Blackbox(k) => {
@@ -537,12 +729,12 @@ fn memcpy_err(e: openvm_cuda_common::error::MemCopyError) -> CompileError {
     CompileError::Runtime(format!("cudaMemcpy failed: {e:?}"))
 }
 
-fn evaluate_sizes(
-    graph: &GraphBuilder,
+fn evaluate_sizes_bufs(
+    bufs: &[BufInfo],
     env: &BTreeMap<VarId, i64>,
 ) -> Result<Vec<usize>, CompileError> {
-    let mut out = Vec::with_capacity(graph.bufs.len());
-    for (b, info) in graph.bufs.iter().enumerate() {
+    let mut out = Vec::with_capacity(bufs.len());
+    for (b, info) in bufs.iter().enumerate() {
         let mut syms = std::collections::BTreeSet::new();
         info.size.syms(&mut syms);
         for s in &syms {
@@ -561,44 +753,6 @@ fn evaluate_sizes(
         out.push(v as usize);
     }
     Ok(out)
-}
-
-/// For each buffer, returns the set of node indices that write it and read
-/// it, matching the semantics used by [`crate::planner`].
-fn classify_buf_uses(graph: &GraphBuilder) -> (Vec<Vec<usize>>, Vec<Vec<usize>>) {
-    let n_bufs = graph.bufs.len();
-    let mut writers = vec![vec![]; n_bufs];
-    let mut readers = vec![vec![]; n_bufs];
-    for (n, node) in graph.nodes.iter().enumerate() {
-        match node {
-            GraphNode::Kernel(k) => {
-                for b in &k.inputs {
-                    readers[b.0].push(n);
-                }
-                for b in &k.outputs {
-                    writers[b.0].push(n);
-                }
-            }
-            GraphNode::BlackboxKernel(k) => {
-                for (i, b) in k.inputs.iter().enumerate() {
-                    readers[b.0].push(n);
-                    if k.modifies[i] {
-                        writers[b.0].push(n);
-                    }
-                }
-                for b in &k.outputs {
-                    writers[b.0].push(n);
-                }
-            }
-            GraphNode::Const(c) => writers[c.buf.0].push(n),
-            GraphNode::Memcpy(m) => {
-                readers[m.src.0].push(n);
-                writers[m.dst.0].push(n);
-            }
-            GraphNode::Memset(m) => writers[m.node.0].push(n),
-        }
-    }
-    (writers, readers)
 }
 
 fn check_kernel_sizes(

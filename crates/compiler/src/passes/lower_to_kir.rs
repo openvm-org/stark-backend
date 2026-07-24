@@ -237,6 +237,9 @@ fn init_const(op: ReduceOp, ty: ScalarType) -> Result<SSAOpCode, CompileError> {
         (ReduceOp::Mul, ScalarType::BabyBear) => Ok(SSAOpCode::ConstField(1)),
         (ReduceOp::Add, ScalarType::U32) => Ok(SSAOpCode::ConstU32(0)),
         (ReduceOp::Mul, ScalarType::U32) => Ok(SSAOpCode::ConstU32(1)),
+        (_, ScalarType::FpExt) => Err(CompileError::Lower(
+            "reduce over FpExt is not supported yet".into(),
+        )),
         (_, ScalarType::Bool) => Err(CompileError::Lower("cannot reduce over Bool".into())),
     }
 }
@@ -864,6 +867,11 @@ impl BlockCx<'_, '_> {
             }
             Node::ConstU32(c) => self.push_elem(SSAOpCode::ConstU32(c), smallvec![]),
             Node::ConstField(c) => self.push_elem(SSAOpCode::ConstField(c), smallvec![]),
+            Node::ConstFpExt(c) => self.push_elem(SSAOpCode::ConstFpExt(c), smallvec![]),
+            Node::LiftFpExt(x) => {
+                let x = self.emit(x)?;
+                self.push_elem(SSAOpCode::LiftFpExt, smallvec![x])
+            }
             Node::Bin(op, x, y) => {
                 let ty = self.cx.scalar_ty(x)?;
                 let lhs = self.emit(x)?;
@@ -876,9 +884,55 @@ impl BlockCx<'_, '_> {
                 else_val,
             } => {
                 let c = self.emit(cond)?;
+                // Emit each branch into its own scope and body sink so
+                // sub-expressions only used inside the branch (in
+                // particular, loads at data-dependent indices) end up
+                // guarded by the condition. Memoization inside the
+                // branch is discarded on exit, so a shared sub-expression
+                // that appears in both branches is emitted twice — one
+                // copy per branch — instead of being lifted above the
+                // conditional where it would be evaluated speculatively.
+                let vars_snapshot = self.var_vals.clone();
+                let lets_snapshot = self.let_nodes.clone();
+                self.scopes.push(Vec::new());
+                self.bodies.push(SmallVec::new());
                 let t = self.emit(then_val)?;
+                let then_body = self.bodies.pop().expect("then body");
+                for evicted in self.scopes.pop().expect("then scope") {
+                    self.memo.remove(&evicted);
+                }
+                self.var_vals = vars_snapshot.clone();
+                self.let_nodes = lets_snapshot.clone();
+
+                self.scopes.push(Vec::new());
+                self.bodies.push(SmallVec::new());
                 let e = self.emit(else_val)?;
-                self.push_elem(SSAOpCode::Select, smallvec![c, t, e])
+                let else_body = self.bodies.pop().expect("else body");
+                for evicted in self.scopes.pop().expect("else scope") {
+                    self.memo.remove(&evicted);
+                }
+                self.var_vals = vars_snapshot;
+                self.let_nodes = lets_snapshot;
+
+                let result = self.cx.k.fresh_val();
+                let else_block = SSABlock {
+                    operands: smallvec![],
+                    body: else_body,
+                    yields: smallvec![e],
+                };
+                let then_block = SSABlock {
+                    operands: smallvec![],
+                    body: then_body,
+                    yields: smallvec![t],
+                };
+                let node = self.cx.k.push_op(SSAOp {
+                    operands: smallvec![c],
+                    results: smallvec![result],
+                    opcode: SSAOpCode::Select { else_block },
+                    block: then_block,
+                });
+                self.bodies.last_mut().expect("op sink").push(node);
+                result
             }
             Node::Index { tensor, indices } => {
                 let shared = match self.cx.b.node(tensor) {

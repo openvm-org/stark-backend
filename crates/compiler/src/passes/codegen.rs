@@ -37,109 +37,85 @@ use crate::{
     CompileError,
 };
 
-/// Per-kernel names for register buffers: [`assign_register_colors`] maps
-/// each register `BufId` to a color and codegen emits arrays named after
-/// the color, so buffers with disjoint live ranges share a single array
-/// and ptxas can reuse the underlying registers.
-type RegNames = HashMap<BufId, usize>;
-
-fn reg_name(names: &RegNames, buf: BufId) -> String {
-    format!("r{}", names.get(&buf).copied().unwrap_or(buf.0 as usize))
+fn reg_name(buf: BufId) -> String {
+    format!("r{}", buf.0)
 }
 
-/// First-fit interval graph coloring for register buffers: two buffers
-/// share a color iff their `[first_write, last_use]` ranges are disjoint.
-/// The resulting number of colors bounds the concurrently-live register
-/// arrays, which is what ptxas turns into physical registers.
-fn assign_register_colors(p: &KernelProgram, k: &Kernel) -> (RegNames, HashMap<usize, usize>) {
-    fn note(
-        p: &KernelProgram,
-        buf: BufId,
-        at: usize,
-        write: bool,
-        ranges: &mut HashMap<BufId, (Option<usize>, usize)>,
-    ) {
-        if p.buffer(buf).kind != BufferKind::Register {
-            return;
-        }
-        let r = ranges.entry(buf).or_insert((None, at));
-        if write && r.0.is_none() {
-            r.0 = Some(at);
-        }
-        r.1 = r.1.max(at);
+/// C++ type name for a [`ScalarType`] — every 32-bit type shares the
+/// same underlying `uint32_t` storage; `FpExt` is a 16-byte struct that
+/// nvcc will pick up as `LDG.128`/`STG.128` when reading from a
+/// `FpExt*`-typed pointer.
+fn c_type(ty: ScalarType) -> &'static str {
+    match ty {
+        ScalarType::FpExt => "FpExt",
+        ScalarType::BabyBear | ScalarType::U32 | ScalarType::Bool => "uint32_t",
     }
-    fn walk(
-        p: &KernelProgram,
-        k: &Kernel,
-        stmts: &[SSANode],
-        pos: &mut usize,
-        ranges: &mut HashMap<BufId, (Option<usize>, usize)>,
-    ) {
-        for &sid in stmts {
-            let op = k.op(sid);
-            let at = *pos;
-            *pos += 1;
+}
+
+/// Precomputed scalar type of every SSA value defined in a kernel:
+/// constants and `Bin` results are known from their opcodes; `Select`
+/// takes its then/else operand's type; `Loop` carried slots inherit
+/// their initial operand's type; par block operands are the par index
+/// (U32) followed by the loaded values, each typed to its access
+/// buffer's element type.
+type ValTypes = HashMap<SSARes, ScalarType>;
+
+fn compute_val_types(p: &KernelProgram, k: &Kernel) -> ValTypes {
+    fn walk(p: &KernelProgram, k: &Kernel, body: &[SSANode], types: &mut ValTypes) {
+        for &nid in body {
+            let op = k.op(nid);
             match &op.opcode {
-                SSAOpCode::Alloc { .. } | SSAOpCode::Sync => {}
-                SSAOpCode::ConvertLayout { dst, src, .. } => {
-                    note(p, *dst, at, true, ranges);
-                    note(p, *src, at, false, ranges);
+                SSAOpCode::ConstU32(_) => {
+                    types.insert(op.results[0], ScalarType::U32);
                 }
-                SSAOpCode::Par { reads, writes, .. } => {
-                    for a in reads.iter() {
-                        note(p, a.buf, at, false, ranges);
-                    }
-                    for a in writes.iter() {
-                        note(p, a.buf, at, true, ranges);
-                    }
+                SSAOpCode::ConstField(_) => {
+                    types.insert(op.results[0], ScalarType::BabyBear);
+                }
+                SSAOpCode::ConstFpExt(_) | SSAOpCode::LiftFpExt => {
+                    types.insert(op.results[0], ScalarType::FpExt);
+                }
+                SSAOpCode::Bin(bop, ty) => {
+                    let result_ty = match bop {
+                        BinOp::Lt | BinOp::Le | BinOp::Eq => ScalarType::Bool,
+                        _ => *ty,
+                    };
+                    types.insert(op.results[0], result_ty);
+                }
+                SSAOpCode::Select { else_block } => {
+                    // Both branches yield a value of the merged result
+                    // type; walk each block's body first so its yield's
+                    // producer is typed, then read the type off the
+                    // yield.
+                    walk(p, k, &op.block.body, types);
+                    walk(p, k, &else_block.body, types);
+                    let t = types[&op.block.yields[0]];
+                    types.insert(op.results[0], t);
                 }
                 SSAOpCode::Loop { .. } => {
-                    let start = *pos;
-                    walk(p, k, &op.block.body, pos, ranges);
-                    let end = *pos - 1;
-                    for r in ranges.values_mut() {
-                        if r.1 >= start {
-                            r.1 = r.1.max(end);
-                        }
+                    types.insert(op.block.operands[0], ScalarType::U32);
+                    for (i, res) in op.results.iter().enumerate() {
+                        let t = types[&op.operands[i]];
+                        types.insert(*res, t);
+                        types.insert(op.block.operands[1 + i], t);
                     }
+                    walk(p, k, &op.block.body, types);
                 }
-                _ => {}
+                SSAOpCode::Par { reads, .. } => {
+                    types.insert(op.block.operands[0], ScalarType::U32);
+                    for (i, access) in reads.iter().enumerate() {
+                        let t = p.buffer(access.buf).elem;
+                        types.insert(op.block.operands[1 + i], t);
+                    }
+                    walk(p, k, &op.block.body, types);
+                }
+                SSAOpCode::Alloc { .. } | SSAOpCode::Sync | SSAOpCode::ConvertLayout { .. } => {}
             }
         }
     }
-    let mut ranges: HashMap<BufId, (Option<usize>, usize)> = HashMap::new();
-    let mut pos = 0usize;
-    walk(p, k, &k.grid.block.body, &mut pos, &mut ranges);
-
-    let mut items: Vec<(BufId, usize, usize)> = ranges
-        .into_iter()
-        .filter_map(|(buf, (start, end))| start.map(|s| (buf, s, end)))
-        .collect();
-    items.sort_by_key(|&(_, start, _)| start);
-
-    // Each color tracks (last_end, max_size); assign the smallest color
-    // whose last interval ends before the incoming buffer's start.
-    let mut colors: Vec<(usize, usize)> = Vec::new();
-    let mut names: RegNames = HashMap::new();
-    for (buf, start, end) in items {
-        let size = register_slots(p, k, buf);
-        let color = colors
-            .iter()
-            .position(|&(last_end, _)| last_end < start)
-            .unwrap_or_else(|| {
-                colors.push((0, 0));
-                colors.len() - 1
-            });
-        colors[color].0 = end;
-        colors[color].1 = colors[color].1.max(size);
-        names.insert(buf, color);
-    }
-    let sizes: HashMap<usize, usize> = colors
-        .into_iter()
-        .enumerate()
-        .map(|(c, (_, sz))| (c, sz))
-        .collect();
-    (names, sizes)
+    let mut types = ValTypes::new();
+    types.insert(k.grid_var(), ScalarType::U32);
+    walk(p, k, &k.grid.block.body, &mut types);
+    types
 }
 
 const PRELUDE: &str = r#"// Auto-generated by crypto-compiler. Do not edit.
@@ -158,6 +134,49 @@ static __device__ __forceinline__ uint32_t bb_sub(uint32_t a, uint32_t b) {
 }
 static __device__ __forceinline__ uint32_t bb_mul(uint32_t a, uint32_t b) {
     return (uint32_t)(((unsigned long long)a * (unsigned long long)b) % BB_P);
+}
+
+// Degree-4 binomial extension of BabyBear over `x^4 - 11`. The 16-byte
+// alignment lets nvcc pick LDG.128 / STG.128 (and LDS.128 / STS.128 for
+// shared) for a whole element in a single instruction.
+struct __align__(16) FpExt {
+    uint32_t v[4];
+};
+static __device__ __forceinline__ FpExt fpext_add(FpExt a, FpExt b) {
+    return FpExt{{
+        bb_add(a.v[0], b.v[0]), bb_add(a.v[1], b.v[1]),
+        bb_add(a.v[2], b.v[2]), bb_add(a.v[3], b.v[3]),
+    }};
+}
+static __device__ __forceinline__ FpExt fpext_sub(FpExt a, FpExt b) {
+    return FpExt{{
+        bb_sub(a.v[0], b.v[0]), bb_sub(a.v[1], b.v[1]),
+        bb_sub(a.v[2], b.v[2]), bb_sub(a.v[3], b.v[3]),
+    }};
+}
+// Karatsuba over `x^4 - 11` (schoolbook is clearer than any 3-mul trick
+// at this size, and ptxas schedules it well):
+// (a0..a3) * (b0..b3) = c0..c3 where
+//   c0 = a0 b0 + 11*(a1 b3 + a2 b2 + a3 b1)
+//   c1 = a0 b1 + a1 b0 + 11*(a2 b3 + a3 b2)
+//   c2 = a0 b2 + a1 b1 + a2 b0 + 11*(a3 b3)
+//   c3 = a0 b3 + a1 b2 + a2 b1 + a3 b0
+static __device__ __forceinline__ FpExt fpext_mul(FpExt a, FpExt b) {
+    const uint32_t B = 11u;
+    uint32_t high0 = bb_mul(B, bb_add(bb_add(bb_mul(a.v[1], b.v[3]),
+                                              bb_mul(a.v[2], b.v[2])),
+                                       bb_mul(a.v[3], b.v[1])));
+    uint32_t high1 = bb_mul(B, bb_add(bb_mul(a.v[2], b.v[3]),
+                                       bb_mul(a.v[3], b.v[2])));
+    uint32_t high2 = bb_mul(B, bb_mul(a.v[3], b.v[3]));
+    return FpExt{{
+        bb_add(bb_mul(a.v[0], b.v[0]), high0),
+        bb_add(bb_add(bb_mul(a.v[0], b.v[1]), bb_mul(a.v[1], b.v[0])), high1),
+        bb_add(bb_add(bb_add(bb_mul(a.v[0], b.v[2]), bb_mul(a.v[1], b.v[1])),
+                       bb_mul(a.v[2], b.v[0])), high2),
+        bb_add(bb_add(bb_add(bb_mul(a.v[0], b.v[3]), bb_mul(a.v[1], b.v[2])),
+                       bb_mul(a.v[2], b.v[1])), bb_mul(a.v[3], b.v[0])),
+    }};
 }
 "#;
 
@@ -192,7 +211,11 @@ fn gen_kernel(
         .iter()
         .map(|&(buf, writable)| {
             let cq = if writable { "" } else { "const " };
-            format!("{cq}uint32_t* __restrict__ b{}", buf.0)
+            format!(
+                "{cq}{}* __restrict__ b{}",
+                c_type(p.buffer(buf).elem),
+                buf.0
+            )
         })
         .collect::<Vec<_>>()
         .join(", ");
@@ -207,29 +230,40 @@ fn gen_kernel(
     .unwrap();
     // Kernel-wide shared pool; each shared `Alloc` becomes a pointer into
     // it at the buffer's planned byte offset, so buffers with disjoint live
-    // ranges share the same memory.
+    // ranges share the same memory. The pool is 16-byte aligned so any
+    // `FpExt*` alias hits `LDS.128`/`STS.128`.
     let shared_bytes = plan.per_kernel[ki];
     if shared_bytes > 0 {
         writeln!(
             s,
-            "    __shared__ uint32_t _sh_pool[{}];",
+            "    __shared__ __align__(16) uint32_t _sh_pool[{}];",
             shared_bytes.div_ceil(4)
         )
         .unwrap();
     }
-    // Per-color register arrays: buffers with disjoint live ranges share
-    // an array name so ptxas reuses their registers instead of holding
-    // them all live at once.
-    let (reg_names, color_sizes) = assign_register_colors(p, k);
-    let mut colors: Vec<usize> = color_sizes.keys().copied().collect();
-    colors.sort();
-    for c in colors {
-        writeln!(s, "    uint32_t r{c}[{}];", color_sizes[&c]).unwrap();
+    // Every register buffer gets its own top-level array. ptxas does
+    // inter-array liveness under `__launch_bounds__` and reuses physical
+    // registers across arrays whose live ranges don't overlap, so we
+    // don't need to hand-color them.
+    for op in k.ops().iter() {
+        if let SSAOpCode::Alloc { buf } = &op.opcode {
+            if p.buffer(*buf).kind == BufferKind::Register {
+                writeln!(
+                    s,
+                    "    {} r{}[{}];",
+                    c_type(p.buffer(*buf).elem),
+                    buf.0,
+                    register_slots(p, k, *buf)
+                )
+                .unwrap();
+            }
+        }
     }
     if kernel_uses(k, k.grid_var()) {
         writeln!(s, "    const uint32_t {} = blockIdx.x;", val(k.grid_var())).unwrap();
     }
-    gen_stmts(s, p, k, plan, &reg_names, &k.grid.block.body, 1)?;
+    let types = compute_val_types(p, k);
+    gen_stmts(s, p, k, plan, &types, &k.grid.block.body, 1)?;
     writeln!(s, "}}").unwrap();
     Ok(())
 }
@@ -262,12 +296,13 @@ fn quast_uses(q: &Quast, v: VarId) -> bool {
 
 /// Emits a statement-level block body: `Alloc`, `Sync`, sequential `Loop`
 /// and `Par` ops.
+#[allow(clippy::too_many_arguments)]
 fn gen_stmts(
     s: &mut String,
     p: &KernelProgram,
     k: &Kernel,
     plan: &SharedMemPlan,
-    reg_names: &RegNames,
+    types: &ValTypes,
     stmts: &[SSANode],
     depth: usize,
 ) -> Result<(), CompileError> {
@@ -281,10 +316,18 @@ fn gen_stmts(
                     BufferKind::Shared => {
                         // Unused shared buffers still emit a pointer for
                         // symmetry; they're pinned to offset 0 since their
-                        // memory is never touched.
+                        // memory is never touched. FpExt buffers alias
+                        // through `reinterpret_cast` since the pool is
+                        // typed `uint32_t` for word-level packing.
                         let offset = plan.offsets.get(buf).copied().unwrap_or(0);
-                        writeln!(s, "{pad}uint32_t *b{} = &_sh_pool[{}u];", buf.0, offset / 4)
-                            .unwrap();
+                        let ct = c_type(decl.elem);
+                        writeln!(
+                            s,
+                            "{pad}{ct} *b{} = reinterpret_cast<{ct}*>(&_sh_pool[{}u]);",
+                            buf.0,
+                            offset / 4
+                        )
+                        .unwrap();
                     }
                     // Register arrays are pre-declared at the kernel top.
                     BufferKind::Register => {}
@@ -300,12 +343,12 @@ fn gen_stmts(
                 writeln!(s, "{pad}__syncthreads();").unwrap();
             }
             SSAOpCode::ConvertLayout { dst, src, map } => {
-                gen_convert(s, p, k, reg_names, *dst, *src, map, depth)?;
+                gen_convert(s, p, k, *dst, *src, map, depth)?;
             }
             SSAOpCode::Loop { bound } => {
                 let v = val(op.block.operands[0]);
                 writeln!(s, "{pad}for (uint32_t {v} = 0u; {v} < {bound}u; ++{v}) {{").unwrap();
-                gen_stmts(s, p, k, plan, reg_names, &op.block.body, depth + 1)?;
+                gen_stmts(s, p, k, plan, types, &op.block.body, depth + 1)?;
                 writeln!(s, "{pad}}}").unwrap();
             }
             SSAOpCode::Par {
@@ -319,7 +362,7 @@ fn gen_stmts(
                     s,
                     p,
                     k,
-                    reg_names,
+                    types,
                     *bound,
                     *spans_grid,
                     attr,
@@ -368,7 +411,7 @@ fn gen_par(
     s: &mut String,
     p: &KernelProgram,
     k: &Kernel,
-    reg_names: &RegNames,
+    types: &ValTypes,
     bound: usize,
     spans_grid: bool,
     attr: &Option<ParAttr>,
@@ -398,7 +441,7 @@ fn gen_par(
             writeln!(s, "{pad}if ({v} < {bound}u) {{").unwrap();
         }
         let d = depth + usize::from(guard);
-        gen_par_body(s, p, k, reg_names, attr, reads, writes, block, "0u", d)?;
+        gen_par_body(s, p, k, types, attr, reads, writes, block, "0u", d)?;
         if guard {
             writeln!(s, "{pad}}}").unwrap();
         }
@@ -424,7 +467,7 @@ fn gen_par(
             s,
             p,
             k,
-            reg_names,
+            types,
             attr,
             reads,
             writes,
@@ -452,7 +495,7 @@ fn gen_par(
             s,
             p,
             k,
-            reg_names,
+            types,
             attr,
             reads,
             writes,
@@ -472,7 +515,7 @@ fn gen_par_body(
     s: &mut String,
     p: &KernelProgram,
     k: &Kernel,
-    reg_names: &RegNames,
+    types: &ValTypes,
     attr: &ParAttr,
     reads: &[Access],
     writes: &[Access],
@@ -484,12 +527,18 @@ fn gen_par_body(
     let vid = block.operands[0];
     for (i, access) in reads.iter().enumerate() {
         let operand = block.operands[1 + i];
-        let src = access_str(p, access, reg_names, attr, vid, slot)?;
-        writeln!(s, "{pad}const uint32_t {} = {src};", val(operand)).unwrap();
+        let src = access_str(p, access, attr, vid, slot)?;
+        writeln!(
+            s,
+            "{pad}const {} {} = {src};",
+            c_type(p.buffer(access.buf).elem),
+            val(operand)
+        )
+        .unwrap();
     }
-    gen_ops(s, k, &block.body, depth)?;
+    gen_ops(s, k, types, &block.body, depth)?;
     for (i, access) in writes.iter().enumerate() {
-        let dst = access_str(p, access, reg_names, attr, vid, slot)?;
+        let dst = access_str(p, access, attr, vid, slot)?;
         writeln!(s, "{pad}{dst} = {};", val(block.yields[i])).unwrap();
     }
     Ok(())
@@ -500,12 +549,10 @@ fn gen_par_body(
 /// `C = f_src^-1 ∘ map ∘ f_dst` from dst physical to src physical index and
 /// become slot permutations or warp shuffles per [`classify_convert`];
 /// register-to-shared stages the registers out through shared memory.
-#[allow(clippy::too_many_arguments)]
 fn gen_convert(
     s: &mut String,
     p: &KernelProgram,
     k: &Kernel,
-    reg_names: &RegNames,
     dst: BufId,
     src: BufId,
     map: &LinearLayout,
@@ -517,7 +564,7 @@ fn gen_convert(
     let kb = map.bases.len();
     let n = 1usize << kb;
     let id = || LinearLayout::identity(kb);
-    let (dst_reg, src_reg) = (reg_name(reg_names, dst), reg_name(reg_names, src));
+    let (dst_reg, src_reg) = (reg_name(dst), reg_name(src));
     match (dd.kind, sd.kind) {
         (BufferKind::Register, BufferKind::Register) => {
             let ld = dd.layout.clone().unwrap_or_else(id);
@@ -718,7 +765,13 @@ fn gen_shuffle(
     }
 }
 
-fn gen_ops(s: &mut String, k: &Kernel, body: &[SSANode], depth: usize) -> Result<(), CompileError> {
+fn gen_ops(
+    s: &mut String,
+    k: &Kernel,
+    types: &ValTypes,
+    body: &[SSANode],
+    depth: usize,
+) -> Result<(), CompileError> {
     let pad = "    ".repeat(depth);
     for &nid in body {
         let op = k.op(nid);
@@ -726,32 +779,68 @@ fn gen_ops(s: &mut String, k: &Kernel, body: &[SSANode], depth: usize) -> Result
             SSAOpCode::ConstU32(c) | SSAOpCode::ConstField(c) => {
                 writeln!(s, "{pad}const uint32_t {} = {c}u;", val(op.results[0])).unwrap();
             }
+            SSAOpCode::ConstFpExt(c) => {
+                writeln!(
+                    s,
+                    "{pad}const FpExt {} = FpExt{{{{{}u, {}u, {}u, {}u}}}};",
+                    val(op.results[0]),
+                    c[0],
+                    c[1],
+                    c[2],
+                    c[3]
+                )
+                .unwrap();
+            }
+            SSAOpCode::LiftFpExt => {
+                writeln!(
+                    s,
+                    "{pad}const FpExt {} = FpExt{{{{{}, 0u, 0u, 0u}}}};",
+                    val(op.results[0]),
+                    val(op.operands[0])
+                )
+                .unwrap();
+            }
             SSAOpCode::Bin(bop, ty) => {
                 let a = val(op.operands[0]);
                 let b = val(op.operands[1]);
+                let res_ty = types[&op.results[0]];
                 writeln!(
                     s,
-                    "{pad}const uint32_t {} = {};",
+                    "{pad}const {} {} = {};",
+                    c_type(res_ty),
                     val(op.results[0]),
                     bin_str(*bop, *ty, &a, &b)
                 )
                 .unwrap();
             }
-            SSAOpCode::Select => {
-                writeln!(
-                    s,
-                    "{pad}const uint32_t {} = {} ? {} : {};",
-                    val(op.results[0]),
-                    val(op.operands[0]),
-                    val(op.operands[1]),
-                    val(op.operands[2])
-                )
-                .unwrap();
+            SSAOpCode::Select { else_block } => {
+                // Emit a real `if / else` so only the taken branch's
+                // body runs — its loads and pointer arithmetic are
+                // gated by the condition, matching the DSL's
+                // short-circuit `if cond then A else B` semantics.
+                let res_ty = types[&op.results[0]];
+                let res = val(op.results[0]);
+                let cond = val(op.operands[0]);
+                writeln!(s, "{pad}{} {res}{{}};", c_type(res_ty)).unwrap();
+                writeln!(s, "{pad}if ({cond}) {{").unwrap();
+                gen_ops(s, k, types, &op.block.body, depth + 1)?;
+                writeln!(s, "{pad}    {res} = {};", val(op.block.yields[0])).unwrap();
+                writeln!(s, "{pad}}} else {{").unwrap();
+                gen_ops(s, k, types, &else_block.body, depth + 1)?;
+                writeln!(s, "{pad}    {res} = {};", val(else_block.yields[0])).unwrap();
+                writeln!(s, "{pad}}}").unwrap();
             }
             SSAOpCode::Loop { bound } => {
                 // The results double as the mutable loop-carried slots.
                 for (i, res) in op.results.iter().enumerate() {
-                    writeln!(s, "{pad}uint32_t {} = {};", val(*res), val(op.operands[i])).unwrap();
+                    writeln!(
+                        s,
+                        "{pad}{} {} = {};",
+                        c_type(types[res]),
+                        val(*res),
+                        val(op.operands[i])
+                    )
+                    .unwrap();
                 }
                 let iv = val(op.block.operands[0]);
                 writeln!(
@@ -762,13 +851,14 @@ fn gen_ops(s: &mut String, k: &Kernel, body: &[SSANode], depth: usize) -> Result
                 for (i, carried) in op.block.operands[1..].iter().enumerate() {
                     writeln!(
                         s,
-                        "{pad}    const uint32_t {} = {};",
+                        "{pad}    const {} {} = {};",
+                        c_type(types[carried]),
                         val(*carried),
                         val(op.results[i])
                     )
                     .unwrap();
                 }
-                gen_ops(s, k, &op.block.body, depth + 1)?;
+                gen_ops(s, k, types, &op.block.body, depth + 1)?;
                 for (i, y) in op.block.yields.iter().enumerate() {
                     writeln!(s, "{pad}    {} = {};", val(op.results[i]), val(*y)).unwrap();
                 }
@@ -786,27 +876,34 @@ fn gen_ops(s: &mut String, k: &Kernel, body: &[SSANode], depth: usize) -> Result
 }
 
 fn bin_str(op: BinOp, ty: ScalarType, a: &str, b: &str) -> String {
-    if ty == ScalarType::BabyBear {
-        match op {
+    match ty {
+        ScalarType::BabyBear => match op {
             BinOp::Add => format!("bb_add({a}, {b})"),
             BinOp::Sub => format!("bb_sub({a}, {b})"),
             BinOp::Mul => format!("bb_mul({a}, {b})"),
             _ => unreachable!("op {op:?} is not defined on BabyBear"),
-        }
-    } else {
-        let c_op = match op {
-            BinOp::Add => "+",
-            BinOp::Sub => "-",
-            BinOp::Mul => "*",
-            BinOp::Div => "/",
-            BinOp::Rem => "%",
-            BinOp::Lt => "<",
-            BinOp::Le => "<=",
-            BinOp::Eq => "==",
-        };
-        match op {
-            BinOp::Lt | BinOp::Le | BinOp::Eq => format!("(uint32_t)({a} {c_op} {b})"),
-            _ => format!("{a} {c_op} {b}"),
+        },
+        ScalarType::FpExt => match op {
+            BinOp::Add => format!("fpext_add({a}, {b})"),
+            BinOp::Sub => format!("fpext_sub({a}, {b})"),
+            BinOp::Mul => format!("fpext_mul({a}, {b})"),
+            _ => unreachable!("op {op:?} is not defined on FpExt"),
+        },
+        ScalarType::U32 | ScalarType::Bool => {
+            let c_op = match op {
+                BinOp::Add => "+",
+                BinOp::Sub => "-",
+                BinOp::Mul => "*",
+                BinOp::Div => "/",
+                BinOp::Rem => "%",
+                BinOp::Lt => "<",
+                BinOp::Le => "<=",
+                BinOp::Eq => "==",
+            };
+            match op {
+                BinOp::Lt | BinOp::Le | BinOp::Eq => format!("(uint32_t)({a} {c_op} {b})"),
+                _ => format!("{a} {c_op} {b}"),
+            }
         }
     }
 }
@@ -824,7 +921,6 @@ fn maps_agree(a: &LinearLayout, b: &LinearLayout) -> bool {
 fn access_str(
     p: &KernelProgram,
     access: &Access,
-    reg_names: &RegNames,
     attr: &ParAttr,
     vid: SSARes,
     slot: &str,
@@ -847,7 +943,7 @@ fn access_str(
                 decl.name
             )));
         }
-        return Ok(format!("{}[{slot}]", reg_name(reg_names, access.buf)));
+        return Ok(format!("{}[{slot}]", reg_name(access.buf)));
     }
     let logical = match &access.index {
         IndexMap::Linear(ll) => ll_apply_str(ll, &val(vid)),
@@ -916,11 +1012,12 @@ fn ll_apply_str(layout: &LinearLayout, x: &str) -> String {
 /// C expression for a buffer pointer inside `run`, respecting constness.
 fn buf_arg(p: &KernelProgram, buf: BufId, writable: bool) -> String {
     let cq = if writable { "" } else { "const " };
+    let ct = c_type(p.buffer(buf).elem);
     match p.buffer(buf).kind {
-        BufferKind::Input(k) => format!("({cq}uint32_t*)p->inputs[{k}]"),
-        BufferKind::Output(k) => format!("({cq}uint32_t*)p->outputs[{k}]"),
+        BufferKind::Input(k) => format!("({cq}{ct}*)p->inputs[{k}]"),
+        BufferKind::Output(k) => format!("({cq}{ct}*)p->outputs[{k}]"),
         BufferKind::Scratch { offset } => {
-            format!("({cq}uint32_t*)((char*)p->scratch + {offset})")
+            format!("({cq}{ct}*)((char*)p->scratch + {offset})")
         }
         BufferKind::Shared | BufferKind::Register => {
             unreachable!("kernel-local buffers are never kernel parameters")

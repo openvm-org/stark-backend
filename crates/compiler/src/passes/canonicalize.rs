@@ -725,7 +725,8 @@ fn is_scalar_form(
         return true;
     }
     match b.node(id) {
-        Node::ConstU32(_) | Node::ConstField(_) | Node::Input(_) => true,
+        Node::ConstU32(_) | Node::ConstField(_) | Node::ConstFpExt(_) | Node::Input(_) => true,
+        Node::LiftFpExt(x) => is_scalar_form(b, program, ck, *x, visited),
         Node::Var(v) => {
             if let Some(&n) = ck.inline_lets.get(v) {
                 return is_scalar_form(b, program, ck, n, visited);
@@ -794,7 +795,11 @@ fn subst_rec(
     let node = b.node(id).clone();
     let result = match node {
         Node::Var(v) => map.get(&v).copied().unwrap_or(id),
-        Node::Input(_) | Node::ConstU32(_) | Node::ConstField(_) => id,
+        Node::Input(_) | Node::ConstU32(_) | Node::ConstField(_) | Node::ConstFpExt(_) => id,
+        Node::LiftFpExt(x) => {
+            let x2 = subst_rec(b, x, map, types, memo);
+            b.lift_fpext(x2)
+        }
         Node::Bin(op, x, y) => {
             let x2 = subst_rec(b, x, map, types, memo);
             let y2 = subst_rec(b, y, map, types, memo);

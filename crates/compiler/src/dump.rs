@@ -79,7 +79,12 @@ fn tensor_ty(elem: ScalarType, shape: &[usize]) -> String {
 /// Direct children of a node, in operand order.
 fn children(node: &Node) -> Vec<NodeId> {
     match node {
-        Node::Input(_) | Node::Var(_) | Node::ConstU32(_) | Node::ConstField(_) => vec![],
+        Node::Input(_)
+        | Node::Var(_)
+        | Node::ConstU32(_)
+        | Node::ConstField(_)
+        | Node::ConstFpExt(_) => vec![],
+        Node::LiftFpExt(x) => vec![*x],
         Node::Bin(_, a, b) => vec![*a, *b],
         Node::Select {
             cond,
@@ -277,6 +282,14 @@ impl<'a> HirPrinter<'a> {
             Node::Var(v) => write!(self.out, "v{}", v.0).unwrap(),
             Node::ConstU32(c) => write!(self.out, "{c}").unwrap(),
             Node::ConstField(c) => write!(self.out, "{c}f").unwrap(),
+            Node::ConstFpExt(c) => {
+                write!(self.out, "fpext({}, {}, {}, {})", c[0], c[1], c[2], c[3]).unwrap()
+            }
+            Node::LiftFpExt(x) => {
+                self.out.push_str("lift_fpext(");
+                self.print_expr(*x, 0, ind);
+                self.out.push(')');
+            }
             Node::Bin(op, a, c) => {
                 let (op, a, c) = (*op, *a, *c);
                 let lv = bin_level(op);
@@ -679,9 +692,31 @@ fn dump_ops(s: &mut String, k: &Kernel, body: &[SSANode], depth: usize) {
             SSAOpCode::ConstField(c) => {
                 writeln!(s, "{pad}{} = const_field {c}", val(op.results[0])).unwrap();
             }
+            SSAOpCode::ConstFpExt(c) => {
+                writeln!(
+                    s,
+                    "{pad}{} = const_fpext {}, {}, {}, {}",
+                    val(op.results[0]),
+                    c[0],
+                    c[1],
+                    c[2],
+                    c[3]
+                )
+                .unwrap();
+            }
+            SSAOpCode::LiftFpExt => {
+                writeln!(
+                    s,
+                    "{pad}{} = lift_fpext {}",
+                    val(op.results[0]),
+                    val(op.operands[0])
+                )
+                .unwrap();
+            }
             SSAOpCode::Bin(bop, ty) => {
                 let ty = match ty {
                     ScalarType::BabyBear => "bb",
+                    ScalarType::FpExt => "fpext",
                     ScalarType::U32 => "u32",
                     ScalarType::Bool => "bool",
                 };
@@ -695,16 +730,20 @@ fn dump_ops(s: &mut String, k: &Kernel, body: &[SSANode], depth: usize) {
                 )
                 .unwrap();
             }
-            SSAOpCode::Select => {
+            SSAOpCode::Select { else_block } => {
                 writeln!(
                     s,
-                    "{pad}{} = select {}, {}, {}",
+                    "{pad}{} = if {} then {{",
                     val(op.results[0]),
-                    val(op.operands[0]),
-                    val(op.operands[1]),
-                    val(op.operands[2])
+                    val(op.operands[0])
                 )
                 .unwrap();
+                dump_ops(s, k, &op.block.body, depth + 1);
+                writeln!(s, "{pad}  yield {}", val(op.block.yields[0])).unwrap();
+                writeln!(s, "{pad}}} else {{").unwrap();
+                dump_ops(s, k, &else_block.body, depth + 1);
+                writeln!(s, "{pad}  yield {}", val(else_block.yields[0])).unwrap();
+                writeln!(s, "{pad}}}").unwrap();
             }
             SSAOpCode::Loop { bound } => {
                 // Inline scf.for: operands are the carried inits then the

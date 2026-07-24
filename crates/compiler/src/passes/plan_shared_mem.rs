@@ -16,9 +16,9 @@ pub struct SharedMemPlan {
     pub per_kernel: Vec<usize>,
 }
 
-/// `(buf, alloc_pos, last_use_pos, size_bytes)` intervals sorted by
-/// `alloc_pos`.
-type Interval = (BufId, usize, usize, usize);
+/// `(buf, alloc_pos, last_use_pos, size_bytes, align_bytes)` intervals
+/// sorted by `alloc_pos`.
+type Interval = (BufId, usize, usize, usize, usize);
 
 /// Records the program-order range in which each shared buffer's memory is
 /// in use: an interval starts at its first write (`Par` store or
@@ -90,34 +90,41 @@ fn compute_liveness(p: &KernelProgram, k: &Kernel) -> Vec<Interval> {
     let mut intervals: Vec<Interval> = ranges
         .into_iter()
         .filter_map(|(buf, (start, end))| {
-            start.map(|s| (buf, s, end, p.buffer(buf).phys_len() * 4))
+            start.map(|s| {
+                let decl = p.buffer(buf);
+                let elem_bytes = decl.elem.size_bytes();
+                (buf, s, end, decl.phys_len() * elem_bytes, elem_bytes)
+            })
         })
         .collect();
-    intervals.sort_by_key(|&(_, start, _, _)| start);
+    intervals.sort_by_key(|&(_, start, _, _, _)| start);
     intervals
 }
 
 /// Assigns each buffer the smallest byte offset such that its live range
 /// does not overlap any other buffer currently occupying that region —
 /// standard first-fit interval graph coloring for offline linear scan.
+/// Each buffer's chosen offset is rounded up to a multiple of its element
+/// size, so `FpExt` (16-byte) buffers stay 16-byte aligned for LDS.128.
 fn assign_offsets(intervals: &[Interval]) -> (HashMap<BufId, usize>, usize) {
     let mut offsets: HashMap<BufId, usize> = HashMap::new();
     // Active buffers as (offset, size, end_pos), sorted by offset.
     let mut active: Vec<(usize, usize, usize)> = Vec::new();
     let mut peak = 0usize;
-    for &(buf, start, end, size) in intervals {
+    for &(buf, start, end, size, align) in intervals {
         active.retain(|&(_, _, e)| e >= start);
         active.sort_by_key(|&(o, _, _)| o);
         let mut cursor = 0usize;
         let mut chosen = None;
         for &(o, sz, _) in &active {
-            if o >= cursor + size {
-                chosen = Some(cursor);
+            let aligned = cursor.next_multiple_of(align);
+            if o >= aligned + size {
+                chosen = Some(aligned);
                 break;
             }
             cursor = cursor.max(o + sz);
         }
-        let offset = chosen.unwrap_or(cursor);
+        let offset = chosen.unwrap_or_else(|| cursor.next_multiple_of(align));
         offsets.insert(buf, offset);
         active.push((offset, size, end));
         peak = peak.max(offset + size);

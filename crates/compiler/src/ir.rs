@@ -22,8 +22,24 @@ pub struct VarId(pub(crate) u32);
 pub enum ScalarType {
     /// BabyBear field element, canonical `u32` representation.
     BabyBear,
+    /// Degree-4 binomial extension of BabyBear over `x^4 - 11`. Each
+    /// element is four canonical BabyBear coefficients laid out as
+    /// `(a0, a1, a2, a3)` for the polynomial `a0 + a1 x + a2 x^2 +
+    /// a3 x^3`, packed to 16 bytes so a single element fits an `LDG.128`
+    /// / `STG.128` instruction.
+    FpExt,
     U32,
     Bool,
+}
+
+impl ScalarType {
+    /// Size in bytes of one scalar element in a global or shared buffer.
+    pub fn size_bytes(self) -> usize {
+        match self {
+            ScalarType::FpExt => 16,
+            ScalarType::BabyBear | ScalarType::U32 | ScalarType::Bool => 4,
+        }
+    }
 }
 
 pub type Shape = Vec<usize>;
@@ -89,6 +105,11 @@ pub enum Node {
     ConstU32(u32),
     /// BabyBear constant, canonical representation.
     ConstField(u32),
+    /// FpExt constant `a0 + a1 x + a2 x^2 + a3 x^3` — each coefficient is
+    /// a canonical BabyBear `u32`.
+    ConstFpExt([u32; 4]),
+    /// Lift a `BabyBear` value to `FpExt`: `x -> (x, 0, 0, 0)`.
+    LiftFpExt(NodeId),
     Bin(BinOp, NodeId, NodeId),
     Select {
         cond: NodeId,
@@ -213,6 +234,17 @@ impl IRBuilder {
     /// BabyBear constant from its canonical `u32` representation.
     pub fn const_field(&mut self, v: u32) -> NodeId {
         self.intern(Node::ConstField(v))
+    }
+
+    /// FpExt constant from four canonical BabyBear `u32` coefficients:
+    /// `coeffs[0] + coeffs[1] x + coeffs[2] x^2 + coeffs[3] x^3`.
+    pub fn const_fpext(&mut self, coeffs: [u32; 4]) -> NodeId {
+        self.intern(Node::ConstFpExt(coeffs))
+    }
+
+    /// Lift a BabyBear-typed value to FpExt as `(x, 0, 0, 0)`.
+    pub fn lift_fpext(&mut self, x: NodeId) -> NodeId {
+        self.intern(Node::LiftFpExt(x))
     }
 
     pub fn bin(&mut self, op: BinOp, a: NodeId, b: NodeId) -> NodeId {

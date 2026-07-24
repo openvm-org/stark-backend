@@ -226,7 +226,7 @@ mod tests {
         assert!(shared[0].layout.as_ref().unwrap().is_identity());
 
         let source = codegen(&kprog).unwrap();
-        assert!(source.contains("__shared__ uint32_t"));
+        assert!(source.contains("__shared__"));
         assert!(source.contains("__syncthreads();"));
     }
 

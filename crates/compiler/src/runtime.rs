@@ -61,6 +61,10 @@ pub struct KernelModule {
     prog: *mut c_void,
     vt: VTable,
     scratch: Option<DeviceBuffer<u8>>,
+    /// Whether the C ABI's scratch pointer has been bound this run, either
+    /// through [`KernelModule::ensure_scratch`] (owned) or
+    /// [`KernelModule::set_scratch`] (external).
+    scratch_bound: bool,
     source: String,
     /// The library must stay loaded while `prog` and the vtable exist.
     _lib: Library,
@@ -136,6 +140,7 @@ impl KernelModule {
             prog,
             vt,
             scratch: None,
+            scratch_bound: false,
             source: source.to_string(),
             _lib: lib,
             _dir: dir,
@@ -210,13 +215,34 @@ impl KernelModule {
         let buf = DeviceBuffer::<u8>::with_capacity_on(size, ctx);
         unsafe { (self.vt.set_scratch_buf)(self.prog, buf.as_mut_raw_ptr()) };
         self.scratch = Some(buf);
+        self.scratch_bound = true;
+    }
+
+    /// Binds `buf` as the module's scratch, letting the caller share a
+    /// scratch pool across kernels instead of each `KernelModule` owning
+    /// its own allocation. `buf` must have at least [`scratch_size`] bytes
+    /// and must stay alive until `run` completes. Any previously owned
+    /// scratch is dropped (the C ABI now points at `buf`, so the owned one
+    /// is unreachable and safe to free).
+    pub fn set_scratch(&mut self, buf: &DeviceBuffer<u8>) -> Result<(), CompileError> {
+        let want = self.scratch_size();
+        if buf.len() < want {
+            return Err(CompileError::Runtime(format!(
+                "set_scratch: buffer is {} bytes, need at least {want}",
+                buf.len()
+            )));
+        }
+        unsafe { (self.vt.set_scratch_buf)(self.prog, buf.as_mut_raw_ptr()) };
+        self.scratch = None;
+        self.scratch_bound = true;
+        Ok(())
     }
 
     /// Launches the whole kernel sequence on `stream` (asynchronous).
     pub fn run(&self, stream: &CudaStream) -> Result<(), CompileError> {
-        if self.scratch_size() > 0 && self.scratch.is_none() {
+        if self.scratch_size() > 0 && !self.scratch_bound {
             return Err(CompileError::Runtime(
-                "scratch buffer not set; call ensure_scratch first".into(),
+                "scratch buffer not set; call ensure_scratch or set_scratch first".into(),
             ));
         }
         let code = unsafe { (self.vt.run)(self.prog, stream.as_raw()) };

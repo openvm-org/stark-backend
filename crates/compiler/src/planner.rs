@@ -22,9 +22,24 @@ use cp_sat::{
 };
 
 use crate::{
-    graph_ir::{BufId, DeviceType, GraphBuilder, GraphNode},
+    graph_ir::{BufId, BufInfo, DeviceType, GraphBuilder, GraphNode},
     ir::VarId,
 };
+
+/// Read/write set for one graph node, as seen by the planner.
+///
+/// This is the internal shape the CP-SAT model consumes: a node's `reads`
+/// contribute to `death[b]` of every read buffer, its `writes` contribute
+/// to `birth[b]` of every written buffer, and (writer, reader) pairs across
+/// different nodes become precedence edges. A buffer that is both read
+/// and written by the same node (e.g. an in-place modify, or a per-node
+/// scratch region) has `birth[b] = death[b] = t[n]` and thus a single
+/// time-step lifetime.
+#[derive(Debug, Default, Clone)]
+pub struct NodeAccess {
+    pub reads: Vec<BufId>,
+    pub writes: Vec<BufId>,
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum PlanError {
@@ -58,56 +73,55 @@ pub fn plan(
     env: &BTreeMap<VarId, i64>,
     device: DeviceType,
 ) -> Result<MemoryPlan, PlanError> {
-    let n_nodes = graph.nodes.len();
-    let n_bufs = graph.bufs.len();
+    let nodes: Vec<NodeAccess> = graph.nodes.iter().map(access_from_node).collect();
+    plan_raw(&graph.bufs, &nodes, env, device, &[])
+}
+
+/// Plans over an explicit `(bufs, nodes)` view. Prefer [`plan`] for the
+/// common case where the accesses come straight from a [`GraphBuilder`];
+/// this entry point exists so [`crate::graph_exe::GraphCompiler`] can inject
+/// synthetic per-kernel scratch buffers into the model.
+///
+/// `exclude` lists buffers that participate in scheduling (so their reads
+/// and writes still induce precedence edges between nodes) but that are
+/// **not** packed into the returned pool: they get no offset and their
+/// sizes don't count toward `peak_bytes`. This is what
+/// [`crate::graph_exe::GraphCompiler`] uses for graph inputs/outputs — the
+/// caller supplies their storage at run time so no pool slot is needed.
+pub fn plan_raw(
+    bufs: &[BufInfo],
+    nodes: &[NodeAccess],
+    env: &BTreeMap<VarId, i64>,
+    device: DeviceType,
+    exclude: &[BufId],
+) -> Result<MemoryPlan, PlanError> {
+    let n_nodes = nodes.len();
+    let n_bufs = bufs.len();
+
+    let mut excluded = vec![false; n_bufs];
+    for &b in exclude {
+        excluded[b.0] = true;
+    }
 
     // Concrete sizes for buffers on the target device.
     let mut sizes = vec![0i64; n_bufs];
     let mut on_device = vec![false; n_bufs];
-    for (idx, info) in graph.bufs.iter().enumerate() {
+    for (idx, info) in bufs.iter().enumerate() {
         if info.device_type == device {
             on_device[idx] = true;
             sizes[idx] = eval_size(BufId(idx), &info.size, env)?;
         }
     }
 
-    // Per-node read/write sets over all buffers (not just device buffers) —
-    // reads/writes on foreign-device buffers still induce precedence edges.
-    let mut writes: Vec<Vec<usize>> = vec![vec![]; n_nodes];
-    let mut reads: Vec<Vec<usize>> = vec![vec![]; n_nodes];
-    for (n, node) in graph.nodes.iter().enumerate() {
-        match node {
-            GraphNode::BlackboxKernel(k) => {
-                for (i, buf) in k.inputs.iter().enumerate() {
-                    reads[n].push(buf.0);
-                    if k.modifies[i] {
-                        writes[n].push(buf.0);
-                    }
-                }
-                for buf in &k.outputs {
-                    writes[n].push(buf.0);
-                }
-            }
-            GraphNode::Kernel(k) => {
-                for buf in &k.inputs {
-                    reads[n].push(buf.0);
-                }
-                for buf in &k.outputs {
-                    writes[n].push(buf.0);
-                }
-            }
-            GraphNode::Const(c) => {
-                writes[n].push(c.buf.0);
-            }
-            GraphNode::Memcpy(m) => {
-                reads[n].push(m.src.0);
-                writes[n].push(m.dst.0);
-            }
-            GraphNode::Memset(m) => {
-                writes[n].push(m.node.0);
-            }
-        }
-    }
+    // Per-node read/write sets, already provided by the caller.
+    let writes: Vec<Vec<usize>> = nodes
+        .iter()
+        .map(|a| a.writes.iter().map(|b| b.0).collect())
+        .collect();
+    let reads: Vec<Vec<usize>> = nodes
+        .iter()
+        .map(|a| a.reads.iter().map(|b| b.0).collect())
+        .collect();
 
     // Per-buffer writer/reader node lists.
     let mut writers: Vec<Vec<usize>> = vec![vec![]; n_bufs];
@@ -151,9 +165,12 @@ pub fn plan(
         }
     }
 
-    // Device buffers with non-zero size are what we're packing.
+    // Device buffers with non-zero size and not in `exclude` are what we're
+    // packing. Excluded buffers still participate in precedence (their
+    // writers/readers appear in `writers`/`readers` above) but aren't
+    // assigned offsets or interfered with in memory.
     let device_bufs: Vec<usize> = (0..n_bufs)
-        .filter(|&b| on_device[b] && sizes[b] > 0)
+        .filter(|&b| on_device[b] && sizes[b] > 0 && !excluded[b])
         .collect();
 
     // Live interval [birth, death] per device buffer. Using the sentinel
@@ -246,6 +263,36 @@ pub fn plan(
         offsets: out_offsets,
         peak_bytes,
     })
+}
+
+/// Builds a [`NodeAccess`] from a [`GraphNode`], matching the semantics
+/// [`plan_raw`] expects (`modifies` on a `BlackboxKernel` input adds it to
+/// both reads and writes; a `Const` writes its target; `Memcpy` reads src
+/// and writes dst; etc.).
+pub fn access_from_node(node: &GraphNode) -> NodeAccess {
+    let mut a = NodeAccess::default();
+    match node {
+        GraphNode::BlackboxKernel(k) => {
+            for (i, b) in k.inputs.iter().enumerate() {
+                a.reads.push(*b);
+                if k.modifies[i] {
+                    a.writes.push(*b);
+                }
+            }
+            a.writes.extend(k.outputs.iter().copied());
+        }
+        GraphNode::Kernel(k) => {
+            a.reads.extend(k.inputs.iter().copied());
+            a.writes.extend(k.outputs.iter().copied());
+        }
+        GraphNode::Const(c) => a.writes.push(c.buf),
+        GraphNode::Memcpy(m) => {
+            a.reads.push(m.src);
+            a.writes.push(m.dst);
+        }
+        GraphNode::Memset(m) => a.writes.push(m.node),
+    }
+    a
 }
 
 fn eval_size(

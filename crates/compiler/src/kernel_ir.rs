@@ -259,17 +259,21 @@ impl BufferDecl {
     }
 
     pub fn size_bytes(&self) -> usize {
-        // All scalar types are stored as u32.
-        self.len() * 4
+        self.len() * self.elem.size_bytes()
     }
 
-    /// Number of physical u32 slots after applying the alloc layout (a
+    /// Physical element count after applying the alloc layout (a
     /// non-identity layout maps into a power-of-two range).
     pub fn phys_len(&self) -> usize {
         match &self.layout {
             Some(l) if !l.is_identity() => 1usize << l.bases.len(),
             _ => self.len(),
         }
+    }
+
+    /// Physical size in bytes: `phys_len() * elem.size_bytes()`.
+    pub fn phys_bytes(&self) -> usize {
+        self.phys_len() * self.elem.size_bytes()
     }
 }
 
@@ -329,11 +333,22 @@ pub enum SSAOpCode {
     ConstU32(u32),
     /// BabyBear constant (canonical representation); one result.
     ConstField(u32),
+    /// FpExt constant `a0 + a1 x + a2 x^2 + a3 x^3` (each a canonical
+    /// BabyBear `u32`); no operands; one result.
+    ConstFpExt([u32; 4]),
+    /// Lift a `BabyBear` value to `FpExt` as `(x, 0, 0, 0)`; one operand,
+    /// one result.
+    LiftFpExt,
     /// Two operands; one result. The scalar type selects field vs integer
     /// semantics.
     Bin(BinOp, ScalarType),
-    /// Three operands `[cond, then, else]`; one result.
-    Select,
+    /// One operand `[cond]`; one result; `SSAOp.block` is the then-body
+    /// and its `yields[0]` is the then-value; the `else_block` field
+    /// carries the else-body and its `yields[0]` is the else-value. Only
+    /// the taken branch's body is executed, so any loads it contains are
+    /// gated by `cond` — the DSL `if cond then A else B` compiles to
+    /// this and never speculatively evaluates the untaken side.
+    Select { else_block: SSABlock },
 }
 
 #[derive(Clone, Debug)]
