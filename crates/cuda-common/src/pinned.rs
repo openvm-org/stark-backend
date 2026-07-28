@@ -23,7 +23,8 @@
 //! drained. Callers should mark the last copy out of a buffer with
 //! [PinnedBuffer::record_last_use]; the cleaner then waits on exactly those
 //! events. Without a recorded event it falls back to synchronizing the device
-//! that was current when the guard dropped.
+//! that was current when the guard dropped, which is sound only if the guard
+//! drops on the thread and device that issued the copies.
 //!
 //! The pool retains at most [set_max_pooled_bytes] bytes (default 4 GiB);
 //! past that, returning a buffer evicts pooled ones, largest first.
@@ -116,6 +117,11 @@ impl PinnedBuffer {
     /// Call from the thread that enqueued the copies, with the same device
     /// current (CUDA requires the event and stream to share a context). If
     /// several streams consume the buffer, record on each of them.
+    ///
+    /// Record after the last copy but before dropping the guard: drop hands
+    /// the events recorded so far to the cleaner, and copies never recorded
+    /// are covered only by the no-events-at-all fallback, a whole-device
+    /// synchronize of the device current on the *dropping* thread.
     pub fn record_last_use(&mut self, stream: &CudaStream) -> Result<(), CudaError> {
         let event = CudaEvent::new()?;
         event.record_on(stream)?;
