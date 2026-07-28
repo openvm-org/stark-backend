@@ -387,6 +387,139 @@ impl GraphBuilder {
         out
     }
 
+    /// Cytoscape.js elements-JSON dump of the graph (`{"elements":
+    /// {"nodes": [..], "edges": [..]}}`), for browser visualization via
+    /// `scripts/serve_graph.py`.
+    ///
+    /// Graph nodes become cytoscape nodes labeled with the op name and node
+    /// type; buffers with no writer get synthetic `Input` nodes on first
+    /// read. Dataflow becomes directed edges from the buffer's most recent
+    /// writer to the consumer, labeled `%name [size]`; edges are `black`
+    /// when the consumer only reads the buffer and `red` when it also
+    /// writes it (in-place modify or overwrite of previously written data).
+    pub fn to_cytoscape_json(&self) -> String {
+        let mut nodes_json: Vec<String> = Vec::new();
+        let mut edges_json: Vec<String> = Vec::new();
+        let mut last_writer: Vec<Option<String>> = vec![None; self.bufs.len()];
+
+        let push_node = |nodes_json: &mut Vec<String>, id: &str, name: &str, ty: &str| {
+            nodes_json.push(format!(
+                "    {{\"data\":{{\"id\":\"{id}\",\"label\":\"{label}\",\"name\":\"{name}\",\
+                 \"type\":\"{ty}\"}}}}",
+                label = json_escape(&format!("{name}\n{ty}")),
+                name = json_escape(name),
+            ));
+        };
+        let buf_label = |b: BufId| {
+            format!(
+                "{} [{}]",
+                self.buf_name(b),
+                format_size(&self.bufs[b.0].size, &self.symbols)
+            )
+        };
+
+        for (n, node) in self.nodes.iter().enumerate() {
+            let id = format!("n{n}");
+            let (name, ty) = match node {
+                GraphNode::Kernel(k) => (k.module.name.clone(), "Kernel"),
+                GraphNode::BlackboxKernel(k) => (k.name.clone(), "BlackboxKernel"),
+                GraphNode::Const(c) => (self.buf_name(c.buf), "Const"),
+                GraphNode::Memcpy(_) => ("memcpy".to_string(), "Memcpy"),
+                GraphNode::Memset(m) => (format!("memset {:#x}", m.val), "Memset"),
+            };
+            push_node(&mut nodes_json, &id, &name, ty);
+
+            // (buffer, consumer-also-writes-it)
+            let mut reads: Vec<(BufId, bool)> = Vec::new();
+            let mut writes: Vec<BufId> = Vec::new();
+            match node {
+                GraphNode::Kernel(k) => {
+                    reads = k
+                        .inputs
+                        .iter()
+                        .map(|b| (*b, k.outputs.contains(b)))
+                        .collect();
+                    writes = k.outputs.clone();
+                }
+                GraphNode::BlackboxKernel(k) => {
+                    reads = k
+                        .inputs
+                        .iter()
+                        .zip(&k.modifies)
+                        .map(|(b, &m)| (*b, m || k.outputs.contains(b)))
+                        .collect();
+                    writes = k
+                        .inputs
+                        .iter()
+                        .zip(&k.modifies)
+                        .filter(|&(_, &m)| m)
+                        .map(|(b, _)| *b)
+                        .chain(k.outputs.iter().copied())
+                        .collect();
+                }
+                GraphNode::Const(c) => writes.push(c.buf),
+                GraphNode::Memcpy(m) => {
+                    reads.push((m.src, false));
+                    writes.push(m.dst);
+                }
+                GraphNode::Memset(m) => writes.push(m.node),
+            }
+
+            // Parallel edges (several buffers flowing between the same two
+            // nodes) get merged into one edge with a combined label; a
+            // single modifying buffer makes the merged edge red.
+            let mut merged: Vec<(String, Vec<String>, bool)> = Vec::new();
+            let mut add_edge = |src: String, buf: BufId, modifies: bool| {
+                let label = buf_label(buf);
+                match merged.iter_mut().find(|(s, ..)| *s == src) {
+                    Some((_, labels, m)) => {
+                        if !labels.contains(&label) {
+                            labels.push(label);
+                        }
+                        *m |= modifies;
+                    }
+                    None => merged.push((src, vec![label], modifies)),
+                }
+            };
+            for &(buf, modifies) in &reads {
+                if last_writer[buf.0].is_none() {
+                    let in_id = format!("in{}", buf.0);
+                    push_node(&mut nodes_json, &in_id, &self.buf_name(buf), "Input");
+                    last_writer[buf.0] = Some(in_id);
+                }
+                add_edge(last_writer[buf.0].clone().unwrap(), buf, modifies);
+            }
+            // Overwrites of previously written buffers that this node does
+            // not read are still modifications (WAW ordering).
+            for &buf in &writes {
+                if reads.iter().any(|&(b, _)| b == buf) {
+                    continue;
+                }
+                if let Some(src) = last_writer[buf.0].clone() {
+                    add_edge(src, buf, true);
+                }
+            }
+            for (src, labels, modifies) in merged {
+                edges_json.push(format!(
+                    "    {{\"data\":{{\"id\":\"e{eid}\",\"source\":\"{src}\",\"target\":\"{id}\",\
+                     \"label\":\"{label}\",\"color\":\"{color}\"}}}}",
+                    eid = edges_json.len(),
+                    label = json_escape(&labels.join(", ")),
+                    color = if modifies { "red" } else { "black" },
+                ));
+            }
+            for buf in writes {
+                last_writer[buf.0] = Some(id.clone());
+            }
+        }
+
+        format!(
+            "{{\"elements\":{{\n  \"nodes\":[\n{}\n  ],\n  \"edges\":[\n{}\n  ]\n}}}}\n",
+            nodes_json.join(",\n"),
+            edges_json.join(",\n"),
+        )
+    }
+
     fn buf_name(&self, id: BufId) -> String {
         match self.bufs[id.0].name.as_deref() {
             Some(n) => format!("%{n}"),
@@ -460,6 +593,20 @@ impl GraphBuilder {
             ),
         }
     }
+}
+
+fn json_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 /// Renders `Quast` size expressions with named symbols and minimal
@@ -753,6 +900,71 @@ mod tests {
         assert_ne!(n, m);
         assert_eq!(b.symbols.get(&n).map(String::as_str), Some("n"));
         assert_eq!(b.symbols.get(&m).map(String::as_str), Some("m"));
+    }
+
+    #[test]
+    fn cytoscape_json_nodes_and_edge_colors() {
+        let mut b = GraphBuilder::new();
+        let n = b.register_symbol("n");
+        let sz = Quast::sym(n).mul_c(4);
+        let host = buf(&mut b, "host", DeviceType::CpuPinned, sz.clone());
+        let x = buf(&mut b, "x", DeviceType::Cuda(0), sz.clone());
+        let y = buf(&mut b, "y", DeviceType::Cuda(0), sz.clone());
+
+        // host --(read)--> memcpy --(defines x)--> kernel "add" reads x,
+        // defines y; kernel "fold" modifies y in place.
+        b.insert_memcpy(host, x);
+        b.insert_blackbox_kernel(
+            "add",
+            [x].into_iter(),
+            [y].into_iter(),
+            [false].into_iter(),
+            |_, _, _| {},
+        );
+        b.insert_blackbox_kernel(
+            "fold",
+            [y].into_iter(),
+            [].into_iter(),
+            [true].into_iter(),
+            |_, _, _| {},
+        );
+        // "pair" writes two buffers both read by "sum": the two parallel
+        // edges must merge into one with a combined label.
+        let u = buf(&mut b, "u", DeviceType::Cuda(0), sz.clone());
+        let v = buf(&mut b, "v", DeviceType::Cuda(0), sz.clone());
+        b.insert_blackbox_kernel(
+            "pair",
+            [].into_iter(),
+            [u, v].into_iter(),
+            [].into_iter(),
+            |_, _, _| {},
+        );
+        b.insert_blackbox_kernel(
+            "sum",
+            [u, v].into_iter(),
+            [].into_iter(),
+            [false, false].into_iter(),
+            |_, _, _| {},
+        );
+
+        let json = b.to_cytoscape_json();
+        // `host` has no writer => synthetic Input node feeding the memcpy.
+        assert!(json.contains(r#""id":"in0","label":"%host\nInput","name":"%host","type":"Input""#));
+        assert!(json.contains(r#""id":"n0","label":"memcpy\nMemcpy""#));
+        assert!(json.contains(r#""id":"n1","label":"add\nBlackboxKernel""#));
+        // Pure reads are black, sized with the symbolic buffer size.
+        assert!(json
+            .contains(r#""source":"in0","target":"n0","label":"%host [n * 4]","color":"black""#));
+        assert!(
+            json.contains(r#""source":"n0","target":"n1","label":"%x [n * 4]","color":"black""#)
+        );
+        // In-place modify of y (written by n1) is red.
+        assert!(json.contains(r#""source":"n1","target":"n2","label":"%y [n * 4]","color":"red""#));
+        // Parallel edges pair->sum merged with a combined label.
+        assert!(json.contains(
+            r#""source":"n3","target":"n4","label":"%u [n * 4], %v [n * 4]","color":"black""#
+        ));
+        assert!(!json.contains(r#""label":"%u [n * 4]","#));
     }
 
     #[test]

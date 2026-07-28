@@ -1,16 +1,33 @@
-//! Runs the DSL `ntt_supra_module` (nthreads=128, z_count=1) and supra's
-//! `batch_ntt` once each at `log_n = 24`, sharing one process so both
-//! kernels land in the same Nsight Compute profile. The DSL config
-//! picked here is the winner of `benches/ntt_supra_sweep.rs` at 2^24.
+//! Compares the DSL `ntt_supra_module` (nthreads=128, z_count=1) against
+//! supra's `batch_ntt` at `log_n = 24`. The DSL config is the sweep winner
+//! from `benches/ntt_supra_sweep.rs` at 2^24.
+//!
+//! Default: benchmark both kernels and print per-launch median/q25/q75 in ms.
+//!
+//! With `NCU_ENABLED=1`: run each kernel exactly once, after warmup, inside
+//! a single NVTX range called `NCU_PROFILE` — so
+//!   `ncu --nvtx --nvtx-include "NCU_PROFILE/"` (or `--range-filter`)
+//! captures only those launches. Combine with `CUDA_LINEINFO=1` — that adds
+//! `-lineinfo` to both the JIT nvcc invocation (see `runtime.rs`) and the
+//! AOT-built supra kernels (see `openvm-cuda-builder`), so
+//! `ncu --set full --import-source yes` can attach SASS to source.
+//!
+//! Example ncu invocation:
+//!   CUDA_LINEINFO=1 NCU_ENABLED=1 \
+//!     ncu --set full --import-source yes \
+//!         --nvtx --nvtx-include "NCU_PROFILE/" \
+//!         -f -o ntt_supra_report \
+//!         target/release/examples/profile_ntt_supra
+
+use std::time::Instant;
 
 use crypto_compiler::{
-    compile_and_load,
     kernels::{ntt_partial_twiddles, ntt_supra_module},
-    runner::to_monty,
+    runner::ModuleRunner,
     runtime::CompileOptions,
 };
 use openvm_cuda_backend::{ntt::batch_ntt, prelude::F};
-use openvm_cuda_common::{copy::MemCopyH2D, d_buffer::DeviceBuffer, stream::GpuDeviceCtx};
+use openvm_cuda_common::{copy::MemCopyH2D, stream::GpuDeviceCtx};
 
 const P: u64 = 2013265921;
 
@@ -28,51 +45,99 @@ fn pseudo_field_elems(n: usize, seed: u64) -> Vec<u32> {
         .collect()
 }
 
+#[derive(Clone, Copy)]
+struct Stats {
+    median: f64,
+    q25: f64,
+    q75: f64,
+}
+
+fn quantiles(mut samples: Vec<f64>) -> Stats {
+    samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let n = samples.len();
+    let pick = |q: f64| samples[((n as f64 * q) as usize).min(n - 1)];
+    Stats {
+        median: pick(0.5),
+        q25: pick(0.25),
+        q75: pick(0.75),
+    }
+}
+
 fn main() {
     let log_n: usize = 24;
     let n = 1usize << log_n;
     let ctx = GpuDeviceCtx::for_current_device().expect("CUDA context");
-    let input = pseudo_field_elems(n, 1);
+    let coeffs = pseudo_field_elems(n, 1);
+    let twiddles = ntt_partial_twiddles(log_n);
 
-    // DSL: best config at 2^24 is (nthreads=128, z_count=1). Both the
-    // coefficient input and the windowed twiddle table go to device in
-    // Montgomery form to match the emitted kernel's data representation.
-    let input_mont: Vec<u32> = input.iter().map(|&x| to_monty(x)).collect();
-    let twiddles_mont: Vec<u32> = ntt_partial_twiddles(log_n)
-        .iter()
-        .map(|&x| to_monty(x))
-        .collect();
-    let d_in = input_mont.as_slice().to_device_on(&ctx).unwrap();
-    let d_tw = twiddles_mont.as_slice().to_device_on(&ctx).unwrap();
-    let d_out = DeviceBuffer::<u32>::with_capacity_on(n, &ctx);
-    let mut km = compile_and_load(
+    // ModuleRunner Mont-encodes the BabyBear inputs at H2D and decodes
+    // outputs on read — matching the emitted kernel's Montgomery domain.
+    let mut runner = ModuleRunner::new(
         &ntt_supra_module(log_n, 128, 1, false),
         &CompileOptions::default(),
     )
     .expect("JIT compile");
-    km.set_input(0, &d_in).unwrap();
-    km.set_input(1, &d_tw).unwrap();
-    km.set_output(0, &d_out).unwrap();
-    km.ensure_scratch(&ctx);
+    runner.set_inputs(&[coeffs.clone(), twiddles]);
 
-    // Warmup (compile fusion, first-touch pages) — nvtx-range these so
-    // the profile can be filtered to just the timed launches if desired.
-    km.run(&ctx.stream).expect("DSL NTT warmup");
+    // Supra baseline: build the device input once, reuse across warmup /
+    // profile / bench. `batch_ntt` is in-place, but the arithmetic is
+    // structurally identical across launches, so wall-clock timing is fair.
+    let input_f: Vec<F> = coeffs.iter().map(|&x| F::new(x)).collect();
+    let d_f = input_f.as_slice().to_device_on(&ctx).unwrap();
+
+    // Warm up both paths so first-touch faults and lazy driver init don't
+    // pollute the measurement. Each path uses its own stream (the runner
+    // owns one, `ctx` holds the one supra targets), so both must be synced.
+    runner.run();
+    batch_ntt(&d_f, log_n as u32, 0, 1, true, false, &ctx);
+    runner.sync();
     ctx.stream.synchronize().expect("warmup sync");
 
-    // Supra baseline setup.
-    let input_f: Vec<F> = input.iter().map(|&x| F::new(x)).collect();
-    let d_f = input_f.as_slice().to_device_on(&ctx).unwrap();
-    batch_ntt(&d_f, log_n as u32, 0, 1, true, false, &ctx);
-    ctx.stream.synchronize().expect("supra warmup sync");
+    if std::env::var_os("NCU_ENABLED").is_some() {
+        eprintln!("[ncu] one launch each inside NCU_PROFILE @ log_n={log_n}");
+        nvtx::range_push!("NCU_PROFILE");
+        runner.run();
+        batch_ntt(&d_f, log_n as u32, 0, 1, true, false, &ctx);
+        runner.sync();
+        ctx.stream.synchronize().expect("ncu sync");
+        nvtx::range_pop!();
+        return;
+    }
 
-    // The two profiled launches. One of each — ncu can filter by
-    // kernel name to compare metrics side by side.
-    eprintln!("=== DSL ntt_supra (128, 1) @ log_n=24 ===");
-    km.run(&ctx.stream).expect("DSL NTT profile run");
-    ctx.stream.synchronize().expect("dsl sync");
+    let iters: usize = std::env::var("BENCH_KERNEL_ITERS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(50);
 
-    eprintln!("=== supra batch_ntt @ log_n=24 ===");
-    batch_ntt(&d_f, log_n as u32, 0, 1, true, false, &ctx);
-    ctx.stream.synchronize().expect("supra sync");
+    let mut dsl_samples: Vec<f64> = Vec::with_capacity(iters);
+    for _ in 0..iters {
+        let t = Instant::now();
+        runner.run();
+        runner.sync();
+        dsl_samples.push(t.elapsed().as_secs_f64() * 1e3);
+    }
+    let dsl = quantiles(dsl_samples);
+
+    let mut supra_samples: Vec<f64> = Vec::with_capacity(iters);
+    for _ in 0..iters {
+        let t = Instant::now();
+        batch_ntt(&d_f, log_n as u32, 0, 1, true, false, &ctx);
+        ctx.stream.synchronize().expect("supra sync");
+        supra_samples.push(t.elapsed().as_secs_f64() * 1e3);
+    }
+    let supra = quantiles(supra_samples);
+
+    println!(
+        "log_n={log_n}, iters={iters}\n\
+         [DSL   ntt_supra(128,1)] median={:.4} ms  q25={:.4} ms  q75={:.4} ms\n\
+         [supra batch_ntt       ] median={:.4} ms  q25={:.4} ms  q75={:.4} ms\n\
+         DSL / supra = {:.2}x  (>1 means DSL is slower)",
+        dsl.median,
+        dsl.q25,
+        dsl.q75,
+        supra.median,
+        supra.q25,
+        supra.q75,
+        dsl.median / supra.median,
+    );
 }

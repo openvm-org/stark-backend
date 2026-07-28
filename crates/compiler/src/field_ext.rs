@@ -185,6 +185,7 @@ mod tests {
         compile_and_load,
         ir::{IRBuilder, ScalarType},
         kernel,
+        runner::{from_monty, to_monty},
         runtime::CompileOptions,
     };
 
@@ -226,15 +227,23 @@ mod tests {
         let body = kernel!(b, compute[N] | i | { bb_inverse(x[i]) });
         let module = b.finish("bb_inverse_test", body);
 
+        // The emitted CUDA operates on Montgomery-encoded BabyBear; this
+        // test drives the raw `KernelModule` so it encodes/decodes itself.
+        let mont_inputs: Vec<u32> = inputs.iter().map(|&v| to_monty(v)).collect();
         let ctx = GpuDeviceCtx::for_current_device().unwrap();
         let mut km = compile_and_load(&module, &CompileOptions::default()).unwrap();
-        let d_in: DeviceBuffer<u32> = inputs.as_slice().to_device_on(&ctx).unwrap();
+        let d_in: DeviceBuffer<u32> = mont_inputs.as_slice().to_device_on(&ctx).unwrap();
         let d_out = DeviceBuffer::<u32>::with_capacity_on(N, &ctx);
         km.set_input(0, &d_in).unwrap();
         km.set_output(0, &d_out).unwrap();
         km.ensure_scratch(&ctx);
         km.run(&ctx.stream).unwrap();
-        let got: Vec<u32> = d_out.to_host_on(&ctx).unwrap();
+        let got: Vec<u32> = d_out
+            .to_host_on(&ctx)
+            .unwrap()
+            .into_iter()
+            .map(from_monty)
+            .collect();
 
         let want: Vec<u32> = inputs
             .iter()
@@ -304,15 +313,23 @@ mod tests {
         });
         let module = b.finish("ef_inverse_test", body);
 
+        // Montgomery-encode at the raw `KernelModule` boundary (see
+        // `bb_inverse_matches_p3`).
+        let mont_flat: Vec<u32> = flat.iter().map(|&v| to_monty(v)).collect();
         let ctx = GpuDeviceCtx::for_current_device().unwrap();
         let mut km = compile_and_load(&module, &CompileOptions::default()).unwrap();
-        let d_in: DeviceBuffer<u32> = flat.as_slice().to_device_on(&ctx).unwrap();
+        let d_in: DeviceBuffer<u32> = mont_flat.as_slice().to_device_on(&ctx).unwrap();
         let d_out = DeviceBuffer::<u32>::with_capacity_on(N * D_EF, &ctx);
         km.set_input(0, &d_in).unwrap();
         km.set_output(0, &d_out).unwrap();
         km.ensure_scratch(&ctx);
         km.run(&ctx.stream).unwrap();
-        let got: Vec<u32> = d_out.to_host_on(&ctx).unwrap();
+        let got: Vec<u32> = d_out
+            .to_host_on(&ctx)
+            .unwrap()
+            .into_iter()
+            .map(from_monty)
+            .collect();
 
         let mut want: Vec<u32> = Vec::with_capacity(N * D_EF);
         for i in 0..N {
@@ -330,7 +347,7 @@ mod tests {
         // the result of a compute). The compute body invokes `ef_inverse`
         // directly, so the `x[#k]` index-and-pack path is exercised on the
         // GPU.
-        let single: [u32; D_EF] = [1, 0, 0, 0];
+        let single: [u32; D_EF] = [to_monty(1), 0, 0, 0];
         let mut b = IRBuilder::new();
         let x = b.input("x", ScalarType::BabyBear, vec![D_EF]);
         let body = b.compute(1, move |b, _i| ef_inverse(b, x));
@@ -342,7 +359,12 @@ mod tests {
         km.set_output(0, &d_out).unwrap();
         km.ensure_scratch(&ctx);
         km.run(&ctx.stream).unwrap();
-        let got: Vec<u32> = d_out.to_host_on(&ctx).unwrap();
+        let got: Vec<u32> = d_out
+            .to_host_on(&ctx)
+            .unwrap()
+            .into_iter()
+            .map(from_monty)
+            .collect();
         assert_eq!(got, vec![1u32, 0, 0, 0], "ef_inverse(EF::ONE) != EF::ONE");
     }
 }

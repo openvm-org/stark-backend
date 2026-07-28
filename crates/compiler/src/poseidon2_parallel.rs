@@ -416,7 +416,12 @@ mod tests {
     use p3_symmetric::Permutation;
 
     use super::*;
-    use crate::{compile_and_load, kernels::poseidon2_permutation, runtime::CompileOptions};
+    use crate::{
+        compile_and_load,
+        kernels::poseidon2_permutation,
+        runner::{from_monty, to_monty},
+        runtime::CompileOptions,
+    };
 
     const P: u64 = 2_013_265_921;
 
@@ -447,13 +452,21 @@ mod tests {
             ..Default::default()
         };
         let mut km = compile_and_load(&module, &options).unwrap();
-        let d_in: DeviceBuffer<u32> = input.to_device_on(&ctx).unwrap();
+        // The emitted CUDA operates on Montgomery-encoded BabyBear; this
+        // helper drives the raw `KernelModule` so it encodes/decodes itself.
+        let mont_input: Vec<u32> = input.iter().map(|&v| to_monty(v)).collect();
+        let d_in: DeviceBuffer<u32> = mont_input.as_slice().to_device_on(&ctx).unwrap();
         km.set_input(0, &d_in).unwrap();
         let d_out = DeviceBuffer::<u32>::with_capacity_on(WIDTH, &ctx);
         km.set_output(0, &d_out).unwrap();
         km.ensure_scratch(&ctx);
         km.run(&ctx.stream).unwrap();
-        d_out.to_host_on(&ctx).unwrap()
+        d_out
+            .to_host_on(&ctx)
+            .unwrap()
+            .into_iter()
+            .map(from_monty)
+            .collect()
     }
 
     fn cpu_reference(state: &[u32; WIDTH]) -> [u32; WIDTH] {
@@ -595,8 +608,10 @@ mod tests {
 
             let mut km_s = compile_and_load(&serial, &options).unwrap();
             let mut km_p = compile_and_load(&parallel, &options).unwrap();
-            let d_state: DeviceBuffer<u32> = state.as_slice().to_device_on(&ctx).unwrap();
-            let d_value: DeviceBuffer<u32> = [value].as_slice().to_device_on(&ctx).unwrap();
+            let mont_state: Vec<u32> = state.iter().map(|&v| to_monty(v)).collect();
+            let d_state: DeviceBuffer<u32> = mont_state.as_slice().to_device_on(&ctx).unwrap();
+            let d_value: DeviceBuffer<u32> =
+                [to_monty(value)].as_slice().to_device_on(&ctx).unwrap();
             let d_out_s = DeviceBuffer::<u32>::with_capacity_on(WIDTH, &ctx);
             let d_out_p = DeviceBuffer::<u32>::with_capacity_on(WIDTH, &ctx);
             km_s.set_input(0, &d_state).unwrap();
@@ -610,8 +625,18 @@ mod tests {
 
             km_s.run(&ctx.stream).unwrap();
             km_p.run(&ctx.stream).unwrap();
-            let got_s: Vec<u32> = d_out_s.to_host_on(&ctx).unwrap();
-            let got_p: Vec<u32> = d_out_p.to_host_on(&ctx).unwrap();
+            let got_s: Vec<u32> = d_out_s
+                .to_host_on(&ctx)
+                .unwrap()
+                .into_iter()
+                .map(from_monty)
+                .collect();
+            let got_p: Vec<u32> = d_out_p
+                .to_host_on(&ctx)
+                .unwrap()
+                .into_iter()
+                .map(from_monty)
+                .collect();
             state[ABSORB_IDX] = value;
             let want = cpu_reference(&state);
             assert_eq!(got_s, want, "serial observe_perm_at_7 mismatch");

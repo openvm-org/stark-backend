@@ -163,6 +163,20 @@ extern "C" {
         stream: cudaStream_t,
     ) -> i32;
 
+    /// Device-challenge variant of [`_frac_compute_round`]: `lambda` is read on-device
+    /// from a device pointer (graph-IR path).
+    fn _frac_compute_round_dev_challenge(
+        eq_xi_low: *const EF,
+        eq_xi_high: *const EF,
+        pq_buffer: *const Frac<EF>,
+        num_x: usize,
+        eq_low_cap: usize,
+        lambda_dev: *const EF,
+        out_device: *mut EF,
+        tmp_block_sums: *mut EF,
+        stream: cudaStream_t,
+    ) -> i32;
+
     /// Fused compute round + tree layer revert. Combines frac_build_tree_layer(revert=true)
     /// with compute_round for the first inner round. Modifies layer in-place for revert.
     fn _frac_compute_round_and_revert(
@@ -180,6 +194,23 @@ extern "C" {
         stream: cudaStream_t,
     ) -> i32;
 
+    /// Device-challenge variant of [`_frac_compute_round_and_revert`]: `lambda` is read
+    /// on-device from a device pointer (graph-IR path). `alpha` stays a host value.
+    fn _frac_compute_round_and_revert_dev_challenge(
+        eq_xi_low: *const EF,
+        eq_xi_high: *const EF,
+        layer: *mut Frac<EF>,
+        num_x: usize,
+        real_len: usize,
+        logical_len: usize,
+        eq_low_cap: usize,
+        lambda_dev: *const EF,
+        alpha: EF,
+        out_device: *mut EF,
+        tmp_block_sums: *mut EF,
+        stream: cudaStream_t,
+    ) -> i32;
+
     fn _frac_fold_fpext_columns(
         src: *const Frac<EF>,
         dst: *mut Frac<EF>,
@@ -187,6 +218,19 @@ extern "C" {
         real_len: usize,
         logical_len: usize,
         r: EF,
+        alpha: EF,
+        stream: cudaStream_t,
+    ) -> i32;
+
+    /// Device-challenge variant of [`_frac_fold_fpext_columns`]: `r` is read on-device
+    /// from a device pointer (graph-IR path). `alpha` stays a host value.
+    fn _frac_fold_fpext_columns_dev_challenge(
+        src: *const Frac<EF>,
+        dst: *mut Frac<EF>,
+        size: usize,
+        real_len: usize,
+        logical_len: usize,
+        r_dev: *const EF,
         alpha: EF,
         stream: cudaStream_t,
     ) -> i32;
@@ -205,6 +249,25 @@ extern "C" {
         eq_low_cap: usize,
         lambda: EF,
         r_prev: EF,
+        alpha: EF,
+        out_device: *mut EF,
+        tmp_block_sums: *mut EF,
+        stream: cudaStream_t,
+    ) -> i32;
+
+    /// Device-challenge variant of [`_frac_compute_round_and_fold`]: `lambda` and `r_prev`
+    /// are read on-device from device pointers (graph-IR path). `alpha` stays a host value.
+    fn _frac_compute_round_and_fold_dev_challenge(
+        eq_xi_low: *const EF,
+        eq_xi_high: *const EF,
+        src_pq_buffer: *const Frac<EF>,
+        dst_pq_buffer: *mut Frac<EF>,
+        src_pq_size: usize,
+        real_len: usize,
+        logical_len: usize,
+        eq_low_cap: usize,
+        lambda_dev: *const EF,
+        r_prev_dev: *const EF,
         alpha: EF,
         out_device: *mut EF,
         tmp_block_sums: *mut EF,
@@ -232,6 +295,27 @@ extern "C" {
         stream: cudaStream_t,
     ) -> i32;
 
+    /// Device-challenge variant of [`_frac_compute_round_and_fold_inplace`]: `lambda` and
+    /// `r_prev` are read on-device from device pointers (graph-IR path). `alpha` stays a
+    /// host value.
+    fn _frac_compute_round_and_fold_inplace_dev_challenge(
+        eq_xi_low: *const EF,
+        eq_xi_high: *const EF,
+        pq_buffer: *mut Frac<EF>,
+        src_pq_size: usize,
+        real_len: usize,
+        logical_len: usize,
+        dst_real_len: usize,
+        dst_logical_len: usize,
+        eq_low_cap: usize,
+        lambda_dev: *const EF,
+        r_prev_dev: *const EF,
+        alpha: EF,
+        out_device: *mut EF,
+        tmp_block_sums: *mut EF,
+        stream: cudaStream_t,
+    ) -> i32;
+
     fn _frac_precompute_m_build(
         pq: *const Frac<EF>,
         real_len: usize,
@@ -240,6 +324,28 @@ extern "C" {
         w: usize,
         lambda: EF,
         r_prev: EF,
+        alpha: EF,
+        inline_fold: bool,
+        eq_tail_low: *const EF,
+        eq_tail_high: *const EF,
+        eq_tail_low_cap: usize,
+        tail_tile: usize,
+        partial_out: *mut EF,
+        partial_len: usize,
+        m_total: *mut EF,
+        stream: cudaStream_t,
+    ) -> i32;
+
+    /// Device-challenge variant of [`_frac_precompute_m_build`]: `lambda` and `r_prev`
+    /// are read on-device from `lambda_dev` / `r_prev_dev` (graph-IR path).
+    fn _frac_precompute_m_build_dev_challenge(
+        pq: *const Frac<EF>,
+        real_len: usize,
+        logical_len: usize,
+        rem_n: usize,
+        w: usize,
+        lambda_dev: *const EF,
+        r_prev_dev: *const EF,
         alpha: EF,
         inline_fold: bool,
         eq_tail_low: *const EF,
@@ -695,6 +801,38 @@ pub unsafe fn frac_compute_round(
     ))
 }
 
+/// Device-challenge variant of [`frac_compute_round`], taking raw device pointers:
+/// `lambda` is read on-device from `lambda_dev` (graph-IR path, where the challenge and
+/// eq layers live in graph-managed buffers). `eq_low_cap` = 2^low_n and
+/// `num_x` = 2^(low_n + high_n + 1) for the eq layer pointers passed in.
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn frac_compute_round_dev_challenge(
+    eq_xi_low: *const EF,
+    eq_xi_high: *const EF,
+    pq_buffer: *const Frac<EF>,
+    num_x: usize,
+    eq_low_cap: usize,
+    lambda_dev: *const EF,
+    out_device: *mut EF,
+    tmp_block_sums: *mut EF,
+    stream: cudaStream_t,
+) -> Result<(), CudaError> {
+    debug_assert!(eq_low_cap.is_power_of_two());
+    debug_assert!(num_x.is_power_of_two());
+    debug_assert!(!lambda_dev.is_null());
+    CudaError::from_result(_frac_compute_round_dev_challenge(
+        eq_xi_low,
+        eq_xi_high,
+        pq_buffer,
+        num_x,
+        eq_low_cap,
+        lambda_dev,
+        out_device,
+        tmp_block_sums,
+        stream,
+    ))
+}
+
 /// Fused compute round + tree layer revert kernel.
 ///
 /// Combines `frac_build_tree_layer(revert=true)` with `compute_round` for the first inner round.
@@ -746,6 +884,47 @@ pub unsafe fn frac_compute_round_and_revert(
     ))
 }
 
+/// Device-challenge variant of [`frac_compute_round_and_revert`], taking raw device
+/// pointers: `lambda` is read on-device from `lambda_dev` (graph-IR path). `alpha` stays
+/// a host value. `real_len` is the physical length of `layer`.
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn frac_compute_round_and_revert_dev_challenge(
+    eq_xi_low: *const EF,
+    eq_xi_high: *const EF,
+    layer: *mut Frac<EF>,
+    num_x: usize,
+    real_len: usize,
+    logical_len: usize,
+    eq_low_cap: usize,
+    lambda_dev: *const EF,
+    alpha: EF,
+    out_device: *mut EF,
+    tmp_block_sums: *mut EF,
+    stream: cudaStream_t,
+) -> Result<(), CudaError> {
+    debug_assert!(eq_low_cap.is_power_of_two());
+    debug_assert!(num_x.is_power_of_two());
+    debug_assert!(!lambda_dev.is_null());
+    debug_assert!(
+        real_len >= 2 * num_x || 2 * num_x == logical_len,
+        "layer too small for pq_size"
+    );
+    CudaError::from_result(_frac_compute_round_and_revert_dev_challenge(
+        eq_xi_low,
+        eq_xi_high,
+        layer,
+        num_x,
+        real_len,
+        logical_len,
+        eq_low_cap,
+        lambda_dev,
+        alpha,
+        out_device,
+        tmp_block_sums,
+        stream,
+    ))
+}
+
 /// Folds `Frac<EF>` buffer. Pairs (idx, idx+quarter) and (idx+half, idx+3*quarter),
 /// writes results to dst[idx] and dst[idx+quarter]. Output size is `size / 2`.
 /// Dense folds are safe for src == dst because each thread handles disjoint indices.
@@ -780,6 +959,33 @@ pub unsafe fn fold_ef_frac_columns(
     ))
 }
 
+/// Device-challenge variant of [`fold_ef_frac_columns`], taking raw device pointers:
+/// `r` is read on-device from `r_dev` (graph-IR path). `alpha` stays a host value.
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn fold_ef_frac_columns_dev_challenge(
+    src: *const Frac<EF>,
+    dst: *mut Frac<EF>,
+    size: usize,
+    real_len: usize,
+    logical_len: usize,
+    r_dev: *const EF,
+    alpha: EF,
+    stream: cudaStream_t,
+) -> Result<(), CudaError> {
+    debug_assert!(real_len <= logical_len);
+    debug_assert!(!r_dev.is_null());
+    CudaError::from_result(_frac_fold_fpext_columns_dev_challenge(
+        src,
+        dst,
+        size,
+        real_len,
+        logical_len,
+        r_dev,
+        alpha,
+        stream,
+    ))
+}
+
 /// In-place fold. See [`fold_ef_frac_columns`] for details.
 pub unsafe fn fold_ef_frac_columns_inplace(
     buffer: &mut DeviceBuffer<Frac<EF>>,
@@ -807,6 +1013,35 @@ pub unsafe fn fold_ef_frac_columns_inplace(
         real_len,
         logical_len,
         r,
+        alpha,
+        stream,
+    ))
+}
+
+/// Device-challenge variant of [`fold_ef_frac_columns_inplace`], taking raw device
+/// pointers: `r` is read on-device from `r_dev` (graph-IR path). `alpha` stays a host
+/// value.
+pub unsafe fn fold_ef_frac_columns_inplace_dev_challenge(
+    buffer: *mut Frac<EF>,
+    size: usize,
+    real_len: usize,
+    logical_len: usize,
+    r_dev: *const EF,
+    alpha: EF,
+    stream: cudaStream_t,
+) -> Result<(), CudaError> {
+    debug_assert_eq!(
+        real_len, logical_len,
+        "virtual compact folds must use an out-of-place destination"
+    );
+    debug_assert!(!r_dev.is_null());
+    CudaError::from_result(_frac_fold_fpext_columns_dev_challenge(
+        buffer,
+        buffer,
+        size,
+        real_len,
+        logical_len,
+        r_dev,
         alpha,
         stream,
     ))
@@ -884,6 +1119,49 @@ pub unsafe fn frac_compute_round_and_fold(
     ))
 }
 
+/// Device-challenge variant of [`frac_compute_round_and_fold`], taking raw device
+/// pointers: `lambda` and `r_prev` are read on-device from `lambda_dev` / `r_prev_dev`
+/// (graph-IR path). `alpha` stays a host value. `eq_low_cap` = 2^low_n for the eq layer
+/// pointers passed in, which must have max_n = log2(src_pq_size / 4).
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn frac_compute_round_and_fold_dev_challenge(
+    eq_xi_low: *const EF,
+    eq_xi_high: *const EF,
+    src_pq_buffer: *const Frac<EF>,
+    dst_pq_buffer: *mut Frac<EF>,
+    src_pq_size: usize,
+    real_len: usize,
+    logical_len: usize,
+    eq_low_cap: usize,
+    lambda_dev: *const EF,
+    r_prev_dev: *const EF,
+    alpha: EF,
+    out_device: *mut EF,
+    tmp_block_sums: *mut EF,
+    stream: cudaStream_t,
+) -> Result<(), CudaError> {
+    debug_assert!(eq_low_cap.is_power_of_two());
+    debug_assert!(src_pq_size > 2, "src_pq_size must be > 2");
+    debug_assert!(!lambda_dev.is_null());
+    debug_assert!(!r_prev_dev.is_null());
+    CudaError::from_result(_frac_compute_round_and_fold_dev_challenge(
+        eq_xi_low,
+        eq_xi_high,
+        src_pq_buffer,
+        dst_pq_buffer,
+        src_pq_size,
+        real_len,
+        logical_len,
+        eq_low_cap,
+        lambda_dev,
+        r_prev_dev,
+        alpha,
+        out_device,
+        tmp_block_sums,
+        stream,
+    ))
+}
+
 /// In-place fused compute round + fold kernel. See [`frac_compute_round_and_fold`] for details.
 ///
 /// Uses a dedicated in-place kernel that doesn't have `__restrict__` on the pq pointer,
@@ -948,6 +1226,51 @@ pub unsafe fn frac_compute_round_and_fold_inplace(
     ))
 }
 
+/// Device-challenge variant of [`frac_compute_round_and_fold_inplace`], taking raw
+/// device pointers: `lambda` and `r_prev` are read on-device from `lambda_dev` /
+/// `r_prev_dev` (graph-IR path). `alpha` stays a host value. `eq_low_cap` = 2^low_n for
+/// the eq layer pointers passed in, which must have max_n = log2(src_pq_size / 4).
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn frac_compute_round_and_fold_inplace_dev_challenge(
+    eq_xi_low: *const EF,
+    eq_xi_high: *const EF,
+    pq_buffer: *mut Frac<EF>,
+    src_pq_size: usize,
+    real_len: usize,
+    logical_len: usize,
+    dst_real_len: usize,
+    dst_logical_len: usize,
+    eq_low_cap: usize,
+    lambda_dev: *const EF,
+    r_prev_dev: *const EF,
+    alpha: EF,
+    out_device: *mut EF,
+    tmp_block_sums: *mut EF,
+    stream: cudaStream_t,
+) -> Result<(), CudaError> {
+    debug_assert!(eq_low_cap.is_power_of_two());
+    debug_assert!(src_pq_size > 2, "src_pq_size must be > 2");
+    debug_assert!(!lambda_dev.is_null());
+    debug_assert!(!r_prev_dev.is_null());
+    CudaError::from_result(_frac_compute_round_and_fold_inplace_dev_challenge(
+        eq_xi_low,
+        eq_xi_high,
+        pq_buffer,
+        src_pq_size,
+        real_len,
+        logical_len,
+        dst_real_len,
+        dst_logical_len,
+        eq_low_cap,
+        lambda_dev,
+        r_prev_dev,
+        alpha,
+        out_device,
+        tmp_block_sums,
+        stream,
+    ))
+}
+
 #[allow(clippy::too_many_arguments)]
 pub unsafe fn frac_precompute_m_build_raw(
     pq: *const Frac<EF>,
@@ -980,6 +1303,55 @@ pub unsafe fn frac_precompute_m_build_raw(
         w,
         lambda,
         r_prev,
+        alpha,
+        inline_fold,
+        eq_tail_low,
+        eq_tail_high,
+        eq_tail_low_cap,
+        tail_tile,
+        partial_out,
+        partial_len,
+        m_total,
+        stream,
+    ))
+}
+
+/// Device-challenge variant of [`frac_precompute_m_build_raw`]: `lambda` and
+/// `r_prev` are read on-device (graph-IR path). `alpha` stays a host value.
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn frac_precompute_m_build_dev_challenge_raw(
+    pq: *const Frac<EF>,
+    real_len: usize,
+    logical_len: usize,
+    rem_n: usize,
+    w: usize,
+    lambda_dev: *const EF,
+    r_prev_dev: *const EF,
+    alpha: EF,
+    inline_fold: bool,
+    eq_tail_low: *const EF,
+    eq_tail_high: *const EF,
+    eq_tail_low_cap: usize,
+    tail_tile: usize,
+    partial_out: *mut EF,
+    partial_len: usize,
+    m_total: *mut EF,
+    stream: cudaStream_t,
+) -> Result<(), CudaError> {
+    debug_assert!(rem_n > 0);
+    debug_assert!(w > 0 && w <= rem_n);
+    debug_assert!(eq_tail_low_cap.is_power_of_two());
+    debug_assert!(tail_tile > 0);
+    debug_assert!(!lambda_dev.is_null());
+    debug_assert!(!r_prev_dev.is_null());
+    CudaError::from_result(_frac_precompute_m_build_dev_challenge(
+        pq,
+        real_len,
+        logical_len,
+        rem_n,
+        w,
+        lambda_dev,
+        r_prev_dev,
         alpha,
         inline_fold,
         eq_tail_low,

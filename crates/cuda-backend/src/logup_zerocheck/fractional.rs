@@ -68,7 +68,7 @@ impl FractionalInputSize {
 
 /// Describes which buffer operation to use for the next fused compute+fold round.
 #[derive(Debug, Clone, Copy)]
-enum BufferTarget {
+pub(super) enum BufferTarget {
     /// Out-of-place: layer → work_buffer
     LayerToWork,
     /// Out-of-place: work_buffer → layer
@@ -83,7 +83,7 @@ enum BufferTarget {
 ///
 /// This struct manages the decision of whether to use in-place or out-of-place
 /// (ping-pong) kernel variants based on buffer capacities and current data location.
-struct BufferScheduler {
+pub(super) struct BufferScheduler {
     /// True if data currently resides in work_buffer, false if in layer.
     data_in_work_buffer: bool,
     /// Maximum capacity of work_buffer in elements.
@@ -91,7 +91,7 @@ struct BufferScheduler {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum GkrRoundStrategy {
+pub(super) enum GkrRoundStrategy {
     FoldEval,
     PrecomputeM,
 }
@@ -103,7 +103,7 @@ const PRECOMPUTE_M_DEFAULT_TARGET_BLOCKS: usize = 1024;
 
 impl BufferScheduler {
     /// Creates a new scheduler with data initially in layer buffer.
-    fn new(work_buffer_cap: usize) -> Self {
+    pub(super) fn new(work_buffer_cap: usize) -> Self {
         Self {
             data_in_work_buffer: false,
             work_buffer_cap,
@@ -119,7 +119,11 @@ impl BufferScheduler {
     ///
     /// For last outer round: uses ping-pong when possible for __restrict__ optimization.
     /// For non-last outer rounds: preserves layer for tree revert operations.
-    fn next_target(&mut self, post_fold_size: usize, last_outer_round: bool) -> BufferTarget {
+    pub(super) fn next_target(
+        &mut self,
+        post_fold_size: usize,
+        last_outer_round: bool,
+    ) -> BufferTarget {
         let can_pingpong = self.can_pingpong(post_fold_size);
 
         if last_outer_round {
@@ -154,7 +158,7 @@ impl BufferScheduler {
     }
 
     /// Returns the buffer target for the final fold (no fused compute).
-    fn final_fold_target(&self, last_outer_round: bool) -> BufferTarget {
+    pub(super) fn final_fold_target(&self, last_outer_round: bool) -> BufferTarget {
         if last_outer_round {
             if self.data_in_work_buffer {
                 BufferTarget::InPlaceWork
@@ -172,14 +176,14 @@ impl BufferScheduler {
     }
 }
 
-fn precompute_m_enabled() -> bool {
+pub(super) fn precompute_m_enabled() -> bool {
     !matches!(
         env::var("SWIRL_CUDA_GKR_PRECOMPUTE_M"),
         Ok(val) if matches!(val.as_str(), "0" | "false" | "FALSE" | "no" | "NO")
     )
 }
 
-fn precompute_m_min_blocks_threshold() -> usize {
+pub(super) fn precompute_m_min_blocks_threshold() -> usize {
     env::var("SWIRL_CUDA_GKR_PRECOMPUTE_M_MIN_BLOCKS")
         .ok()
         .and_then(|val| val.parse::<usize>().ok())
@@ -187,12 +191,12 @@ fn precompute_m_min_blocks_threshold() -> usize {
         .max(1)
 }
 
-fn precompute_m_num_tail_blocks(rem_n: usize, w: usize, tail_tile: usize) -> usize {
+pub(super) fn precompute_m_num_tail_blocks(rem_n: usize, w: usize, tail_tile: usize) -> usize {
     let tail_n = rem_n - w;
     (1usize << tail_n).div_ceil(tail_tile)
 }
 
-fn precompute_m_target_blocks() -> usize {
+pub(super) fn precompute_m_target_blocks() -> usize {
     env::var("SWIRL_CUDA_GKR_PRECOMPUTE_M_TARGET_BLOCKS")
         .ok()
         .and_then(|val| val.parse::<usize>().ok())
@@ -200,21 +204,21 @@ fn precompute_m_target_blocks() -> usize {
         .max(1)
 }
 
-fn precompute_m_tail_tile_override() -> Option<usize> {
+pub(super) fn precompute_m_tail_tile_override() -> Option<usize> {
     env::var("SWIRL_CUDA_GKR_PRECOMPUTE_M_TAIL_TILE")
         .ok()
         .and_then(|val| val.parse::<usize>().ok())
         .map(|v| v.clamp(PRECOMPUTE_M_MIN_TAIL_TILE, PRECOMPUTE_M_TAIL_TILE))
 }
 
-fn precompute_m_min_n() -> usize {
+pub(super) fn precompute_m_min_n() -> usize {
     env::var("SWIRL_CUDA_GKR_PRECOMPUTE_M_MIN_N")
         .ok()
         .and_then(|val| val.parse::<usize>().ok())
         .unwrap_or(GKR_WINDOW_DEFAULT_MIN_N)
 }
 
-fn precompute_m_build_tail_tile(
+pub(super) fn precompute_m_build_tail_tile(
     rem_n: usize,
     w: usize,
     min_blocks_threshold: usize,
@@ -231,7 +235,7 @@ fn precompute_m_build_tail_tile(
     desired_tile.clamp(PRECOMPUTE_M_MIN_TAIL_TILE, PRECOMPUTE_M_TAIL_TILE)
 }
 
-fn choose_precompute_m_window_w(
+pub(super) fn choose_precompute_m_window_w(
     rem_n: usize,
     rounds_left: usize,
     min_blocks_threshold: usize,
@@ -253,7 +257,7 @@ fn choose_precompute_m_window_w(
     (precompute_m_num_tail_blocks(rem_n, w, tail_tile) >= min_blocks_threshold).then_some(w)
 }
 
-fn choose_round_strategy(
+pub(super) fn choose_round_strategy(
     round: usize,
     precompute_m_env: bool,
     precompute_m_min_blocks_threshold: usize,
@@ -284,7 +288,7 @@ fn choose_round_strategy(
     GkrRoundStrategy::PrecomputeM
 }
 
-fn eval_mle_table(points: &[EF], out: &mut [EF]) {
+pub(super) fn eval_mle_table(points: &[EF], out: &mut [EF]) {
     // w <= 5 so CPU builds are trivial; avoid GPU kernel/alloc overhead for tiny tables.
     let n = points.len();
     let size = 1usize << n;
@@ -357,7 +361,7 @@ fn bit_reverse_usize(value: usize, bits: usize) -> usize {
     }
 }
 
-fn virtual_padding_q(alpha: EF, subtree_len: usize) -> EF {
+pub(super) fn virtual_padding_q(alpha: EF, subtree_len: usize) -> EF {
     let mut q = alpha;
     let mut len = subtree_len;
     while len > 1 {
@@ -367,7 +371,7 @@ fn virtual_padding_q(alpha: EF, subtree_len: usize) -> EF {
     q
 }
 
-fn folded_virtual_support_len(source_support_len: usize) -> usize {
+pub(super) fn folded_virtual_support_len(source_support_len: usize) -> usize {
     if source_support_len == 0 {
         return 0;
     }
@@ -864,12 +868,6 @@ where
 
         let lambda = transcript.sample_ext();
 
-        let tmp_buffer_capacity =
-            unsafe { _frac_compute_round_temp_buffer_size((1 << round) as u32) } as usize;
-        if tmp_buffer_capacity > tmp_block_sums.len() {
-            tmp_block_sums = DeviceBuffer::<EF>::with_capacity_on(tmp_buffer_capacity, device_ctx);
-        }
-
         let last_outer_round = round == total_rounds - 1;
         debug_assert!(round > 0);
         let backend = choose_round_strategy(
@@ -880,6 +878,19 @@ where
             precompute_m_tail_tile_override,
             precompute_m_min_n,
         );
+
+        let mut tmp_buffer_capacity =
+            unsafe { _frac_compute_round_temp_buffer_size((1 << round) as u32) } as usize;
+        // The PrecomputeM arm reuses `tmp_block_sums` to stage `eq_r_window`
+        // (up to `2^(GKR_WINDOW_SIZE + 1)` entries). At small `round` (only
+        // reachable with env-lowered thresholds) the natural capacity can be
+        // smaller, so clamp it up to keep the reuse in bounds.
+        if matches!(backend, GkrRoundStrategy::PrecomputeM) {
+            tmp_buffer_capacity = tmp_buffer_capacity.max(1 << (GKR_WINDOW_SIZE + 1));
+        }
+        if tmp_buffer_capacity > tmp_block_sums.len() {
+            tmp_block_sums = DeviceBuffer::<EF>::with_capacity_on(tmp_buffer_capacity, device_ctx);
+        }
 
         // In round `j`, contains `s_{j-1}(r_{j-1})`. Starts with the sumcheck's sum claim.
         let (numer_claim, denom_claim) =

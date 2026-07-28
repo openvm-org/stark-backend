@@ -244,6 +244,9 @@ __device__ __forceinline__ void reduce_block_sums(
 
 // shared memory size requirement: max(num_warps,1) * sizeof(FpExt)
 // Computes s' polynomial evaluations at 1 and 2 (first eq term factored out).
+// DEV_CH: challenge lives in a device buffer (graph-IR path); the by-value lambda is ignored
+// and loaded from lambda_dev instead.
+template <bool DEV_CH>
 __global__ void compute_round_block_sum_kernel(
     const FpExt *__restrict__ eq_xi_low,
     const FpExt *__restrict__ eq_xi_high,
@@ -251,8 +254,12 @@ __global__ void compute_round_block_sum_kernel(
     uint32_t num_x,
     uint32_t log_eq_low_cap,
     FpExt lambda,
+    const FpExt *__restrict__ lambda_dev,
     FpExt *__restrict__ block_sums // Output: [gridDim.x][2]
 ) {
+    if constexpr (DEV_CH) {
+        lambda = *lambda_dev;
+    }
     extern __shared__ FpExt shared[];
     const uint32_t pq_size = 2 * num_x;
 
@@ -308,6 +315,8 @@ __global__ void compute_round_block_sum_kernel(
 // Pairs (idx, idx+quarter) and (idx+half, idx+3*quarter),
 // writes results to dst[idx] and dst[idx+quarter].
 // Safe for src == dst (in-place) because each thread reads before writing to the same index.
+// DEV_CH: r is ignored and loaded from r_dev instead (graph-IR path).
+template <bool DEV_CH>
 __global__ void fold_ef_columns_kernel(
     const FracExt *src,
     FracExt *dst,
@@ -315,8 +324,12 @@ __global__ void fold_ef_columns_kernel(
     uint32_t real_len,
     uint32_t logical_len,
     FpExt r,
+    const FpExt *r_dev,
     FpExt alpha
 ) {
+    if constexpr (DEV_CH) {
+        r = *r_dev;
+    }
     uint32_t quarter = size >> 2;
     uint32_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= quarter) {
@@ -357,6 +370,9 @@ __global__ void fold_ef_columns_kernel(
 // immediately to reduce live register ranges.
 //
 // shared memory size requirement: max(num_warps,1) * sizeof(FpExt)
+// DEV_CH: lambda/r_prev are ignored and loaded from lambda_dev/r_prev_dev instead
+// (graph-IR path).
+template <bool DEV_CH>
 __global__ void compute_round_and_fold_kernel(
     const FpExt *__restrict__ eq_xi_low,
     const FpExt *__restrict__ eq_xi_high,
@@ -367,10 +383,16 @@ __global__ void compute_round_and_fold_kernel(
     uint32_t log_eq_low_cap,
     FpExt lambda,
     FpExt r_prev,                        // Previous round's challenge for folding
+    const FpExt *__restrict__ lambda_dev,
+    const FpExt *__restrict__ r_prev_dev,
     FpExt alpha,
     FpExt *__restrict__ block_sums,      // Output: [gridDim.x * 2]
     FracExt *__restrict__ dst_pq         // Post-fold buffer (pq_size FracExt)
 ) {
+    if constexpr (DEV_CH) {
+        lambda = *lambda_dev;
+        r_prev = *r_prev_dev;
+    }
     extern __shared__ FpExt shared[];
     const uint32_t pq_size = 2 * num_x;
     const uint32_t src_active_size = pq_size << 1;
@@ -466,6 +488,9 @@ __global__ void compute_round_and_fold_kernel(
 // NOTE: No __restrict__ on pq pointer since we read and write to the same buffer.
 //
 // shared memory size requirement: max(num_warps,1) * sizeof(FpExt)
+// DEV_CH: lambda/r_prev are ignored and loaded from lambda_dev/r_prev_dev instead
+// (graph-IR path).
+template <bool DEV_CH>
 __global__ void compute_round_and_fold_inplace_kernel(
     const FpExt *__restrict__ eq_xi_low,
     const FpExt *__restrict__ eq_xi_high,
@@ -478,9 +503,15 @@ __global__ void compute_round_and_fold_inplace_kernel(
     uint32_t log_eq_low_cap,
     FpExt lambda,
     FpExt r_prev,                        // Previous round's challenge for folding
+    const FpExt *__restrict__ lambda_dev,
+    const FpExt *__restrict__ r_prev_dev,
     FpExt alpha,
     FpExt *__restrict__ block_sums       // Output: [gridDim.x * 2]
 ) {
+    if constexpr (DEV_CH) {
+        lambda = *lambda_dev;
+        r_prev = *r_prev_dev;
+    }
     extern __shared__ FpExt shared[];
     const uint32_t pq_size = 2 * num_x;
     const uint32_t src_active_size = pq_size << 1;
@@ -640,6 +671,8 @@ __global__ void compute_round_and_fold_inplace_kernel(
 //   - For idx in [0, num_x/2), these cover [0, half) completely
 //
 // shared memory size requirement: max(num_warps,1) * sizeof(FpExt)
+// DEV_CH: lambda is ignored and loaded from lambda_dev instead (graph-IR path).
+template <bool DEV_CH>
 __global__ void compute_round_and_revert_kernel(
     const FpExt *__restrict__ eq_xi_low,
     const FpExt *__restrict__ eq_xi_high,
@@ -649,9 +682,13 @@ __global__ void compute_round_and_revert_kernel(
     uint32_t logical_len,
     uint32_t log_eq_low_cap,
     FpExt lambda,
+    const FpExt *__restrict__ lambda_dev,
     FpExt alpha,
     FpExt *__restrict__ block_sums       // Output: [gridDim.x * 2]
 ) {
+    if constexpr (DEV_CH) {
+        lambda = *lambda_dev;
+    }
     extern __shared__ FpExt shared[];
     const uint32_t pq_size = 2 * num_x;
     const uint32_t half = pq_size >> 1;     // pq_size / 2
@@ -767,7 +804,9 @@ constexpr uint32_t PRECOMPUTE_M_TAIL_BATCH = 16;
 // Each block covers a range of tail points [b_start, b_end) and computes a full M block.
 // Uses 2D blocks (m,m) where each thread owns one (u,v) M-matrix entry.
 // Shared memory uses +1 padding on the m-dimension stride to avoid bank conflicts.
-template <bool inline_fold, uint32_t W>
+// When DEV_CH, lambda / r_prev are read on-device from lambda_dev / r_prev_dev
+// (graph-IR path) and the by-value params are ignored.
+template <bool inline_fold, bool DEV_CH, uint32_t W>
 __global__ void precompute_m_build_partial_kernel(
     const FracExt *__restrict__ pq,
     uint32_t real_len,
@@ -776,12 +815,20 @@ __global__ void precompute_m_build_partial_kernel(
     FpExt lambda,
     FpExt r_prev,            // challenge for the inline fold (only used when inline_fold=true)
     FpExt alpha,
+    const FpExt *__restrict__ lambda_dev,
+    const FpExt *__restrict__ r_prev_dev,
     const FpExt *__restrict__ eq_tail_low,
     const FpExt *__restrict__ eq_tail_high,
     uint32_t log_eq_tail_low_cap,
     uint32_t tail_tile,
     FpExt *__restrict__ partial_out
 ) {
+    if constexpr (DEV_CH) {
+        lambda = *lambda_dev;
+        if constexpr (inline_fold) {
+            r_prev = *r_prev_dev;
+        }
+    }
     constexpr uint32_t m = 1u << W;
     uint32_t u = threadIdx.y;
     uint32_t v = threadIdx.x;
@@ -894,7 +941,7 @@ __global__ void precompute_m_build_partial_kernel(
     partial_out[blockIdx.x * (m * m) + u * m + v] = acc;
 }
 
-template <bool inline_fold, uint32_t W>
+template <bool inline_fold, bool DEV_CH, uint32_t W>
 inline void launch_precompute_m_build_partial_kernel(
     dim3 grid,
     const FracExt *pq,
@@ -904,6 +951,8 @@ inline void launch_precompute_m_build_partial_kernel(
     FpExt lambda,
     FpExt r_prev,
     FpExt alpha,
+    const FpExt *lambda_dev,
+    const FpExt *r_prev_dev,
     const FpExt *eq_tail_low,
     const FpExt *eq_tail_high,
     uint32_t log_eq_tail_low_cap,
@@ -916,7 +965,7 @@ inline void launch_precompute_m_build_partial_kernel(
     constexpr uint32_t sh_stride = m + 1;  // +1 padding to match kernel
     size_t shmem_bytes =
         (4 * sh_stride * PRECOMPUTE_M_TAIL_BATCH + PRECOMPUTE_M_TAIL_BATCH) * sizeof(FpExt);
-    precompute_m_build_partial_kernel<inline_fold, W><<<grid, block, shmem_bytes, stream>>>(
+    precompute_m_build_partial_kernel<inline_fold, DEV_CH, W><<<grid, block, shmem_bytes, stream>>>(
         pq,
         real_len,
         logical_len,
@@ -924,6 +973,8 @@ inline void launch_precompute_m_build_partial_kernel(
         lambda,
         r_prev,
         alpha,
+        lambda_dev,
+        r_prev_dev,
         eq_tail_low,
         eq_tail_high,
         log_eq_tail_low_cap,
@@ -932,7 +983,7 @@ inline void launch_precompute_m_build_partial_kernel(
     );
 }
 
-template <bool inline_fold>
+template <bool inline_fold, bool DEV_CH>
 inline int launch_precompute_m_build_partial_dispatch(
     uint32_t w,
     dim3 grid,
@@ -943,6 +994,8 @@ inline int launch_precompute_m_build_partial_dispatch(
     FpExt lambda,
     FpExt r_prev,
     FpExt alpha,
+    const FpExt *lambda_dev,
+    const FpExt *r_prev_dev,
     const FpExt *eq_tail_low,
     const FpExt *eq_tail_high,
     uint32_t log_eq_tail_low_cap,
@@ -952,14 +1005,15 @@ inline int launch_precompute_m_build_partial_dispatch(
 ) {
     using LauncherFn = void (*)(
         dim3, const FracExt *, uint32_t, uint32_t, uint32_t, FpExt, FpExt, FpExt,
+        const FpExt *, const FpExt *,
         const FpExt *, const FpExt *, uint32_t, uint32_t, FpExt *, cudaStream_t
     );
     static constexpr LauncherFn launchers[] = {
-        &launch_precompute_m_build_partial_kernel<inline_fold, 1>,
-        &launch_precompute_m_build_partial_kernel<inline_fold, 2>,
-        &launch_precompute_m_build_partial_kernel<inline_fold, 3>,
-        &launch_precompute_m_build_partial_kernel<inline_fold, 4>,
-        &launch_precompute_m_build_partial_kernel<inline_fold, 5>,
+        &launch_precompute_m_build_partial_kernel<inline_fold, DEV_CH, 1>,
+        &launch_precompute_m_build_partial_kernel<inline_fold, DEV_CH, 2>,
+        &launch_precompute_m_build_partial_kernel<inline_fold, DEV_CH, 3>,
+        &launch_precompute_m_build_partial_kernel<inline_fold, DEV_CH, 4>,
+        &launch_precompute_m_build_partial_kernel<inline_fold, DEV_CH, 5>,
     };
 
     constexpr uint32_t min_w = 1;
@@ -978,6 +1032,8 @@ inline int launch_precompute_m_build_partial_dispatch(
         lambda,
         r_prev,
         alpha,
+        lambda_dev,
+        r_prev_dev,
         eq_tail_low,
         eq_tail_high,
         log_eq_tail_low_cap,
@@ -1333,6 +1389,15 @@ extern "C" uint32_t _frac_compute_round_temp_buffer_size(uint32_t num_x) {
     return grid.x * GKR_SP_DEG;
 }
 
+// Host-safe zero FpExt for the unused by-value challenge slots of the
+// _dev_challenge launchers: FpExt only has __device__ constructors, so we
+// materialize it from zeroed bytes via the implicit (host+device) copy ctor.
+// The value is never read when DEV_CH is true.
+static inline FpExt host_dummy_fpext() {
+    alignas(FpExt) unsigned char bytes[sizeof(FpExt)] = {};
+    return *reinterpret_cast<FpExt *>(bytes);
+}
+
 inline int final_reduce_block_sums(FpExt *tmp_block_sums, FpExt *out, uint32_t num_blocks, cudaStream_t stream) {
     auto [unused_grid, reduce_block] = kernel_launch_params(num_blocks);
     (void)unused_grid;
@@ -1341,6 +1406,43 @@ inline int final_reduce_block_sums(FpExt *tmp_block_sums, FpExt *out, uint32_t n
     sumcheck::static_final_reduce_block_sums<GKR_SP_DEG>
         <<<GKR_SP_DEG, reduce_block, reduce_shmem, stream>>>(tmp_block_sums, out, num_blocks);
     return CHECK_KERNEL();
+}
+
+template <bool DEV_CH>
+static int frac_compute_round_impl(
+    const FpExt *eq_xi_low,
+    const FpExt *eq_xi_high,
+    const FracExt *pq_buffer,
+    size_t num_x,
+    size_t eq_low_cap,
+    FpExt lambda,
+    const FpExt *lambda_dev,
+    FpExt *out,           // Output: [d=2] final results
+    FpExt *tmp_block_sums, // Temporary buffer: [gridDim.x * d]
+    cudaStream_t stream
+) {
+    assert(num_x > 1);
+
+    auto [grid, block] = frac_compute_round_launch_params(num_x);
+    size_t shmem_bytes = div_ceil(block.x, WARP_SIZE) * sizeof(FpExt);
+
+    // Launch main kernel - writes to tmp_block_sums
+    compute_round_block_sum_kernel<DEV_CH><<<grid, block, shmem_bytes, stream>>>(
+        eq_xi_low,
+        eq_xi_high,
+        pq_buffer,
+        (uint32_t)num_x,
+        __builtin_ctz((uint32_t)eq_low_cap),
+        lambda,
+        lambda_dev,
+        tmp_block_sums
+    );
+    int err = CHECK_KERNEL();
+    if (err != 0)
+        return err;
+
+    // Launch final reduction kernel - reads from tmp_block_sums, writes to output.
+    return final_reduce_block_sums(tmp_block_sums, out, grid.x, stream);
 }
 
 extern "C" int _frac_compute_round(
@@ -1354,31 +1456,75 @@ extern "C" int _frac_compute_round(
     FpExt *tmp_block_sums, // Temporary buffer: [gridDim.x * d]
     cudaStream_t stream
 ) {
+    return frac_compute_round_impl<false>(
+        eq_xi_low, eq_xi_high, pq_buffer, num_x, eq_low_cap,
+        lambda, nullptr, out, tmp_block_sums, stream
+    );
+}
+
+// Device-challenge variant: lambda is read on-device from a device buffer (graph-IR path).
+extern "C" int _frac_compute_round_dev_challenge(
+    const FpExt *eq_xi_low,
+    const FpExt *eq_xi_high,
+    const FracExt *pq_buffer,
+    size_t num_x,
+    size_t eq_low_cap,
+    const FpExt *lambda_dev,
+    FpExt *out,           // Output: [d=2] final results
+    FpExt *tmp_block_sums, // Temporary buffer: [gridDim.x * d]
+    cudaStream_t stream
+) {
+    return frac_compute_round_impl<true>(
+        eq_xi_low, eq_xi_high, pq_buffer, num_x, eq_low_cap,
+        host_dummy_fpext(), lambda_dev, out, tmp_block_sums, stream
+    );
+}
+
+// Fused compute round + tree layer revert launcher.
+// Combines frac_build_tree_layer(revert=true) with compute_round for the first inner round.
+template <bool DEV_CH>
+static int frac_compute_round_and_revert_impl(
+    const FpExt *eq_xi_low,
+    const FpExt *eq_xi_high,
+    FracExt *layer,           // Tree layer buffer (modified in-place for revert)
+    size_t num_x,
+    size_t real_len,
+    size_t logical_len,
+    size_t eq_low_cap,
+    FpExt lambda,
+    const FpExt *lambda_dev,
+    FpExt alpha,
+    FpExt *out,               // Output: [d=2] final results
+    FpExt *tmp_block_sums,     // Temporary buffer: [gridDim.x * d]
+    cudaStream_t stream
+) {
     assert(num_x > 1);
 
     auto [grid, block] = frac_compute_round_launch_params(num_x);
     size_t shmem_bytes = div_ceil(block.x, WARP_SIZE) * sizeof(FpExt);
 
-    // Launch main kernel - writes to tmp_block_sums
-    compute_round_block_sum_kernel<<<grid, block, shmem_bytes, stream>>>(
+    // Launch fused revert + compute kernel
+    compute_round_and_revert_kernel<DEV_CH><<<grid, block, shmem_bytes, stream>>>(
         eq_xi_low,
         eq_xi_high,
-        pq_buffer,
+        layer,
         (uint32_t)num_x,
+        (uint32_t)real_len,
+        (uint32_t)logical_len,
         __builtin_ctz((uint32_t)eq_low_cap),
         lambda,
+        lambda_dev,
+        alpha,
         tmp_block_sums
     );
     int err = CHECK_KERNEL();
     if (err != 0)
         return err;
 
-    // Launch final reduction kernel - reads from tmp_block_sums, writes to output.
+    // Launch final reduction kernel.
     return final_reduce_block_sums(tmp_block_sums, out, grid.x, stream);
 }
 
-// Fused compute round + tree layer revert launcher.
-// Combines frac_build_tree_layer(revert=true) with compute_round for the first inner round.
 extern "C" int _frac_compute_round_and_revert(
     const FpExt *eq_xi_low,
     const FpExt *eq_xi_high,
@@ -1393,35 +1539,90 @@ extern "C" int _frac_compute_round_and_revert(
     FpExt *tmp_block_sums,     // Temporary buffer: [gridDim.x * d]
     cudaStream_t stream
 ) {
-    assert(num_x > 1);
-
-    auto [grid, block] = frac_compute_round_launch_params(num_x);
-    size_t shmem_bytes = div_ceil(block.x, WARP_SIZE) * sizeof(FpExt);
-
-    // Launch fused revert + compute kernel
-    compute_round_and_revert_kernel<<<grid, block, shmem_bytes, stream>>>(
-        eq_xi_low,
-        eq_xi_high,
-        layer,
-        (uint32_t)num_x,
-        (uint32_t)real_len,
-        (uint32_t)logical_len,
-        __builtin_ctz((uint32_t)eq_low_cap),
-        lambda,
-        alpha,
-        tmp_block_sums
+    return frac_compute_round_and_revert_impl<false>(
+        eq_xi_low, eq_xi_high, layer, num_x, real_len, logical_len, eq_low_cap,
+        lambda, nullptr, alpha, out, tmp_block_sums, stream
     );
-    int err = CHECK_KERNEL();
-    if (err != 0)
-        return err;
+}
 
-    // Launch final reduction kernel.
-    return final_reduce_block_sums(tmp_block_sums, out, grid.x, stream);
+// Device-challenge variant: lambda is read on-device from a device buffer (graph-IR path).
+// Alpha stays a host value (resolved before graph build).
+extern "C" int _frac_compute_round_and_revert_dev_challenge(
+    const FpExt *eq_xi_low,
+    const FpExt *eq_xi_high,
+    FracExt *layer,           // Tree layer buffer (modified in-place for revert)
+    size_t num_x,
+    size_t real_len,
+    size_t logical_len,
+    size_t eq_low_cap,
+    const FpExt *lambda_dev,
+    FpExt alpha,
+    FpExt *out,               // Output: [d=2] final results
+    FpExt *tmp_block_sums,     // Temporary buffer: [gridDim.x * d]
+    cudaStream_t stream
+) {
+    return frac_compute_round_and_revert_impl<true>(
+        eq_xi_low, eq_xi_high, layer, num_x, real_len, logical_len, eq_low_cap,
+        host_dummy_fpext(), lambda_dev, alpha, out, tmp_block_sums, stream
+    );
 }
 
 // Fused compute round + fold launcher.
 // src_pq_size is the pre-fold buffer size (2*pq_size).
 // Post-fold: num_x = pq_size / 2 = src_pq_size / 4.
+template <bool DEV_CH>
+static int frac_compute_round_and_fold_impl(
+    const FpExt *eq_xi_low,
+    const FpExt *eq_xi_high,
+    const FracExt *src_pq_buffer,
+    FracExt *dst_pq_buffer,
+    size_t src_pq_size,           // Pre-fold size in FracExt
+    size_t real_len,
+    size_t logical_len,
+    size_t eq_low_cap,
+    FpExt lambda,
+    FpExt r_prev,
+    const FpExt *lambda_dev,
+    const FpExt *r_prev_dev,
+    FpExt alpha,
+    FpExt *out,                   // Output: [d=2] final results
+    FpExt *tmp_block_sums,         // Temporary buffer: [gridDim.x * d]
+    cudaStream_t stream
+) {
+    assert(src_pq_size > 2);
+    // Post-fold sizes
+    size_t pq_size = src_pq_size >> 1;
+    size_t num_x = pq_size >> 1;
+    assert(num_x > 0);
+
+    auto [grid, block] = frac_compute_round_launch_params(num_x);
+    size_t shmem_bytes = div_ceil(block.x, WARP_SIZE) * sizeof(FpExt);
+
+    // Launch fused kernel - writes to tmp_block_sums and dst_pq_buffer
+    compute_round_and_fold_kernel<DEV_CH><<<grid, block, shmem_bytes, stream>>>(
+        eq_xi_low,
+        eq_xi_high,
+        src_pq_buffer,
+        (uint32_t)num_x,
+        (uint32_t)real_len,
+        (uint32_t)logical_len,
+        __builtin_ctz((uint32_t)eq_low_cap),
+        lambda,
+        r_prev,
+        lambda_dev,
+        r_prev_dev,
+        alpha,
+        tmp_block_sums,
+        dst_pq_buffer
+    );
+    int err = CHECK_KERNEL();
+    if (err != 0)
+        return err;
+
+    // Launch final reduction kernel - reads from tmp_block_sums, writes to output.
+    return final_reduce_block_sums(tmp_block_sums, out, grid.x, stream);
+}
+
 extern "C" int _frac_compute_round_and_fold(
     const FpExt *eq_xi_low,
     const FpExt *eq_xi_high,
@@ -1438,6 +1639,61 @@ extern "C" int _frac_compute_round_and_fold(
     FpExt *tmp_block_sums,         // Temporary buffer: [gridDim.x * d]
     cudaStream_t stream
 ) {
+    return frac_compute_round_and_fold_impl<false>(
+        eq_xi_low, eq_xi_high, src_pq_buffer, dst_pq_buffer, src_pq_size,
+        real_len, logical_len, eq_low_cap,
+        lambda, r_prev, nullptr, nullptr, alpha, out, tmp_block_sums, stream
+    );
+}
+
+// Device-challenge variant: lambda and r_prev are read on-device from device buffers
+// (graph-IR path). Alpha stays a host value (resolved before graph build).
+extern "C" int _frac_compute_round_and_fold_dev_challenge(
+    const FpExt *eq_xi_low,
+    const FpExt *eq_xi_high,
+    const FracExt *src_pq_buffer,
+    FracExt *dst_pq_buffer,
+    size_t src_pq_size,           // Pre-fold size in FracExt
+    size_t real_len,
+    size_t logical_len,
+    size_t eq_low_cap,
+    const FpExt *lambda_dev,
+    const FpExt *r_prev_dev,
+    FpExt alpha,
+    FpExt *out,                   // Output: [d=2] final results
+    FpExt *tmp_block_sums,         // Temporary buffer: [gridDim.x * d]
+    cudaStream_t stream
+) {
+    return frac_compute_round_and_fold_impl<true>(
+        eq_xi_low, eq_xi_high, src_pq_buffer, dst_pq_buffer, src_pq_size,
+        real_len, logical_len, eq_low_cap,
+        host_dummy_fpext(), host_dummy_fpext(), lambda_dev, r_prev_dev, alpha, out, tmp_block_sums, stream
+    );
+}
+
+// Fused compute round + fold launcher (IN-PLACE version).
+// src_pq_size is the pre-fold buffer size (2*pq_size).
+// Post-fold: num_x = pq_size / 2 = src_pq_size / 4.
+template <bool DEV_CH>
+static int frac_compute_round_and_fold_inplace_impl(
+    const FpExt *eq_xi_low,
+    const FpExt *eq_xi_high,
+    FracExt *pq_buffer,           // In-place: reads src_pq_size, writes pq_size
+    size_t src_pq_size,           // Pre-fold size in FracExt
+    size_t real_len,
+    size_t logical_len,
+    size_t dst_real_len,
+    size_t dst_logical_len,
+    size_t eq_low_cap,
+    FpExt lambda,
+    FpExt r_prev,
+    const FpExt *lambda_dev,
+    const FpExt *r_prev_dev,
+    FpExt alpha,
+    FpExt *out,                   // Output: [d=2] final results
+    FpExt *tmp_block_sums,         // Temporary buffer: [gridDim.x * d]
+    cudaStream_t stream
+) {
     assert(src_pq_size > 2);
     // Post-fold sizes
     size_t pq_size = src_pq_size >> 1;
@@ -1447,20 +1703,23 @@ extern "C" int _frac_compute_round_and_fold(
     auto [grid, block] = frac_compute_round_launch_params(num_x);
     size_t shmem_bytes = div_ceil(block.x, WARP_SIZE) * sizeof(FpExt);
 
-    // Launch fused kernel - writes to tmp_block_sums and dst_pq_buffer
-    compute_round_and_fold_kernel<<<grid, block, shmem_bytes, stream>>>(
+    // Launch fused in-place kernel - writes to tmp_block_sums and pq_buffer (first half)
+    compute_round_and_fold_inplace_kernel<DEV_CH><<<grid, block, shmem_bytes, stream>>>(
         eq_xi_low,
         eq_xi_high,
-        src_pq_buffer,
+        pq_buffer,
         (uint32_t)num_x,
         (uint32_t)real_len,
         (uint32_t)logical_len,
+        (uint32_t)dst_real_len,
+        (uint32_t)dst_logical_len,
         __builtin_ctz((uint32_t)eq_low_cap),
         lambda,
         r_prev,
+        lambda_dev,
+        r_prev_dev,
         alpha,
-        tmp_block_sums,
-        dst_pq_buffer
+        tmp_block_sums
     );
     int err = CHECK_KERNEL();
     if (err != 0)
@@ -1470,9 +1729,6 @@ extern "C" int _frac_compute_round_and_fold(
     return final_reduce_block_sums(tmp_block_sums, out, grid.x, stream);
 }
 
-// Fused compute round + fold launcher (IN-PLACE version).
-// src_pq_size is the pre-fold buffer size (2*pq_size).
-// Post-fold: num_x = pq_size / 2 = src_pq_size / 4.
 extern "C" int _frac_compute_round_and_fold_inplace(
     const FpExt *eq_xi_low,
     const FpExt *eq_xi_high,
@@ -1490,40 +1746,41 @@ extern "C" int _frac_compute_round_and_fold_inplace(
     FpExt *tmp_block_sums,         // Temporary buffer: [gridDim.x * d]
     cudaStream_t stream
 ) {
-    assert(src_pq_size > 2);
-    // Post-fold sizes
-    size_t pq_size = src_pq_size >> 1;
-    size_t num_x = pq_size >> 1;
-    assert(num_x > 0);
-
-    auto [grid, block] = frac_compute_round_launch_params(num_x);
-    size_t shmem_bytes = div_ceil(block.x, WARP_SIZE) * sizeof(FpExt);
-
-    // Launch fused in-place kernel - writes to tmp_block_sums and pq_buffer (first half)
-    compute_round_and_fold_inplace_kernel<<<grid, block, shmem_bytes, stream>>>(
-        eq_xi_low,
-        eq_xi_high,
-        pq_buffer,
-        (uint32_t)num_x,
-        (uint32_t)real_len,
-        (uint32_t)logical_len,
-        (uint32_t)dst_real_len,
-        (uint32_t)dst_logical_len,
-        __builtin_ctz((uint32_t)eq_low_cap),
-        lambda,
-        r_prev,
-        alpha,
-        tmp_block_sums
+    return frac_compute_round_and_fold_inplace_impl<false>(
+        eq_xi_low, eq_xi_high, pq_buffer, src_pq_size,
+        real_len, logical_len, dst_real_len, dst_logical_len, eq_low_cap,
+        lambda, r_prev, nullptr, nullptr, alpha, out, tmp_block_sums, stream
     );
-    int err = CHECK_KERNEL();
-    if (err != 0)
-        return err;
-
-    // Launch final reduction kernel - reads from tmp_block_sums, writes to output.
-    return final_reduce_block_sums(tmp_block_sums, out, grid.x, stream);
 }
 
-extern "C" int _frac_precompute_m_build(
+// Device-challenge variant: lambda and r_prev are read on-device from device buffers
+// (graph-IR path). Alpha stays a host value (resolved before graph build).
+extern "C" int _frac_compute_round_and_fold_inplace_dev_challenge(
+    const FpExt *eq_xi_low,
+    const FpExt *eq_xi_high,
+    FracExt *pq_buffer,           // In-place: reads src_pq_size, writes pq_size
+    size_t src_pq_size,           // Pre-fold size in FracExt
+    size_t real_len,
+    size_t logical_len,
+    size_t dst_real_len,
+    size_t dst_logical_len,
+    size_t eq_low_cap,
+    const FpExt *lambda_dev,
+    const FpExt *r_prev_dev,
+    FpExt alpha,
+    FpExt *out,                   // Output: [d=2] final results
+    FpExt *tmp_block_sums,         // Temporary buffer: [gridDim.x * d]
+    cudaStream_t stream
+) {
+    return frac_compute_round_and_fold_inplace_impl<true>(
+        eq_xi_low, eq_xi_high, pq_buffer, src_pq_size,
+        real_len, logical_len, dst_real_len, dst_logical_len, eq_low_cap,
+        host_dummy_fpext(), host_dummy_fpext(), lambda_dev, r_prev_dev, alpha, out, tmp_block_sums, stream
+    );
+}
+
+template <bool DEV_CH>
+static int frac_precompute_m_build_impl(
     const FracExt *pq,
     size_t real_len,
     size_t logical_len,
@@ -1532,6 +1789,8 @@ extern "C" int _frac_precompute_m_build(
     FpExt lambda,
     FpExt r_prev,             // challenge for the inline fold (only used when inline_fold=true)
     FpExt alpha,
+    const FpExt *lambda_dev,
+    const FpExt *r_prev_dev,
     bool inline_fold,         // true: pq is unfolded (rem_n+1 vars), false: pq is already folded
     const FpExt *eq_tail_low,
     const FpExt *eq_tail_high,
@@ -1560,7 +1819,7 @@ extern "C" int _frac_precompute_m_build(
     uint32_t log_eq_tail_low_cap = __builtin_ctz((uint32_t)eq_tail_low_cap);
     int launch_err = 0;
     if (inline_fold) {
-        launch_err = launch_precompute_m_build_partial_dispatch<true>(
+        launch_err = launch_precompute_m_build_partial_dispatch<true, DEV_CH>(
             w_u32,
             grid,
             pq,
@@ -1570,6 +1829,8 @@ extern "C" int _frac_precompute_m_build(
             lambda,
             r_prev,
             alpha,
+            lambda_dev,
+            r_prev_dev,
             eq_tail_low,
             eq_tail_high,
             log_eq_tail_low_cap,
@@ -1578,7 +1839,7 @@ extern "C" int _frac_precompute_m_build(
             stream
         );
     } else {
-        launch_err = launch_precompute_m_build_partial_dispatch<false>(
+        launch_err = launch_precompute_m_build_partial_dispatch<false, DEV_CH>(
             w_u32,
             grid,
             pq,
@@ -1588,6 +1849,8 @@ extern "C" int _frac_precompute_m_build(
             lambda,
             r_prev,
             alpha,
+            lambda_dev,
+            r_prev_dev,
             eq_tail_low,
             eq_tail_high,
             log_eq_tail_low_cap,
@@ -1613,6 +1876,60 @@ extern "C" int _frac_precompute_m_build(
         m_total
     );
     return CHECK_KERNEL();
+}
+
+extern "C" int _frac_precompute_m_build(
+    const FracExt *pq,
+    size_t real_len,
+    size_t logical_len,
+    size_t rem_n,             // folded rem_n
+    size_t w,
+    FpExt lambda,
+    FpExt r_prev,             // challenge for the inline fold (only used when inline_fold=true)
+    FpExt alpha,
+    bool inline_fold,         // true: pq is unfolded (rem_n+1 vars), false: pq is already folded
+    const FpExt *eq_tail_low,
+    const FpExt *eq_tail_high,
+    size_t eq_tail_low_cap,
+    size_t tail_tile,
+    FpExt *partial_out,
+    size_t partial_len,
+    FpExt *m_total,
+    cudaStream_t stream
+) {
+    return frac_precompute_m_build_impl<false>(
+        pq, real_len, logical_len, rem_n, w, lambda, r_prev, alpha,
+        nullptr, nullptr, inline_fold, eq_tail_low, eq_tail_high,
+        eq_tail_low_cap, tail_tile, partial_out, partial_len, m_total, stream
+    );
+}
+
+// Device-challenge variant: lambda and r_prev are read on-device from device buffers
+// (graph-IR path). Alpha stays a host value (resolved before graph build).
+extern "C" int _frac_precompute_m_build_dev_challenge(
+    const FracExt *pq,
+    size_t real_len,
+    size_t logical_len,
+    size_t rem_n,             // folded rem_n
+    size_t w,
+    const FpExt *lambda_dev,
+    const FpExt *r_prev_dev,  // challenge for the inline fold (only read when inline_fold=true)
+    FpExt alpha,
+    bool inline_fold,         // true: pq is unfolded (rem_n+1 vars), false: pq is already folded
+    const FpExt *eq_tail_low,
+    const FpExt *eq_tail_high,
+    size_t eq_tail_low_cap,
+    size_t tail_tile,
+    FpExt *partial_out,
+    size_t partial_len,
+    FpExt *m_total,
+    cudaStream_t stream
+) {
+    return frac_precompute_m_build_impl<true>(
+        pq, real_len, logical_len, rem_n, w, host_dummy_fpext(), host_dummy_fpext(), alpha,
+        lambda_dev, r_prev_dev, inline_fold, eq_tail_low, eq_tail_high,
+        eq_tail_low_cap, tail_tile, partial_out, partial_len, m_total, stream
+    );
 }
 
 extern "C" int _frac_precompute_m_eval_round(
@@ -1679,6 +1996,36 @@ extern "C" int _frac_multifold(
 #undef DISPATCH_MULTIFOLD
 }
 
+template <bool DEV_CH>
+static int frac_fold_fpext_columns_impl(
+    const FracExt *src,
+    FracExt *dst,
+    size_t size,
+    size_t real_len,
+    size_t logical_len,
+    FpExt r,
+    const FpExt *r_dev,
+    FpExt alpha,
+    cudaStream_t stream
+) {
+    if (size <= 2) {
+        return 0;
+    }
+    uint32_t quarter = size >> 2;
+    auto [grid, block] = kernel_launch_params(quarter);
+    fold_ef_columns_kernel<DEV_CH><<<grid, block, 0, stream>>>(
+        src,
+        dst,
+        (uint32_t)size,
+        (uint32_t)real_len,
+        (uint32_t)logical_len,
+        r,
+        r_dev,
+        alpha
+    );
+    return CHECK_KERNEL();
+}
+
 extern "C" int _frac_fold_fpext_columns(
     const FracExt *src,
     FracExt *dst,
@@ -1689,21 +2036,26 @@ extern "C" int _frac_fold_fpext_columns(
     FpExt alpha,
     cudaStream_t stream
 ) {
-    if (size <= 2) {
-        return 0;
-    }
-    uint32_t quarter = size >> 2;
-    auto [grid, block] = kernel_launch_params(quarter);
-    fold_ef_columns_kernel<<<grid, block, 0, stream>>>(
-        src,
-        dst,
-        (uint32_t)size,
-        (uint32_t)real_len,
-        (uint32_t)logical_len,
-        r,
-        alpha
+    return frac_fold_fpext_columns_impl<false>(
+        src, dst, size, real_len, logical_len, r, nullptr, alpha, stream
     );
-    return CHECK_KERNEL();
+}
+
+// Device-challenge variant: r is read on-device from a device buffer (graph-IR path).
+// Alpha stays a host value (resolved before graph build).
+extern "C" int _frac_fold_fpext_columns_dev_challenge(
+    const FracExt *src,
+    FracExt *dst,
+    size_t size,
+    size_t real_len,
+    size_t logical_len,
+    const FpExt *r_dev,
+    FpExt alpha,
+    cudaStream_t stream
+) {
+    return frac_fold_fpext_columns_impl<true>(
+        src, dst, size, real_len, logical_len, host_dummy_fpext(), r_dev, alpha, stream
+    );
 }
 
 extern "C" int _frac_add_alpha(FracExt *data, size_t len, FpExt alpha, cudaStream_t stream) {

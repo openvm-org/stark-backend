@@ -712,16 +712,15 @@ mod tests {
     }
 
     fn f_to_bytes(f: F) -> [u8; 4] {
-        // BabyBear canonical u32 layout, little-endian, matches how kernels
-        // read/write buffers of ScalarType::BabyBear.
-        use p3_field::PrimeField32;
-        f.as_canonical_u32().to_le_bytes()
+        // Raw p3 `BabyBear` memory layout — Montgomery-encoded u32,
+        // little-endian. Matches the on-device encoding the DSL's
+        // Montgomery codegen reads/writes for `ScalarType::BabyBear`.
+        unsafe { std::mem::transmute::<F, [u8; 4]>(f) }
     }
 
     fn bytes_to_f(bytes: &[u8]) -> F {
         assert_eq!(bytes.len(), 4);
-        let u = u32::from_le_bytes(bytes.try_into().unwrap());
-        F::from_u32(u)
+        unsafe { std::ptr::read_unaligned(bytes.as_ptr() as *const F) }
     }
 
     /// Op kinds a test can sequence against both transcripts.

@@ -283,6 +283,49 @@ impl IRBuilder {
         self.bin(BinOp::Eq, a, b)
     }
 
+    /// `x & c` for a compile-time-known low-bit mask `c = (1 << k) - 1`.
+    /// Lowered to `x % (1 << k)` so it stays quasi-affine. `c == 0` folds to
+    /// the constant `0`; the full-`u32` mask folds to `x`. Panics on any
+    /// other constant (arbitrary masks have no quasi-affine equivalent).
+    pub fn and(&mut self, x: NodeId, c: usize) -> NodeId {
+        let c = c as u32;
+        if c == 0 {
+            return self.const_u32(0);
+        }
+        if c == u32::MAX {
+            return x;
+        }
+        assert!(
+            (c + 1).is_power_of_two(),
+            "and: constant {c:#x} is not `(1 << k) - 1`; only low-bit masks lower to quasi-affine form"
+        );
+        let m = self.const_u32(c + 1);
+        self.rem(x, m)
+    }
+
+    /// `x | c` under the precondition that `x & c == 0` (the caller
+    /// guarantees the bits set in `c` are zero in `x`) — equivalent to `x + c`
+    /// in that case, which is the emitted lowering. `c == 0` folds to `x`.
+    pub fn or(&mut self, x: NodeId, c: usize) -> NodeId {
+        let c = c as u32;
+        if c == 0 {
+            return x;
+        }
+        let k = self.const_u32(c);
+        self.add(x, k)
+    }
+
+    /// `x ^ c` under the same disjoint-bit precondition as [`Self::or`] — with
+    /// `x & c == 0`, `x ^ c == x + c`. `c == 0` folds to `x`.
+    pub fn xor(&mut self, x: NodeId, c: usize) -> NodeId {
+        let c = c as u32;
+        if c == 0 {
+            return x;
+        }
+        let k = self.const_u32(c);
+        self.add(x, k)
+    }
+
     /// `if cond then a else b` on scalars.
     pub fn select(&mut self, cond: NodeId, then_val: NodeId, else_val: NodeId) -> NodeId {
         self.intern(Node::Select {

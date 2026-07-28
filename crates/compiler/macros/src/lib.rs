@@ -29,9 +29,15 @@
 //!   `N` threads per block instead of the default;
 //! - `t[i, j, ...]` — tensor indexing;
 //! - `+ - * / % < <= ==` with the usual precedence;
+//! - `& ^ |` bitwise operators (in that precedence order, tighter than
+//!   comparisons and looser than `+ -`). RHS must be a constant `usize`
+//!   expression — an integer literal or a `#`-splice — and the whole
+//!   `lhs OP rhs` lowers to arithmetic ([`IRBuilder::and`] uses `%`, [`or`]
+//!   and [`xor`] use `+`) so the result stays quasi-affine;
 //! - `(a, b, ...)` — tuple; `[a, b, ...]` — pack (array literal);
 //! - `17` / `17u32` — u32 constant; `17bb` — BabyBear constant;
-//! - `#x` / `#(expr)` — u32 constant from a host Rust expression;
+//! - `#x` / `#(expr)` — u32 constant from a host Rust expression; the paren
+//!   form accepts any Rust expression (e.g. `#(i + f(j))`);
 //! - `foo(a, b)` — calls the Rust function `foo(builder, a, b)`: a function used with n arguments
 //!   must take n+1, the builder first. Identifier arguments are passed through verbatim (so host
 //!   values of any type can be forwarded); all other arguments are built as DSL expressions.
@@ -72,6 +78,15 @@ enum DslExpr {
         method: &'static str,
         lhs: Box<DslExpr>,
         rhs: Box<DslExpr>,
+    },
+    /// `lhs & c` / `lhs ^ c` / `lhs | c` where `c` is a host constant usize
+    /// expression. Lowered through `IRBuilder::and` / `or` / `xor`, which
+    /// pick an arithmetic equivalent so the whole expression stays
+    /// quasi-affine.
+    BitOp {
+        method: &'static str,
+        lhs: Box<DslExpr>,
+        rhs: Expr,
     },
     If {
         cond: Box<DslExpr>,
@@ -399,7 +414,11 @@ fn parse_qatom(input: ParseStream) -> syn::Result<QExpr> {
         let expr: Expr = if input.peek(syn::token::Paren) {
             let paren;
             parenthesized!(paren in input);
-            paren.parse()?
+            let e: Expr = paren.parse()?;
+            if !paren.is_empty() {
+                return Err(paren.error("unexpected tokens after splice expression"));
+            }
+            e
         } else {
             let ident: Ident = input.parse()?;
             syn::parse_quote!(#ident)
@@ -419,7 +438,7 @@ fn parse_qatom(input: ParseStream) -> syn::Result<QExpr> {
 }
 
 fn parse_cmp(input: ParseStream) -> syn::Result<DslExpr> {
-    let lhs = parse_add(input)?;
+    let lhs = parse_bit_or(input)?;
     let method = if input.peek(Token![<=]) {
         input.parse::<Token![<=]>()?;
         "le"
@@ -432,12 +451,92 @@ fn parse_cmp(input: ParseStream) -> syn::Result<DslExpr> {
     } else {
         return Ok(lhs);
     };
-    let rhs = parse_add(input)?;
+    let rhs = parse_bit_or(input)?;
     Ok(DslExpr::Bin {
         method,
         lhs: Box::new(lhs),
         rhs: Box::new(rhs),
     })
+}
+
+/// Bitwise `|`, looser than `^` and `&`. RHS is a constant `usize` expression.
+fn parse_bit_or(input: ParseStream) -> syn::Result<DslExpr> {
+    let mut lhs = parse_bit_xor(input)?;
+    while input.peek(Token![|]) && !input.peek(Token![||]) {
+        input.parse::<Token![|]>()?;
+        let rhs = parse_const_usize(input, '|')?;
+        lhs = DslExpr::BitOp {
+            method: "or",
+            lhs: Box::new(lhs),
+            rhs,
+        };
+    }
+    Ok(lhs)
+}
+
+/// Bitwise `^`, tighter than `|`, looser than `&`.
+fn parse_bit_xor(input: ParseStream) -> syn::Result<DslExpr> {
+    let mut lhs = parse_bit_and(input)?;
+    while input.peek(Token![^]) {
+        input.parse::<Token![^]>()?;
+        let rhs = parse_const_usize(input, '^')?;
+        lhs = DslExpr::BitOp {
+            method: "xor",
+            lhs: Box::new(lhs),
+            rhs,
+        };
+    }
+    Ok(lhs)
+}
+
+/// Bitwise `&`, tighter than `^` and `|`, looser than `+`.
+fn parse_bit_and(input: ParseStream) -> syn::Result<DslExpr> {
+    let mut lhs = parse_add(input)?;
+    while input.peek(Token![&]) && !input.peek(Token![&&]) {
+        input.parse::<Token![&]>()?;
+        let rhs = parse_const_usize(input, '&')?;
+        lhs = DslExpr::BitOp {
+            method: "and",
+            lhs: Box::new(lhs),
+            rhs,
+        };
+    }
+    Ok(lhs)
+}
+
+/// Parses the constant-`usize` RHS of a bitwise op: either an integer literal
+/// (any suffix except `bb`) or a `#`-splice (`#ident` or `#(expr)`). Any
+/// other form is rejected — the whole point of taking a constant on the RHS
+/// is that the lowering picks an arithmetic form based on `c`.
+fn parse_const_usize(input: ParseStream, op: char) -> syn::Result<Expr> {
+    if input.peek(Token![#]) {
+        input.parse::<Token![#]>()?;
+        if input.peek(syn::token::Paren) {
+            let paren;
+            parenthesized!(paren in input);
+            let e: Expr = paren.parse()?;
+            if !paren.is_empty() {
+                return Err(paren.error("unexpected tokens after splice expression"));
+            }
+            Ok(e)
+        } else {
+            let ident: Ident = input.parse()?;
+            Ok(syn::parse_quote!(#ident))
+        }
+    } else if input.peek(LitInt) {
+        let lit: LitInt = input.parse()?;
+        if lit.suffix() == "bb" {
+            return Err(syn::Error::new(
+                lit.span(),
+                format!("`{op}` RHS must be an integer constant, not a BabyBear literal"),
+            ));
+        }
+        Ok(syn::parse_quote!(#lit))
+    } else {
+        Err(input.error(&format!(
+            "`{op}` RHS must be an integer literal or a `#`-splice"
+        )))
+    }
 }
 
 fn parse_add(input: ParseStream) -> syn::Result<DslExpr> {
@@ -519,7 +618,11 @@ fn parse_atom(input: ParseStream) -> syn::Result<DslExpr> {
         let expr: Expr = if input.peek(syn::token::Paren) {
             let paren;
             parenthesized!(paren in input);
-            paren.parse()?
+            let e: Expr = paren.parse()?;
+            if !paren.is_empty() {
+                return Err(paren.error("unexpected tokens after splice expression"));
+            }
+            e
         } else {
             let ident: Ident = input.parse()?;
             syn::parse_quote!(#ident)
@@ -580,6 +683,14 @@ fn gen_expr(e: &DslExpr) -> TokenStream2 {
                 let __cc_l = #l;
                 let __cc_r = #r;
                 __cc_b.#m(__cc_l, __cc_r)
+            })
+        }
+        DslExpr::BitOp { method, lhs, rhs } => {
+            let m = format_ident!("{method}");
+            let l = gen_expr(lhs);
+            quote!({
+                let __cc_l = #l;
+                __cc_b.#m(__cc_l, (#rhs) as usize)
             })
         }
         DslExpr::If {

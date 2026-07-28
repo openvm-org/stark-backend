@@ -11,6 +11,18 @@ use crate::{
     kernel,
 };
 
+pub fn next_pow2_of_2(i: usize) -> usize {
+    if i == 0 {
+        return 1;
+    }
+    let j = 1 << i.ilog2();
+    if j < i {
+        j << 1
+    } else {
+        j
+    }
+}
+
 /// Poseidon2-16 BabyBear round constants and internal diagonal, canonical
 /// `u32` representation.
 #[derive(Clone, Debug)]
@@ -1047,6 +1059,42 @@ pub fn ntt_supra_module(log_n: usize, nthreads: usize, z_count: usize, coalesced
     }
 
     b.finish(format!("ntt_supra_{n}_t{nthreads}_z{z_count}"), prev)
+}
+
+pub fn ntt_supra_v2_module(log_n: usize, steps: &[usize]) -> Module {
+    assert!(log_n == steps.iter().sum());
+    assert!(steps.iter().all(|&s| s.is_power_of_two()));
+    let n = 1 << log_n;
+    let offset = 0;
+    let mut b = IRBuilder::new();
+    let mut poly = b.input("poly_in", ScalarType::BabyBear, vec![n]);
+    let twiddles = b.input("twiddles", ScalarType::BabyBear, vec![todo!()]);
+
+    let get_intermediate_roots = |b, x, y| -> NodeId { todo!() };
+
+    for s in steps {
+        let coalesced = offset == 0;
+        let diff_pow = 1 << (s - 1);
+        let inp_pow = 1 << offset;
+        let out_pow = 1 << (offset + s - 1);
+
+        let block_width = (1 << s) * z_count; // number of elems per block
+        let num_blocks = n / block_width;
+        let iterations = *s;
+        poly = kernel!(b,
+            #[grid(threads = 256)]
+            compute [num_blocks] |bid| {
+                let shared_slice = compute [block_width] |tid| {
+                    poly[bid * #block_width + tid]
+                };
+                let tiz = tid / #diff_pow * #diff_pow * #z_count + tid % #diff_pow;
+
+                // let (r0, r1) = get_intermediate_roots()
+                shared_slice
+            }
+        );
+    }
+    todo!()
 }
 
 /// Poseidon2-16 Merkle compression tree over `2^log_leaves` digests.

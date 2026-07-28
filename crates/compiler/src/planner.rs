@@ -17,7 +17,13 @@
 //! Both backends assume single-stream execution: nodes run sequentially and
 //! only stream ordering enforces read-after-write, so a buffer is alive
 //! from the earliest schedule time of any of its writers through the
-//! latest schedule time of any of its readers.
+//! latest schedule time of any of its accesses (reads or writes).
+//!
+//! Precedence between nodes follows classic versioned RAW/WAR/WAW
+//! serialization derived from node insertion order (see [`PlanCtx::edges`]):
+//! a reader is pinned between the writer whose version it reads and the
+//! next overwrite of the buffer, so in-place modification chains with
+//! interleaved snapshot reads schedule correctly.
 //!
 //! Feature-gated behind `planner` (currently both backends live in this
 //! module; only CP-SAT needs OR-Tools at link time).
@@ -55,13 +61,13 @@ impl Default for SchedulerMode {
 
 /// Read/write set for one graph node, as seen by the planner.
 ///
-/// This is the internal shape the CP-SAT model consumes: a node's `reads`
-/// contribute to `death[b]` of every read buffer, its `writes` contribute
-/// to `birth[b]` of every written buffer, and (writer, reader) pairs across
-/// different nodes become precedence edges. A buffer that is both read
-/// and written by the same node (e.g. an in-place modify, or a per-node
-/// scratch region) has `birth[b] = death[b] = t[n]` and thus a single
-/// time-step lifetime.
+/// This is the internal shape the planner backends consume: a node's
+/// `reads` and `writes` contribute to `death[b]` of every accessed buffer,
+/// its `writes` contribute to `birth[b]` of every written buffer, and
+/// versioned RAW/WAR/WAW pairs become precedence edges (see
+/// [`PlanCtx::edges`]). A buffer that is both read and written by the same
+/// node (e.g. an in-place modify, or a per-node scratch region) has
+/// `birth[b] = death[b] = t[n]` and thus a single time-step lifetime.
 #[derive(Debug, Default, Clone)]
 pub struct NodeAccess {
     pub reads: Vec<BufId>,
@@ -145,8 +151,8 @@ pub fn plan_raw(
 }
 
 /// Shared preprocessing built once and consumed by both scheduler
-/// backends: concrete sizes on the target device, per-buffer writer /
-/// reader lists, and the in-place-modifier set for each buffer.
+/// backends: concrete sizes on the target device and per-buffer writer /
+/// reader lists (ascending in node insertion order).
 struct PlanCtx {
     n_nodes: usize,
     n_bufs: usize,
@@ -158,10 +164,6 @@ struct PlanCtx {
     writers: Vec<Vec<usize>>,
     /// Per-buffer node indices that read it.
     readers: Vec<Vec<usize>>,
-    /// Per-buffer modifiers (both read and write the buffer). Modifiers of
-    /// the same buffer must be serialized in insertion order; see
-    /// [`PlanCtx::edges`].
-    modifiers: Vec<Vec<usize>>,
 }
 
 impl PlanCtx {
@@ -208,22 +210,6 @@ impl PlanCtx {
                 readers[b].push(n);
             }
         }
-        let modifiers: Vec<Vec<usize>> = (0..n_bufs)
-            .map(|b| {
-                let write_set: std::collections::BTreeSet<usize> = writes
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(n, bufs)| bufs.contains(&b).then_some(n))
-                    .collect();
-                reads
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(n, bufs)| {
-                        (bufs.contains(&b) && write_set.contains(&n)).then_some(n)
-                    })
-                    .collect()
-            })
-            .collect();
 
         Ok(Self {
             n_nodes,
@@ -233,7 +219,6 @@ impl PlanCtx {
             excluded,
             writers,
             readers,
-            modifiers,
         })
     }
 
@@ -243,29 +228,40 @@ impl PlanCtx {
         self.on_device[b] && self.sizes[b] > 0 && !self.excluded[b]
     }
 
-    /// Direct precedence edges implied by the read/write sets:
+    /// Direct precedence edges implied by the read/write sets, using node
+    /// insertion order to version each buffer (the graph is documented to
+    /// be built write-before-read, see `graph_ir.rs`):
     ///
-    /// - every `writer -> reader` of a buffer, unless both endpoints are in-place modifiers of that
-    ///   buffer (in which case the pair would be contradictory in both directions), and
-    /// - `M_i -> M_{i+1}` for each pair of consecutive modifiers of the same buffer (serialization
-    ///   by insertion order).
+    /// - **WAW**: consecutive writers of the same buffer are serialized in insertion order.
+    /// - **RAW**: a reader runs after the last writer inserted before it (the writer that produced
+    ///   the version it reads).
+    /// - **WAR**: a reader runs before the next writer inserted after it (the writer that would
+    ///   overwrite the version it reads).
+    ///
+    /// A node that both reads and writes a buffer (in-place modifier)
+    /// participates as a writer in the WAW chain; its own read yields no
+    /// self-edge because RAW/WAR use strict insertion-order comparisons.
     ///
     /// Returns `succ` (adjacency lists, deduped and sorted) and the
     /// corresponding in-degrees.
     fn edges(&self) -> (Vec<Vec<usize>>, Vec<usize>) {
         let mut succ: Vec<Vec<usize>> = vec![vec![]; self.n_nodes];
         for b in 0..self.n_bufs {
-            let mods: std::collections::BTreeSet<usize> =
-                self.modifiers[b].iter().copied().collect();
-            for &w in &self.writers[b] {
-                for &r in &self.readers[b] {
-                    if w != r && !(mods.contains(&w) && mods.contains(&r)) {
-                        succ[w].push(r);
-                    }
-                }
-            }
-            for pair in self.modifiers[b].windows(2) {
+            // `writers`/`readers` are built by scanning nodes in order, so
+            // both lists are ascending in insertion order.
+            let writers = &self.writers[b];
+            for pair in writers.windows(2) {
                 succ[pair[0]].push(pair[1]);
+            }
+            for &r in &self.readers[b] {
+                let i = writers.partition_point(|&w| w < r);
+                if i > 0 {
+                    succ[writers[i - 1]].push(r);
+                }
+                let j = writers.partition_point(|&w| w <= r);
+                if j < writers.len() {
+                    succ[r].push(writers[j]);
+                }
             }
         }
         for s in &mut succ {
@@ -310,7 +306,6 @@ fn plan_cpsat(bufs: &[BufInfo], ctx: &PlanCtx, max_secs: f64) -> Result<MemoryPl
         sizes,
         writers,
         readers,
-        modifiers,
         ..
     } = ctx;
     let n_nodes = *n_nodes;
@@ -326,29 +321,12 @@ fn plan_cpsat(bufs: &[BufInfo], ctx: &PlanCtx, max_secs: f64) -> Result<MemoryPl
         .collect();
     m.add_all_different(t.iter().copied());
 
-    // Precedence: every writer of a buffer runs before every reader of it,
-    // *except* when both endpoints are in-place modifiers of that buffer —
-    // in that case the pair would appear in both directions and yield the
-    // contradictory `t[A] < t[B]` / `t[B] < t[A]` clauses. Modifiers of the
-    // same buffer are instead serialized by insertion order (see below).
-    for b in 0..n_bufs {
-        let mods: std::collections::BTreeSet<usize> = modifiers[b].iter().copied().collect();
-        for &w in &writers[b] {
-            for &r in &readers[b] {
-                if w != r && !(mods.contains(&w) && mods.contains(&r)) {
-                    m.add_lt(t[w], t[r]);
-                }
-            }
-        }
-    }
-
-    // Insertion-order serialization of modifiers of the same buffer. The
-    // graph is documented to be built write-before-read (see `graph_ir.rs`),
-    // so a modifier's position in the builder's node list defines the intended
-    // execution order relative to the buffer's other modifiers.
-    for mods in modifiers.iter().take(n_bufs) {
-        for pair in mods.windows(2) {
-            m.add_lt(t[pair[0]], t[pair[1]]);
+    // Precedence: the versioned RAW/WAR/WAW edges from [`PlanCtx::edges`]
+    // (shared with the heuristic backend).
+    let (succ, _) = ctx.edges();
+    for (u, sv) in succ.iter().enumerate() {
+        for &v in sv {
+            m.add_lt(t[u], t[v]);
         }
     }
 
@@ -361,7 +339,9 @@ fn plan_cpsat(bufs: &[BufInfo], ctx: &PlanCtx, max_secs: f64) -> Result<MemoryPl
     // Live interval [birth, death] per device buffer. Using the sentinel
     // range [-1, n_nodes] lets buffers that are never written (graph
     // inputs) be born at -1 and buffers that are never read (graph
-    // outputs) die at n_nodes, so they interfere with everything.
+    // outputs) die at n_nodes, so they interfere with everything. Death is
+    // the last *access* (read or write): a buffer that is overwritten after
+    // its last read must keep its slot until that write lands.
     let mut birth: BTreeMap<usize, IntVar> = BTreeMap::new();
     let mut death: BTreeMap<usize, IntVar> = BTreeMap::new();
     for &b in &device_bufs {
@@ -376,10 +356,17 @@ fn plan_cpsat(bufs: &[BufInfo], ctx: &PlanCtx, max_secs: f64) -> Result<MemoryPl
         }
         if readers[b].is_empty() {
             m.add_eq(death_v, n_nodes as i64);
-        } else if readers[b].len() == 1 {
-            m.add_eq(death_v, t[readers[b][0]]);
         } else {
-            m.add_max_eq(death_v, readers[b].iter().map(|&r| t[r]));
+            let accesses: std::collections::BTreeSet<usize> = readers[b]
+                .iter()
+                .chain(writers[b].iter())
+                .copied()
+                .collect();
+            if accesses.len() == 1 {
+                m.add_eq(death_v, t[*accesses.first().unwrap()]);
+            } else {
+                m.add_max_eq(death_v, accesses.iter().map(|&n| t[n]));
+            }
         }
         birth.insert(b, birth_v);
         death.insert(b, death_v);
@@ -655,9 +642,11 @@ fn score_node(
 ///
 /// Lifetimes use the same strict-less-than disjoint-ness rule the CP-SAT
 /// model uses: two buffers overlap unless `death(b1) < birth(b2)` or
-/// `death(b2) < birth(b1)`. Buffers with no writer get `birth = -1`
-/// (graph inputs live from the start) and buffers with no reader get
-/// `death = n` (graph outputs live to the end).
+/// `death(b2) < birth(b1)`. Death is the last access (read or write), so a
+/// buffer overwritten after its last read stays live through that write.
+/// Buffers with no writer get `birth = -1` (graph inputs live from the
+/// start) and buffers with no reader get `death = n` (graph outputs live
+/// to the end).
 ///
 /// This offline pass is markedly stronger than an online best-fit walk
 /// because it sees every buffer's full lifetime up front and can place
@@ -683,6 +672,7 @@ fn pack_order(ctx: &PlanCtx, bufs: &[BufInfo], order: &[usize]) -> (Vec<Option<u
         }
         for &w in &ctx.writers[b] {
             birth[b] = birth[b].min(pos[w] as i64);
+            death[b] = death[b].max(pos[w] as i64);
         }
         for &r in &ctx.readers[b] {
             death[b] = death[b].max(pos[r] as i64);
@@ -1117,6 +1107,129 @@ mod tests {
             "expected peak 800 (theoretical minimum) after local search, got {}",
             plan.peak_bytes
         );
+    }
+
+    /// A pure reader that snapshots a buffer *between* two in-place
+    /// modifications, where the later modification transitively depends on
+    /// the snapshot (the GKR driver's claim-extraction pattern):
+    ///
+    /// ```text
+    /// k0: writes L
+    /// k1: modifies L in place
+    /// k2: reads L, writes S            (snapshot after k1's version)
+    /// k3: reads S, modifies L in place (next round depends on snapshot)
+    /// ```
+    ///
+    /// Under the old "every writer before every reader" model this was a
+    /// cycle (k3 -> k2 via L, k2 -> k3 via S) and CP-SAT returned
+    /// Infeasible. Versioned RAW/WAR/WAW edges pin k2 between k1 and k3.
+    fn snapshot_between_modifiers_graph() -> (GraphBuilder, BufId, BufId) {
+        let mut g = GraphBuilder::new();
+        let l = buf(&mut g, "layer", 128);
+        let s = buf(&mut g, "snapshot", 64);
+        g.insert_blackbox_kernel(
+            "k0",
+            std::iter::empty(),
+            [l].into_iter(),
+            std::iter::empty(),
+            |_, _, _| {},
+        );
+        g.insert_blackbox_kernel(
+            "k1",
+            [l].into_iter(),
+            std::iter::empty(),
+            [true].into_iter(),
+            |_, _, _| {},
+        );
+        g.insert_blackbox_kernel(
+            "k2",
+            [l].into_iter(),
+            [s].into_iter(),
+            [false].into_iter(),
+            |_, _, _| {},
+        );
+        g.insert_blackbox_kernel(
+            "k3",
+            [l, s].into_iter(),
+            std::iter::empty(),
+            [true, false].into_iter(),
+            |_, _, _| {},
+        );
+        (g, l, s)
+    }
+
+    #[test]
+    fn snapshot_read_between_inplace_modifiers_plans() {
+        let (g, _, _) = snapshot_between_modifiers_graph();
+        for mode in [
+            SchedulerMode::CpSat { max_secs: 10.0 },
+            SchedulerMode::Heuristic,
+        ] {
+            let plan = plan_with(&g, &BTreeMap::new(), DeviceType::Cuda(0), mode).unwrap();
+            assert_eq!(plan.order, vec![0, 1, 2, 3]);
+        }
+    }
+
+    /// A buffer overwritten after its last read must keep its slot through
+    /// that write, otherwise the overwrite would corrupt whatever buffer
+    /// was packed into the "freed" region:
+    ///
+    /// ```text
+    /// k0: writes A
+    /// k1: reads A, writes T
+    /// k2: reads T, writes A (pure overwrite, A never read again) + writes B
+    /// k3: reads B
+    /// ```
+    ///
+    /// With a readers-only death, A dies at k1 and B (born at k2) could
+    /// share A's region — which k2's overwrite of A would then clobber.
+    #[test]
+    fn overwrite_after_last_read_extends_lifetime() {
+        let mut g = GraphBuilder::new();
+        let a = buf(&mut g, "a", 100);
+        let t = buf(&mut g, "t", 4);
+        let b = buf(&mut g, "b", 100);
+        g.insert_blackbox_kernel(
+            "k0",
+            std::iter::empty(),
+            [a].into_iter(),
+            std::iter::empty(),
+            |_, _, _| {},
+        );
+        g.insert_blackbox_kernel(
+            "k1",
+            [a].into_iter(),
+            [t].into_iter(),
+            [false].into_iter(),
+            |_, _, _| {},
+        );
+        g.insert_blackbox_kernel(
+            "k2",
+            [t].into_iter(),
+            [a, b].into_iter(),
+            [false].into_iter(),
+            |_, _, _| {},
+        );
+        g.insert_blackbox_kernel(
+            "k3",
+            [b].into_iter(),
+            std::iter::empty(),
+            [false].into_iter(),
+            |_, _, _| {},
+        );
+        for mode in [
+            SchedulerMode::CpSat { max_secs: 10.0 },
+            SchedulerMode::Heuristic,
+        ] {
+            let plan = plan_with(&g, &BTreeMap::new(), DeviceType::Cuda(0), mode).unwrap();
+            let oa = plan.offsets[a.0].unwrap();
+            let ob = plan.offsets[b.0].unwrap();
+            let (sa, sb) = (sizes(&g)[a.0], sizes(&g)[b.0]);
+            assert!(
+                oa + sa <= ob || ob + sb <= oa,
+                "a and b overlap in memory despite a's trailing overwrite"
+            );
+        }
     }
 
     /// Heuristic respects symbolic sizes just like the CP-SAT backend.

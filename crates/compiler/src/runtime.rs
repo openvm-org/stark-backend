@@ -97,8 +97,14 @@ impl KernelModule {
             .arg("--shared")
             .arg("-Xcompiler")
             .arg("-fPIC")
-            .arg(format!("-arch={}", options.arch))
-            .args(&options.extra_nvcc_flags)
+            .arg(format!("-arch={}", options.arch));
+        // `CUDA_LINEINFO=1` adds `-lineinfo` so ncu's `--import-source yes`
+        // can attach SASS to the emitted CUDA source. Matches the flag
+        // `openvm-cuda-builder` sets on the AOT-compiled kernels.
+        if matches!(std::env::var("CUDA_LINEINFO").as_deref(), Ok("1")) {
+            cmd.arg("-lineinfo");
+        }
+        cmd.args(&options.extra_nvcc_flags)
             .arg("-o")
             .arg(&so_path)
             .arg(&cu_path);

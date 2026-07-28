@@ -152,6 +152,13 @@ impl ModuleRunner {
         self.module.run(&self.ctx.stream).expect("kernel run");
     }
 
+    /// Blocks until every kernel previously launched via [`Self::run`] on the
+    /// runner's stream has finished. Useful when callers do their own timing
+    /// or profiling loop and don't want to go through [`Self::read_outputs`].
+    pub fn sync(&self) {
+        self.ctx.stream.synchronize().expect("stream sync");
+    }
+
     /// Copies every output buffer back to host, synchronizing the stream in
     /// the process (via `MemCopyD2H::to_host_on`).
     ///

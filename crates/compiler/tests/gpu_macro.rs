@@ -2236,3 +2236,34 @@ fn select_emits_if_else_block_not_ternary() {
         "expected no `?:` on SSA values in the kernel body:\n{kernel_body}"
     );
 }
+
+/// Exercises the `& ^ |` bitwise operators added to `kernel!`, plus the
+/// `#(expr)` splice. `i & #(n - 1)` lowers to `i % n` (low-bit mask). For
+/// `i < n`, `i ^ #n` and `i | #n` both lower to `i + n` (bits disjoint), so
+/// indexing `c[i ^ #n]` and `c[i | #n]` both read the upper half of `c`.
+/// The `#(base + 0)` splice shows a compound Rust expression as the operand.
+#[test]
+fn macro_bitwise_ops_lower_to_quasi_affine() {
+    let log_n = 5usize;
+    let n = 1usize << log_n;
+    let base = n;
+    let c = pseudo_field_elems(2 * n, 7);
+
+    let mut ib = IRBuilder::new();
+    let c_in = ib.input("c", ScalarType::BabyBear, vec![2 * n]);
+    // Output equals `c` because:
+    // - `i in [0, n)` → `lo = i & (n-1) = i`, and `i | 0 = i`, so we read `c[i]`.
+    // - `i in [n, 2n)` → `lo = i & (n-1) = i - n`, and `lo ^ n = lo + n = i` (bits disjoint), so we
+    //   read `c[i]`.
+    let body = kernel!(ib,
+        compute [2 * n] |i| {
+            let lo = i & #(n - 1);
+            if i < #(base + 0) then c_in[lo | 0] else c_in[lo ^ #base]
+        }
+    );
+    let module = ib.finish("bitwise_ops", body);
+
+    let outs = run_module(module, &[c.clone()]);
+    assert_eq!(outs.len(), 1);
+    assert_eq!(outs[0], c);
+}

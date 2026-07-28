@@ -7,7 +7,7 @@ kernel launch, memcpy and memset as a graph node; the whole graph is then
 compiled once via `GraphCompiler` and re-run cheaply via `GraphExe`, which
 handles memory planning and single-stream ordering for you.
 
-Three principles govern how you should port. Follow them and the resulting
+Four principles govern how you should port. Follow them and the resulting
 port compiles into a planner-friendly graph that the memory planner
 (`planner.rs`) can schedule and pack correctly.
 
@@ -19,6 +19,9 @@ port compiles into a planner-friendly graph that the memory planner
 - [Principle 3](#principle-3-use-insert_memcpy--insert_memset-for-buffer-scale-copies-and-fills) —
   use `insert_memcpy` / `insert_memset` for buffer-scale copies and
   fills, not `cudaMemcpy*` / `cudaMemset*` inside a blackbox.
+- [Principle 4](#principle-4-no-data-dependent-host-values) —
+  no host values that depend on kernel outputs. Every value produced
+  by a device computation must stay on-device as a `BufId`.
 
 The running example throughout is the port of the fractional-GKR
 segment-tree build from `crates/cuda-backend/src/logup_zerocheck/fractional.rs`
@@ -192,10 +195,13 @@ Notes:
   same as `layer_size` (the segment tree's current layer's element
   count).
 - `modifies=[true]` on the one input tells the planner this node is an
-  in-place modifier of `layer`. The planner serializes multiple modifiers
-  of the same buffer by insertion order (see `planner.rs`, `PlanCtx::modifiers`),
-  so composing multiple `*_ir` calls that all modify the same `BufId` is
-  safe.
+  in-place modifier of `layer`. The planner derives versioned RAW/WAR/WAW
+  precedence from node insertion order (see `planner.rs`,
+  `PlanCtx::edges`): writers of the same buffer are serialized in
+  insertion order, and a pure reader is pinned between the write that
+  produced the version it reads and the next overwrite. Composing
+  multiple `*_ir` calls that modify the same `BufId` — with snapshot
+  reads (e.g. claim extraction) interleaved between them — is safe.
 - `mem::forget(buf)` is required. `DeviceBuffer::from_raw_parts` is a
   view; letting it drop would double-free the memory the graph runtime
   owns.
@@ -289,6 +295,112 @@ blackbox that issues one `cudaMemcpyAsync` per slice. That is what
 default: the moment you find yourself writing two memcpys in one
 closure, ask if you can restructure the source graph to use two separate
 whole-buffer copies.
+
+---
+
+## Principle 4: no data-dependent host values
+
+Any value that is a function of kernel outputs — a sampled Fiat-Shamir
+challenge, a claim read off a `Frac<EF>` slot, a random `r` interpolated
+from observed sumcheck evaluations — must stay on-device as a `BufId`
+that flows into the next graph node. It is never read back to a host
+`EF` (or `u32`, or `bool`, …) at graph-build time and captured by a
+subsequent kernel's closure.
+
+Practically: at graph-build time you only have access to *static* host
+values — shape parameters, loop bounds, alpha (if it is a compile-time
+constant of the prover), the round index, table sizes. Anything that
+depends on the state of a buffer *produced by the graph* is
+data-dependent and must be a `BufId`.
+
+Contrast with the eager code: `fractional_sumcheck_gpu` is full of
+patterns like
+
+```rust
+let root = copy_from_device(&layer, 0, &mut scratch, ctx)?;         // host-side read
+transcript.observe_ext(root.p);                                     // host update
+let r = transcript.sample_ext();                                    // host sample
+frac_compute_round_and_fold(.., lambda, r, alpha, ..)?;             // r captured by value
+```
+
+That is fine on the CPU-driving path because every launch happens on
+the same stream and `copy_from_device` implicitly syncs. It is
+**wrong** in the graph-IR port because:
+
+- Reading `root.p` to a host `EF` would require a D2H sync inside a
+  closure ([Principle 1](#principle-1-one-cuda-kernel-per-insert_blackbox_kernel-no-host-work)),
+  or a synchronous read at graph-build time (which pins the value at
+  compile time, before the graph has even started running).
+- `r = transcript.sample_ext()` at graph-build time is meaningless —
+  the transcript state at graph-build time is whatever was observed
+  *before this build call*, not what the graph will observe when it
+  runs. In the graph, `sample_ext(g)` returns a `BufId`; the value it
+  ultimately holds is only defined at `GraphExe::run` time.
+- Capturing an `EF` challenge by value in an `insert_blackbox_kernel`
+  closure freezes it at graph-build time. Any downstream kernel that
+  needs the actual runtime value has to read it from a `BufId`.
+
+### Kernels that took `EF` by value need graph-friendly variants
+
+The eager `_frac_*` kernels take challenges as `EF` scalars because the
+host has already resolved them. In the graph-IR port those challenges
+are `BufId`s. The corresponding `*_ir` inserter must either:
+
+- Wrap a **new** CUDA kernel entry point that takes `x_i` as a
+  `*const EF` and loads it on-device (preferred: keeps the launch a
+  blackbox and stays 1:1 with an underlying `_frac_*` variant).
+- Or emit an `insert_kernel` with a structured `ir::Module` that
+  loads the challenge from a `[D_EF]`-shaped `BabyBear` input and
+  reconstructs an `FpExt` scalar in the DSL — see
+  `build_eq_hypercube_stage_module` in `fractional_ir.rs` for the
+  full pattern (`lift_fpext` per coefficient, then recombine against
+  `{1, t, t², t³}` via `const_fpext`, `let_bound` so the reconstruction
+  fires once per launch rather than once per compute thread).
+
+Neither path is a "read the challenge to host inside the closure and
+pass it as an `EF`". That would defeat the purpose of the graph.
+
+### What still can be an `EF` at graph-build time
+
+Constants the caller *has already resolved* before `GraphBuilder`
+sees the graph. In the fractional-GKR case that is `alpha` (fixed for
+the whole prover), the compile-time `total_leaves` shape, the round
+index, the `w` window size, etc. These do not depend on kernel outputs
+so capturing them by value in a closure is fine.
+
+The test is: "does this host value depend on any buffer that appears
+in the graph?" If yes, it must be a `BufId`. If no (it is a static
+prover parameter or shape), captured by value is fine.
+
+### Example — porting the root observe
+
+**Wrong.**
+
+```rust
+let root_bytes = /* D2H sync of layer[0] */;
+let root = unsafe { *(root_bytes.as_ptr() as *const Frac<EF>) };
+transcript.observe_ext(root.p);
+transcript.observe_ext(root.q);
+```
+
+`root` is a data-dependent host value here — a host `Frac<EF>` synthesized
+from a kernel output — and every downstream launch that consumes it
+would freeze it at build time.
+
+**Right.**
+
+```rust
+let root_p = add_ext_scalar_buf(g, device, "root_p");
+let root_q = add_ext_scalar_buf(g, device, "root_q");
+extract_root_pq_ir(g, layer, real_len, root_p, root_q);
+transcript.observe_ext(g, root_p);
+transcript.observe_ext(g, root_q);
+```
+
+`root_p` and `root_q` are `BufId`s. `extract_root_pq_ir` is a graph node
+whose closure runs at `GraphExe::run` time and populates them from the
+layer buffer; `transcript.observe_ext(g, buf)` is a graph node that
+consumes them. No host value is ever synthesized from a kernel output.
 
 ---
 
