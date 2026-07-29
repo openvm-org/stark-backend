@@ -1,4 +1,8 @@
 //! Memory estimates for proving.
+//!
+//! These estimates model the memory used by the prove call itself. They may not include
+//! buffers that are already resident before proving starts (e.g. proving-key or
+//! preprocessed-trace device data).
 
 use std::{cmp::max, mem::size_of};
 
@@ -196,7 +200,7 @@ impl ProvingMemoryConfig {
     /// round0_spill = min(full_constraint_eval_buffer, round0_max_temp_bytes)
     /// working_set (save memory) = max(main, round0_spill)
     /// working_set (no save memory) = main + max(round0_spill, 6 GiB)
-    /// batch_constraint = working_set + 192 MiB
+    /// batch_constraint = working_set + BATCH_CONSTRAINT_MEMORY_OVERHEAD (256 MiB)
     /// ```
     #[inline]
     pub fn batch_constraint_memory_bytes(&self, counts: ProvingMemoryCounts) -> usize {
@@ -255,7 +259,7 @@ impl ProvingMemoryConfig {
     /// leaves         = real_len * leaf_bytes
     /// work_buffer    = max(logical_len / 16, 2^22) * leaf_bytes
     /// tmp_block_sums = logical_len / 256 * leaf_bytes
-    /// gkr             = leaves + work_buffer + tmp_block_sums + 64 MiB
+    /// gkr            = leaves + work_buffer + tmp_block_sums + GKR_MEMORY_OVERHEAD (256 MiB)
     /// ```
     #[inline]
     pub fn gkr_memory_bytes(&self, interaction_cells: usize) -> usize {
