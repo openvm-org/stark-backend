@@ -15,12 +15,17 @@
 //! which module inputs. Static data lives in [`GraphNode::Const`], which
 //! carries either device or host bytes. See `graph-ir.md`.
 
-use std::{collections::BTreeMap, fmt, rc::Rc};
+use std::{
+    collections::{BTreeMap, HashMap},
+    fmt,
+    sync::Arc,
+};
 
 use openvm_cuda_common::{d_buffer::DeviceBuffer, stream::cudaStream_t};
 
 use crate::{
     ir::{self, VarId},
+    module_hash::module_hash,
     quast::Quast,
 };
 
@@ -108,11 +113,13 @@ pub struct MemSetNode {
 /// with the module's top-level outputs (a scalar body binds one output; a
 /// tuple body binds one BufId per element).
 ///
-/// `module` is wrapped in an [`Rc`] so multiple `KernelModuleNode`s can
+/// `module` is wrapped in an [`Arc`] so multiple `KernelModuleNode`s can
 /// share the same source module by pointer identity; downstream compilation
-/// (see `graph_exe`) deduplicates JIT builds keyed on that pointer.
+/// (see `graph_exe`) deduplicates JIT builds keyed on that pointer. `Arc`
+/// (rather than `Rc`) also lets modules cross thread boundaries during
+/// parallel JIT.
 pub struct KernelModuleNode {
-    pub module: Rc<ir::Module>,
+    pub module: Arc<ir::Module>,
     pub inputs: Vec<BufId>,
     pub outputs: Vec<BufId>,
 }
@@ -187,6 +194,14 @@ pub struct GraphBuilder {
     /// to each [`VarId`] is its printable name.
     pub symbols: BTreeMap<VarId, String>,
     next_var: u32,
+    /// Content-hash → canonical `Arc<ir::Module>`. `insert_kernel` collapses
+    /// structurally identical modules onto their first-seen `Arc` so
+    /// downstream `Arc::as_ptr` identity checks (`GraphCompiler`'s
+    /// per-module JIT dedup, cytoscape rendering, …) automatically see the
+    /// merged set. This is skipped when a caller pushes `GraphNode::Kernel`
+    /// directly into `nodes`, so the compiler still runs a hash-based
+    /// dedup pass as a backstop.
+    module_dedup: HashMap<[u8; 32], Arc<ir::Module>>,
 }
 
 impl GraphBuilder {
@@ -217,20 +232,20 @@ impl GraphBuilder {
     /// compiler pipeline, together with the graph buffers that feed its
     /// declared module inputs and receive its outputs.
     ///
-    /// The module is passed as an `Rc<ir::Module>` (or anything convertible
+    /// The module is passed as an `Arc<ir::Module>` (or anything convertible
     /// into one, so a bare `ir::Module` also works). Inserting two kernels
-    /// with the *same* `Rc` clone lets [`crate::graph_exe::GraphCompiler`]
+    /// with the *same* `Arc` clone lets [`crate::graph_exe::GraphCompiler`]
     /// JIT the module only once and reuse the compiled artifact across both
     /// nodes.
     ///
     /// `inputs.len()` must equal `module.builder.inputs().len()`.
     pub fn insert_kernel(
         &mut self,
-        module: impl Into<Rc<ir::Module>>,
+        module: impl Into<Arc<ir::Module>>,
         inputs: impl IntoIterator<Item = BufId>,
         outputs: impl IntoIterator<Item = BufId>,
     ) {
-        let module: Rc<ir::Module> = module.into();
+        let module: Arc<ir::Module> = module.into();
         let inputs: Vec<BufId> = inputs.into_iter().collect();
         assert_eq!(
             inputs.len(),
@@ -240,6 +255,17 @@ impl GraphBuilder {
             module.name,
             module.builder.inputs().len(),
         );
+        // Content-dedup: two callers can build structurally identical
+        // modules at different sites and pass distinct `Arc`s. Fold those
+        // onto the first-seen `Arc` so the graph carries a single canonical
+        // handle per unique kernel. Skipped when the caller already reuses
+        // a shared `Arc` (`Arc::ptr_eq` fast path via the hash lookup).
+        let hash = module_hash(&module);
+        let module = self
+            .module_dedup
+            .entry(hash)
+            .or_insert_with(|| module.clone())
+            .clone();
         self.nodes.push(GraphNode::Kernel(KernelModuleNode {
             module,
             inputs,

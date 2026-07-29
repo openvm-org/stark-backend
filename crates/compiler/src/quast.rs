@@ -15,7 +15,7 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
-    rc::Rc,
+    sync::Arc,
 };
 
 use crate::{
@@ -34,12 +34,12 @@ fn err(msg: impl Into<String>) -> CompileError {
 pub enum Quast {
     Sym(VarId),
     Const(i64),
-    Add(Rc<Quast>, Rc<Quast>),
+    Add(Arc<Quast>, Arc<Quast>),
     /// Multiplication by an integer constant.
-    Mul(Rc<Quast>, i64),
+    Mul(Arc<Quast>, i64),
     /// Floor division by a positive integer constant.
-    FloorDiv(Rc<Quast>, i64),
-    Neg(Rc<Quast>),
+    FloorDiv(Arc<Quast>, i64),
+    Neg(Arc<Quast>),
 }
 
 impl Quast {
@@ -52,23 +52,23 @@ impl Quast {
     }
 
     pub fn add(&self, other: &Quast) -> Quast {
-        Quast::Add(Rc::new(self.clone()), Rc::new(other.clone()))
+        Quast::Add(Arc::new(self.clone()), Arc::new(other.clone()))
     }
 
     pub fn sub(&self, other: &Quast) -> Quast {
-        Quast::Add(Rc::new(self.clone()), Rc::new(other.neg()))
+        Quast::Add(Arc::new(self.clone()), Arc::new(other.neg()))
     }
 
     pub fn neg(&self) -> Quast {
-        Quast::Neg(Rc::new(self.clone()))
+        Quast::Neg(Arc::new(self.clone()))
     }
 
     pub fn mul_c(&self, c: i64) -> Quast {
-        Quast::Mul(Rc::new(self.clone()), c)
+        Quast::Mul(Arc::new(self.clone()), c)
     }
 
     pub fn floordiv(&self, c: i64) -> Quast {
-        Quast::FloorDiv(Rc::new(self.clone()), c)
+        Quast::FloorDiv(Arc::new(self.clone()), c)
     }
 
     /// `self % c` as `self - c * floor(self / c)`.
@@ -114,10 +114,12 @@ impl Quast {
         match self {
             Quast::Sym(v) => map.get(v).cloned().unwrap_or_else(|| self.clone()),
             Quast::Const(_) => self.clone(),
-            Quast::Add(a, b) => Quast::Add(Rc::new(a.substitute(map)), Rc::new(b.substitute(map))),
-            Quast::Mul(a, c) => Quast::Mul(Rc::new(a.substitute(map)), *c),
-            Quast::FloorDiv(a, c) => Quast::FloorDiv(Rc::new(a.substitute(map)), *c),
-            Quast::Neg(a) => Quast::Neg(Rc::new(a.substitute(map))),
+            Quast::Add(a, b) => {
+                Quast::Add(Arc::new(a.substitute(map)), Arc::new(b.substitute(map)))
+            }
+            Quast::Mul(a, c) => Quast::Mul(Arc::new(a.substitute(map)), *c),
+            Quast::FloorDiv(a, c) => Quast::FloorDiv(Arc::new(a.substitute(map)), *c),
+            Quast::Neg(a) => Quast::Neg(Arc::new(a.substitute(map))),
         }
     }
 
@@ -393,17 +395,17 @@ impl LinComb {
             let term = if coeff == 1 {
                 atom.clone()
             } else {
-                Quast::Mul(Rc::new(atom.clone()), coeff)
+                Quast::Mul(Arc::new(atom.clone()), coeff)
             };
             acc = Some(match acc {
                 None => term,
-                Some(a) => Quast::Add(Rc::new(a), Rc::new(term)),
+                Some(a) => Quast::Add(Arc::new(a), Arc::new(term)),
             });
         }
         match (acc, self.cst) {
             (None, c) => Quast::Const(c),
             (Some(a), 0) => a,
-            (Some(a), c) => Quast::Add(Rc::new(a), Rc::new(Quast::Const(c))),
+            (Some(a), c) => Quast::Add(Arc::new(a), Arc::new(Quast::Const(c))),
         }
     }
 
@@ -473,7 +475,7 @@ fn floordiv_lc(inner: LinComb, c: i64, bounds: &BTreeMap<VarId, u64>) -> LinComb
             return outer;
         }
     }
-    outer.add_term(Quast::FloorDiv(Rc::new(rest_q), c), 1);
+    outer.add_term(Quast::FloorDiv(Arc::new(rest_q), c), 1);
     outer
 }
 

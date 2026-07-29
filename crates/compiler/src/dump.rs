@@ -26,7 +26,10 @@ use crate::{
         Access, BufId, BufferDecl, BufferKind, IndexMap, Kernel, KernelProgram, LinearLayout,
         SSABlock, SSANode, SSAOp, SSAOpCode, SSARes,
     },
-    passes::SharedMemPlan,
+    passes::{
+        canonicalize::Program, plan_global_scratch::GlobalScratchPlan, type_infer::TypeMap,
+        SharedMemPlan,
+    },
     quast::{CStrEmitter, ParSpec, Quast, Scatter},
 };
 
@@ -42,6 +45,129 @@ pub fn write_ir_dumps(dir: &Path, name: &str, hir: &str, kir: &str) -> io::Resul
 pub fn write_cuda_dump(dir: &Path, name: &str, source: &str) -> io::Result<()> {
     std::fs::create_dir_all(dir)?;
     std::fs::write(dir.join(format!("{name}.cu")), source)
+}
+
+/// Writes one file into `dir` at path `{name}.{step:02}.{tag}.{ext}`, so the
+/// per-pass dumps produced under [`crate::runtime::Verbosity::Verbose`] sort
+/// in pipeline order.
+pub fn write_step_dump(
+    dir: &Path,
+    name: &str,
+    step: usize,
+    tag: &str,
+    ext: &str,
+    contents: &str,
+) -> io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    std::fs::write(dir.join(format!("{name}.{step:02}.{tag}.{ext}")), contents)
+}
+
+/// Renders a [`TypeMap`] as a sorted `NodeId(k): Type` listing.
+pub fn dump_types(types: &TypeMap) -> String {
+    let ids: BTreeSet<NodeId> = types.iter().map(|(id, _)| *id).collect();
+    let mut s = String::new();
+    writeln!(s, "// TypeMap: {} typed nodes", ids.len()).unwrap();
+    for id in ids {
+        writeln!(s, "  %{}: {:?}", id.0, types.get(id)).unwrap();
+    }
+    s
+}
+
+/// Renders the canonical [`Program`]: kernels with their outer/inner bounds,
+/// grid-thread hints, scatter and par attributes, inner-let tiles and output
+/// tensor refs.
+pub fn dump_program(program: &Program) -> String {
+    let mut s = String::new();
+    writeln!(
+        s,
+        "// Canonical Program: {} kernel(s)",
+        program.kernels.len()
+    )
+    .unwrap();
+    writeln!(s, "// module: {}", program.module.name).unwrap();
+    for (k, ck) in program.kernels.iter().enumerate() {
+        writeln!(s, "\nkernel[{k}] {}", ck.name).unwrap();
+        write!(s, "  outer[{}] |v{}|", ck.outer_bound, ck.outer_var.0).unwrap();
+        if let Some((b, v)) = ck.inner {
+            write!(s, " inner[{b}] |v{}|", v.0).unwrap();
+        }
+        if let Some(t) = ck.threads {
+            write!(s, " threads({t})").unwrap();
+        }
+        writeln!(s).unwrap();
+        if ck.scatter_store.is_some() {
+            writeln!(s, "  scatter_store: yes").unwrap();
+        }
+        if ck.inner_par.is_some() {
+            writeln!(s, "  inner_par: yes").unwrap();
+        }
+        if !ck.inner_lets.is_empty() {
+            writeln!(s, "  inner_lets: {}", ck.inner_lets.len()).unwrap();
+            for (i, il) in ck.inner_lets.iter().enumerate() {
+                writeln!(
+                    s,
+                    "    [{i}] v{} : {:?}{:?} bound={} iter=v{}",
+                    il.var.0, il.elem, il.shape, il.bound, il.iter_var.0
+                )
+                .unwrap();
+            }
+        }
+        writeln!(s, "  member_types:").unwrap();
+        for (i, ty) in ck.member_types.iter().enumerate() {
+            writeln!(s, "    [{i}] {ty:?}").unwrap();
+        }
+    }
+    writeln!(s, "\n// module outputs: {}", program.outputs.len()).unwrap();
+    for (i, r) in program.outputs.iter().enumerate() {
+        writeln!(s, "  [{i}] {r:?}").unwrap();
+    }
+    s
+}
+
+/// Renders a [`GlobalScratchPlan`]: total arena bytes and each intermediate
+/// tensor's byte offset.
+pub fn dump_global_scratch(plan: &GlobalScratchPlan) -> String {
+    let mut s = String::new();
+    writeln!(
+        s,
+        "// GlobalScratchPlan: {} intermediates, {} bytes total",
+        plan.offsets.len(),
+        plan.total_bytes,
+    )
+    .unwrap();
+    let mut entries: Vec<_> = plan.offsets.iter().collect();
+    entries.sort_by_key(|(_, &off)| off);
+    for (tref, off) in entries {
+        writeln!(s, "  {tref:?} @ {off}").unwrap();
+    }
+    s
+}
+
+/// Renders a [`SharedMemPlan`]: per-kernel peak shared bytes and per-buffer
+/// offsets, grouped by kernel index.
+pub fn dump_shared_mem(kprog: &KernelProgram, plan: &SharedMemPlan) -> String {
+    let mut s = String::new();
+    writeln!(
+        s,
+        "// SharedMemPlan: {} kernels, {} shared buffers placed",
+        plan.per_kernel.len(),
+        plan.offsets.len(),
+    )
+    .unwrap();
+    for (k, &bytes) in plan.per_kernel.iter().enumerate() {
+        let kname = kprog
+            .kernels
+            .get(k)
+            .map(|k| k.name.as_str())
+            .unwrap_or("<unknown>");
+        writeln!(s, "  kernel[{k}] {kname}: peak={bytes}B").unwrap();
+    }
+    let mut entries: Vec<_> = plan.offsets.iter().collect();
+    entries.sort_by_key(|(bid, _)| bid.0);
+    for (bid, off) in entries {
+        writeln!(s, "  b{} @ {off}", bid.0).unwrap();
+    }
+    s
 }
 
 // ---------------------------------------------------------------------------

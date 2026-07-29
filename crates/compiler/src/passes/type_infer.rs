@@ -28,6 +28,19 @@ impl TypeMap {
     pub(crate) fn insert(&mut self, id: NodeId, ty: Type) {
         self.types.insert(id, ty);
     }
+
+    /// Iterator over `(NodeId, Type)` in unspecified order.
+    pub fn iter(&self) -> impl Iterator<Item = (&NodeId, &Type)> {
+        self.types.iter()
+    }
+
+    pub fn len(&self) -> usize {
+        self.types.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.types.is_empty()
+    }
 }
 
 /// Infers the type of every reachable node of the module.

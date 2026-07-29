@@ -23,15 +23,15 @@
 //!
 //! Every reachable transcript state (indexed by `absorb_idx` / `sample_idx`)
 //! corresponds to exactly one kernel shape. [`DuplexSpongeGpuIR::new`] builds
-//! all of them up front and stores them as `Rc<ir::Module>` clones inside the
+//! all of them up front and stores them as `Arc<ir::Module>` clones inside the
 //! sponge, so subsequent `observe` / `sample` calls just hand a *clone* of
-//! the relevant `Rc` to [`GraphBuilder::insert_kernel`]. Every graph node
-//! carrying the same `Rc` shares one JIT compilation via
-//! [`crypto_compiler::graph_exe::GraphCompiler`]'s Rc-keyed dedup — so, for
+//! the relevant `Arc` to [`GraphBuilder::insert_kernel`]. Every graph node
+//! carrying the same `Arc` shares one JIT compilation via
+//! [`crypto_compiler::graph_exe::GraphCompiler`]'s Arc-keyed dedup — so, for
 //! example, a transcript with 100 observes across 8 absorb positions ends up
 //! with 8 compiled kernels instead of 100.
 
-use std::rc::Rc;
+use std::sync::Arc;
 
 use crypto_compiler::{
     graph_ir::{BufId, BufInfo, DeviceType, GraphBuilder},
@@ -81,27 +81,27 @@ pub trait FiatShamirTranscriptGraphIR {
 }
 
 /// Every kernel module a `DuplexSpongeGpuIR` may need over its lifetime,
-/// stored as `Rc<Module>` clones so multiple `insert_kernel` calls at the
+/// stored as `Arc<Module>` clones so multiple `insert_kernel` calls at the
 /// same transcript position all point at the same JIT compilation unit.
 struct SpongeModules {
     /// One per absorb position: `observe[i]` inserts a single value at slot
     /// `i` and (when `i == CHUNK - 1`) permutes the state.
-    observe: [Rc<Module>; CHUNK],
+    observe: [Arc<Module>; CHUNK],
     /// One per read index in `0..CHUNK`. State is unchanged (no state output).
-    sample_no_perm: [Rc<Module>; CHUNK],
+    sample_no_perm: [Arc<Module>; CHUNK],
     /// Permute the state and read `state'[CHUNK - 1]`. Two outputs
     /// (new_state, sample).
-    sample_perm: Rc<Module>,
+    sample_perm: Arc<Module>,
     /// One per starting absorb index; statically unrolls `D_EF` observes and
     /// weaves in permutations where they'd trigger.
-    observe_ext: [Rc<Module>; CHUNK],
+    observe_ext: [Arc<Module>; CHUNK],
     /// One per starting `sample_idx` in `D_EF..=CHUNK` (indexed by
     /// `sample_idx - D_EF`). Reads `D_EF` slots; state unchanged.
-    sample_ext_no_perm: [Rc<Module>; N_SAMPLE_EXT_NO_PERM],
+    sample_ext_no_perm: [Arc<Module>; N_SAMPLE_EXT_NO_PERM],
     /// One per "pre-permutation reads" count in `0..D_EF`. `k` reads from
     /// pre-perm state, then one permutation, then `D_EF - k` reads from
     /// post-perm state. Two outputs (new_state, samples).
-    sample_ext_perm: [Rc<Module>; D_EF],
+    sample_ext_perm: [Arc<Module>; D_EF],
 }
 
 impl SpongeModules {
@@ -109,20 +109,20 @@ impl SpongeModules {
         let consts = Poseidon2Constants::p3_default();
         Self {
             observe: std::array::from_fn(|abs| {
-                Rc::new(build_observe_module(abs, abs + 1 == CHUNK, &consts))
+                Arc::new(build_observe_module(abs, abs + 1 == CHUNK, &consts))
             }),
             sample_no_perm: std::array::from_fn(|read_idx| {
-                Rc::new(build_sample_no_perm_module(read_idx))
+                Arc::new(build_sample_no_perm_module(read_idx))
             }),
-            sample_perm: Rc::new(build_sample_perm_module(&consts)),
+            sample_perm: Arc::new(build_sample_perm_module(&consts)),
             observe_ext: std::array::from_fn(|start_abs| {
-                Rc::new(build_observe_ext_module(start_abs, &consts))
+                Arc::new(build_observe_ext_module(start_abs, &consts))
             }),
             sample_ext_no_perm: std::array::from_fn(|i| {
-                Rc::new(build_sample_ext_no_perm_module(i + D_EF))
+                Arc::new(build_sample_ext_no_perm_module(i + D_EF))
             }),
             sample_ext_perm: std::array::from_fn(|pre_reads| {
-                Rc::new(build_sample_ext_perm_module(pre_reads, &consts))
+                Arc::new(build_sample_ext_perm_module(pre_reads, &consts))
             }),
         }
     }
@@ -155,7 +155,7 @@ impl DuplexSpongeGpuIR {
     /// Creates a fresh transcript with all-zero sponge state on `device`.
     ///
     /// Builds every kernel module the transcript may emit ahead of time and
-    /// stores them as `Rc<Module>` clones. Adds a `[1, WIDTH]` BabyBear state
+    /// stores them as `Arc<Module>` clones. Adds a `[1, WIDTH]` BabyBear state
     /// buffer to `g` and emits a `Memset(0)` node that initializes it
     /// (matching the default `DuplexSpongeGpu` starting state).
     pub fn new(g: &mut GraphBuilder, device: DeviceType) -> Self {
@@ -941,7 +941,7 @@ mod tests {
     }
 
     /// Sanity check: emitting many ops through the sponge produces a graph
-    /// whose Rc-keyed dedup collapses the kernel count down to at most one
+    /// whose Arc-keyed dedup collapses the kernel count down to at most one
     /// module per distinct transcript position.  Also asserts on the exact
     /// count for the emitted sequence so a regression that broke sharing
     /// would show up here.

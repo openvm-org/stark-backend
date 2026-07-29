@@ -10,11 +10,10 @@
 //! Feature-gated behind `planner` (needs the CP-SAT planner + OR-Tools).
 
 use std::{
-    cell::RefCell,
     collections::{BTreeMap, HashMap},
     ffi::c_void,
     mem::ManuallyDrop,
-    rc::Rc,
+    sync::{Arc, Mutex},
 };
 
 use openvm_cuda_common::{
@@ -29,6 +28,8 @@ use crate::{
         BufId, BufInfo, ConstBuf, ConstNode, DeviceType, GraphBuilder, GraphNode, KernelNode,
     },
     ir::{self, VarId},
+    kernel_cache::KernelCache,
+    module_hash::module_hash,
     planner::{self, access_from_node, MemoryPlan, NodeAccess, PlanError, SchedulerMode},
     quast::Quast,
     runtime::{CompileOptions, KernelModule},
@@ -50,6 +51,10 @@ pub struct GraphCompiler {
     env: BTreeMap<VarId, i64>,
     options: CompileOptions,
     scheduler: SchedulerMode,
+    /// On-disk cache queried before hitting nvcc; kernels found here skip
+    /// compilation entirely. `None` disables the cache. Defaults to a shared
+    /// `~/.openvm/kernel_cache` with the [`KernelCache`] defaults.
+    kernel_cache: Option<Arc<KernelCache>>,
 }
 
 impl Default for GraphCompiler {
@@ -65,6 +70,7 @@ impl GraphCompiler {
             env: BTreeMap::new(),
             options: CompileOptions::default(),
             scheduler: SchedulerMode::default(),
+            kernel_cache: Some(Arc::new(KernelCache::new())),
         }
     }
 
@@ -95,6 +101,21 @@ impl GraphCompiler {
         self
     }
 
+    /// Overrides the on-disk kernel cache. Pass an
+    /// [`Arc`] so the cache can be shared across compilations. See
+    /// [`KernelCache`] for defaults.
+    pub fn kernel_cache(mut self, cache: Arc<KernelCache>) -> Self {
+        self.kernel_cache = Some(cache);
+        self
+    }
+
+    /// Disables the kernel cache entirely — every structured kernel is
+    /// re-JIT'd from scratch and nothing is written to disk.
+    pub fn without_kernel_cache(mut self) -> Self {
+        self.kernel_cache = None;
+        self
+    }
+
     /// Consumes the graph, plans it and compiles every structured kernel.
     ///
     /// The pipeline runs in three phases:
@@ -114,14 +135,14 @@ impl GraphCompiler {
         //
         // `compiled` mirrors the original node order. For structured kernels
         // the compiled `KernelModule` is wrapped in `Rc<RefCell<_>>` and
-        // cached by the source `Rc<ir::Module>`'s pointer identity, so two
+        // cached by the source `Arc<ir::Module>`'s pointer identity, so two
         // `Kernel` nodes that carry the same module clone share one JIT
         // build. `KernelModule::set_input`/`set_output`/`set_scratch` take
         // `&mut self`, hence the `RefCell` for the shared handle.
         enum PreExe {
             Kernel {
                 name: String,
-                module: Rc<RefCell<KernelModule>>,
+                module: Arc<Mutex<KernelModule>>,
                 inputs: Vec<BufId>,
                 outputs: Vec<BufId>,
                 scratch: Option<BufId>,
@@ -143,30 +164,130 @@ impl GraphCompiler {
             },
         }
         let nodes: Vec<GraphNode> = graph.nodes.drain(..).collect();
+
+        // Phase 1a: partition Kernel nodes from the rest and identify the
+        // unique modules to compile. Two `KernelModuleNode`s sharing an `Arc`
+        // pointer alias the same source module, so they share a compiled
+        // artifact. `unique_keys` holds those pointers in first-seen order so
+        // parallel compilation can index into it.
+        let mut unique_keys: Vec<*const ir::Module> = Vec::new();
+        let mut unique_modules: Vec<Arc<ir::Module>> = Vec::new();
+        let mut key_index: HashMap<*const ir::Module, usize> = HashMap::new();
+        // Per-node kernel slot: `Some(kernel_idx)` if this graph node is a
+        // Kernel, referring to `unique_modules[kernel_idx]`.
+        let mut node_module_idx: Vec<Option<usize>> = Vec::with_capacity(nodes.len());
+        for node in &nodes {
+            match node {
+                GraphNode::Kernel(k) => {
+                    let key = Arc::as_ptr(&k.module);
+                    let idx = *key_index.entry(key).or_insert_with(|| {
+                        unique_keys.push(key);
+                        unique_modules.push(k.module.clone());
+                        unique_modules.len() - 1
+                    });
+                    node_module_idx.push(Some(idx));
+                }
+                _ => node_module_idx.push(None),
+            }
+        }
+        drop(key_index);
+
+        // Phase 1b: content-based dedup. `Arc::as_ptr` identity picks up
+        // callers who deliberately share a single module handle across
+        // multiple `insert_kernel` calls, but a helper that rebuilds the
+        // same `Module` at each call site produces distinct `Arc`s with
+        // identical bytes. Group by `module_hash` so those still share one
+        // JIT build. `hash_repr[i]` is the *representative* unique-module
+        // index for `unique_modules[i]` (`i` itself if this module was the
+        // first with its hash).
+        let hashes: Vec<[u8; 32]> = unique_modules.iter().map(|m| module_hash(m)).collect();
+        let mut hash_repr: Vec<usize> = Vec::with_capacity(unique_modules.len());
+        let mut representative_of_hash: HashMap<[u8; 32], usize> = HashMap::new();
+        let mut representatives: Vec<usize> = Vec::new();
+        for (i, h) in hashes.iter().enumerate() {
+            match representative_of_hash.get(h) {
+                Some(&repr) => hash_repr.push(repr),
+                None => {
+                    representative_of_hash.insert(*h, i);
+                    representatives.push(i);
+                    hash_repr.push(i);
+                }
+            }
+        }
+        drop(representative_of_hash);
+        let num_unique_content = representatives.len();
+
+        // Phase 1c: probe the on-disk cache, but only for representatives.
+        // Cache hits are loaded on the main thread (cheap; just a dlopen).
+        let mut compiled_slots: Vec<Option<(Arc<Mutex<KernelModule>>, usize)>> =
+            (0..unique_modules.len()).map(|_| None).collect();
+        let mut cache_misses: Vec<usize> = Vec::new();
+        let mut num_cached_modules = 0usize;
+        for &repr in &representatives {
+            let module = &unique_modules[repr];
+            let hit = match &self.kernel_cache {
+                Some(cache) => cache.get(module)?,
+                None => None,
+            };
+            match hit {
+                Some(km) => {
+                    let scratch_size = km.scratch_size();
+                    compiled_slots[repr] = Some((Arc::new(Mutex::new(km)), scratch_size));
+                    num_cached_modules += 1;
+                }
+                None => cache_misses.push(repr),
+            }
+        }
+
+        // Phase 1d: JIT the misses in parallel — one compile per unique
+        // content hash, not per unique Arc handle.
+        let options = self.options.clone();
+        let cache = self.kernel_cache.clone();
+        let compile_results: Vec<Result<(usize, KernelModule), CompileError>> = {
+            use rayon::prelude::*;
+            cache_misses
+                .par_iter()
+                .map(|&idx| {
+                    let module = &unique_modules[idx];
+                    let km = compile_and_load(module, &options)?;
+                    if let Some(c) = &cache {
+                        // Best-effort — a failed insert shouldn't fail the compile.
+                        let _ = c.insert(module, &km);
+                    }
+                    Ok((idx, km))
+                })
+                .collect()
+        };
+        for res in compile_results {
+            let (idx, km) = res?;
+            let scratch_size = km.scratch_size();
+            compiled_slots[idx] = Some((Arc::new(Mutex::new(km)), scratch_size));
+        }
+
+        // Phase 1e: fan the representative's compiled slot out to every
+        // aliased unique-module index. Two `Kernel` nodes with distinct
+        // `Arc`s but identical hashes now share the same `Arc<Mutex<
+        // KernelModule>>` — and each still gets its own scratch BufId
+        // downstream, since the planner needs disjoint scratch lifetimes.
+        for i in 0..unique_modules.len() {
+            let repr = hash_repr[i];
+            if repr != i {
+                compiled_slots[i] = compiled_slots[repr].clone();
+            }
+        }
+
+        // Phase 1d: assemble `PreExe`s in original node order, allocating a
+        // per-node scratch BufId where the compiled module reports scratch.
         let mut compiled: Vec<PreExe> = Vec::with_capacity(nodes.len());
-        // Cache of compiled kernel modules keyed by source `Rc<ir::Module>`
-        // pointer identity. Each entry maps to the shared JIT'd module *and*
-        // the scratch size (so repeat lookups skip re-querying the vtable).
-        let mut module_cache: HashMap<*const ir::Module, (Rc<RefCell<KernelModule>>, usize)> =
-            HashMap::new();
-        for node in nodes {
+        for (node, mod_idx) in nodes.into_iter().zip(node_module_idx.into_iter()) {
             compiled.push(match node {
                 GraphNode::Kernel(k) => {
+                    let idx = mod_idx.expect("Kernel node without module index");
+                    let (module_handle, scratch_size) = compiled_slots[idx]
+                        .as_ref()
+                        .expect("missing compiled slot")
+                        .clone();
                     let name = k.module.name.clone();
-                    let key = Rc::as_ptr(&k.module);
-                    let (module_handle, scratch_size) = if let Some(hit) = module_cache.get(&key) {
-                        (hit.0.clone(), hit.1)
-                    } else {
-                        let km = compile_and_load(&k.module, &self.options)?;
-                        let scratch_size = km.scratch_size();
-                        let handle = Rc::new(RefCell::new(km));
-                        module_cache.insert(key, (handle.clone(), scratch_size));
-                        (handle, scratch_size)
-                    };
-                    // Each node keeps its own scratch buffer id: two kernels
-                    // sharing a module still need disjoint scratch storage
-                    // during their (sequential) launches so the planner can
-                    // model each lifetime independently.
                     let scratch = if scratch_size > 0 {
                         let bid = graph.add_buf(BufInfo {
                             name: Some(format!("scratch<{name}>")),
@@ -203,8 +324,11 @@ impl GraphCompiler {
                 },
             });
         }
-        let num_unique_modules = module_cache.len();
-        drop(module_cache);
+        // Report content-unique modules rather than Arc-unique ones. This
+        // is the number of nvcc invocations a cold cache would trigger; the
+        // Arc-level count would double-count structurally identical modules
+        // built at different call sites.
+        let num_unique_modules = num_unique_content;
         let bufs = graph.bufs.clone();
 
         // Phase 2: build per-node access sets, injecting scratch as both a
@@ -297,7 +421,7 @@ impl GraphCompiler {
                     scratch,
                 } => {
                     {
-                        let m = module.borrow();
+                        let m = module.lock().unwrap();
                         check_kernel_sizes(&m, &inputs, &outputs, &sizes)?;
                         if let Some(sc) = scratch {
                             // Scratch was sized from `module.scratch_size()`
@@ -400,6 +524,7 @@ impl GraphCompiler {
             device: self.device,
             bufs,
             num_unique_modules,
+            num_cached_modules,
         })
     }
 }
@@ -444,11 +569,11 @@ fn writers_readers_from_accesses(
 struct ExeKernel {
     name: String,
     /// Shared handle to the JIT'd module. Multiple `ExeKernel`s can point at
-    /// the same underlying `KernelModule` when their source `Rc<ir::Module>`
+    /// the same underlying `KernelModule` when their source `Arc<ir::Module>`
     /// was shared at graph construction time; execution is sequential so
     /// re-binding inputs / outputs / scratch on the shared handle before
     /// each launch is safe.
-    module: Rc<RefCell<KernelModule>>,
+    module: Arc<Mutex<KernelModule>>,
     inputs: Vec<BufId>,
     outputs: Vec<BufId>,
     /// Synthetic BufId for this module's private scratch, or `None` when
@@ -489,9 +614,15 @@ pub struct GraphExe {
     /// Preserved from the source graph for [`GraphExe::print`]: name and
     /// device_type per BufId.
     bufs: Vec<BufInfo>,
-    /// Number of distinct `KernelModule`s that were JIT-compiled. Two
-    /// `Kernel` nodes sharing the same `Rc<ir::Module>` count once.
+    /// Number of distinct `KernelModule`s that were compiled or loaded from
+    /// cache. Kernels are deduplicated first by `Arc<ir::Module>` identity
+    /// and then by [`crate::module_hash::module_hash`], so two `Kernel`
+    /// nodes with structurally identical modules count once even when they
+    /// carry distinct `Arc` handles.
     num_unique_modules: usize,
+    /// Subset of `num_unique_modules` served from the on-disk kernel cache
+    /// (i.e. reused a persisted `.so` instead of running nvcc).
+    num_cached_modules: usize,
 }
 
 impl GraphExe {
@@ -533,12 +664,20 @@ impl GraphExe {
 
     /// Number of distinct compiled [`KernelModule`]s held by this exe.
     ///
-    /// When callers reuse the same `Rc<ir::Module>` clone across multiple
-    /// [`GraphBuilder::insert_kernel`](crate::graph_ir::GraphBuilder::insert_kernel)
-    /// calls, the underlying module is JIT'd exactly once and shared, so
-    /// this count is less than the number of `Kernel` graph nodes.
+    /// Kernels are deduplicated in two passes: first by `Arc<ir::Module>`
+    /// pointer identity, then by [`crate::module_hash::module_hash`].
+    /// Structurally identical modules built at different call sites (so
+    /// carrying different `Arc`s) share a single JIT'd artifact, which
+    /// keeps this count aligned with the number of nvcc invocations the
+    /// cold cache would trigger.
     pub fn num_unique_modules(&self) -> usize {
         self.num_unique_modules
+    }
+
+    /// How many of [`Self::num_unique_modules`] were served from the on-disk
+    /// [`crate::kernel_cache::KernelCache`] instead of re-running nvcc.
+    pub fn num_cached_modules(&self) -> usize {
+        self.num_cached_modules
     }
 
     /// SSA-form textual dump of the compiled graph. Nodes are printed in
@@ -766,7 +905,7 @@ impl GraphExe {
                     // Re-binding inputs / outputs / scratch just before the
                     // launch is safe even when this handle is shared with
                     // another `ExeKernel`, because execution is sequential.
-                    let mut m = k.module.borrow_mut();
+                    let mut m = k.module.lock().unwrap();
                     for (i, &bid) in k.inputs.iter().enumerate() {
                         let ptr = bufid_ptr(bid)?;
                         let expected = m.input_size(i);
@@ -992,7 +1131,7 @@ fn check_kernel_sizes(
 
 #[cfg(test)]
 mod tests {
-    use std::rc::Rc;
+    use std::sync::Arc;
 
     use openvm_cuda_common::{
         copy::{MemCopyD2H, MemCopyH2D},
@@ -1006,7 +1145,7 @@ mod tests {
         ir::{IRBuilder, ScalarType},
     };
 
-    /// Two `Kernel` graph nodes that share the *same* `Rc<ir::Module>` are
+    /// Two `Kernel` graph nodes that share the *same* `Arc<ir::Module>` are
     /// JIT'd exactly once, and each node still receives its own input/output
     /// bindings. The scaled outputs must equal 2 * input for both bindings.
     #[test]
@@ -1022,7 +1161,7 @@ mod tests {
                 let two = b.const_field(2);
                 b.mul(ai, two)
             });
-            Rc::new(b.finish("scale_by_two_shared", body))
+            Arc::new(b.finish("scale_by_two_shared", body))
         };
 
         let bytes = (N * 4) as i64;

@@ -1061,39 +1061,39 @@ pub fn ntt_supra_module(log_n: usize, nthreads: usize, z_count: usize, coalesced
     b.finish(format!("ntt_supra_{n}_t{nthreads}_z{z_count}"), prev)
 }
 
-pub fn ntt_supra_v2_module(log_n: usize, steps: &[usize]) -> Module {
-    assert!(log_n == steps.iter().sum());
-    assert!(steps.iter().all(|&s| s.is_power_of_two()));
-    let n = 1 << log_n;
-    let offset = 0;
-    let mut b = IRBuilder::new();
-    let mut poly = b.input("poly_in", ScalarType::BabyBear, vec![n]);
-    let twiddles = b.input("twiddles", ScalarType::BabyBear, vec![todo!()]);
+pub fn ntt_supra_v2_module(_log_n: usize, _steps: &[usize]) -> Module {
+    // assert!(log_n == steps.iter().sum());
+    // assert!(steps.iter().all(|&s| s.is_power_of_two()));
+    // let n = 1 << log_n;
+    // let offset = 0;
+    // let mut b = IRBuilder::new();
+    // let mut poly = b.input("poly_in", ScalarType::BabyBear, vec![n]);
+    // let twiddles = b.input("twiddles", ScalarType::BabyBear, vec![todo!()]);
 
-    let get_intermediate_roots = |b, x, y| -> NodeId { todo!() };
+    // let get_intermediate_roots = |b, x, y| -> NodeId { todo!() };
 
-    for s in steps {
-        let coalesced = offset == 0;
-        let diff_pow = 1 << (s - 1);
-        let inp_pow = 1 << offset;
-        let out_pow = 1 << (offset + s - 1);
+    // for s in steps {
+    //     let coalesced = offset == 0;
+    //     let diff_pow = 1 << (s - 1);
+    //     let inp_pow = 1 << offset;
+    //     let out_pow = 1 << (offset + s - 1);
 
-        let block_width = (1 << s) * z_count; // number of elems per block
-        let num_blocks = n / block_width;
-        let iterations = *s;
-        poly = kernel!(b,
-            #[grid(threads = 256)]
-            compute [num_blocks] |bid| {
-                let shared_slice = compute [block_width] |tid| {
-                    poly[bid * #block_width + tid]
-                };
-                let tiz = tid / #diff_pow * #diff_pow * #z_count + tid % #diff_pow;
+    //     let block_width = (1 << s) * z_count; // number of elems per block
+    //     let num_blocks = n / block_width;
+    //     let iterations = *s;
+    //     poly = kernel!(b,
+    //         #[grid(threads = 256)]
+    //         compute [num_blocks] |bid| {
+    //             let shared_slice = compute [block_width] |tid| {
+    //                 poly[bid * #block_width + tid]
+    //             };
+    //             let tiz = tid / #diff_pow * #diff_pow * #z_count + tid % #diff_pow;
 
-                // let (r0, r1) = get_intermediate_roots()
-                shared_slice
-            }
-        );
-    }
+    //             // let (r0, r1) = get_intermediate_roots()
+    //             shared_slice
+    //         }
+    //     );
+    // }
     todo!()
 }
 

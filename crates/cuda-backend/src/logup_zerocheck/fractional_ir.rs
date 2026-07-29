@@ -40,7 +40,7 @@
 use std::{
     cell::OnceCell,
     mem::{forget, size_of},
-    rc::Rc,
+    sync::Arc,
 };
 
 use crypto_compiler::{
@@ -1235,11 +1235,11 @@ pub fn claim_combine_ir(
 
 /// Cached `ir::Module` for [`claim_combine_ir`] (see
 /// [`reconstruct_s_evals_module`] for why the cache matters).
-fn claim_combine_module() -> Rc<Module> {
+fn claim_combine_module() -> Arc<Module> {
     thread_local! {
-        static MODULE: OnceCell<Rc<Module>> = const { OnceCell::new() };
+        static MODULE: OnceCell<Arc<Module>> = const { OnceCell::new() };
     }
-    MODULE.with(|m| Rc::clone(m.get_or_init(|| Rc::new(build_claim_combine_module()))))
+    MODULE.with(|m| Arc::clone(m.get_or_init(|| Arc::new(build_claim_combine_module()))))
 }
 
 /// Structured module for [`claim_combine_ir`]: `out = numer + lambda *
@@ -1350,11 +1350,11 @@ pub fn reconstruct_s_evals_ir(
 /// shape-static and `GraphCompiler` dedups JIT compilation by `Rc` pointer
 /// identity, so sharing one instance means the per-round calls in the
 /// sumcheck driver compile the kernel exactly once.
-fn reconstruct_s_evals_module() -> Rc<Module> {
+fn reconstruct_s_evals_module() -> Arc<Module> {
     thread_local! {
-        static MODULE: OnceCell<Rc<Module>> = const { OnceCell::new() };
+        static MODULE: OnceCell<Arc<Module>> = const { OnceCell::new() };
     }
-    MODULE.with(|m| Rc::clone(m.get_or_init(|| Rc::new(build_reconstruct_s_evals_module()))))
+    MODULE.with(|m| Arc::clone(m.get_or_init(|| Arc::new(build_reconstruct_s_evals_module()))))
 }
 
 /// Structured module for [`reconstruct_s_evals_ir`], following the
@@ -1526,11 +1526,11 @@ pub fn update_running_scalars_ir(
 
 /// Cached `ir::Module` for [`update_running_scalars_ir`] (see
 /// [`reconstruct_s_evals_module`] for why the cache matters).
-fn update_running_scalars_module() -> Rc<Module> {
+fn update_running_scalars_module() -> Arc<Module> {
     thread_local! {
-        static MODULE: OnceCell<Rc<Module>> = const { OnceCell::new() };
+        static MODULE: OnceCell<Arc<Module>> = const { OnceCell::new() };
     }
-    MODULE.with(|m| Rc::clone(m.get_or_init(|| Rc::new(build_update_running_scalars_module()))))
+    MODULE.with(|m| Arc::clone(m.get_or_init(|| Arc::new(build_update_running_scalars_module()))))
 }
 
 /// Structured module for [`update_running_scalars_ir`]:
@@ -4831,8 +4831,9 @@ mod tests {
             let compile_ms = t0.elapsed().as_secs_f64() * 1e3;
             println!(
                 "graph build: {build_ms:>8.2} ms ({n_nodes} nodes); compile: {compile_ms:>8.2} \
-                 ms ({} unique modules, scratch pool {} bytes)",
+                 ms ({} unique modules, {} loaded from cache, scratch pool {} bytes)",
                 exe.num_unique_modules(),
+                exe.num_cached_modules(),
                 exe.scratch_bytes(),
             );
 

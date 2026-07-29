@@ -21,6 +21,12 @@ rustc-hash = { workspace = true }
 smallvec = { workspace = true }
 tempfile = { workspace = true }
 thiserror = { workspace = true }
+hex = { workspace = true, default-features = false, features = ["std"] }
+sha3 = { workspace = true }
+rayon = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+parking_lot = { workspace = true }
 
 # The `planner` feature enables the CP-SAT-based memory planner. `cp_sat`
 # links against Google OR-Tools; install it per
