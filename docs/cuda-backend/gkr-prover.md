@@ -322,7 +322,7 @@ Let:
 - Assume precompute-M is active
 
 Buffers used at peak (workspace only; excludes input `layer`/leaves):
-- `work_buffer`: `2^(n-w-2) * |Frac|` (precompute-M defers `w+1` folds before first write)
+- `work_buffer`: `max(2^(n-w-1), 2^22) * |Frac|` (precompute-M defers `w+1` folds before first write; `2^(n-2) * |Frac|` if fold-eval only)
 - `copy_scratch`: `1 * |Frac|`
 - `d_sum_evals`: `2 * |EF|`
 - `tmp_block_sums`: `< 2^(n-7) * |EF|`
@@ -332,15 +332,21 @@ Buffers used at peak (workspace only; excludes input `layer`/leaves):
 - `eq_r_prefix_buffer` + `eq_suffix_buffer`: `2^(w+1) * |EF|` (default `w=3` gives `16 * |EF|`)
 
 Workspace upper bound (sum of the buffers above), using `|Frac| = 2 * |EF|`:
-- `W < (2^(n-w-1) + 2^(n-7) + 2^(n+w-10) + 2^floor(n/2) + 2^ceil(n/2) + 4^w + 2^(w+1) + 2) * |EF|`
+- `W < (2^(n-w) + 2^(n-7) + 2^(n+w-10) + 2^floor(n/2) + 2^ceil(n/2) + 4^w + 2^(w+1) + 2) * |EF|`
 
 Total GPU memory required (workspace + input leaves `2^n * |Frac| = 2^(n+1) * |EF|`):
-- `M_total < (2^(n+1) + 2^(n-w-1) + 2^(n-7) + 2^(n+w-10) + 2^floor(n/2) + 2^ceil(n/2) + 4^w + 2^(w+1) + 2) * |EF|`
+- `M_total < (2^(n+1) + 2^(n-w) + 2^(n-7) + 2^(n+w-10) + 2^floor(n/2) + 2^ceil(n/2) + 4^w + 2^(w+1) + 2) * |EF|`
 - With default `w = 3` and `|EF| = 16` bytes:
-  - `M_total < (2^(n+1) + 2^(n-4) + 2^(n-6) + 2^floor(n/2) + 2^ceil(n/2) + 82) / 2^26 GiB`
-  - `n = 27`: `M_total < 4.16 GiB`
-  - `n = 28`: `M_total < 8.31 GiB`
-  - `n = 29`: `M_total < 16.63 GiB`
-  - `n = 30`: `M_total < 33.25 GiB`
+  - `M_total < (2^(n+1) + 2^(n-3) + 2^(n-6) + 2^floor(n/2) + 2^ceil(n/2) + 82) / 2^26 GiB`
+  - `n = 27`: `M_total < 4.29 GiB`
+  - `n = 28`: `M_total < 8.57 GiB`
+  - `n = 29`: `M_total < 17.13 GiB`
+  - `n = 30`: `M_total < 34.26 GiB`
 
-Dominant term is the input leaves (`2^(n+1) * |EF|`). Workspace overhead is ~4%.
+Dominant term is the input leaves (`2^(n+1) * |EF|`). Workspace overhead is ~7%.
+
+`ProvingMemoryConfig::gkr_memory_bytes` (`memory_metering.rs`) mirrors this as
+`leaves + max(logical_len/16, 2^22) * |Frac| + logical_len/256 * |Frac| + 256 MiB`, with
+`logical_len = 2^ceil_log2(interaction_cells + 1)`. The batch-constraint round0 budget
+instead uses the fold-eval work buffer (`logical_len/4`), matching
+`FractionalInputSize::peak_work_buffer_bytes`. Keep both in sync with this section.

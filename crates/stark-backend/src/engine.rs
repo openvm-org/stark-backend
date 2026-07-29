@@ -66,7 +66,15 @@ where
     }
 
     fn proving_memory_config(&self) -> ProvingMemoryConfig {
-        ProvingMemoryConfig::from_protocol_config(self.config(), true)
+        let cache_stacked_matrix = false;
+        let cache_rs_code_matrix = true;
+        let zerocheck_save_memory = self.config().params().log_blowup == 1;
+        ProvingMemoryConfig::from_protocol_config(
+            self.config(),
+            cache_stacked_matrix,
+            cache_rs_code_matrix,
+            zerocheck_save_memory,
+        )
     }
 
     fn device(&self) -> &Self::PD;
