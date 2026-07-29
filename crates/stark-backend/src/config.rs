@@ -96,10 +96,9 @@ impl SystemParams {
     /// Constructor with many configuration options. Only `k_whir`, `max_constraint_degree`,
     /// `query_phase_pow_bits` are preset with constants.
     ///
-    /// The `security_bits` is the target bits of security. It is used to select the number of WHIR
-    /// queries, but does **not** guarantee the target security level is achieved by the overall
-    /// protocol using these parameters. Use the soundness calculator to ensure the target security
-    /// level is met.
+    /// The `security_bits` value targets field/protocol security when selecting the number of WHIR
+    /// queries. It does **not** include commitment or transcript hash security. The soundness
+    /// calculator is likewise field-side-only and does not establish an end-to-end security level.
     ///
     /// This function should only be used for internal cryptography libraries. Most users should
     /// instead use preset parameters provided in SDKs.
@@ -281,8 +280,8 @@ impl ProximityRegime {
 }
 
 impl WhirConfig {
-    /// Sets parameters targeting `security_bits` of provable security (including grinding), using
-    /// the given proximity regime.
+    /// Sets parameters targeting `security_bits` of field/protocol security (including grinding),
+    /// using the given proximity regime.
     pub fn new(
         log_blowup: usize,
         log_stacked_height: usize,

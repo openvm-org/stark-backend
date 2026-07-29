@@ -4,12 +4,15 @@ use super::{base_field_order, challenge_field_bits, SoundnessCalculator};
 use crate::{keygen::types::MultiStarkVerifyingKey, StarkProtocolConfig};
 
 impl SoundnessCalculator {
-    /// Computes a conservative soundness estimate for the verifier defined by the given `vk`.
+    /// Computes a conservative field/protocol soundness estimate for the verifier defined by the
+    /// given `vk`. This field-side-only estimate excludes commitment and transcript hash security.
     ///
     /// The verifying key does not fix a single proof shape: optional AIRs may be absent and trace
     /// heights can vary within verifier-enforced bounds. This function therefore uses verifier-side
     /// upper bounds derived from the key.
-    pub fn calculate_from_vk<SC: StarkProtocolConfig>(vk: &MultiStarkVerifyingKey<SC>) -> Self {
+    pub fn calculate_field_protocol_from_vk<SC: StarkProtocolConfig>(
+        vk: &MultiStarkVerifyingKey<SC>,
+    ) -> Self {
         let params = &vk.inner.params;
         let num_airs = vk.inner.per_air.len();
         let mut max_constraints_per_air = 0;
@@ -35,7 +38,7 @@ impl SoundnessCalculator {
             params.log_stacked_height(),
         ));
 
-        Self::calculate(
+        Self::calculate_field_protocol(
             params,
             base_field_order::<SC>(),
             challenge_field_bits::<SC>(),
@@ -117,7 +120,7 @@ mod tests {
 
     impl StarkProtocolConfig for DummyConfig {
         type F = BabyBear;
-        type EF = BinomialExtensionField<BabyBear, 4>;
+        type EF = BinomialExtensionField<BabyBear, 5>;
         type Digest = [BabyBear; 1];
         type Hasher = DummyHasher;
 
@@ -236,9 +239,9 @@ mod tests {
     fn calculates_vk_soundness_from_verifier_bounds() {
         let vk = test_vk();
         let params = vk.inner.params.clone();
-        let soundness = SoundnessCalculator::calculate_from_vk(&vk);
+        let soundness = SoundnessCalculator::calculate_field_protocol_from_vk(&vk);
 
-        let expected = SoundnessCalculator::calculate(
+        let expected = SoundnessCalculator::calculate_field_protocol(
             &params,
             base_field_order::<DummyConfig>(),
             challenge_field_bits::<DummyConfig>(),
@@ -251,7 +254,10 @@ mod tests {
             10,
         );
 
-        assert_eq!(soundness.total_bits, expected.total_bits);
+        assert_eq!(
+            soundness.field_protocol_security_bits,
+            expected.field_protocol_security_bits
+        );
         assert_eq!(
             soundness.constraint_batching_bits,
             expected.constraint_batching_bits

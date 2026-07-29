@@ -336,11 +336,11 @@ Workspace upper bound (sum of the buffers above), using `|Frac| = 2 * |EF|`:
 
 Total GPU memory required (workspace + input leaves `2^n * |Frac| = 2^(n+1) * |EF|`):
 - `M_total < (2^(n+1) + 2^(n-w-1) + 2^(n-7) + 2^(n+w-10) + 2^floor(n/2) + 2^ceil(n/2) + 4^w + 2^(w+1) + 2) * |EF|`
-- With default `w = 3` and `|EF| = 16` bytes:
-  - `M_total < (2^(n+1) + 2^(n-4) + 2^(n-6) + 2^floor(n/2) + 2^ceil(n/2) + 82) / 2^26 GiB`
-  - `n = 27`: `M_total < 4.16 GiB`
-  - `n = 28`: `M_total < 8.31 GiB`
-  - `n = 29`: `M_total < 16.63 GiB`
-  - `n = 30`: `M_total < 33.25 GiB`
+- With default `w = 3` and quintic `|EF| = 20` bytes:
+  - `M_total < 20 * (2^(n+1) + 2^(n-4) + 2^(n-6) + 2^floor(n/2) + 2^ceil(n/2) + 82) / 2^30 GiB`
+  - `n = 27`: `M_total < 5.20 GiB`
+  - `n = 28`: `M_total < 10.39 GiB`
+  - `n = 29`: `M_total < 20.78 GiB`
+  - `n = 30`: `M_total < 41.56 GiB`
 
 Dominant term is the input leaves (`2^(n+1) * |EF|`). Workspace overhead is ~4%.

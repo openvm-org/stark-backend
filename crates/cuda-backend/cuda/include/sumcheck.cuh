@@ -28,6 +28,7 @@ static __device__ inline FpExt warp_reduce_sum(FpExt val) {
         other.elems[1] = Fp::fromRaw(__shfl_down_sync(mask, val.elems[1].asRaw(), offset));
         other.elems[2] = Fp::fromRaw(__shfl_down_sync(mask, val.elems[2].asRaw(), offset));
         other.elems[3] = Fp::fromRaw(__shfl_down_sync(mask, val.elems[3].asRaw(), offset));
+        other.elems[4] = Fp::fromRaw(__shfl_down_sync(mask, val.elems[4].asRaw(), offset));
         val = val + other;
     }
     return val;
@@ -40,7 +41,7 @@ __device__ __forceinline__ FpExt warp_reduce_sum_n(FpExt val, uint32_t n) {
     for (uint32_t offset = n >> 1; offset > 0; offset >>= 1) {
         FpExt other;
 #pragma unroll
-        for (int i = 0; i < 4; i++) {
+        for (int i = 0; i < D_EF; i++) {
             other.elems[i] =
                 Fp::fromRaw(__shfl_xor_sync(0xffffffff, val.elems[i].asRaw(), offset));
         }
@@ -56,7 +57,7 @@ __device__ __forceinline__ FpExt warp_reduce_sum_n(FpExt val, uint32_t n) {
 // smem: shared memory for cross-warp reduction (size >= total_warps_in_block)
 //
 // Note: When chunk_size > 32, writes to chunk_smem[warp_in_chunk] from different chunks
-// may hit the same bank (FpExt = 16 bytes = 4 words). This is a minor inefficiency in the
+// may hit the same bank (FpExt = 20 bytes = 5 words). This is a minor inefficiency in the
 // reduction phase, not a correctness issue.
 __device__ inline FpExt chunk_reduce_sum(
     FpExt val,
@@ -86,7 +87,7 @@ __device__ inline FpExt chunk_reduce_sum(
 
     // Step 3: First warp of chunk reads and reduces warp results
     if (warp_in_chunk == 0) {
-        FpExt zero = {0, 0, 0, 0};
+        FpExt zero = FpExt(0);
         FpExt warp_val = (lane_id < warps_per_chunk) ? chunk_smem[lane_id] : zero;
         val = warp_reduce_sum(warp_val);
     }
@@ -107,11 +108,11 @@ __device__ __forceinline__ void atomic_add_fp_to_u64(uint64_t *output, Fp val) {
     atomicAdd((unsigned long long *)output, static_cast<uint64_t>(val.asRaw()));
 }
 
-// Atomically add FpExt to uint64_t[4] accumulator
-// Layout: output[0..3] correspond to elems[0..3]
+// Atomically add FpExt to uint64_t[5] accumulator
+// Layout: output[0..4] correspond to elems[0..4]
 __device__ __forceinline__ void atomic_add_fpext_to_u64(uint64_t *output, FpExt val) {
 #pragma unroll
-    for (int i = 0; i < 4; ++i) {
+    for (int i = 0; i < D_EF; ++i) {
         atomic_add_fp_to_u64(output + i, val.elems[i]);
     }
 }
@@ -131,7 +132,7 @@ __device__ __forceinline__ void atomic_add_fpext_to_u64(uint64_t *output, FpExt 
 
 // Warp-aggregated atomic: reduce within warp, lane 0 does single atomic add
 __device__ __forceinline__ void warp_aggregated_atomic_add_fpext(
-    uint64_t *output, // Global memory, uint64_t[4] for one FpExt
+    uint64_t *output, // Global memory, uint64_t[5] for one FpExt
     FpExt val
 ) {
     // Step 1: Warp-level reduction via shuffles
@@ -145,13 +146,13 @@ __device__ __forceinline__ void warp_aggregated_atomic_add_fpext(
 }
 
 // Indexed version for arrays of FpExt outputs
-// Layout: output[idx * 4 .. idx * 4 + 3]
+// Layout: output[idx * 5 .. idx * 5 + 4]
 __device__ __forceinline__ void warp_aggregated_atomic_add_fpext_indexed(
-    uint64_t *output, // Global memory, uint64_t[d * 4]
+    uint64_t *output, // Global memory, uint64_t[d * 5]
     uint32_t idx,
     FpExt val
 ) {
-    warp_aggregated_atomic_add_fpext(output + idx * 4, val);
+    warp_aggregated_atomic_add_fpext(output + idx * D_EF, val);
 }
 
 // Block-level reduction: sums FpExt values across all threads in a block
@@ -173,7 +174,7 @@ static __device__ inline FpExt block_reduce_sum(FpExt val, FpExt *shared) {
     __syncthreads();
 
     // Stage 2: First warp reduces the per-warp results
-    FpExt zero = {0, 0, 0, 0};
+    FpExt zero = FpExt(0);
     if (warp_id == 0) {
         // Only the first warp participates in the second reduction. Within that warp we
         // reuse the lane id to index the number of warps stored in shared memory.
@@ -205,7 +206,7 @@ static __global__ void static_final_reduce_block_sums(
     if (out_idx >= D)
         return;
 
-    FpExt sum = {0, 0, 0, 0};
+    FpExt sum = FpExt(0);
 
     // Each thread accumulates subset of blocks
     for (int block_id = tid; block_id < num_blocks; block_id += blockDim.x) {
@@ -236,7 +237,7 @@ static __global__ void final_reduce_block_sums(
     int out_idx = blockIdx.x;
     int d = gridDim.x;
 
-    FpExt sum = {0, 0, 0, 0};
+    FpExt sum = FpExt(0);
 
     // Each thread accumulates subset of blocks
     for (int block_id = tid; block_id < num_blocks; block_id += blockDim.x) {
@@ -275,7 +276,7 @@ static __global__ void batched_final_reduce_block_sums(
     uint32_t end = segment_offsets[seg_idx + 1];
     uint32_t num_blocks = end - start;
 
-    FpExt sum = {0, 0, 0, 0};
+    FpExt sum = FpExt(0);
 
     // Each thread accumulates a strided subset of this segment's blocks
     for (uint32_t i = tid; i < num_blocks; i += blockDim.x) {

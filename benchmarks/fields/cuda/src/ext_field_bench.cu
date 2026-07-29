@@ -203,13 +203,13 @@ extern "C" int inv_fp4(void* out, const void* a, size_t n, int reps, cudaStream_
 }
 
 // ============================================================================
-// Extern "C" Wrappers for FpExt (quartic extension - optimized bb31_4_t)
+// Extern "C" Wrappers for FpExt (quintic extension - BabyBear^5)
 // ============================================================================
 
 extern "C" int init_fpext(void* out, const uint32_t* raw_data, size_t n, cudaStream_t stream) {
     int grid_size;
     dim3 block = get_launch_config(n, grid_size);
-    bench_init_kernel<FpExt, Fp, 4><<<grid_size, block, 0, stream>>>(static_cast<FpExt*>(out), raw_data, n);
+    bench_init_kernel<FpExt, Fp, 5><<<grid_size, block, 0, stream>>>(static_cast<FpExt*>(out), raw_data, n);
     return cudaGetLastError();
 }
 

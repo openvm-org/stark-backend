@@ -1,14 +1,23 @@
 //! ==========================================================================
 //! Production configuration soundness tests
 //! ==========================================================================
+//!
+//! These tests cover field/protocol soundness only. They do not assess commitment or transcript
+//! hash security and make no end-to-end security claim.
 
-use openvm_stark_backend::{soundness::*, SystemParams};
+use openvm_stark_backend::{
+    soundness::*,
+    test_utils::{FibFixture, TestFixture},
+    StarkEngine, SystemParams,
+};
 use openvm_stark_sdk::config::{
-    app_params_with_100_bits_security, base_field_order, challenge_field_bits,
-    hook_params_with_100_bits_security as hook_params,
-    internal_params_with_100_bits_security as internal_params,
-    leaf_params_with_100_bits_security as leaf_params,
-    root_params_with_100_bits_security as root_params, MAX_APP_LOG_STACKED_HEIGHT,
+    app_params_with_128_bits_field_security,
+    baby_bear_poseidon2::{BabyBearPoseidon2RefEngine, DuplexSponge},
+    base_field_order, challenge_field_bits,
+    hook_params_with_128_bits_field_security as hook_params,
+    internal_params_with_128_bits_field_security as internal_params,
+    leaf_params_with_128_bits_field_security as leaf_params,
+    root_params_with_128_bits_field_security as root_params, MAX_APP_LOG_STACKED_HEIGHT,
 };
 
 // ==========================================================================
@@ -55,12 +64,13 @@ const APP_MAX_INTERACTIONS_PER_AIR: usize = 1000;
 const RECURSION_MAX_CONSTRAINTS: usize = 1000;
 const RECURSION_NUM_AIRS: usize = 50;
 const RECURSION_NUM_COLUMNS: usize = 2000;
+const ROOT_NUM_COLUMNS: usize = 2400;
 const RECURSION_MAX_INTERACTIONS_PER_AIR: usize = 100; // estimate, needs verification
 
-const TARGET_SECURITY_BITS: usize = 100;
+const TARGET_FIELD_PROTOCOL_SECURITY_BITS: f64 = 128.0;
 
 fn app_params() -> SystemParams {
-    app_params_with_100_bits_security(MAX_APP_LOG_STACKED_HEIGHT)
+    app_params_with_128_bits_field_security(MAX_APP_LOG_STACKED_HEIGHT)
 }
 
 fn check_soundness(
@@ -72,7 +82,7 @@ fn check_soundness(
     num_columns: usize,
     n_logup: usize,
 ) -> SoundnessCalculator {
-    let soundness = SoundnessCalculator::calculate(
+    let soundness = SoundnessCalculator::calculate_field_protocol(
         params,
         base_field_order(),
         challenge_field_bits(),
@@ -99,6 +109,7 @@ fn check_soundness(
         "Context: max_constraints={}, num_airs={}, max_log_height={}, num_columns={}, n_logup={}",
         max_constraints, num_airs, max_log_height, num_columns, n_logup
     );
+    println!("Challenge field:      {:.1} bits", challenge_field_bits());
     println!();
     println!("LogUp (α/β + PoW):   {:.1} bits", soundness.logup_bits);
     println!(
@@ -122,7 +133,10 @@ fn check_soundness(
         soundness.stacked_reduction_bits
     );
     println!("WHIR:                {:.1} bits", soundness.whir_bits);
-    println!("TOTAL:               {:.1} bits", soundness.total_bits);
+    println!(
+        "FIELD/PROTOCOL SECURITY: {:.1} bits",
+        soundness.field_protocol_security_bits
+    );
 
     println!("\nWHIR Error Source Breakdown:");
     let whir = &soundness.whir_details;
@@ -145,6 +159,24 @@ fn check_soundness(
 }
 
 #[test]
+fn test_quintic_challenge_field_bits() {
+    let bits = challenge_field_bits();
+    assert!(
+        (bits - 154.5).abs() < 0.1,
+        "expected a 154.5-bit quintic challenge field, got {bits:.4} bits"
+    );
+}
+
+#[test]
+fn test_internal_vk_folding_pow_preset_values() {
+    let engine = BabyBearPoseidon2RefEngine::<DuplexSponge>::new(internal_params());
+    let (_, internal_vk) = FibFixture::new(0, 1, 1).keygen(&engine);
+
+    assert_eq!(internal_vk.inner.params.whir.folding_pow_bits, 14);
+    assert_eq!(internal_vk.inner.params.whir.query_phase_pow_bits, 20);
+}
+
+#[test]
 fn test_app_vm_security() {
     let params = app_params();
     let n_logup = n_logup_bound(
@@ -164,9 +196,9 @@ fn test_app_vm_security() {
         n_logup,
     );
     assert!(
-        soundness.total_bits >= TARGET_SECURITY_BITS as f64,
+        soundness.field_protocol_security_bits >= TARGET_FIELD_PROTOCOL_SECURITY_BITS,
         "App VM: got {:.1} bits",
-        soundness.total_bits
+        soundness.field_protocol_security_bits
     );
 }
 
@@ -191,16 +223,16 @@ fn test_leaf_aggregation_security() {
         n_logup,
     );
     assert!(
-        soundness.total_bits >= TARGET_SECURITY_BITS as f64,
+        soundness.field_protocol_security_bits >= TARGET_FIELD_PROTOCOL_SECURITY_BITS,
         "Leaf: got {:.1} bits",
-        soundness.total_bits
+        soundness.field_protocol_security_bits
     );
 }
 
 #[test]
 fn test_internal_aggregation_security() {
     let params = internal_params();
-    let max_log_height = 19;
+    let max_log_height = 21;
     let n_logup = n_logup_bound(
         params.l_skip,
         RECURSION_NUM_AIRS,
@@ -218,16 +250,16 @@ fn test_internal_aggregation_security() {
         n_logup,
     );
     assert!(
-        soundness.total_bits >= TARGET_SECURITY_BITS as f64,
+        soundness.field_protocol_security_bits >= TARGET_FIELD_PROTOCOL_SECURITY_BITS,
         "Internal: got {:.1} bits",
-        soundness.total_bits
+        soundness.field_protocol_security_bits
     );
 }
 
 #[test]
 fn test_root_aggregation_security() {
     let params = root_params();
-    let max_log_height = 21;
+    let max_log_height = 20;
     let n_logup = n_logup_bound(
         params.l_skip,
         RECURSION_NUM_AIRS,
@@ -241,13 +273,13 @@ fn test_root_aggregation_security() {
         RECURSION_MAX_CONSTRAINTS,
         RECURSION_NUM_AIRS,
         max_log_height,
-        RECURSION_NUM_COLUMNS,
+        ROOT_NUM_COLUMNS,
         n_logup,
     );
     assert!(
-        soundness.total_bits >= TARGET_SECURITY_BITS as f64,
+        soundness.field_protocol_security_bits >= TARGET_FIELD_PROTOCOL_SECURITY_BITS,
         "Root: got {:.1} bits",
-        soundness.total_bits
+        soundness.field_protocol_security_bits
     );
 }
 
@@ -272,9 +304,9 @@ fn test_hook_security() {
         n_logup,
     );
     assert!(
-        soundness.total_bits >= TARGET_SECURITY_BITS as f64,
+        soundness.field_protocol_security_bits >= TARGET_FIELD_PROTOCOL_SECURITY_BITS,
         "Hook: got {:.1} bits",
-        soundness.total_bits
+        soundness.field_protocol_security_bits
     );
 }
 
@@ -314,7 +346,7 @@ fn test_all_production_configs() {
             &internal,
             RECURSION_MAX_CONSTRAINTS,
             RECURSION_NUM_AIRS,
-            19,
+            21,
             RECURSION_NUM_COLUMNS,
             RECURSION_MAX_INTERACTIONS_PER_AIR,
         ),
@@ -324,7 +356,7 @@ fn test_all_production_configs() {
             RECURSION_MAX_CONSTRAINTS,
             RECURSION_NUM_AIRS,
             20,
-            RECURSION_NUM_COLUMNS,
+            ROOT_NUM_COLUMNS,
             RECURSION_MAX_INTERACTIONS_PER_AIR,
         ),
         (
@@ -358,10 +390,10 @@ fn test_all_production_configs() {
             n_logup,
         );
         assert!(
-            soundness.total_bits >= TARGET_SECURITY_BITS as f64,
+            soundness.field_protocol_security_bits >= TARGET_FIELD_PROTOCOL_SECURITY_BITS,
             "{}: got {:.1} bits",
             name,
-            soundness.total_bits
+            soundness.field_protocol_security_bits
         );
     }
 

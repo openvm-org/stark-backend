@@ -68,7 +68,7 @@ __global__ void whir_algebraic_batch_traces_kernel(
         }
     }
 #pragma unroll
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < D_EF; i++) {
         output[i * stacked_height + row] = res.elems[i];
     }
 }

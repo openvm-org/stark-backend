@@ -39,7 +39,7 @@ use openvm_stark_backend::{
     prover::{AirProvingContext, ColMajorMatrix, DeviceDataTransporter, ProvingContext},
     AirRef, StarkEngine, SystemParams,
 };
-use openvm_stark_sdk::config::app_params_with_100_bits_security;
+use openvm_stark_sdk::config::app_params_with_128_bits_field_security;
 use rand::{rngs::StdRng, seq::SliceRandom, SeedableRng};
 use serde::Serialize;
 
@@ -128,15 +128,15 @@ fn shape_from_record(rec: &AirShapeRecord, max_log_height: usize) -> SyntheticSh
     }
 }
 
-/// Use the production `app_params_with_100_bits_security` config —
-/// the standard 100-bit-security params. The captured distribution
+/// Use the production `app_params_with_128_bits_field_security` config —
+/// the standard 128-bit field/protocol-security params. The captured distribution
 /// lives within these bounds (heights ≤ 2^22, ≤ 100 AIRs, ≤ 5,000
 /// constraints/AIR, ≤ 1,000 interactions/AIR). The widest captured AIR
 /// is `KeccakfPermAir` at width 2,634 — w_stack=2,048 is the *stacked*
 /// width bound on common_main partitions, NOT a per-AIR-width cap, so
 /// this is fine.
 fn build_params(max_log_height: usize) -> SystemParams {
-    app_params_with_100_bits_security(max_log_height)
+    app_params_with_128_bits_field_security(max_log_height)
 }
 
 fn run_on_hash_impl<HS: GpuHashScheme>() -> eyre::Result<()>

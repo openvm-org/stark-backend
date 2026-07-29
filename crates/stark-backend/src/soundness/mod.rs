@@ -1,4 +1,7 @@
-//! Soundness analysis for the SWIRL proof system.
+//! Field/protocol soundness analysis for the SWIRL proof system.
+//!
+//! This module is field-side-only. It does not model commitment or transcript hash security and
+//! does not produce an end-to-end security estimate.
 
 use p3_field::PrimeField64;
 

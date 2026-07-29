@@ -6,13 +6,15 @@
 //! 3. Stacked Reduction - Reduces trace evaluations to stacked polynomial evaluations
 //! 4. WHIR - Polynomial commitment opening via FRI-like folding
 //!
-//! Each component contributes to the overall soundness error, and the total security
-//! is the minimum across all components.
+//! Each algebraic component contributes to the field/protocol soundness error, and
+//! [`SoundnessCalculator::field_protocol_security_bits`] is the minimum across those components.
+//! This calculator is field-side-only: it does not model commitment or transcript hash security
+//! and must not be used as an end-to-end security claim.
 //!
 //! Components add proof-of-work grinding (`*_pow_bits`) on top of their statistical soundness.
 //! Grinding bits count hash evaluations, so the attacker's cost for `g` grinding bits is
-//! `≈ 2^g · cost(H)` for the grinding hash `H` (the transcript hash). Bit totals are thus
-//! comparable only across configs that share a grinding hash.
+//! `≈ 2^g · cost(H)` for the grinding hash `H` (the transcript hash). Bit estimates are comparable
+//! only across configs that share a grinding hash.
 
 use std::f64;
 
@@ -39,8 +41,10 @@ pub struct SoundnessCalculator {
     pub whir_bits: f64,
     /// Detailed WHIR soundness breakdown.
     pub whir_details: WhirSoundnessCalculator,
-    /// Total security bits (minimum of all components).
-    pub total_bits: f64,
+    /// Field/protocol security bits (minimum of all algebraic protocol components).
+    ///
+    /// This field-side-only estimate excludes commitment and transcript hash security.
+    pub field_protocol_security_bits: f64,
 }
 
 /// WHIR soundness breakdown by error source.
@@ -71,14 +75,17 @@ pub struct ProximityGapSecurity {
 }
 
 impl SoundnessCalculator {
-    /// Calculates soundness for the given system parameters.
+    /// Calculates field/protocol soundness for the given system parameters.
+    ///
+    /// This is a field-side-only calculation and does not report end-to-end security.
     ///
     /// # Arguments
     /// * `params` - System parameters including WHIR config and LogUp parameters.
     /// * `base_field_order` - Order `p` of the base field that `sample_bits` reduces. For BabyBear:
     ///   `2^31 - 2^27 + 1`. Used to charge the `sample_bits` sampling bias (query bad-set argument
     ///   and proof-of-work).
-    /// * `challenge_field_bits` - Bits in the challenge field. For BabyBear4: ~124 bits.
+    /// * `challenge_field_bits` - Bits in the challenge field. For the BabyBear quintic extension:
+    ///   ~155 bits.
     /// * `max_num_constraints_per_air` - Maximum constraints in any single AIR.
     /// * `num_airs` - Number of AIRs being batched.
     /// * `max_constraint_degree` - Maximum degree of any constraint polynomial.
@@ -86,9 +93,8 @@ impl SoundnessCalculator {
     /// * `num_trace_columns` - Total columns batched in stacked reduction.
     /// * `num_stacked_columns` - Total columns across all commitments (for WHIR μ batching).
     /// * `n_logup` - GKR depth (log₂ of total interactions), or 0 if no interactions.
-    /// * `proximity_regime` - Unique decoding or other regimes (for WHIR-related calculations).
     #[allow(clippy::too_many_arguments)]
-    pub fn calculate(
+    pub fn calculate_field_protocol(
         params: &SystemParams,
         base_field_order: f64,
         challenge_field_bits: f64,
@@ -156,7 +162,7 @@ impl SoundnessCalculator {
             params.whir.proximity,
         );
 
-        let total_bits = logup_bits
+        let field_protocol_security_bits = logup_bits
             .min(gkr_sumcheck_bits)
             .min(gkr_batching_bits)
             .min(zerocheck_sumcheck_bits)
@@ -173,7 +179,7 @@ impl SoundnessCalculator {
             stacked_reduction_bits,
             whir_bits,
             whir_details,
-            total_bits,
+            field_protocol_security_bits,
         }
     }
 
@@ -841,9 +847,11 @@ impl SoundnessCalculator {
     }
 }
 
-/// Prints a detailed soundness report to stdout.
+/// Prints a detailed field/protocol soundness report to stdout.
+///
+/// The report is field-side-only and is not an end-to-end security assessment.
 #[allow(clippy::too_many_arguments)]
-pub fn print_soundness_report(
+pub fn print_field_protocol_soundness_report(
     params: &SystemParams,
     base_field_order: f64,
     challenge_field_bits: f64,
@@ -856,7 +864,7 @@ pub fn print_soundness_report(
     n_logup: usize,
     proximity_regime: ProximityRegime,
 ) {
-    let soundness = SoundnessCalculator::calculate(
+    let soundness = SoundnessCalculator::calculate_field_protocol(
         params,
         base_field_order,
         challenge_field_bits,
@@ -933,8 +941,8 @@ pub fn print_soundness_report(
     println!("  WHIR (round-by-round min):   {:.1}", soundness.whir_bits);
     println!();
     println!(
-        "  TOTAL SECURITY:              {:.1} bits",
-        soundness.total_bits
+        "  FIELD/PROTOCOL SECURITY:     {:.1} bits",
+        soundness.field_protocol_security_bits
     );
     println!();
 
@@ -1024,12 +1032,12 @@ mod tests {
     // ==========================================================================
     // Unit tests
     // ==========================================================================
-    const TARGET_SECURITY_BITS: usize = 100;
+    const TARGET_FIELD_SECURITY_BITS: usize = 128;
 
     #[test]
     fn test_soundness_calculation() {
         let params = test_params();
-        let soundness = SoundnessCalculator::calculate(
+        let soundness = SoundnessCalculator::calculate_field_protocol(
             &params,
             base_field_order(),
             challenge_field_bits(),
@@ -1049,9 +1057,9 @@ mod tests {
         assert!(soundness.constraint_batching_bits > 0.0);
         assert!(soundness.stacked_reduction_bits > 0.0);
         assert!(soundness.whir_bits > 0.0);
-        assert!(soundness.total_bits > 0.0);
+        assert!(soundness.field_protocol_security_bits > 0.0);
 
-        let expected_total = soundness
+        let expected_field_protocol = soundness
             .logup_bits
             .min(soundness.gkr_sumcheck_bits)
             .min(soundness.gkr_batching_bits)
@@ -1059,12 +1067,16 @@ mod tests {
             .min(soundness.constraint_batching_bits)
             .min(soundness.stacked_reduction_bits)
             .min(soundness.whir_bits);
-        assert!((soundness.total_bits - expected_total).abs() < 0.001);
+        assert!((soundness.field_protocol_security_bits - expected_field_protocol).abs() < 0.001);
     }
 
     #[test]
     fn test_whir_query_calculation() {
-        let queries = min_whir_queries(ProximityRegime::UniqueDecoding, TARGET_SECURITY_BITS, 1);
+        let queries = min_whir_queries(
+            ProximityRegime::UniqueDecoding,
+            TARGET_FIELD_SECURITY_BITS,
+            1,
+        );
         assert!(queries > 0);
     }
 
@@ -1078,7 +1090,7 @@ mod tests {
                 challenge_field_bits(),
                 0.0,
             ) + SoundnessCalculator::effective_pow_bits(logup.pow_bits, base_field_order());
-        assert!(security > TARGET_SECURITY_BITS as f64);
+        assert!(security > TARGET_FIELD_SECURITY_BITS as f64);
     }
 
     #[test]

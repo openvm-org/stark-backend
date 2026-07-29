@@ -89,7 +89,7 @@ mod ffi {
             stream: cudaStream_t,
         ) -> i32;
 
-        // BabyBear quartic extension (optimized bb31_4_t)
+        // BabyBear quintic extension (BabyBear^5)
         pub(crate) fn init_fpext(
             out: *mut c_void,
             raw_data: *const u32,
@@ -924,9 +924,9 @@ pub fn bench_fpext(config: &BenchConfig) -> FieldBenchResult {
     let reps = config.ops_per_element;
 
     // Only 3 device buffers: a, b, out (init works in-place)
-    let d_a = random_u32s(n * 4, 12345).to_device_on(bench_ctx()).unwrap();
-    let d_b = random_u32s(n * 4, 67890).to_device_on(bench_ctx()).unwrap();
-    let d_out = DeviceBuffer::<u32>::with_capacity_on(n * 4, bench_ctx());
+    let d_a = random_u32s(n * 5, 12345).to_device_on(bench_ctx()).unwrap();
+    let d_b = random_u32s(n * 5, 67890).to_device_on(bench_ctx()).unwrap();
+    let d_out = DeviceBuffer::<u32>::with_capacity_on(n * 5, bench_ctx());
 
     // Benchmark init (in-place: raw u32s -> FpExt) - also initializes d_a
     let init = measure(config, n as u64, || {
@@ -967,8 +967,8 @@ pub fn bench_fpext(config: &BenchConfig) -> FieldBenchResult {
 
     FieldBenchResult {
         field_name: "FpExt".into(),
-        bits: 124,
-        u32s_per_element: 4,
+        bits: 155,
+        u32s_per_element: 5,
         init,
         add,
         mul,
