@@ -29,15 +29,14 @@
 //!   `N` threads per block instead of the default;
 //! - `t[i, j, ...]` — tensor indexing;
 //! - `+ - * / % < <= ==` with the usual precedence;
-//! - `& ^ |` bitwise operators (in that precedence order, tighter than
-//!   comparisons and looser than `+ -`). RHS must be a constant `usize`
-//!   expression — an integer literal or a `#`-splice — and the whole
-//!   `lhs OP rhs` lowers to arithmetic ([`IRBuilder::and`] uses `%`, [`or`]
-//!   and [`xor`] use `+`) so the result stays quasi-affine;
+//! - `& ^ |` bitwise operators (in that precedence order, tighter than comparisons and looser than
+//!   `+ -`). RHS must be a constant `usize` expression — an integer literal or a `#`-splice — and
+//!   the whole `lhs OP rhs` lowers to arithmetic ([`IRBuilder::and`] uses `%`, [`or`] and [`xor`]
+//!   use `+`) so the result stays quasi-affine;
 //! - `(a, b, ...)` — tuple; `[a, b, ...]` — pack (array literal);
 //! - `17` / `17u32` — u32 constant; `17bb` — BabyBear constant;
-//! - `#x` / `#(expr)` — u32 constant from a host Rust expression; the paren
-//!   form accepts any Rust expression (e.g. `#(i + f(j))`);
+//! - `#x` / `#(expr)` — u32 constant from a host Rust expression; the paren form accepts any Rust
+//!   expression (e.g. `#(i + f(j))`);
 //! - `foo(a, b)` — calls the Rust function `foo(builder, a, b)`: a function used with n arguments
 //!   must take n+1, the builder first. Identifier arguments are passed through verbatim (so host
 //!   values of any type can be forwarded); all other arguments are built as DSL expressions.
@@ -533,7 +532,7 @@ fn parse_const_usize(input: ParseStream, op: char) -> syn::Result<Expr> {
         }
         Ok(syn::parse_quote!(#lit))
     } else {
-        Err(input.error(&format!(
+        Err(input.error(format!(
             "`{op}` RHS must be an integer literal or a `#`-splice"
         )))
     }

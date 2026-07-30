@@ -41,6 +41,7 @@ openvm-backend-tests.workspace = true
 p3-keccak-air.workspace = true
 eyre.workspace = true
 test-case.workspace = true
+nvtx.workspace = true
 
 [features]
 default = []
@@ -57,3 +58,18 @@ graph-ir = ["dep:crypto-compiler", "crypto-compiler/planner"]
 [[bin]]
 name = "bench"
 path = "src/bin/bench.rs"
+
+[[example]]
+name = "bench_ir_dsl_ports"
+path = "examples/bench_ir_dsl_ports.rs"
+required-features = ["graph-ir"]
+
+[[example]]
+name = "dump_ir_frac_compute_round"
+path = "examples/dump_ir_frac_compute_round.rs"
+required-features = ["graph-ir"]
+
+[[example]]
+name = "dump_ir_eval_round"
+path = "examples/dump_ir_eval_round.rs"
+required-features = ["graph-ir"]

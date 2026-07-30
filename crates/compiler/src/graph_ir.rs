@@ -16,7 +16,7 @@
 //! carries either device or host bytes. See `graph-ir.md`.
 
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     fmt,
     sync::Arc,
 };
@@ -26,12 +26,18 @@ use openvm_cuda_common::{d_buffer::DeviceBuffer, stream::cudaStream_t};
 use crate::{
     ir::{self, VarId},
     module_hash::module_hash,
+    passes::split_module::{split_module, ModuleSubgraph, SubgraphValue},
     quast::Quast,
 };
 
 /// Index of a buffer in the graph's buffer table.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct BufId(pub usize);
+
+/// Per-node buffer accesses `(reads, writes)`, where each read carries a
+/// flag indicating the node also writes the buffer (in-place modify). See
+/// [`GraphBuilder::node_reads_writes`].
+type NodeReadsWrites = (Vec<(BufId, bool)>, Vec<BufId>);
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum DeviceType {
@@ -61,9 +67,16 @@ pub type KernelFn = Box<dyn Fn(&[*mut ()], &[*mut ()], cudaStream_t)>;
 pub struct KernelNode {
     pub inputs: Vec<BufId>,
     pub outputs: Vec<BufId>,
-    /// Parallel to `inputs`: whether the kernel also writes the buffer
-    /// in place (read-write dependency rather than read-only).
-    pub modifies: Vec<bool>,
+    /// Subset of `inputs` whose buffers the kernel also *writes* to
+    /// (in-place). These are the "carried" inputs: they flow into the
+    /// kernel as a read and out again as a fresh write of the same
+    /// [`BufId`]. Buffers in `carried_outputs` are effectively both a
+    /// read and a write of this node, so downstream nodes that touch
+    /// them must sequence after this one. The union `outputs ∪
+    /// carried_outputs` is the complete write set used to build data
+    /// dependencies — any valid topological order over those edges
+    /// respects the order of execution the caller intended.
+    pub carried_outputs: Vec<BufId>,
     pub func: KernelFn,
     pub name: String,
 }
@@ -73,7 +86,7 @@ impl fmt::Debug for KernelNode {
         f.debug_struct("KernelNode")
             .field("inputs", &self.inputs)
             .field("outputs", &self.outputs)
-            .field("modifies", &self.modifies)
+            .field("carried_outputs", &self.carried_outputs)
             .field("name", &self.name)
             .finish_non_exhaustive()
     }
@@ -112,6 +125,17 @@ pub struct MemSetNode {
 /// order-aligned with `module.builder.inputs()`; `outputs` is one-to-one
 /// with the module's top-level outputs (a scalar body binds one output; a
 /// tuple body binds one BufId per element).
+///
+/// Invariant: `module` contains exactly one top-level kernel — its body is
+/// a single `compute` (or bare `reduce`), never a `let` chain of several.
+/// [`GraphBuilder::insert_kernel`] enforces this by splitting multi-kernel
+/// modules on insertion (see [`crate::passes::split_module`]), one graph
+/// node per kernel. The invariant is HIR-level only: JIT-time rewrites
+/// (e.g. `rewrite_parallel_reduce` inside [`crate::compile_and_load`]) may
+/// still expand one HIR kernel into several CUDA kernels within its
+/// compiled [`crate::runtime::KernelModule`]. Callers that push
+/// `GraphNode::Kernel` directly into [`GraphBuilder::nodes`] are
+/// responsible for upholding it themselves.
 ///
 /// `module` is wrapped in an [`Arc`] so multiple `KernelModuleNode`s can
 /// share the same source module by pointer identity; downstream compilation
@@ -194,14 +218,19 @@ pub struct GraphBuilder {
     /// to each [`VarId`] is its printable name.
     pub symbols: BTreeMap<VarId, String>,
     next_var: u32,
-    /// Content-hash → canonical `Arc<ir::Module>`. `insert_kernel` collapses
-    /// structurally identical modules onto their first-seen `Arc` so
-    /// downstream `Arc::as_ptr` identity checks (`GraphCompiler`'s
-    /// per-module JIT dedup, cytoscape rendering, …) automatically see the
-    /// merged set. This is skipped when a caller pushes `GraphNode::Kernel`
-    /// directly into `nodes`, so the compiler still runs a hash-based
-    /// dedup pass as a backstop.
+    /// Content-hash → canonical `Arc<ir::Module>` for *split* (single-
+    /// kernel) modules. Kernel insertion collapses structurally identical
+    /// modules onto their first-seen `Arc` so downstream `Arc::as_ptr`
+    /// identity checks (`GraphCompiler`'s per-module JIT dedup, cytoscape
+    /// rendering, …) automatically see the merged set. This is skipped when
+    /// a caller pushes `GraphNode::Kernel` directly into `nodes`, so the
+    /// compiler still runs a hash-based dedup pass as a backstop.
     module_dedup: HashMap<[u8; 32], Arc<ir::Module>>,
+    /// Content-hash of the *original* (possibly multi-kernel) module →
+    /// its split subgraph. [`GraphBuilder::insert_kernel`] splits a module
+    /// once per unique content and replays the cached subgraph on every
+    /// later insertion.
+    subgraph_cache: HashMap<[u8; 32], Arc<ModuleSubgraph>>,
 }
 
 impl GraphBuilder {
@@ -232,13 +261,26 @@ impl GraphBuilder {
     /// compiler pipeline, together with the graph buffers that feed its
     /// declared module inputs and receive its outputs.
     ///
-    /// The module is passed as an `Arc<ir::Module>` (or anything convertible
-    /// into one, so a bare `ir::Module` also works). Inserting two kernels
-    /// with the *same* `Arc` clone lets [`crate::graph_exe::GraphCompiler`]
-    /// JIT the module only once and reuse the compiled artifact across both
-    /// nodes.
+    /// The module is type-checked, canonicalized and split into one
+    /// single-kernel module per top-level compute/reduce (see
+    /// [`crate::passes::split_module`]) the first time its content is seen;
+    /// later insertions of a structurally identical module replay the
+    /// cached split. One [`GraphNode::Kernel`] is pushed per split kernel,
+    /// so a multi-kernel module produces multiple graph nodes, with
+    /// intermediate buffers allocated automatically on the first input's
+    /// device (each `GraphNode::Kernel` then upholds the single-kernel
+    /// invariant documented on [`KernelModuleNode`]). Split kernels are
+    /// content-deduped onto canonical `Arc`s so
+    /// [`crate::graph_exe::GraphCompiler`] JITs each unique kernel once.
     ///
-    /// `inputs.len()` must equal `module.builder.inputs().len()`.
+    /// The module is passed as an `Arc<ir::Module>` (or anything convertible
+    /// into one, so a bare `ir::Module` also works).
+    ///
+    /// `inputs.len()` must equal `module.builder.inputs().len()` and
+    /// `outputs` must have one BufId per module output (a scalar body binds
+    /// one output; a tuple body binds one per element).
+    ///
+    /// Panics if the module fails type checking or canonicalization.
     pub fn insert_kernel(
         &mut self,
         module: impl Into<Arc<ir::Module>>,
@@ -247,6 +289,7 @@ impl GraphBuilder {
     ) {
         let module: Arc<ir::Module> = module.into();
         let inputs: Vec<BufId> = inputs.into_iter().collect();
+        let outputs: Vec<BufId> = outputs.into_iter().collect();
         assert_eq!(
             inputs.len(),
             module.builder.inputs().len(),
@@ -255,22 +298,152 @@ impl GraphBuilder {
             module.name,
             module.builder.inputs().len(),
         );
-        // Content-dedup: two callers can build structurally identical
-        // modules at different sites and pass distinct `Arc`s. Fold those
-        // onto the first-seen `Arc` so the graph carries a single canonical
-        // handle per unique kernel. Skipped when the caller already reuses
-        // a shared `Arc` (`Arc::ptr_eq` fast path via the hash lookup).
         let hash = module_hash(&module);
-        let module = self
-            .module_dedup
+        let subgraph = match self.subgraph_cache.get(&hash) {
+            Some(sg) => sg.clone(),
+            None => {
+                let sg = split_module(&module).unwrap_or_else(|e| {
+                    panic!(
+                        "insert_kernel: module `{}` failed to split: {e}",
+                        module.name
+                    )
+                });
+                let sg = Arc::new(sg);
+                self.subgraph_cache.insert(hash, sg.clone());
+                sg
+            }
+        };
+        assert_eq!(
+            outputs.len(),
+            subgraph.outputs.len(),
+            "insert_kernel: outputs.len() must match the number of module outputs \
+             (module `{}` produces {})",
+            module.name,
+            subgraph.outputs.len(),
+        );
+        self.insert_subgraph_impl(&subgraph, &inputs, Some(&outputs));
+    }
+
+    /// Adds every kernel of a split [`ModuleSubgraph`] (see
+    /// [`crate::passes::split_module::split_module`]), wiring
+    /// [`SubgraphValue::Input`]s to `inputs` and allocating a fresh buffer
+    /// for every kernel output. Returns the buffers holding the subgraph's
+    /// outputs, one per [`ModuleSubgraph::outputs`] entry.
+    ///
+    /// Intermediate and output buffers are allocated on the first input's
+    /// device (`Cuda(0)` if the subgraph has no inputs) with their concrete
+    /// byte sizes from the split kernels' [`crate::passes::OutputSpec`]s.
+    ///
+    /// `inputs.len()` must equal [`ModuleSubgraph::num_inputs`].
+    pub fn insert_subgraph(&mut self, subgraph: &ModuleSubgraph, inputs: &[BufId]) -> Vec<BufId> {
+        self.insert_subgraph_impl(subgraph, inputs, None)
+    }
+
+    /// Shared body of [`Self::insert_kernel`] / [`Self::insert_subgraph`]:
+    /// pushes one [`GraphNode::Kernel`] per split kernel in dependency
+    /// order. With `bound_outputs` set, the subgraph's outputs land in
+    /// those buffers; otherwise fresh buffers are allocated for them like
+    /// for any intermediate.
+    fn insert_subgraph_impl(
+        &mut self,
+        subgraph: &ModuleSubgraph,
+        inputs: &[BufId],
+        bound_outputs: Option<&[BufId]>,
+    ) -> Vec<BufId> {
+        assert_eq!(
+            inputs.len(),
+            subgraph.num_inputs,
+            "insert_subgraph: inputs.len() must match the subgraph's input count \
+             (subgraph `{}` declares {})",
+            subgraph.name,
+            subgraph.num_inputs,
+        );
+        let device = inputs
+            .first()
+            .or_else(|| bound_outputs.and_then(|outs| outs.first()))
+            .map(|b| self.bufs[b.0].device_type)
+            .unwrap_or(DeviceType::Cuda(0));
+
+        // Kernel outputs that are subgraph outputs bound by the caller.
+        let mut bound: HashMap<SubgraphValue, BufId> = HashMap::new();
+        if let Some(outs) = bound_outputs {
+            assert_eq!(outs.len(), subgraph.outputs.len());
+            for (val, &buf) in subgraph.outputs.iter().zip(outs) {
+                match val {
+                    SubgraphValue::KernelOutput { .. } => {
+                        bound.insert(*val, buf);
+                    }
+                    SubgraphValue::Input(_) => panic!(
+                        "insert_kernel: subgraph `{}` output {val:?} is an input \
+                         passthrough and cannot be bound to an output buffer",
+                        subgraph.name,
+                    ),
+                }
+            }
+        }
+
+        // Per-kernel output buffers, in kernel order (producers precede
+        // consumers, so back-references into `produced` always resolve).
+        let mut produced: Vec<Vec<BufId>> = Vec::with_capacity(subgraph.kernels.len());
+        for (ki, k) in subgraph.kernels.iter().enumerate() {
+            let in_bufs: Vec<BufId> = k
+                .inputs
+                .iter()
+                .map(|v| match *v {
+                    SubgraphValue::Input(i) => inputs[i],
+                    SubgraphValue::KernelOutput { kernel, out_idx } => produced[kernel][out_idx],
+                })
+                .collect();
+            let out_bufs: Vec<BufId> = k
+                .outputs
+                .iter()
+                .enumerate()
+                .map(|(oi, spec)| {
+                    let val = SubgraphValue::KernelOutput {
+                        kernel: ki,
+                        out_idx: oi,
+                    };
+                    if let Some(&b) = bound.get(&val) {
+                        return b;
+                    }
+                    self.add_buf(BufInfo {
+                        name: Some(format!("{}.k{ki}.o{oi}", subgraph.name)),
+                        device_type: device,
+                        size: Quast::cst(spec.size_bytes() as i64),
+                        elem_size: spec.elem.size_bytes(),
+                    })
+                })
+                .collect();
+            let module = self.dedup_module(k.module.clone());
+            self.nodes.push(GraphNode::Kernel(KernelModuleNode {
+                module,
+                inputs: in_bufs,
+                outputs: out_bufs.clone(),
+            }));
+            produced.push(out_bufs);
+        }
+
+        subgraph
+            .outputs
+            .iter()
+            .map(|v| match *v {
+                SubgraphValue::Input(i) => inputs[i],
+                SubgraphValue::KernelOutput { kernel, out_idx } => produced[kernel][out_idx],
+            })
+            .collect()
+    }
+
+    /// Content-dedup: two callers can build structurally identical modules
+    /// at different sites and pass distinct `Arc`s. Fold those onto the
+    /// first-seen `Arc` so the graph carries a single canonical handle per
+    /// unique kernel and downstream `Arc::as_ptr` identity checks see the
+    /// merged set.
+    fn dedup_module(&mut self, module: Arc<ir::Module>) -> Arc<ir::Module> {
+        let hash = module_hash(&module);
+        self.module_dedup
             .entry(hash)
             .or_insert_with(|| module.clone())
-            .clone();
-        self.nodes.push(GraphNode::Kernel(KernelModuleNode {
-            module,
-            inputs,
-            outputs: outputs.into_iter().collect(),
-        }));
+            .clone()
     }
 
     /// Adds a constant node: makes `buf` refer to static bytes carried in
@@ -302,10 +475,21 @@ impl GraphBuilder {
             modifies.len(),
             "modifies must have one flag per input"
         );
+        // Fold the parallel `modifies` bool vector into `carried_outputs`
+        // — the subset of inputs the kernel also writes. Everything
+        // downstream (edge derivation, planner accesses, IR printer) is
+        // written against `carried_outputs`, so a modified input becomes
+        // a structural producer edge and any topological sort respects
+        // it automatically.
+        let carried_outputs: Vec<BufId> = inputs
+            .iter()
+            .zip(&modifies)
+            .filter_map(|(b, &m)| m.then_some(*b))
+            .collect();
         self.nodes.push(GraphNode::BlackboxKernel(KernelNode {
             inputs,
             outputs: outputs.collect(),
-            modifies,
+            carried_outputs,
             func: Box::new(f),
             name: name.into(),
         }));
@@ -413,9 +597,8 @@ impl GraphBuilder {
         out
     }
 
-    /// Cytoscape.js elements-JSON dump of the graph (`{"elements":
-    /// {"nodes": [..], "edges": [..]}}`), for browser visualization via
-    /// `scripts/serve_graph.py`.
+    /// Cytoscape.js elements-JSON dump of the graph, for browser
+    /// visualization via `scripts/serve_graph.py`.
     ///
     /// Graph nodes become cytoscape nodes labeled with the op name and node
     /// type; buffers with no writer get synthetic `Input` nodes on first
@@ -423,19 +606,26 @@ impl GraphBuilder {
     /// writer to the consumer, labeled `%name [size]`; edges are `black`
     /// when the consumer only reads the buffer and `red` when it also
     /// writes it (in-place modify or overwrite of previously written data).
+    ///
+    /// Each node carries an `ir` field (its `format_node_line` text) plus
+    /// dataflow stats (`inputs`, `outputs`, `producers`, `consumers`).
+    /// Kernel nodes additionally carry a `module` key pointing into the
+    /// top-level `modules` map, which holds a single [`crate::dump::dump_hir`]
+    /// entry per unique `Arc<ir::Module>` (deduped by pointer identity so
+    /// two kernels sharing the same module share one dump). Overall shape:
+    /// `{"elements": {"nodes": [..], "edges": [..]}, "modules": {..}}`.
     pub fn to_cytoscape_json(&self) -> String {
-        let mut nodes_json: Vec<String> = Vec::new();
-        let mut edges_json: Vec<String> = Vec::new();
-        let mut last_writer: Vec<Option<String>> = vec![None; self.bufs.len()];
+        // First pass: compute per-node reads/writes so we can reuse the
+        // classification for edges and dataflow stats.
+        let node_rw: Vec<NodeReadsWrites> = self
+            .nodes
+            .iter()
+            .map(|n| self.node_reads_writes(n))
+            .collect();
 
-        let push_node = |nodes_json: &mut Vec<String>, id: &str, name: &str, ty: &str| {
-            nodes_json.push(format!(
-                "    {{\"data\":{{\"id\":\"{id}\",\"label\":\"{label}\",\"name\":\"{name}\",\
-                 \"type\":\"{ty}\"}}}}",
-                label = json_escape(&format!("{name}\n{ty}")),
-                name = json_escape(name),
-            ));
-        };
+        // Second pass: replay the last-writer stream to derive edges, and
+        // record (source_node_id, target_node_id) pairs for stats. Synthetic
+        // Input nodes use ids `in{buf}` and count as producers.
         let buf_label = |b: BufId| {
             format!(
                 "{} [{}]",
@@ -443,57 +633,12 @@ impl GraphBuilder {
                 format_size(&self.bufs[b.0].size, &self.symbols)
             )
         };
-
-        for (n, node) in self.nodes.iter().enumerate() {
+        let mut last_writer: Vec<Option<String>> = vec![None; self.bufs.len()];
+        let mut input_bufs: Vec<BufId> = Vec::new();
+        // (src_id, tgt_id, merged_labels, any_modify)
+        let mut edges: Vec<(String, String, Vec<String>, bool)> = Vec::new();
+        for (n, (reads, writes)) in node_rw.iter().enumerate() {
             let id = format!("n{n}");
-            let (name, ty) = match node {
-                GraphNode::Kernel(k) => (k.module.name.clone(), "Kernel"),
-                GraphNode::BlackboxKernel(k) => (k.name.clone(), "BlackboxKernel"),
-                GraphNode::Const(c) => (self.buf_name(c.buf), "Const"),
-                GraphNode::Memcpy(_) => ("memcpy".to_string(), "Memcpy"),
-                GraphNode::Memset(m) => (format!("memset {:#x}", m.val), "Memset"),
-            };
-            push_node(&mut nodes_json, &id, &name, ty);
-
-            // (buffer, consumer-also-writes-it)
-            let mut reads: Vec<(BufId, bool)> = Vec::new();
-            let mut writes: Vec<BufId> = Vec::new();
-            match node {
-                GraphNode::Kernel(k) => {
-                    reads = k
-                        .inputs
-                        .iter()
-                        .map(|b| (*b, k.outputs.contains(b)))
-                        .collect();
-                    writes = k.outputs.clone();
-                }
-                GraphNode::BlackboxKernel(k) => {
-                    reads = k
-                        .inputs
-                        .iter()
-                        .zip(&k.modifies)
-                        .map(|(b, &m)| (*b, m || k.outputs.contains(b)))
-                        .collect();
-                    writes = k
-                        .inputs
-                        .iter()
-                        .zip(&k.modifies)
-                        .filter(|&(_, &m)| m)
-                        .map(|(b, _)| *b)
-                        .chain(k.outputs.iter().copied())
-                        .collect();
-                }
-                GraphNode::Const(c) => writes.push(c.buf),
-                GraphNode::Memcpy(m) => {
-                    reads.push((m.src, false));
-                    writes.push(m.dst);
-                }
-                GraphNode::Memset(m) => writes.push(m.node),
-            }
-
-            // Parallel edges (several buffers flowing between the same two
-            // nodes) get merged into one edge with a combined label; a
-            // single modifying buffer makes the merged edge red.
             let mut merged: Vec<(String, Vec<String>, bool)> = Vec::new();
             let mut add_edge = |src: String, buf: BufId, modifies: bool| {
                 let label = buf_label(buf);
@@ -507,17 +652,16 @@ impl GraphBuilder {
                     None => merged.push((src, vec![label], modifies)),
                 }
             };
-            for &(buf, modifies) in &reads {
+            for &(buf, modifies) in reads {
                 if last_writer[buf.0].is_none() {
-                    let in_id = format!("in{}", buf.0);
-                    push_node(&mut nodes_json, &in_id, &self.buf_name(buf), "Input");
-                    last_writer[buf.0] = Some(in_id);
+                    input_bufs.push(buf);
+                    last_writer[buf.0] = Some(format!("in{}", buf.0));
                 }
                 add_edge(last_writer[buf.0].clone().unwrap(), buf, modifies);
             }
-            // Overwrites of previously written buffers that this node does
-            // not read are still modifications (WAW ordering).
-            for &buf in &writes {
+            // WAW: overwrites of previously written buffers this node does
+            // not read are still modifications.
+            for &buf in writes {
                 if reads.iter().any(|&(b, _)| b == buf) {
                     continue;
                 }
@@ -526,24 +670,172 @@ impl GraphBuilder {
                 }
             }
             for (src, labels, modifies) in merged {
-                edges_json.push(format!(
-                    "    {{\"data\":{{\"id\":\"e{eid}\",\"source\":\"{src}\",\"target\":\"{id}\",\
-                     \"label\":\"{label}\",\"color\":\"{color}\"}}}}",
-                    eid = edges_json.len(),
-                    label = json_escape(&labels.join(", ")),
-                    color = if modifies { "red" } else { "black" },
-                ));
+                edges.push((src, id.clone(), labels, modifies));
             }
-            for buf in writes {
+            for &buf in writes {
                 last_writer[buf.0] = Some(id.clone());
             }
         }
 
+        // Aggregate producers/consumers per node id from the edge list.
+        let mut producers: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        let mut consumers: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        for (src, tgt, _, _) in &edges {
+            producers
+                .entry(tgt.clone())
+                .or_default()
+                .insert(src.clone());
+            consumers
+                .entry(src.clone())
+                .or_default()
+                .insert(tgt.clone());
+        }
+        let count = |m: &BTreeMap<String, BTreeSet<String>>, id: &str| {
+            m.get(id).map(|s| s.len()).unwrap_or(0)
+        };
+
+        // Dedupe modules by Arc pointer identity: two kernels sharing the
+        // same Arc<ir::Module> share a single `modules` entry keyed by name
+        // (with a suffix on pointer collisions where distinct modules
+        // happen to have the same name).
+        let mut module_key_by_ptr: HashMap<*const ir::Module, String> = HashMap::new();
+        let mut modules_dump: BTreeMap<String, String> = BTreeMap::new();
+        let mut module_key = |m: &Arc<ir::Module>| -> String {
+            let ptr = Arc::as_ptr(m);
+            if let Some(k) = module_key_by_ptr.get(&ptr) {
+                return k.clone();
+            }
+            let mut key = m.name.clone();
+            let mut n = 1;
+            while modules_dump.contains_key(&key) {
+                key = format!("{}#{n}", m.name);
+                n += 1;
+            }
+            modules_dump.insert(key.clone(), crate::dump::dump_hir(m));
+            module_key_by_ptr.insert(ptr, key.clone());
+            key
+        };
+
+        // Now emit the JSON.
+        let mut nodes_json: Vec<String> = Vec::new();
+        let push_node = |nodes_json: &mut Vec<String>, fields: Vec<(&str, String)>| {
+            let body = fields
+                .iter()
+                .map(|(k, v)| format!("\"{k}\":{v}"))
+                .collect::<Vec<_>>()
+                .join(",");
+            nodes_json.push(format!("    {{\"data\":{{{body}}}}}"));
+        };
+        for (n, (reads, writes)) in node_rw.iter().enumerate() {
+            let id = format!("n{n}");
+            let node = &self.nodes[n];
+            let (name, ty) = match node {
+                GraphNode::Kernel(k) => (k.module.name.clone(), "Kernel"),
+                GraphNode::BlackboxKernel(k) => (k.name.clone(), "BlackboxKernel"),
+                GraphNode::Const(c) => (self.buf_name(c.buf), "Const"),
+                GraphNode::Memcpy(_) => ("memcpy".to_string(), "Memcpy"),
+                GraphNode::Memset(m) => (format!("memset {:#x}", m.val), "Memset"),
+            };
+            let ir_text = self.format_node_line(node);
+            let mut fields = vec![
+                ("id", format!("\"{id}\"")),
+                (
+                    "label",
+                    format!("\"{}\"", json_escape(&format!("{name}\n{ty}"))),
+                ),
+                ("name", format!("\"{}\"", json_escape(&name))),
+                ("type", format!("\"{ty}\"")),
+                ("ir", format!("\"{}\"", json_escape(&ir_text))),
+                ("inputs", reads.len().to_string()),
+                ("outputs", writes.len().to_string()),
+                ("producers", count(&producers, &id).to_string()),
+                ("consumers", count(&consumers, &id).to_string()),
+            ];
+            if let GraphNode::Kernel(k) = node {
+                let key = module_key(&k.module);
+                fields.push(("module", format!("\"{}\"", json_escape(&key))));
+            }
+            push_node(&mut nodes_json, fields);
+        }
+        for buf in &input_bufs {
+            let in_id = format!("in{}", buf.0);
+            let name = self.buf_name(*buf);
+            push_node(
+                &mut nodes_json,
+                vec![
+                    ("id", format!("\"{in_id}\"")),
+                    (
+                        "label",
+                        format!("\"{}\"", json_escape(&format!("{name}\nInput"))),
+                    ),
+                    ("name", format!("\"{}\"", json_escape(&name))),
+                    ("type", "\"Input\"".to_string()),
+                    ("consumers", count(&consumers, &in_id).to_string()),
+                ],
+            );
+        }
+
+        let mut edges_json: Vec<String> = Vec::with_capacity(edges.len());
+        for (eid, (src, tgt, labels, modifies)) in edges.iter().enumerate() {
+            edges_json.push(format!(
+                "    {{\"data\":{{\"id\":\"e{eid}\",\"source\":\"{src}\",\"target\":\"{tgt}\",\
+                 \"label\":\"{label}\",\"color\":\"{color}\"}}}}",
+                label = json_escape(&labels.join(", ")),
+                color = if *modifies { "red" } else { "black" },
+            ));
+        }
+
+        let modules_json = modules_dump
+            .iter()
+            .map(|(k, v)| format!("    \"{}\":\"{}\"", json_escape(k), json_escape(v)))
+            .collect::<Vec<_>>()
+            .join(",\n");
         format!(
-            "{{\"elements\":{{\n  \"nodes\":[\n{}\n  ],\n  \"edges\":[\n{}\n  ]\n}}}}\n",
+            "{{\"elements\":{{\n  \"nodes\":[\n{}\n  ],\n  \"edges\":[\n{}\n  ]\n}},\n\
+             \"modules\":{{\n{}\n}}}}\n",
             nodes_json.join(",\n"),
             edges_json.join(",\n"),
+            modules_json,
         )
+    }
+
+    /// Classifies a graph node's buffer accesses. Returns `(reads, writes)`
+    /// where each read carries a flag indicating the node also modifies the
+    /// buffer (in-place update). Matches the WAW-aware semantics used for
+    /// building cytoscape edges.
+    fn node_reads_writes(&self, node: &GraphNode) -> NodeReadsWrites {
+        let mut reads: Vec<(BufId, bool)> = Vec::new();
+        let mut writes: Vec<BufId> = Vec::new();
+        match node {
+            GraphNode::Kernel(k) => {
+                reads = k
+                    .inputs
+                    .iter()
+                    .map(|b| (*b, k.outputs.contains(b)))
+                    .collect();
+                writes = k.outputs.clone();
+            }
+            GraphNode::BlackboxKernel(k) => {
+                reads = k
+                    .inputs
+                    .iter()
+                    .map(|b| (*b, k.carried_outputs.contains(b) || k.outputs.contains(b)))
+                    .collect();
+                writes = k
+                    .carried_outputs
+                    .iter()
+                    .copied()
+                    .chain(k.outputs.iter().copied())
+                    .collect();
+            }
+            GraphNode::Const(c) => writes.push(c.buf),
+            GraphNode::Memcpy(m) => {
+                reads.push((m.src, false));
+                writes.push(m.dst);
+            }
+            GraphNode::Memset(m) => writes.push(m.node),
+        }
+        (reads, writes)
     }
 
     fn buf_name(&self, id: BufId) -> String {
@@ -585,8 +877,11 @@ impl GraphBuilder {
             ),
             GraphNode::BlackboxKernel(k) => {
                 let mut attrs = format!("name=\"{}\"", k.name);
-                if k.modifies.iter().any(|&m| m) {
-                    attrs.push_str(&format!(", modifies={:?}", k.modifies));
+                if !k.carried_outputs.is_empty() {
+                    attrs.push_str(&format!(
+                        ", carried_outputs=[{}]",
+                        self.buf_ref_list(&k.carried_outputs),
+                    ));
                 }
                 format!(
                     "let ({}) = BlackboxKernel({}, {});",
@@ -714,13 +1009,10 @@ pub(crate) fn classify_buf_uses(
                 }
             }
             GraphNode::BlackboxKernel(k) => {
-                for (i, b) in k.inputs.iter().enumerate() {
+                for b in &k.inputs {
                     readers[b.0].push(n);
-                    if k.modifies[i] {
-                        writers[b.0].push(n);
-                    }
                 }
-                for b in &k.outputs {
+                for b in k.carried_outputs.iter().chain(k.outputs.iter()) {
                     writers[b.0].push(n);
                 }
             }
@@ -789,7 +1081,7 @@ mod tests {
                 assert_eq!(k.name, "add");
                 assert_eq!(k.inputs, vec![x]);
                 assert_eq!(k.outputs, vec![y]);
-                assert_eq!(k.modifies, vec![false]);
+                assert!(k.carried_outputs.is_empty());
                 (k.func)(&[], &[], std::ptr::null_mut());
             }
             other => panic!("expected blackbox kernel node, got {other:?}"),
@@ -833,6 +1125,105 @@ mod tests {
 
         let mut b = GraphBuilder::new();
         b.insert_kernel(module, std::iter::empty(), std::iter::empty());
+    }
+
+    /// `let t = a * 2; out = t + a` as a two-kernel chain over one input.
+    fn two_kernel_chain(name: &str, n: usize) -> ir::Module {
+        let mut ib = IRBuilder::new();
+        let a = ib.input("a", ScalarType::BabyBear, vec![n]);
+        let t = ib.compute(n, |ib, i| {
+            let ai = ib.index(a, &[i]);
+            let two = ib.const_field(2);
+            ib.mul(ai, two)
+        });
+        let t = ib.let_bound(t);
+        let out = ib.compute(n, |ib, i| {
+            let ti = ib.index(t, &[i]);
+            let ai = ib.index(a, &[i]);
+            ib.add(ti, ai)
+        });
+        ib.finish(name, out)
+    }
+
+    #[test]
+    fn insert_kernel_splits_multi_kernel_module() {
+        let mut b = GraphBuilder::new();
+        let a_buf = buf(&mut b, "a", DeviceType::Cuda(0), Quast::cst(32));
+        let out_buf = buf(&mut b, "out", DeviceType::Cuda(0), Quast::cst(32));
+        b.insert_kernel(two_kernel_chain("chain", 8), [a_buf], [out_buf]);
+
+        // One GraphNode::Kernel per split kernel, chained through an
+        // auto-allocated intermediate buffer on the inputs' device.
+        assert_eq!(b.nodes.len(), 2);
+        let (k0, k1) = match (&b.nodes[0], &b.nodes[1]) {
+            (GraphNode::Kernel(k0), GraphNode::Kernel(k1)) => (k0, k1),
+            other => panic!("expected two structured kernel nodes, got {other:?}"),
+        };
+        assert_eq!(k0.module.name, "chain__k0");
+        assert_eq!(k0.inputs, vec![a_buf]);
+        assert_eq!(k0.outputs.len(), 1);
+        let mid = k0.outputs[0];
+        assert_ne!(mid, out_buf);
+        assert_eq!(k1.module.name, "chain__k1");
+        assert_eq!(k1.inputs, vec![mid, a_buf]);
+        assert_eq!(k1.outputs, vec![out_buf]);
+
+        let mid_info = b.buf_info(mid);
+        assert_eq!(mid_info.name.as_deref(), Some("chain.k0.o0"));
+        assert_eq!(mid_info.device_type, DeviceType::Cuda(0));
+        assert_eq!(mid_info.size.eval(&BTreeMap::new()), 32);
+        assert_eq!(mid_info.elem_size, 4);
+    }
+
+    #[test]
+    fn insert_kernel_replays_cached_subgraph_with_shared_arcs() {
+        let mut b = GraphBuilder::new();
+        let a0 = buf(&mut b, "a0", DeviceType::Cuda(0), Quast::cst(32));
+        let o0 = buf(&mut b, "o0", DeviceType::Cuda(0), Quast::cst(32));
+        let a1 = buf(&mut b, "a1", DeviceType::Cuda(0), Quast::cst(32));
+        let o1 = buf(&mut b, "o1", DeviceType::Cuda(0), Quast::cst(32));
+
+        // Two structurally identical modules built independently: the
+        // second insertion must hit the subgraph cache and reuse the same
+        // canonical Arcs for the split kernels.
+        b.insert_kernel(two_kernel_chain("chain", 8), [a0], [o0]);
+        b.insert_kernel(two_kernel_chain("chain", 8), [a1], [o1]);
+
+        assert_eq!(b.nodes.len(), 4);
+        let kernels: Vec<_> = b
+            .nodes
+            .iter()
+            .map(|n| match n {
+                GraphNode::Kernel(k) => k,
+                other => panic!("expected structured kernel node, got {other:?}"),
+            })
+            .collect();
+        assert!(Arc::ptr_eq(&kernels[0].module, &kernels[2].module));
+        assert!(Arc::ptr_eq(&kernels[1].module, &kernels[3].module));
+        // Second insertion wires its own buffers.
+        assert_eq!(kernels[2].inputs, vec![a1]);
+        assert_eq!(kernels[3].outputs, vec![o1]);
+    }
+
+    #[test]
+    fn insert_subgraph_allocates_and_returns_outputs() {
+        let module = two_kernel_chain("chain", 8);
+        let subgraph = crate::passes::split_module(&module).expect("split");
+
+        let mut b = GraphBuilder::new();
+        let a_buf = buf(&mut b, "a", DeviceType::Cuda(0), Quast::cst(32));
+        let outs = b.insert_subgraph(&subgraph, &[a_buf]);
+
+        assert_eq!(outs.len(), 1);
+        assert_eq!(b.nodes.len(), 2);
+        match &b.nodes[1] {
+            GraphNode::Kernel(k) => assert_eq!(k.outputs, outs),
+            other => panic!("expected structured kernel node, got {other:?}"),
+        }
+        let out_info = b.buf_info(outs[0]);
+        assert_eq!(out_info.name.as_deref(), Some("chain.k1.o0"));
+        assert_eq!(out_info.size.eval(&BTreeMap::new()), 32);
+        assert_eq!(out_info.elem_size, 4);
     }
 
     #[test]
@@ -991,6 +1382,122 @@ mod tests {
             r#""source":"n3","target":"n4","label":"%u [n * 4], %v [n * 4]","color":"black""#
         ));
         assert!(!json.contains(r#""label":"%u [n * 4]","#));
+
+        // Per-node IR text and dataflow stats surface on each node.
+        // n1 ("add") reads x, writes y => inputs=1, outputs=1.
+        // Its producer is n0 (memcpy) and its consumer is n2 (fold).
+        assert!(
+            json.contains(r#""ir":"let (%y: G[0][n * 4]) = BlackboxKernel(%x, name=\"add\");""#)
+        );
+        assert!(json.contains(r#""inputs":1,"outputs":1,"producers":1,"consumers":1"#));
+        // n3 ("pair") has 0 inputs, 2 outputs; both u and v flow into n4
+        // ("sum") so consumers=1 (unique downstream node).
+        assert!(json.contains(r#""inputs":0,"outputs":2,"producers":0,"consumers":1"#));
+        // Synthetic Input node reports its downstream consumers.
+        assert!(json.contains(
+            r#""id":"in0","label":"%host\nInput","name":"%host","type":"Input","consumers":1"#
+        ));
+
+        // No Kernel (structured module) nodes here, so the modules map
+        // exists but is empty.
+        assert!(json.contains("\"modules\":{\n\n}"));
+    }
+
+    #[test]
+    fn cytoscape_json_module_dedup_and_hir() {
+        use crate::ir::{IRBuilder, ScalarType};
+        let mut b = GraphBuilder::new();
+        let sz = Quast::cst(1024);
+        let inp = buf(&mut b, "inp", DeviceType::Cuda(0), sz.clone());
+        let out_a = buf(&mut b, "out_a", DeviceType::Cuda(0), sz.clone());
+        let out_b = buf(&mut b, "out_b", DeviceType::Cuda(0), sz.clone());
+
+        // A minimal module used twice; the two insertions must share one
+        // `modules` entry (Arc pointer identity preserved by dedup).
+        let make_mod = || {
+            let mut ib = IRBuilder::new();
+            let x = ib.input("x", ScalarType::U32, vec![256]);
+            let body = ib.compute(256, |ib, i| ib.index(x, &[i]));
+            ib.finish("shared_mod", body)
+        };
+        let m = make_mod();
+        b.insert_kernel(m.clone(), [inp], [out_a]);
+        b.insert_kernel(m, [inp], [out_b]);
+
+        let json = b.to_cytoscape_json();
+        // Both kernel nodes reference the same module key.
+        assert!(json.contains(r#""module":"shared_mod""#));
+        // Module IR dump is under the modules map, with the module header.
+        assert!(json.contains(r#""shared_mod":"module shared_mod"#));
+        // The module name appears exactly once as a key in the map (dedup).
+        let occurrences = json.matches(r#""shared_mod":"module"#).count();
+        assert_eq!(occurrences, 1, "module dedup failed: {json}");
+    }
+
+    #[test]
+    fn modifies_flags_lower_to_carried_outputs() {
+        // Public API still takes a parallel `modifies` bool vector, but
+        // the KernelNode stores the modified inputs as `carried_outputs`
+        // (a Vec<BufId>). Downstream code reasons about the write set as
+        // `carried_outputs ∪ outputs`, which makes the graph edges from
+        // this node structurally complete.
+        let mut b = GraphBuilder::new();
+        let sz = Quast::cst(64);
+        let x = buf(&mut b, "x", DeviceType::Cuda(0), sz.clone());
+        let y = buf(&mut b, "y", DeviceType::Cuda(0), sz.clone());
+        let z = buf(&mut b, "z", DeviceType::Cuda(0), sz.clone());
+        b.insert_blackbox_kernel(
+            "k",
+            [x, y].into_iter(),
+            [z].into_iter(),
+            [false, true].into_iter(),
+            |_, _, _| {},
+        );
+        match &b.nodes[0] {
+            GraphNode::BlackboxKernel(k) => {
+                assert_eq!(k.inputs, vec![x, y]);
+                assert_eq!(k.outputs, vec![z]);
+                assert_eq!(k.carried_outputs, vec![y]);
+            }
+            other => panic!("expected blackbox kernel, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn carried_outputs_close_the_topological_gap() {
+        // Regression: with only a `modifies` flag on the middle node, a
+        // downstream reader of the same buffer relied on insertion order
+        // to sequence after the modifier. Since `carried_outputs` puts
+        // the modified buffer into the node's write set, the writer /
+        // reader chain (buffer x is written by k0, re-written by k1, read
+        // by k2) shows up in `classify_buf_uses` and any topological sort
+        // walks k0 → k1 → k2 without consulting insertion order.
+        let mut b = GraphBuilder::new();
+        let x = buf(&mut b, "x", DeviceType::Cuda(0), Quast::cst(32));
+        b.insert_blackbox_kernel(
+            "k0",
+            std::iter::empty(),
+            [x].into_iter(),
+            std::iter::empty(),
+            |_, _, _| {},
+        );
+        b.insert_blackbox_kernel(
+            "k1",
+            [x].into_iter(),
+            std::iter::empty(),
+            [true].into_iter(),
+            |_, _, _| {},
+        );
+        b.insert_blackbox_kernel(
+            "k2",
+            [x].into_iter(),
+            std::iter::empty(),
+            [false].into_iter(),
+            |_, _, _| {},
+        );
+        let (writers, readers) = classify_buf_uses(&b.nodes, b.bufs.len());
+        assert_eq!(writers[x.0], vec![0, 1], "k1 must be a writer of x");
+        assert_eq!(readers[x.0], vec![1, 2]);
     }
 
     #[test]

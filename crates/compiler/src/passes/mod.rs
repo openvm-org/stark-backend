@@ -5,14 +5,22 @@
 //!
 //! [`verify`] structurally checks the KernelIR produced by the pipeline;
 //! shared helpers live in [`utils`].
+//!
+//! [`split_module`] sits outside the single-module pipeline: it splits a
+//! multi-kernel module into single-kernel modules for graph-level insertion
+//! (see [`crate::graph_ir::GraphBuilder::insert_kernel`]).
 
 pub mod canonicalize;
 pub mod codegen;
+pub mod fusion;
+pub mod inplace;
 pub mod insert_sync;
 pub mod layout_infer;
 pub mod lower_to_kir;
+pub mod parallel_reduce_rewrite;
 pub mod plan_global_scratch;
 pub mod plan_shared_mem;
+pub mod split_module;
 pub mod type_infer;
 pub mod utils;
 pub mod verify;
@@ -23,8 +31,10 @@ pub use self::{
     insert_sync::insert_sync,
     layout_infer::layout_infer,
     lower_to_kir::lower_to_kir,
+    parallel_reduce_rewrite::rewrite_parallel_reduce,
     plan_global_scratch::{plan_global_scratch, GlobalScratchPlan},
     plan_shared_mem::{plan_shared_mem, SharedMemPlan},
+    split_module::{split_module, ModuleSubgraph, OutputSpec, SubgraphKernel, SubgraphValue},
     type_infer::{type_check, type_infer, TypeMap},
     verify::verify,
 };

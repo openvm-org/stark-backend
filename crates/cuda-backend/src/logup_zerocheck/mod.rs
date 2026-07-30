@@ -74,6 +74,13 @@ mod fractional;
 /// Graph-IR mirror of [`fractional::fractional_sumcheck_gpu`].
 #[cfg(feature = "graph-ir")]
 pub mod fractional_ir;
+/// Structured `ir::Module` (DSL) ports of the fractional-GKR kernels.
+#[cfg(feature = "graph-ir")]
+pub mod fractional_ir_dsl;
+/// Simplified DSL-first port of the fractional-GKR sumcheck prover
+/// (persistent per-layer tree, dense-only, fold-eval only, no reverts).
+#[cfg(feature = "graph-ir")]
+pub mod fractional_sumcheck_gpu_irv2;
 /// Logup interaction evaluations for GKR input
 mod gkr_input;
 mod mle_round;

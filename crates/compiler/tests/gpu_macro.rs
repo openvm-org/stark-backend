@@ -2267,3 +2267,62 @@ fn macro_bitwise_ops_lower_to_quasi_affine() {
     assert_eq!(outs.len(), 1);
     assert_eq!(outs[0], c);
 }
+
+/// Top-level FpExt reduce: `sum_t a[t] * b[t]` over `EF`. Exercises the
+/// hoisted-reduce path with a register accumulator whose element type is
+/// `FpExt`, initialized with a zero `ConstFpExt`.
+#[test]
+fn macro_top_level_reduce_fpext_dot_product() {
+    let k = 1024usize;
+    let a = pseudo_ext_elems(k, 80);
+    let b = pseudo_ext_elems(k, 81);
+
+    let mut ib = IRBuilder::new();
+    let a_in = ib.input("a", ScalarType::FpExt, vec![k]);
+    let b_in = ib.input("b", ScalarType::FpExt, vec![k]);
+    let body = kernel!(ib, reduce[k] | t | { a_in[t] * b_in[t] });
+    let module = ib.finish("fpext_dot", body);
+
+    let outs = run_module(module, &[a.clone(), b.clone()]);
+    let a_ef: Vec<EF> = a.chunks(4).map(ef_from_u32s).collect();
+    let b_ef: Vec<EF> = b.chunks(4).map(ef_from_u32s).collect();
+    let want = ef_to_u32s(
+        a_ef.iter()
+            .zip(b_ef.iter())
+            .map(|(&x, &y)| x * y)
+            .fold(EF::ZERO, |acc, v| acc + v),
+    );
+    assert_eq!(outs[0], want.to_vec());
+}
+
+/// `compute [n] |i| reduce [k] |t| { ... }` over FpExt — the shape the
+/// GKR compute-round / precompute-M-eval kernels use. Reference
+/// evaluates the same nested sum on the host.
+#[test]
+fn macro_compute_reduce_fpext_weighted_sums() {
+    let (n, k) = (128usize, 64usize);
+    let w = pseudo_ext_elems(n * k, 82);
+    let v = pseudo_ext_elems(k, 83);
+
+    let mut ib = IRBuilder::new();
+    let w_in = ib.input("w", ScalarType::FpExt, vec![n, k]);
+    let v_in = ib.input("v", ScalarType::FpExt, vec![k]);
+    let body = kernel!(ib,
+        compute [n] |i| {
+            reduce [k] |t| { w_in[i, t] * v_in[t] }
+        }
+    );
+    let module = ib.finish("fpext_weighted_sums", body);
+
+    let outs = run_module(module, &[w.clone(), v.clone()]);
+    let w_ef: Vec<EF> = w.chunks(4).map(ef_from_u32s).collect();
+    let v_ef: Vec<EF> = v.chunks(4).map(ef_from_u32s).collect();
+    let mut want: Vec<u32> = Vec::with_capacity(4 * n);
+    for i in 0..n {
+        let acc = (0..k)
+            .map(|t| w_ef[i * k + t] * v_ef[t])
+            .fold(EF::ZERO, |acc, x| acc + x);
+        want.extend_from_slice(&ef_to_u32s(acc));
+    }
+    assert_eq!(outs[0], want);
+}

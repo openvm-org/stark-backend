@@ -61,6 +61,7 @@ use super::{
         precompute_m_target_blocks, virtual_padding_q, BufferScheduler, BufferTarget,
         FractionalInputSize, GkrRoundStrategy,
     },
+    fractional_ir_dsl::frac_precompute_m_eval_round_ir_dsl,
 };
 use crate::{
     cuda::{
@@ -1280,7 +1281,7 @@ const INV2_CANONICAL: u32 = 1_006_632_961;
 
 /// Load the four base-field coefficients of a `[D_EF]`-shaped BabyBear
 /// input.
-fn load_ext_coeffs(b: &mut IRBuilder, x: NodeId) -> [NodeId; D_EF] {
+pub(crate) fn load_ext_coeffs(b: &mut IRBuilder, x: NodeId) -> [NodeId; D_EF] {
     std::array::from_fn(|k| {
         let idx = b.const_u32(k as u32);
         b.index(x, &[idx])
@@ -1289,7 +1290,7 @@ fn load_ext_coeffs(b: &mut IRBuilder, x: NodeId) -> [NodeId; D_EF] {
 
 /// Recombine four BabyBear coefficient scalars into one `FpExt` scalar
 /// against the extension basis `{1, t, t², t³}`.
-fn fpext_from_coeffs(b: &mut IRBuilder, coeffs: [NodeId; D_EF]) -> NodeId {
+pub(crate) fn fpext_from_coeffs(b: &mut IRBuilder, coeffs: [NodeId; D_EF]) -> NodeId {
     let [a0, a1, a2, a3] = coeffs;
     let e0 = b.lift_fpext(a0);
     let e1 = b.lift_fpext(a1);
@@ -2789,7 +2790,11 @@ where
                         let eq_suffix =
                             eq_mle_table_ir(g, &xi_prev[base + t + 1..base + w], device);
                         let d_sum = add_ef_buf(g, device, "d_sum_evals", GKR_S_DEG - 1);
-                        frac_precompute_m_eval_round_ir(
+                        // Dense-only DSL: `m_total`, `eq_r_prefix`, `eq_suffix`,
+                        // and `d_sum` are all freshly-allocated exact-sized
+                        // buffers, so the DSL's byte-size type check succeeds.
+                        // `frac_precompute_m_eval_round` has no virtual variant.
+                        frac_precompute_m_eval_round_ir_dsl(
                             g,
                             m_total,
                             eq_r_prefix,
@@ -3003,6 +3008,12 @@ mod tests {
             device_id: get_device().unwrap() as u32,
             stream: StreamGuard::new(CudaStream::new_non_blocking().unwrap()),
         }
+    }
+
+    #[link(name = "cudart")]
+    extern "C" {
+        fn cudaProfilerStart() -> i32;
+        fn cudaProfilerStop() -> i32;
     }
 
     fn make_host_leaves(len: usize, seed: u64) -> Vec<Frac<EF>> {
@@ -4731,16 +4742,47 @@ mod tests {
     ///     cargo nextest run -p openvm-cuda-backend --features graph-ir \
     ///         --run-ignored all --no-capture \
     ///         -E 'test(bench_fractional_sumcheck_eager_vs_ir)'
+    ///
+    /// nsys profile (env `NSYS_ENABLED=1`): a *single* cudaProfilerStart/Stop
+    /// window wraps only the timed eager + graph iterations across every
+    /// size. Warmup and graph build/compile run in a separate setup pass
+    /// beforehand, so the profile contains only measured kernel work.
+    /// NVTX ranges `eager n=2^{k}` and `graph n=2^{k}` label each phase:
+    ///     NSYS_ENABLED=1 nsys profile --capture-range=cudaProfilerApi \
+    ///         --trace=cuda,nvtx -o frac_bench \
+    ///         cargo nextest run -p openvm-cuda-backend --features graph-ir \
+    ///             --run-ignored all --no-capture \
+    ///             -E 'test(bench_fractional_sumcheck_eager_vs_ir)'
     #[test]
     #[ignore = "benchmark; run explicitly with --run-ignored"]
     fn bench_fractional_sumcheck_eager_vs_ir() {
         use std::time::Instant;
 
+        use crypto_compiler::graph_exe::GraphExe;
         use openvm_cuda_common::memory_manager::MemTracker;
 
         use super::super::fractional::fractional_sumcheck_gpu;
 
         const ITERS: usize = 3;
+
+        struct PerSize {
+            log_n: usize,
+            n: usize,
+            sizes: FractionalInputSize,
+            leaves: Vec<Frac<EF>>,
+            alpha: EF,
+            eager_sum: (EF, EF),
+            exe: GraphExe,
+            inputs: Vec<DeviceBuffer<u8>>,
+            outputs: Vec<DeviceBuffer<u8>>,
+            scratch: DeviceBuffer<u8>,
+            exports: Vec<BufId>,
+            build_ms: f64,
+            compile_ms: f64,
+            n_nodes: usize,
+            eager_ms: Vec<f64>,
+            graph_ms: Vec<f64>,
+        }
 
         let ctx = test_ctx();
         let device = DeviceType::Cuda(0);
@@ -4750,6 +4792,12 @@ mod tests {
             .map(|s| s.trim().parse().expect("FRAC_BENCH_LOG_N entry"))
             .collect();
 
+        let nsys_enabled = std::env::var_os("NSYS_ENABLED").is_some();
+
+        // ---- Setup pass: build/compile the graph, prime both eager and
+        // graph kernels. All runs here happen *before* cudaProfilerStart,
+        // so first-launch driver init and JIT cost never enter the profile.
+        let mut states: Vec<PerSize> = Vec::with_capacity(log_ns.len());
         for log_n in log_ns {
             let n = 1usize << log_n;
             let sizes = FractionalInputSize::new(n, n);
@@ -4759,17 +4807,12 @@ mod tests {
 
             println!("\n=== fractional sumcheck: n = 2^{log_n} = {n} leaves ===");
 
-            // ---- Eager: 1 warmup + ITERS timed runs. The prover consumes
-            // (folds in place) its input, so each run gets a fresh device
-            // copy, uploaded outside the timed region.
-            let mut eager_sum = (EF::ZERO, EF::ZERO);
-            let mut eager_ms = Vec::with_capacity(ITERS);
-            for i in 0..=ITERS {
+            // Eager warmup — also records `eager_sum` for the sanity check.
+            let eager_sum = {
                 let d_leaves = leaves_to_device(&leaves, &ctx);
                 let mut sponge = DuplexSpongeGpu::default();
                 let mut mem = MemTracker::start("bench.fractional_eager");
                 ctx.stream.synchronize().expect("sync");
-                let t0 = Instant::now();
                 let (proof, _xi) = fractional_sumcheck_gpu::<SC, _>(
                     &mut sponge,
                     d_leaves,
@@ -4779,18 +4822,12 @@ mod tests {
                     &mut mem,
                     &ctx,
                 )
-                .expect("eager fractional_sumcheck_gpu");
+                .expect("eager warmup");
                 ctx.stream.synchronize().expect("sync");
-                let ms = t0.elapsed().as_secs_f64() * 1e3;
-                if i > 0 {
-                    eager_ms.push(ms);
-                }
-                eager_sum = proof.fractional_sum;
-            }
-            let eager_mean = eager_ms.iter().sum::<f64>() / ITERS as f64;
-            println!("eager      : {eager_ms:>8.2?} ms (mean {eager_mean:.2} ms)");
+                proof.fractional_sum
+            };
 
-            // ---- Graph: build once, compile once, 1 warmup + ITERS runs.
+            // Graph build + compile — never inside an NVTX range or profile.
             let t0 = Instant::now();
             let mut g = GraphBuilder::new();
             let mut transcript = DuplexSpongeGpuIR::new(&mut g, device);
@@ -4839,39 +4876,123 @@ mod tests {
 
             assert_eq!(exe.num_inputs(), 1, "leaves should be the only input");
             let d_input = frac_bytes(&leaves).to_device_on(&ctx).expect("H2D");
-            let inputs = [d_input];
+            let inputs: Vec<DeviceBuffer<u8>> = vec![d_input];
             let mut outputs: Vec<DeviceBuffer<u8>> = (0..exe.num_outputs())
                 .map(|i| DeviceBuffer::<u8>::with_capacity_on(exe.output_size(i), &ctx))
                 .collect();
             let mut scratch =
                 DeviceBuffer::<u8>::with_capacity_on(exe.scratch_bytes().max(1), &ctx);
-            let mut graph_ms = Vec::with_capacity(ITERS);
-            for i in 0..=ITERS {
+
+            // Graph exec warmup.
+            ctx.stream.synchronize().expect("sync");
+            exe.run(&ctx, &inputs, &mut outputs, &mut scratch)
+                .expect("graph warmup");
+            ctx.stream.synchronize().expect("sync");
+
+            states.push(PerSize {
+                log_n,
+                n,
+                sizes,
+                leaves,
+                alpha,
+                eager_sum,
+                exe,
+                inputs,
+                outputs,
+                scratch,
+                exports,
+                build_ms,
+                compile_ms,
+                n_nodes,
+                eager_ms: Vec::with_capacity(ITERS),
+                graph_ms: Vec::with_capacity(ITERS),
+            });
+        }
+
+        // ---- Timed pass: everything below runs inside a single
+        // cudaProfilerStart/Stop window so nsys emits one .nsys-rep file
+        // containing only the labeled timed work.
+        if nsys_enabled {
+            unsafe { cudaProfilerStart() };
+        }
+        for st in states.iter_mut() {
+            if nsys_enabled {
+                nvtx::range_push!("eager n=2^{}", st.log_n);
+            }
+            for _ in 0..ITERS {
+                let d_leaves = leaves_to_device(&st.leaves, &ctx);
+                let mut sponge = DuplexSpongeGpu::default();
+                let mut mem = MemTracker::start("bench.fractional_eager");
                 ctx.stream.synchronize().expect("sync");
                 let t0 = Instant::now();
-                exe.run(&ctx, &inputs, &mut outputs, &mut scratch)
+                let (proof, _xi) = fractional_sumcheck_gpu::<SC, _>(
+                    &mut sponge,
+                    d_leaves,
+                    st.sizes,
+                    st.alpha,
+                    false,
+                    &mut mem,
+                    &ctx,
+                )
+                .expect("eager fractional_sumcheck_gpu");
+                ctx.stream.synchronize().expect("sync");
+                st.eager_ms.push(t0.elapsed().as_secs_f64() * 1e3);
+                st.eager_sum = proof.fractional_sum;
+            }
+            if nsys_enabled {
+                nvtx::range_pop!();
+                nvtx::range_push!("graph n=2^{}", st.log_n);
+            }
+            for _ in 0..ITERS {
+                ctx.stream.synchronize().expect("sync");
+                let t0 = Instant::now();
+                st.exe
+                    .run(&ctx, &st.inputs, &mut st.outputs, &mut st.scratch)
                     .expect("graph run");
                 ctx.stream.synchronize().expect("sync");
-                let ms = t0.elapsed().as_secs_f64() * 1e3;
-                if i > 0 {
-                    graph_ms.push(ms);
-                }
+                st.graph_ms.push(t0.elapsed().as_secs_f64() * 1e3);
             }
-            let graph_mean = graph_ms.iter().sum::<f64>() / ITERS as f64;
+            if nsys_enabled {
+                nvtx::range_pop!();
+            }
+        }
+        if nsys_enabled {
+            unsafe { cudaProfilerStop() };
+        }
+
+        // ---- Report + sanity check.
+        for st in &states {
+            let eager_mean = st.eager_ms.iter().sum::<f64>() / ITERS as f64;
+            let graph_mean = st.graph_ms.iter().sum::<f64>() / ITERS as f64;
             println!(
-                "graph exec : {graph_ms:>8.2?} ms (mean {graph_mean:.2} ms, {:.3}x eager)",
+                "\n--- fractional sumcheck: n = 2^{} = {} leaves ---\n\
+                 eager      : {:>8.2?} ms (mean {:.2} ms)\n\
+                 graph build: {:>8.2} ms ({} nodes); compile: {:>8.2} ms\n\
+                 graph exec : {:>8.2?} ms (mean {:.2} ms, {:.3}x eager)",
+                st.log_n,
+                st.n,
+                st.eager_ms,
+                eager_mean,
+                st.build_ms,
+                st.n_nodes,
+                st.compile_ms,
+                st.graph_ms,
+                graph_mean,
                 graph_mean / eager_mean,
             );
 
-            // Sanity: the graph's root fractional sum must match eager.
             let read_export = |bid: BufId| -> EF {
-                let idx = (0..exe.num_outputs())
-                    .find(|&i| exe.output_buf_id(i) == bid)
+                let idx = (0..st.exe.num_outputs())
+                    .find(|&i| st.exe.output_buf_id(i) == bid)
                     .expect("export output index");
-                ef_from_bytes(&outputs[idx].to_host_on(&ctx).expect("D2H"))
+                ef_from_bytes(&st.outputs[idx].to_host_on(&ctx).expect("D2H"))
             };
-            let got_sum = (read_export(exports[0]), read_export(exports[1]));
-            assert_eq!(got_sum, eager_sum, "fractional_sum mismatch at 2^{log_n}");
+            let got_sum = (read_export(st.exports[0]), read_export(st.exports[1]));
+            assert_eq!(
+                got_sum, st.eager_sum,
+                "fractional_sum mismatch at 2^{}",
+                st.log_n
+            );
         }
     }
 }

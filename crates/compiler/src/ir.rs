@@ -211,6 +211,20 @@ impl IRBuilder {
         v
     }
 
+    /// One past the highest [`VarId`] allocated so far. Together with
+    /// [`Self::raise_var_watermark`] this lets passes copy nodes across
+    /// builders with `VarId`s preserved verbatim, without later
+    /// [`Self::fresh_var`] calls in the destination colliding with them.
+    pub(crate) fn var_watermark(&self) -> u32 {
+        self.next_var
+    }
+
+    /// Raises the fresh-variable watermark to at least `n` (no-op if the
+    /// builder is already past it).
+    pub(crate) fn raise_var_watermark(&mut self, n: u32) {
+        self.next_var = self.next_var.max(n);
+    }
+
     /// Declares a module input tensor (scalar input if `shape` is empty).
     pub fn input(
         &mut self,

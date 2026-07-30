@@ -92,9 +92,10 @@ impl GraphCompiler {
         self
     }
 
-    /// Picks the memory scheduler backend. Default is
-    /// [`SchedulerMode::CpSat`] with `max_secs = 30.0`, which requires the
-    /// `planner` feature's OR-Tools install; [`SchedulerMode::Heuristic`] is
+    /// Picks the memory scheduler backend. Default depends on features:
+    /// with `planner-ortools`, [`SchedulerMode::CpSat`] with `max_secs =
+    /// 30.0` (requires the OR-Tools install described in the compiler
+    /// crate's `Cargo.toml`); without it, [`SchedulerMode::Heuristic`] —
     /// the OR-Tools-free fallback described in [`planner::plan_heuristic`].
     pub fn scheduler(mut self, scheduler: SchedulerMode) -> Self {
         self.scheduler = scheduler;
@@ -405,6 +406,7 @@ impl GraphCompiler {
             PlanError::UnboundSizeSymbol { .. } | PlanError::NegativeSize { .. } => {
                 CompileError::Type(format!("graph plan: {e}"))
             }
+            #[cfg(feature = "planner-ortools")]
             PlanError::NoSolution(_) => CompileError::Runtime(format!("graph plan: {e}")),
         })?;
         let sizes = evaluate_sizes_bufs(&bufs, &self.env)?;
@@ -535,7 +537,7 @@ fn clone_kn(k: &KernelNode) -> KernelNode {
     KernelNode {
         inputs: k.inputs.clone(),
         outputs: k.outputs.clone(),
-        modifies: k.modifies.clone(),
+        carried_outputs: k.carried_outputs.clone(),
         func: Box::new(|_, _, _| {}),
         name: k.name.clone(),
     }
@@ -782,8 +784,11 @@ impl GraphExe {
             }
             ExeNode::Blackbox(k) => {
                 let mut attrs = format!("name=\"{}\"", k.name);
-                if k.modifies.iter().any(|&m| m) {
-                    attrs.push_str(&format!(", modifies={:?}", k.modifies));
+                if !k.carried_outputs.is_empty() {
+                    attrs.push_str(&format!(
+                        ", carried_outputs=[{}]",
+                        self.buf_ref_list(&k.carried_outputs),
+                    ));
                 }
                 format!(
                     "let ({}) = BlackboxKernel({}, {});",
@@ -1253,5 +1258,89 @@ mod tests {
             let want = want_for(out_bid);
             assert_eq!(got, want, "output {i} mismatch (BufId {out_bid:?})");
         }
+    }
+
+    /// A multi-kernel module (`s = reduce_add(a); out = a[i] * s`) inserted
+    /// through `insert_kernel` is split into one graph node per kernel, JIT'd
+    /// as two unique modules, and runs end-to-end: the reduce's scalar result
+    /// flows to the consumer through a planner-managed intermediate buffer.
+    #[test]
+    fn multi_kernel_module_splits_and_runs() {
+        const N: usize = 16;
+        let module = {
+            let mut b = IRBuilder::new();
+            let a = b.input("a", ScalarType::BabyBear, vec![N]);
+            let s = b.reduce_add(N, |b, i| b.index(a, &[i]));
+            let s = b.let_bound(s);
+            let out = b.compute(N, |b, i| {
+                let ai = b.index(a, &[i]);
+                b.mul(ai, s)
+            });
+            b.finish("scale_by_sum", out)
+        };
+
+        let bytes = (N * 4) as i64;
+        let mut g = GraphBuilder::new();
+        let mk = |g: &mut GraphBuilder, name: &str| -> BufId {
+            g.add_buf(BufInfo {
+                name: Some(name.to_string()),
+                device_type: DeviceType::Cuda(0),
+                size: Quast::cst(bytes),
+                elem_size: 4,
+            })
+        };
+        let a_buf = mk(&mut g, "a");
+        let out_buf = mk(&mut g, "out");
+        g.insert_kernel(module, [a_buf], [out_buf]);
+
+        // Split on insertion: one graph node per top-level kernel.
+        assert_eq!(g.nodes.len(), 2);
+
+        let mut exe = GraphCompiler::new()
+            .device(DeviceType::Cuda(0))
+            .compile_options(CompileOptions::default())
+            .compile(g)
+            .expect("graph compile");
+
+        // Two distinct split kernels → two unique JIT builds. The scalar
+        // intermediate has both a writer and a reader, so it lives in the
+        // planner's scratch pool, not in the caller-facing I/O sets.
+        assert_eq!(exe.num_unique_modules(), 2);
+        assert_eq!(exe.num_inputs(), 1);
+        assert_eq!(exe.num_outputs(), 1);
+        assert_eq!(exe.input_buf_id(0), a_buf);
+        assert_eq!(exe.output_buf_id(0), out_buf);
+
+        // BabyBear buffers hold Montgomery-form values (see passes::codegen):
+        // encode inputs and compare Montgomery-encoded expectations. Sum and
+        // products stay far below the modulus, so plain u32 arithmetic is
+        // the canonical reference.
+        use crate::passes::codegen::to_monty;
+        let host: Vec<u32> = (1..=N as u32).collect();
+        let sum: u32 = host.iter().sum();
+        let want: Vec<u32> = host.iter().map(|&x| to_monty(x * sum)).collect();
+
+        let ctx = GpuDeviceCtx::for_current_device().expect("GPU ctx");
+        let in_bytes: Vec<u8> = host
+            .iter()
+            .flat_map(|&x| to_monty(x).to_le_bytes())
+            .collect();
+        let in_bufs = vec![in_bytes.as_slice().to_device_on(&ctx).expect("H2D")];
+        let mut out_bufs = vec![DeviceBuffer::<u8>::with_capacity_on(
+            exe.output_size(0),
+            &ctx,
+        )];
+        let mut scratch: DeviceBuffer<u8> =
+            DeviceBuffer::with_capacity_on(exe.scratch_bytes().max(1), &ctx);
+
+        exe.run(&ctx, &in_bufs, &mut out_bufs, &mut scratch)
+            .expect("graph run");
+
+        let bytes: Vec<u8> = out_bufs[0].to_host_on(&ctx).expect("D2H");
+        let got: Vec<u32> = bytes
+            .chunks_exact(4)
+            .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
+            .collect();
+        assert_eq!(got, want);
     }
 }

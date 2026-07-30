@@ -93,6 +93,13 @@ pub fn compile_and_load(
         dump::write_step_dump(dir, &name, 1, "types", "txt", &dump::dump_types(&types))?;
     }
 
+    // Rewrite `reduce` nodes with insufficient outer parallelism into a
+    // chain of top-level compute kernels implementing a halving parallel
+    // reduction. This runs before canonicalize so the emitted chain flows
+    // through the same lowering as any other user-written compute chain.
+    let module = passes::rewrite_parallel_reduce(module.clone())?;
+    let types = passes::type_infer(&module)?;
+
     // `canonicalize` mutates the module's builder in-place; clone so multiple
     // callers (e.g. graph deduplication) can share the same source `Module`
     // without conflict. `IRBuilder` and `Module` derive `Clone` for this.

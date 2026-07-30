@@ -237,9 +237,8 @@ fn init_const(op: ReduceOp, ty: ScalarType) -> Result<SSAOpCode, CompileError> {
         (ReduceOp::Mul, ScalarType::BabyBear) => Ok(SSAOpCode::ConstField(1)),
         (ReduceOp::Add, ScalarType::U32) => Ok(SSAOpCode::ConstU32(0)),
         (ReduceOp::Mul, ScalarType::U32) => Ok(SSAOpCode::ConstU32(1)),
-        (_, ScalarType::FpExt) => Err(CompileError::Lower(
-            "reduce over FpExt is not supported yet".into(),
-        )),
+        (ReduceOp::Add, ScalarType::FpExt) => Ok(SSAOpCode::ConstFpExt([0, 0, 0, 0])),
+        (ReduceOp::Mul, ScalarType::FpExt) => Ok(SSAOpCode::ConstFpExt([1, 0, 0, 0])),
         (_, ScalarType::Bool) => Err(CompileError::Lower("cannot reduce over Bool".into())),
     }
 }

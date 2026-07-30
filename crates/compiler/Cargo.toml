@@ -28,17 +28,19 @@ serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 parking_lot = { workspace = true }
 
-# The `planner` feature enables the CP-SAT-based memory planner. `cp_sat`
-# links against Google OR-Tools; install it per
+# The `planner-ortools` feature adds the CP-SAT memory-planner backend.
+# `cp_sat` links against Google OR-Tools; install it per
 # https://developers.google.com/optimization/install (prebuilt binaries) and
 # either drop it in one of `/usr/local`, `/usr`, `/opt/homebrew`,
 # `/home/linuxbrew/.linuxbrew`, `/opt/ortools`, or set `ORTOOLS_PREFIX` to
-# the install prefix before building with `--features planner`.
+# the install prefix before building with `--features planner-ortools`.
+# `planner` alone (heuristic backend) has no external link deps.
 cp_sat = { version = "0.4", optional = true }
 
 [features]
 default = []
-planner = ["dep:cp_sat"]
+planner = []
+planner-ortools = ["planner", "dep:cp_sat"]
 
 [dev-dependencies]
 nvtx = { workspace = true }
@@ -64,4 +66,4 @@ required-features = ["planner"]
 
 [[example]]
 name = "planner_bench"
-required-features = ["planner"]
+required-features = ["planner-ortools"]

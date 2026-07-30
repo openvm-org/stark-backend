@@ -100,6 +100,12 @@ pub struct CanonKernel {
     /// `#[grid(threads = N)]` block-size hint from the outer compute.
     pub threads: Option<usize>,
     pub name: String,
+    /// The original compute/reduce node this kernel was emitted from, before
+    /// any canonicalization rewrites (in particular before a bare top-level
+    /// `reduce` is wrapped in `compute [1]`). Lets
+    /// [`split_module`](crate::passes::split_module::split_module) extract
+    /// the user-written subtree for this kernel.
+    pub source: NodeId,
 }
 
 /// A module in canonical form.
@@ -472,6 +478,7 @@ impl CanonCx<'_> {
             inner_par,
             threads,
             name: format!("k{let_id}"),
+            source: id,
         });
         Ok((0..num_outs)
             .map(|out_idx| TensorRef::Let { let_id, out_idx })

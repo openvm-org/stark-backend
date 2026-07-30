@@ -93,6 +93,11 @@ impl KernelCache {
     /// Looks up `module` in the cache. On hit, dlopens the persisted `.so`,
     /// touches the entry's mtime so LRU accounting treats it as recent, and
     /// returns the reconstructed [`KernelModule`]. On miss, returns `None`.
+    ///
+    /// An entry that exists but fails to load (torn write from a crashed
+    /// producer, concurrent eviction between the existence check and the
+    /// dlopen, corrupt artifacts) is treated as a miss rather than an error —
+    /// the caller falls back to a fresh compile.
     pub fn get(&self, module: &Module) -> Result<Option<KernelModule>, CompileError> {
         let key = module_hash_hex(module);
         let dir = self.entry_dir(&key);
@@ -102,13 +107,28 @@ impl KernelCache {
         // Touch mtime so this entry moves to the head of the LRU. Best-effort:
         // if the touch fails we still return the module.
         let _ = touch(&dir);
-        Ok(Some(KernelModule::load_from_dir(&dir)?))
+        match KernelModule::load_from_dir(&dir) {
+            Ok(km) => Ok(Some(km)),
+            Err(e) => {
+                tracing_warn(&format!(
+                    "kernel_cache: entry {key} failed to load ({e}); recompiling"
+                ));
+                Ok(None)
+            }
+        }
     }
 
     /// Persists `km`'s artifacts under this cache keyed by `module`, then
     /// enforces the eviction bounds. Existing entries under the same key are
     /// overwritten (they represent the same source module and any prior
     /// artifacts are stale w.r.t. the fresh compile).
+    ///
+    /// The artifacts are staged in a hidden sibling directory and published
+    /// with an atomic `rename`, so a concurrent reader — including one in
+    /// another *process*, which the `lock` cannot serialize — never observes
+    /// a half-written entry and never has a dlopen'd `.so` overwritten in
+    /// place under its feet (the old inode stays alive for existing maps;
+    /// only the directory entry is swapped).
     ///
     /// A best-effort operation: if the underlying filesystem operations fail
     /// mid-way we still return the compiled module — the cache is an
@@ -117,11 +137,26 @@ impl KernelCache {
         let _guard = self.lock.lock();
         let key = module_hash_hex(module);
         let dir = self.entry_dir(&key);
-        fs::create_dir_all(&dir).map_err(io_err("kernel_cache: create entry dir"))?;
-        km.save_artifacts(&dir)?;
-        // Bring this entry to the head of the LRU explicitly (the freshly
-        // written files should already be most-recent, but be defensive).
-        let _ = touch(&dir);
+        let stage = self
+            .directory
+            .join(format!(".{key}.tmp-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&stage);
+        fs::create_dir_all(&stage).map_err(io_err("kernel_cache: create staging dir"))?;
+        let staged = km.save_artifacts(&stage).and_then(|()| {
+            let _ = touch(&stage);
+            fs::rename(&stage, &dir).or_else(|_| {
+                // The target exists (stale prior artifacts or a concurrent
+                // producer of the same key). Displace it and retry once; the
+                // key is a content hash, so a racing winner's entry is
+                // equivalent and losing this second race is also fine.
+                let _ = fs::remove_dir_all(&dir);
+                fs::rename(&stage, &dir).map_err(io_err("kernel_cache: publish entry"))
+            })
+        });
+        if let Err(e) = staged {
+            let _ = fs::remove_dir_all(&stage);
+            return Err(e);
+        }
         self.enforce_bounds()?;
         Ok(())
     }
@@ -161,6 +196,12 @@ impl KernelCache {
         for entry in iter {
             let entry = entry.map_err(io_err("kernel_cache: iterate directory"))?;
             let path = entry.path();
+            // Hidden names are in-flight staging dirs (see `insert`), not
+            // published entries — evicting one would tear a concurrent
+            // producer's publish.
+            if entry.file_name().to_string_lossy().starts_with('.') {
+                continue;
+            }
             let meta = match entry.metadata() {
                 Ok(m) if m.is_dir() => m,
                 _ => continue,
@@ -310,5 +351,45 @@ mod tests {
         assert!(!cache.entry_dir("fake_0").exists());
         assert!(cache.entry_dir("fake_1").exists());
         assert!(cache.entry_dir("fake_2").exists());
+    }
+
+    /// An entry whose artifacts fail to load (torn write from a crashed
+    /// producer, corruption) is a miss, not an error — callers recompile.
+    #[test]
+    fn corrupt_entry_is_a_miss() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = KernelCache::at(tmp.path());
+        let m = scale_module(2);
+        let dir = cache.entry_dir(&module_hash_hex(&m));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join(KERNEL_MODULE_SO), b"not an ELF").unwrap();
+        fs::write(dir.join(KERNEL_MODULE_METADATA), b"not json").unwrap();
+        assert!(cache.get(&m).unwrap().is_none());
+    }
+
+    /// Hidden staging dirs (in-flight `insert` publishes) are invisible to
+    /// eviction: they are neither counted against the bounds nor deleted.
+    #[test]
+    fn staging_dirs_are_skipped_by_eviction() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = KernelCache::at(tmp.path())
+            .max_kernels(2)
+            .storage_size(1_000_000);
+
+        let stage = tmp.path().join(".abc.tmp-42");
+        fs::create_dir_all(&stage).unwrap();
+        fs::write(stage.join(KERNEL_MODULE_SO), [0u8; 128]).unwrap();
+        for i in 0..2 {
+            let dir = cache.entry_dir(&format!("fake_{i}"));
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join(KERNEL_MODULE_SO), []).unwrap();
+            fs::write(dir.join(KERNEL_MODULE_METADATA), b"{}").unwrap();
+        }
+        cache.enforce_bounds().unwrap();
+        // Two published entries fit the bound; the staging dir neither
+        // counted as a third entry nor got evicted.
+        assert!(stage.exists());
+        assert!(cache.entry_dir("fake_0").exists());
+        assert!(cache.entry_dir("fake_1").exists());
     }
 }

@@ -6,7 +6,8 @@
 //!
 //! - [`SchedulerMode::CpSat`] jointly solves for schedule and offsets as one CP-SAT model (see
 //!   [`plan_cpsat`]). Optimal-ish but heavy; requires the OR-Tools install described in the crate's
-//!   `Cargo.toml`. Best when the graph is small enough to prove optimality within the time budget.
+//!   `Cargo.toml`, and is only compiled under the `planner-ortools` feature. Best when the graph is
+//!   small enough to prove optimality within the time budget.
 //!
 //! - [`SchedulerMode::Heuristic`] runs a lightweight three-phase pipeline — memory-aware greedy
 //!   topological order, offline best-fit-decreasing offset assignment, then a hill-climbing local
@@ -25,11 +26,14 @@
 //! next overwrite of the buffer, so in-place modification chains with
 //! interleaved snapshot reads schedule correctly.
 //!
-//! Feature-gated behind `planner` (currently both backends live in this
-//! module; only CP-SAT needs OR-Tools at link time).
+//! Feature-gated behind `planner`. The CP-SAT backend is additionally
+//! gated behind `planner-ortools`, which is the flag that pulls in
+//! `cp_sat` and needs OR-Tools at link time; without it only the
+//! heuristic backend is built.
 
 use std::collections::BTreeMap;
 
+#[cfg(feature = "planner-ortools")]
 use cp_sat::{
     builder::{CpModelBuilder, IntVar, LinearExpr},
     proto::{CpSolverStatus, SatParameters},
@@ -46,6 +50,8 @@ pub enum SchedulerMode {
     /// CP-SAT joint schedule / packing solve, with an overall wall-time
     /// cap of `max_secs`. The solver returns whatever is best when the
     /// deadline elapses (accepted as `Feasible` on top of `Optimal`).
+    /// Only available with the `planner-ortools` feature.
+    #[cfg(feature = "planner-ortools")]
     CpSat { max_secs: f64 },
     /// Solver-free heuristic pipeline: memory-aware greedy topological
     /// order, offline best-fit-decreasing packing, and adjacent-swap
@@ -53,9 +59,18 @@ pub enum SchedulerMode {
     Heuristic,
 }
 
+// Not derivable: the default is `CpSat` when `planner-ortools` is enabled.
+#[allow(clippy::derivable_impls)]
 impl Default for SchedulerMode {
     fn default() -> Self {
-        SchedulerMode::CpSat { max_secs: 30.0 }
+        #[cfg(feature = "planner-ortools")]
+        {
+            SchedulerMode::CpSat { max_secs: 30.0 }
+        }
+        #[cfg(not(feature = "planner-ortools"))]
+        {
+            SchedulerMode::Heuristic
+        }
     }
 }
 
@@ -80,6 +95,7 @@ pub enum PlanError {
     UnboundSizeSymbol { buf: BufId, sym: VarId },
     #[error("size expression for buffer {buf:?} evaluates to a negative value {value}")]
     NegativeSize { buf: BufId, value: i64 },
+    #[cfg(feature = "planner-ortools")]
     #[error("CP-SAT returned no solution (status: {0:?})")]
     NoSolution(CpSolverStatus),
 }
@@ -145,6 +161,7 @@ pub fn plan_raw(
         });
     }
     match scheduler {
+        #[cfg(feature = "planner-ortools")]
         SchedulerMode::CpSat { max_secs } => plan_cpsat(bufs, &ctx, *max_secs),
         SchedulerMode::Heuristic => plan_heuristic(bufs, &ctx),
     }
@@ -298,7 +315,8 @@ impl PlanCtx {
 /// and buffer offsets with a wall-time cap of `max_secs`; accepts any
 /// `Optimal`/`Feasible` solution the solver returns before the deadline.
 ///
-/// Requires the `planner` feature's OR-Tools install.
+/// Requires the `planner-ortools` feature's OR-Tools install.
+#[cfg(feature = "planner-ortools")]
 fn plan_cpsat(bufs: &[BufInfo], ctx: &PlanCtx, max_secs: f64) -> Result<MemoryPlan, PlanError> {
     let PlanCtx {
         n_nodes,
@@ -745,19 +763,16 @@ fn align_up(off: i64, align: i64) -> i64 {
 }
 
 /// Builds a [`NodeAccess`] from a [`GraphNode`], matching the semantics
-/// [`plan_raw`] expects (`modifies` on a `BlackboxKernel` input adds it to
-/// both reads and writes; a `Const` writes its target; `Memcpy` reads src
-/// and writes dst; etc.).
+/// [`plan_raw`] expects: a `BlackboxKernel`'s `carried_outputs` are inputs
+/// the kernel also writes in place (so they land in both reads and
+/// writes); a `Const` writes its target; `Memcpy` reads src and writes
+/// dst; etc.
 pub fn access_from_node(node: &GraphNode) -> NodeAccess {
     let mut a = NodeAccess::default();
     match node {
         GraphNode::BlackboxKernel(k) => {
-            for (i, b) in k.inputs.iter().enumerate() {
-                a.reads.push(*b);
-                if k.modifies[i] {
-                    a.writes.push(*b);
-                }
-            }
+            a.reads.extend(k.inputs.iter().copied());
+            a.writes.extend(k.carried_outputs.iter().copied());
             a.writes.extend(k.outputs.iter().copied());
         }
         GraphNode::Kernel(k) => {
@@ -958,6 +973,22 @@ mod tests {
     ) -> Result<MemoryPlan, PlanError> {
         let nodes: Vec<NodeAccess> = g.nodes.iter().map(access_from_node).collect();
         plan_raw(&g.bufs, &nodes, env, device, &[], &mode)
+    }
+
+    /// All scheduler backends compiled in this build, so backend-agnostic
+    /// tests exercise every available planner. Without `planner-ortools`,
+    /// only [`SchedulerMode::Heuristic`] is compiled in.
+    // `vec![..]` can't express the cfg-gated CpSat entry.
+    #[allow(clippy::vec_init_then_push)]
+    fn all_modes(cpsat_max_secs: f64) -> Vec<SchedulerMode> {
+        let _ = cpsat_max_secs;
+        let mut modes = Vec::new();
+        #[cfg(feature = "planner-ortools")]
+        modes.push(SchedulerMode::CpSat {
+            max_secs: cpsat_max_secs,
+        });
+        modes.push(SchedulerMode::Heuristic);
+        modes
     }
 
     /// Same chain as `packs_disjoint_lifetimes`, but planned through the
@@ -1161,10 +1192,7 @@ mod tests {
     #[test]
     fn snapshot_read_between_inplace_modifiers_plans() {
         let (g, _, _) = snapshot_between_modifiers_graph();
-        for mode in [
-            SchedulerMode::CpSat { max_secs: 10.0 },
-            SchedulerMode::Heuristic,
-        ] {
+        for mode in all_modes(10.0) {
             let plan = plan_with(&g, &BTreeMap::new(), DeviceType::Cuda(0), mode).unwrap();
             assert_eq!(plan.order, vec![0, 1, 2, 3]);
         }
@@ -1217,10 +1245,7 @@ mod tests {
             [false].into_iter(),
             |_, _, _| {},
         );
-        for mode in [
-            SchedulerMode::CpSat { max_secs: 10.0 },
-            SchedulerMode::Heuristic,
-        ] {
+        for mode in all_modes(10.0) {
             let plan = plan_with(&g, &BTreeMap::new(), DeviceType::Cuda(0), mode).unwrap();
             let oa = plan.offsets[a.0].unwrap();
             let ob = plan.offsets[b.0].unwrap();

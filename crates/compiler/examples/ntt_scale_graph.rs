@@ -4,8 +4,10 @@
 //! / [`GraphExe`] and compare the result against a plonky3 `Radix2Dit`
 //! reference (scaled by 2 in BabyBear).
 //!
-//! Requires the `planner` feature; needs an OR-Tools install (see the
-//! `planner` docs in `Cargo.toml`) and a working CUDA setup.
+//! Requires the `planner` feature and a working CUDA setup. Compiles with
+//! the heuristic backend alone; add `planner-ortools` if you want the
+//! CP-SAT backend (OR-Tools install required — see the feature docs in
+//! `Cargo.toml`).
 //!
 //! Run with:
 //!     cargo run -p crypto-compiler --features planner \

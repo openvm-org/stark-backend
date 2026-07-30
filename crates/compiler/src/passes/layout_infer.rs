@@ -68,6 +68,19 @@ pub fn layout_infer(p: &mut KernelProgram) {
     }
 }
 
+/// Extend `l`'s bases with identity bases at positions
+/// `l.bases.len()..target_bits`. Semantically: the padded input bits
+/// don't exist in the caller's phys space (they're always zero for
+/// actual inputs), but padding with identity keeps the resulting square
+/// map bijective — a prerequisite for [`classify_convert`]'s lane-block
+/// invertibility check to yield `Shuffle` rather than `Bounce`.
+fn pad_layout_identity(mut l: LinearLayout, target_bits: usize) -> LinearLayout {
+    for i in l.bases.len()..target_bits {
+        l.bases.push(1u64 << i);
+    }
+    l
+}
+
 /// Rewrites `Affine` access maps that depend only on the par's own index
 /// over a power-of-two domain into [`IndexMap::Linear`]. Accesses to
 /// register accumulators keep their `Affine` own-index form.
@@ -103,11 +116,18 @@ type StmtLoc = (Option<SSANode>, usize);
 /// How a reader of a promoted tile consumes it.
 enum Plan {
     /// `C` is the identity: the effective map equals the tile layout, so
-    /// the read stays on the thread's own register slot.
-    Direct,
-    /// Slot permutation or warp shuffle into a register view with this
-    /// effective map `g ∘ f` as its layout.
-    View(LinearLayout),
+    /// the read stays on the thread's own register slot. When `Some`,
+    /// the reader's `IndexMap::Linear(g)` is replaced by this padded
+    /// version so codegen's [`maps_agree`] check sees a `kb`-sized map
+    /// (used for `rbound < n`; `None` for the equal-bound path).
+    Direct(Option<LinearLayout>),
+    /// Slot permutation or warp shuffle into a register view with `eff`
+    /// as its layout. `g_padded` is the reader's rewritten
+    /// `IndexMap::Linear(g)` (padded to `kb` bases when `rbound < n`).
+    View {
+        eff: LinearLayout,
+        g_padded: LinearLayout,
+    },
     /// The read goes through a shared-memory mirror of the tile.
     Mirror,
 }
@@ -203,7 +223,7 @@ fn promote_tiles(p: &mut KernelProgram, ki: usize) {
                 // The writer reads its own tile: only the exact map keeps
                 // the read on the thread's own slot.
                 match &a.index {
-                    IndexMap::Linear(g) if g == f => readers.push((rnode, rai, Plan::Direct)),
+                    IndexMap::Linear(g) if g == f => readers.push((rnode, rai, Plan::Direct(None))),
                     _ => continue 'tiles,
                 }
                 continue;
@@ -214,14 +234,27 @@ fn promote_tiles(p: &mut KernelProgram, ki: usize) {
                 continue 'tiles;
             }
             let plan = match &a.index {
-                IndexMap::Linear(g) if !*rgrid && *rbound == n => {
+                IndexMap::Linear(g) if !*rgrid && *rbound <= n && rbound.is_power_of_two() => {
+                    // For readers whose par bound is smaller than the
+                    // writer's tile (halving-tree pattern), extend the
+                    // reader's linear-layout inputs with identity bases
+                    // so the composed map is a square kb × kb linear
+                    // map. The extra "padded" input bits are inert
+                    // (reader never sets them) but let classify_convert
+                    // reason over the full writer phys space — a lane
+                    // permutation that crosses only the reader's active
+                    // range still classifies as `Shuffle`, not `Bounce`.
+                    let g_padded = pad_layout_identity(g.clone(), kb);
                     let eff = match rattr {
-                        Some(a) => g.compose(&a.layout),
-                        None => g.clone(),
+                        Some(a) => {
+                            let a_padded = pad_layout_identity(a.layout.clone(), kb);
+                            g_padded.compose(&a_padded)
+                        }
+                        None => g_padded.clone(),
                     };
                     match classify_convert(&l_inv.compose(&eff), k.block) {
-                        ConvertKind::Copy => Plan::Direct,
-                        ConvertKind::Slot | ConvertKind::Shuffle => Plan::View(eff),
+                        ConvertKind::Copy => Plan::Direct(Some(g_padded)),
+                        ConvertKind::Slot | ConvertKind::Shuffle => Plan::View { eff, g_padded },
                         ConvertKind::Bounce => Plan::Mirror,
                     }
                 }
@@ -254,8 +287,15 @@ fn promote_tiles(p: &mut KernelProgram, ki: usize) {
         let mut rewrites: Vec<(SSANode, usize, BufId, Option<IndexMap>)> = Vec::new();
         for (rnode, rai, plan) in pr.readers {
             match plan {
-                Plan::Direct => {}
-                Plan::View(eff) => {
+                Plan::Direct(padded_g) => {
+                    if let Some(g) = padded_g {
+                        // rbound < n path: update the reader's index to
+                        // the padded form so codegen's `maps_agree`
+                        // matches the writer tile's kb-bit layout.
+                        rewrites.push((rnode, rai, pr.buf, Some(IndexMap::Linear(g))));
+                    }
+                }
+                Plan::View { eff, g_padded } => {
                     // The view's layout is the reader's effective map, so its
                     // original access resolves to the thread's own slot; the
                     // identity-map conversion re-lays the tile out as `E`.
@@ -281,7 +321,7 @@ fn promote_tiles(p: &mut KernelProgram, ki: usize) {
                             id
                         }
                     };
-                    rewrites.push((rnode, rai, vb, None));
+                    rewrites.push((rnode, rai, vb, Some(IndexMap::Linear(g_padded))));
                 }
                 Plan::Mirror => {
                     let mb = *mirror.get_or_insert_with(|| {

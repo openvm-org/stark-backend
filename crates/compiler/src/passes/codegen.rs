@@ -249,6 +249,18 @@ static __device__ __forceinline__ FpExt fpext_mul(FpExt a, FpExt b) {
                        bb_mul(a.v[2], b.v[1])), bb_mul(a.v[3], b.v[0])),
     }};
 }
+// FpExt warp shuffle: `__shfl_sync` doesn't take struct arguments, so
+// we shuffle each 32-bit coefficient separately. Overloading on the
+// value's type lets `gen_shuffle` emit a single `__shfl_sync(mask, val,
+// srcLane)` call regardless of `T`.
+static __device__ __forceinline__ FpExt __shfl_sync(unsigned mask, FpExt val, int src_lane) {
+    return FpExt{{
+        __shfl_sync(mask, val.v[0], src_lane),
+        __shfl_sync(mask, val.v[1], src_lane),
+        __shfl_sync(mask, val.v[2], src_lane),
+        __shfl_sync(mask, val.v[3], src_lane),
+    }};
+}
 "#;
 
 /// Generates the CUDA C++ translation unit for a [`KernelProgram`].

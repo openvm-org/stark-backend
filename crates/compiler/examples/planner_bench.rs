@@ -7,8 +7,10 @@
 //! twice — once with `SchedulerMode::CpSat { max_secs: 30.0 }` and once
 //! with `SchedulerMode::Heuristic` — reporting wall time and peak bytes.
 //!
+//! Requires the `planner-ortools` feature (CP-SAT backend).
+//!
 //! Run with:
-//!     cargo run -p crypto-compiler --features planner \
+//!     cargo run -p crypto-compiler --features planner-ortools \
 //!         --release --example planner_bench
 
 use std::{collections::BTreeMap, time::Instant};
