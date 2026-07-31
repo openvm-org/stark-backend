@@ -216,14 +216,18 @@ public:
     friend inline mont_t operator+(mont_t a, const mont_t& b)
     {   return a += b;   }
 
-    inline void add_with_carry(const mont_t& b)
+    // Returns the carry out of the top limb so a following halving can shift it
+    // back in: (x+p) overflows the container when the modulus fills all its limbs.
+    inline uint32_t add_with_carry(const mont_t& b)
     {
-        uint32_t i;
+        uint32_t i, carry;
         asm("{");
         asm("add.cc.u32 %0, %0, %1;" : "+r"(even[0]) : "r"(b[0]));
         for (i = 1; i < n; i++)
             asm("addc.cc.u32 %0, %0, %1;" : "+r"(even[i]) : "r"(b[i]));
+        asm("addc.u32 %0, 0, 0;" : "=r"(carry));
         asm("}");
+        return carry;
     }
 
     inline mont_t& operator<<=(unsigned l)
@@ -288,8 +292,11 @@ public:
     friend inline mont_t operator>>(mont_t a, unsigned r)
     {   return a >>= r;   }
 
-    inline void div_by_2() {
-        uint32_t t = 0;
+    // `carry` is the bit shifted out above the top limb — e.g. the carry from an
+    // odd (x+p) add, which overflows the container when the modulus fills all its
+    // limbs. It must re-enter as the new MSB, or the halved result loses that bit.
+    inline void div_by_2(uint32_t carry = 0) {
+        uint32_t t = carry << 31;
         for(uint32_t i=0; i<n; i++) {
             uint32_t *a = &(this->even[n - i - 1]);
             uint32_t t2 = *a << 31;
@@ -554,6 +561,11 @@ public:
 
     inline mont_t inverse()
     {
+        // 0 is not invertible: the `while (is_even())` steps below would spin
+        // forever on a zero input (0 stays even and stays 0 under halving).
+        if (is_zero())
+            asm("trap;");
+
         const mont_t p = mont_t::modulus();
         mont_t v, b, c;
         v = modulus();
@@ -564,18 +576,20 @@ public:
         while (!u.equal_to_digital_one() && !v.equal_to_digital_one()) {
             while (u.is_even()) {
                 u.div_by_2();
+                uint32_t carry = 0;
                 if(b.is_odd()) {
-                    b.add_with_carry(p);
+                    carry = b.add_with_carry(p);
                 }
-                b.div_by_2();
+                b.div_by_2(carry);
             }
             while (v.is_even())
             {
                 v.div_by_2();
+                uint32_t carry = 0;
                 if(c.is_odd()) {
-                    c.add_with_carry(p);
+                    carry = c.add_with_carry(p);
                 }
-                c.div_by_2();
+                c.div_by_2(carry);
             }
 
             if (u >= v) {
