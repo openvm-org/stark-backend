@@ -2263,7 +2263,7 @@ fn macro_bitwise_ops_lower_to_quasi_affine() {
     );
     let module = ib.finish("bitwise_ops", body);
 
-    let outs = run_module(module, &[c.clone()]);
+    let outs = run_module(module, std::slice::from_ref(&c));
     assert_eq!(outs.len(), 1);
     assert_eq!(outs[0], c);
 }

@@ -30,7 +30,7 @@ use crate::{
     passes::{
         canonicalize::{is_canonicalized, CanonKernel, CanonValue, Program, ResultExpr, TensorRef},
         plan_global_scratch::GlobalScratchPlan,
-        utils::resolve_tensor_ref,
+        utils::{hir_to_quast, resolve_tensor_ref},
     },
     quast::{self, ParSpec, Quast, ScatterStore},
     CompileError,
@@ -1046,108 +1046,31 @@ impl BlockCx<'_, '_> {
 
     /// Extracts an index expression as a quasi-affine [`Quast`] over the
     /// kernel's index symbols (par index, grid var, loop induction vars).
-    fn extract_quast(&mut self, id: NodeId) -> Result<Quast, CompileError> {
-        match self.cx.b.node(id).clone() {
-            Node::ConstU32(c) => Ok(Quast::cst(c as i64)),
-            Node::Var(v) => {
-                if v == self.cx.ck.outer_var {
-                    Ok(if self.cx.flat {
-                        Quast::sym(VarId(self.vid.0))
-                    } else {
-                        Quast::sym(VarId(self.cx.k.grid_var().0))
-                    })
-                } else if self.par_var == Some(v) {
-                    Ok(Quast::sym(VarId(self.vid.0)))
-                } else if let Some(&r) = self.cx.loop_vars.get(&v) {
-                    Ok(Quast::sym(VarId(r.0)))
-                } else if let Some(&n) = self.let_nodes.get(&v) {
-                    self.extract_quast(n)
-                } else if let Some(&n) = self.cx.ck.inline_lets.get(&v) {
-                    self.extract_quast(n)
-                } else if let Some(CanonValue::Scalar(n)) = self.cx.program.env.get(&v) {
-                    let n = *n;
-                    self.extract_quast(n)
+    fn extract_quast(&self, id: NodeId) -> Result<Quast, CompileError> {
+        let syms = |v: VarId| {
+            if v == self.cx.ck.outer_var {
+                Some(if self.cx.flat {
+                    Quast::sym(VarId(self.vid.0))
                 } else {
-                    Err(CompileError::Lower(format!(
-                        "variable {v:?} is not usable in an index expression"
-                    )))
-                }
+                    Quast::sym(VarId(self.cx.k.grid_var().0))
+                })
+            } else if self.par_var == Some(v) {
+                Some(Quast::sym(VarId(self.vid.0)))
+            } else {
+                self.cx.loop_vars.get(&v).map(|r| Quast::sym(VarId(r.0)))
             }
-            Node::Bin(op, x, y) => match op {
-                BinOp::Add => Ok(self.extract_quast(x)?.add(&self.extract_quast(y)?)),
-                BinOp::Sub => Ok(self.extract_quast(x)?.sub(&self.extract_quast(y)?)),
-                BinOp::Mul => {
-                    if let Some(c) = self.const_eval(x) {
-                        Ok(self.extract_quast(y)?.mul_c(c))
-                    } else if let Some(c) = self.const_eval(y) {
-                        Ok(self.extract_quast(x)?.mul_c(c))
-                    } else {
-                        Err(CompileError::Lower(
-                            "non-affine multiplication in index expression".into(),
-                        ))
-                    }
-                }
-                BinOp::Div => {
-                    let c = self.const_eval(y).filter(|&c| c > 0).ok_or_else(|| {
-                        CompileError::Lower(
-                            "index division requires a positive constant divisor".into(),
-                        )
-                    })?;
-                    Ok(self.extract_quast(x)?.floordiv(c))
-                }
-                BinOp::Rem => {
-                    let c = self.const_eval(y).filter(|&c| c > 0).ok_or_else(|| {
-                        CompileError::Lower(
-                            "index remainder requires a positive constant divisor".into(),
-                        )
-                    })?;
-                    Ok(self.extract_quast(x)?.rem_c(c))
-                }
-                BinOp::Lt | BinOp::Le | BinOp::Eq => {
-                    Err(CompileError::Lower("comparison in index expression".into()))
-                }
-            },
-            Node::Let { var, value, body } => {
-                self.let_nodes.insert(var, value);
-                self.extract_quast(body)
-            }
-            other => Err(CompileError::Lower(format!(
-                "non-quasi-affine index expression: {other:?}"
-            ))),
-        }
-    }
-
-    /// Constant-folds an index subexpression, resolving variables through
-    /// lets.
-    fn const_eval(&self, id: NodeId) -> Option<i64> {
-        match self.cx.b.node(id) {
-            Node::ConstU32(c) => Some(*c as i64),
-            Node::Var(v) => {
-                let n = self
-                    .let_nodes
-                    .get(v)
-                    .copied()
-                    .or_else(|| self.cx.ck.inline_lets.get(v).copied())
-                    .or_else(|| match self.cx.program.env.get(v) {
-                        Some(CanonValue::Scalar(n)) => Some(*n),
-                        _ => None,
-                    })?;
-                self.const_eval(n)
-            }
-            Node::Bin(op, x, y) => {
-                let a = self.const_eval(*x)?;
-                let b = self.const_eval(*y)?;
-                match op {
-                    BinOp::Add => a.checked_add(b),
-                    BinOp::Sub => a.checked_sub(b),
-                    BinOp::Mul => a.checked_mul(b),
-                    BinOp::Div => (b != 0).then(|| a.div_euclid(b)),
-                    BinOp::Rem => (b != 0).then(|| a.rem_euclid(b)),
-                    BinOp::Lt | BinOp::Le | BinOp::Eq => None,
-                }
-            }
-            _ => None,
-        }
+        };
+        let lets = |v: VarId| {
+            self.let_nodes
+                .get(&v)
+                .or_else(|| self.cx.ck.inline_lets.get(&v))
+                .copied()
+                .or_else(|| match self.cx.program.env.get(&v) {
+                    Some(CanonValue::Scalar(n)) => Some(*n),
+                    _ => None,
+                })
+        };
+        hir_to_quast(self.cx.b, id, &syms, &lets)
     }
 }
 

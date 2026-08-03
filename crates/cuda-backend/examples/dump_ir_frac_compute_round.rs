@@ -65,7 +65,7 @@ fn main() {
     // Enumerate what got written so callers can grep it.
     if let Ok(entries) = std::fs::read_dir(&dump_dir) {
         let mut names: Vec<_> = entries
-            .filter_map(|e| e.ok().map(|e| e.file_name().into_string().ok()).flatten())
+            .filter_map(|e| e.ok().and_then(|e| e.file_name().into_string().ok()))
             .collect();
         names.sort();
         println!("--- files in {} ---", dump_dir.display());

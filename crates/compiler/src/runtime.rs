@@ -8,6 +8,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
     process::Command,
+    time::Duration,
 };
 
 use libloading::Library;
@@ -78,6 +79,13 @@ pub struct CompileOptions {
     pub dump_ir: Option<PathBuf>,
     /// How much to dump when `dump_ir` is set.
     pub verbosity: Verbosity,
+    /// Per-invocation wall-clock limit for nvcc. `None` disables the
+    /// timeout (unbounded wait, the previous behaviour). On timeout the
+    /// nvcc process group is SIGKILL'd and [`CompileError::NvccTimeout`]
+    /// is returned with the module name embedded, so an aggregating
+    /// caller (e.g. [`crate::graph_exe::GraphCompiler::compile`]) can
+    /// surface which kernels were the slow ones.
+    pub nvcc_timeout: Option<Duration>,
 }
 
 impl Default for CompileOptions {
@@ -92,6 +100,10 @@ impl Default for CompileOptions {
                 Ok("verbose") | Ok("Verbose") | Ok("VERBOSE") => Verbosity::Verbose,
                 _ => Verbosity::Basic,
             },
+            nvcc_timeout: std::env::var("NVCC_TIMEOUT_SECS")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+                .map(Duration::from_secs),
         }
     }
 }
@@ -161,6 +173,7 @@ impl KernelModule {
         kprog: &KernelProgram,
         source: &str,
         options: &CompileOptions,
+        module_name: &str,
     ) -> Result<Self, CompileError> {
         let dir = tempfile::Builder::new()
             .prefix("crypto-compiler-")
@@ -168,7 +181,7 @@ impl KernelModule {
         let cu_path = dir.path().join(KERNEL_MODULE_CU);
         let so_path = dir.path().join(KERNEL_MODULE_SO);
         fs::write(&cu_path, source)?;
-        Self::compile_source(&cu_path, &so_path, options)?;
+        Self::compile_source(&cu_path, &so_path, options, module_name)?;
 
         let input_types: Vec<ScalarType> = kprog
             .input_bufs
@@ -193,20 +206,29 @@ impl KernelModule {
     }
 
     /// Invokes `nvcc` on `cu_path` to produce a shared library at `so_path`.
+    ///
+    /// If [`CompileOptions::nvcc_timeout`] is set, the nvcc process (and
+    /// its cicc/ptxas/cudafe children — we launch it in its own Unix
+    /// process group and SIGKILL the whole group on timeout so no child
+    /// escapes) is bounded to that duration; on expiration we return
+    /// [`CompileError::NvccTimeout`] carrying `module_name`.
     fn compile_source(
         cu_path: &Path,
         so_path: &Path,
         options: &CompileOptions,
+        module_name: &str,
     ) -> Result<(), CompileError> {
+        use std::{
+            io::Read,
+            time::{Duration, Instant},
+        };
+
         let mut cmd = Command::new(&options.nvcc);
         cmd.arg("-O3")
             .arg("--shared")
             .arg("-Xcompiler")
             .arg("-fPIC")
             .arg(format!("-arch={}", options.arch));
-        // `CUDA_LINEINFO=1` adds `-lineinfo` so ncu's `--import-source yes`
-        // can attach SASS to the emitted CUDA source. Matches the flag
-        // `openvm-cuda-builder` sets on the AOT-compiled kernels.
         if matches!(std::env::var("CUDA_LINEINFO").as_deref(), Ok("1")) {
             cmd.arg("-lineinfo");
         }
@@ -214,16 +236,85 @@ impl KernelModule {
             .arg("-o")
             .arg(so_path)
             .arg(cu_path);
-        let out = cmd
-            .output()
+
+        let timeout = options.nvcc_timeout;
+        if timeout.is_none() {
+            // Fast path — original behaviour, no polling.
+            let out = cmd.output().map_err(|e| {
+                CompileError::Nvcc(format!("failed to spawn {}: {e}", options.nvcc))
+            })?;
+            if !out.status.success() {
+                return Err(CompileError::Nvcc(format!(
+                    "{:?} exited with {}\nstdout:\n{}\nstderr:\n{}",
+                    cmd.get_program(),
+                    out.status,
+                    String::from_utf8_lossy(&out.stdout),
+                    String::from_utf8_lossy(&out.stderr),
+                )));
+            }
+            return Ok(());
+        }
+        let limit = timeout.unwrap();
+
+        // Put nvcc (and everything it forks — cicc, ptxas, cudafe, ...)
+        // into its own Unix process group. On timeout we SIGKILL the
+        // whole group by pid = -pgid; that leaves no orphans.
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            cmd.process_group(0);
+        }
+        cmd.stdout(std::process::Stdio::piped());
+        cmd.stderr(std::process::Stdio::piped());
+
+        let mut child = cmd
+            .spawn()
             .map_err(|e| CompileError::Nvcc(format!("failed to spawn {}: {e}", options.nvcc)))?;
-        if !out.status.success() {
+        let child_pid = child.id() as i32;
+        let start = Instant::now();
+        let poll_interval = Duration::from_millis(200);
+        let status = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break Ok(status),
+                Ok(None) => {
+                    if start.elapsed() > limit {
+                        // SIGKILL the whole process group. The Rust
+                        // Child::kill only SIGKILLs the direct child;
+                        // cicc/ptxas siblings would leak. Best-effort:
+                        // on any failure we still try Child::kill and
+                        // report the timeout.
+                        #[cfg(unix)]
+                        unsafe {
+                            libc::kill(-child_pid, libc::SIGKILL);
+                        }
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        return Err(CompileError::NvccTimeout {
+                            name: module_name.to_string(),
+                            seconds: start.elapsed().as_secs_f64(),
+                            limit: limit.as_secs_f64(),
+                        });
+                    }
+                    std::thread::sleep(poll_interval);
+                }
+                Err(e) => break Err(e),
+            }
+        }
+        .map_err(|e| CompileError::Nvcc(format!("wait failed: {e}")))?;
+
+        if !status.success() {
+            let mut stdout = String::new();
+            let mut stderr = String::new();
+            if let Some(mut s) = child.stdout.take() {
+                let _ = s.read_to_string(&mut stdout);
+            }
+            if let Some(mut s) = child.stderr.take() {
+                let _ = s.read_to_string(&mut stderr);
+            }
             return Err(CompileError::Nvcc(format!(
-                "{:?} exited with {}\nstdout:\n{}\nstderr:\n{}",
+                "{:?} exited with {}\nstdout:\n{stdout}\nstderr:\n{stderr}",
                 cmd.get_program(),
-                out.status,
-                String::from_utf8_lossy(&out.stdout),
-                String::from_utf8_lossy(&out.stderr),
+                status,
             )));
         }
         Ok(())

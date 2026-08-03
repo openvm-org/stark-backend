@@ -225,6 +225,14 @@ impl IRBuilder {
         self.next_var = self.next_var.max(n);
     }
 
+    /// Removes input declaration `pos`, shifting later declarations down.
+    /// The caller must have already renumbered every `Node::Input` reference
+    /// past `pos` that is reachable from the module body; stale `Node::Input`
+    /// nodes may remain in the arena as long as they are unreachable.
+    pub(crate) fn remove_input_decl(&mut self, pos: usize) {
+        self.inputs.remove(pos);
+    }
+
     /// Declares a module input tensor (scalar input if `shape` is empty).
     pub fn input(
         &mut self,

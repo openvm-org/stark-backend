@@ -4,24 +4,20 @@
 //! this v2 driver deliberately simplifies the graph structure:
 //!
 //! 1. **No PrecomputeM.** Only the FoldEval strategy is emitted.
-//! 2. **No in-place reverts.** The segment tree is materialized layer by
-//!    layer as separate persistent buffers (`tree_layers[k]` has `2^k`
-//!    `Frac<EF>` elements). Every outer round reads its input pq buffer
-//!    straight from `tree_layers[round + 1]` — no `frac_build_tree_layer`
+//! 2. **No in-place reverts.** The segment tree is materialized layer by layer as separate
+//!    persistent buffers (`tree_layers[k]` has `2^k` `Frac<EF>` elements). Every outer round reads
+//!    its input pq buffer straight from `tree_layers[round + 1]` — no `frac_build_tree_layer`
 //!    revert nodes anywhere in the graph.
-//! 3. **Dense-only.** `real_len == logical_len`. Virtual/compact mode is
-//!    unsupported; asserted at the entry point.
-//! 4. **DSL-first — every kernel node.** No blackbox kernels at all. Tree
-//!    combines via a small forward-combine DSL module added here
-//!    ([`build_frac_tree_layer_forward_module`]); the leaves-preparation
-//!    step (bit-reversal + alpha shift) is a single DSL kernel
-//!    ([`build_bit_rev_and_alpha_module`]) — bit-reverse is quasi-affine
-//!    when written as `Σ_{b=0..k} ((i mod 2^{b+1}) / 2^b) · 2^{k-1-b}`
-//!    (see [`bit_rev_expr`]), which the DSL's index-expression checker
-//!    accepts. Compute rounds go through [`frac_compute_round_ir_dsl`],
+//! 3. **Dense-only.** `real_len == logical_len`. Virtual/compact mode is unsupported; asserted at
+//!    the entry point.
+//! 4. **DSL-first — every kernel node.** No blackbox kernels at all. Tree combines via a small
+//!    forward-combine DSL module added here ([`build_frac_tree_layer_forward_module`]); the
+//!    leaves-preparation step (bit-reversal + alpha shift) is a single DSL kernel
+//!    ([`build_bit_rev_and_alpha_module`]) — bit-reverse is quasi-affine when written as
+//!    `Σ_{b=0..k} ((i mod 2^{b+1}) / 2^b) · 2^{k-1-b}` (see [`bit_rev_expr`]), which the DSL's
+//!    index-expression checker accepts. Compute rounds go through [`frac_compute_round_ir_dsl`],
 //!    folds via [`fold_ef_frac_columns_ir_dsl`], scalar helpers via
-//!    [`reduce_to_single_evaluation_ir`] / [`claim_combine_ir`] /
-//!    [`observe_and_update_ir`].
+//!    [`reduce_to_single_evaluation_ir`] / [`claim_combine_ir`] / [`observe_and_update_ir`].
 //!
 //! Proofs emitted by v2 are byte-identical to those of the eager
 //! [`super::fractional::fractional_sumcheck_gpu`] (and hence v1) for the
@@ -36,8 +32,8 @@ use crypto_compiler::{
 };
 use p3_field::{BasedVectorSpace, PrimeCharacteristicRing, PrimeField32};
 use p3_util::log2_strict_usize;
-// (`PrimeCharacteristicRing` is used below for `EF::ONE` via the trait.)
 
+// (`PrimeCharacteristicRing` is used below for `EF::ONE` via the trait.)
 use super::{
     errors::FractionalSumcheckError,
     fractional_ir::{
@@ -160,7 +156,11 @@ pub fn bit_rev_and_alpha_ir_dsl(
     n: usize,
     alpha: EF,
 ) {
-    g.insert_kernel(build_bit_rev_and_alpha_module(n, alpha), [leaves], [layer_out]);
+    g.insert_kernel(
+        build_bit_rev_and_alpha_module(n, alpha),
+        [leaves],
+        [layer_out],
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -233,41 +233,38 @@ pub fn frac_tree_layer_forward_ir_dsl(
 /// - `assert_zero` follows v1 semantics: skip the `p_root` observe when true.
 ///
 /// # Structure
-/// 1. Bit-reverse `leaves` and add `alpha` to every `q` slot, into
-///    `layer[N]` — one DSL kernel ([`bit_rev_and_alpha_ir_dsl`]).
-/// 2. Emit `N` forward tree-combine DSL kernels to materialize
-///    `layer[N-1] .. layer[0]` (each half the size of its parent).
+/// 1. Bit-reverse `leaves` and add `alpha` to every `q` slot, into `layer[N]` — one DSL kernel
+///    ([`bit_rev_and_alpha_ir_dsl`]).
+/// 2. Emit `N` forward tree-combine DSL kernels to materialize `layer[N-1] .. layer[0]` (each half
+///    the size of its parent).
 /// 4. Observe `root.p` (unless `assert_zero`) and `root.q` from `layer[0]`.
-/// 5. Extract first claim from `layer[N-1]` (size 2). Observe claim, sample
-///    `mu_1`. Seed `xi_prev = [mu_1]`.
+/// 5. Extract first claim from `layer[N-1]` (size 2). Observe claim, sample `mu_1`. Seed `xi_prev =
+///    [mu_1]`.
 /// 6. Outer GKR loop for `round in 1..N`:
 ///    - Read `layer[round + 1]` (size `2^{round + 1}`) as `pq_buffer`.
 ///    - Sample `lambda_{round + 1}`.
-///    - Seed `prev_s_eval` via [`reduce_to_single_evaluation_ir`] +
-///      [`claim_combine_ir`] on the previous layer's claims.
+///    - Seed `prev_s_eval` via [`reduce_to_single_evaluation_ir`] + [`claim_combine_ir`] on the
+///      previous layer's claims.
 ///    - Build `SqrtEqLayersIR` from `&xi_prev[1..]`.
 ///    - Inner sumcheck rounds `t in 0..round`:
-///      * Compute `d_sum` via [`frac_compute_round_ir_dsl`] on the current
-///        pq buffer.
+///      * Compute `d_sum` via [`frac_compute_round_ir_dsl`] on the current pq buffer.
 ///      * Drop one eq layer.
-///      * [`observe_and_update_ir`] with `xi_j = xi_prev[t]` → sample `r_t`,
-///        push `s_evals`, update `prev_s_eval` and `eq_r_acc`.
-///      * Fold pq buffer by `r_t` via [`fold_ef_frac_columns_ir_dsl`] into a
-///        fresh half-sized buffer (used in the next inner round OR by the
-///        final claim extraction).
-///    - Extract layer claim at positions `(0, 1)` of the final folded buffer
-///      (size 2). Observe. Sample `mu_{round + 1}`. Update `xi_prev`.
+///      * [`observe_and_update_ir`] with `xi_j = xi_prev[t]` → sample `r_t`, push `s_evals`, update
+///        `prev_s_eval` and `eq_r_acc`.
+///      * Fold pq buffer by `r_t` via [`fold_ef_frac_columns_ir_dsl`] into a fresh half-sized
+///        buffer (used in the next inner round OR by the final claim extraction).
+///    - Extract layer claim at positions `(0, 1)` of the final folded buffer (size 2). Observe.
+///      Sample `mu_{round + 1}`. Update `xi_prev`.
 ///
 /// # Byte-equality with the eager prover
 ///
 /// Every transcript observe / sample is emitted in the same order and with
 /// the same values as v1 (and hence the eager `fractional_sumcheck_gpu`):
-/// - Tree building writes the same "layer j values" v1's in-place tree +
-///   top-revert produces — see the module docs for the derivation.
-/// - The `frac_compute_round_ir_dsl` module reads the same four positions
-///   `(idx, idx + q, idx + h, idx + h + q)` in the size-`2^{round+1}` layer
-///   that v1's `compute_round_and_revert` reads (v1 reverts `[0, h)` on the
-///   fly; v2 reads the same values directly from `tree_layers[round + 1]`).
+/// - Tree building writes the same "layer j values" v1's in-place tree + top-revert produces — see
+///   the module docs for the derivation.
+/// - The `frac_compute_round_ir_dsl` module reads the same four positions `(idx, idx + q, idx + h,
+///   idx + h + q)` in the size-`2^{round+1}` layer that v1's `compute_round_and_revert` reads (v1
+///   reverts `[0, h)` on the fly; v2 reads the same values directly from `tree_layers[round + 1]`).
 /// - Folds use the same DSL kernel as v1's dense fold.
 ///
 /// The single conceptual difference is that v1 fuses (revert + compute) and
@@ -355,8 +352,12 @@ where
 
         // Reduce previous layer's claims via mu = xi_prev[0], combine with
         // lambda to seed `prev_s_eval`.
-        let (numer, denom) =
-            reduce_to_single_evaluation_ir(g, *claims_per_layer.last().unwrap(), xi_prev[0], device);
+        let (numer, denom) = reduce_to_single_evaluation_ir(
+            g,
+            *claims_per_layer.last().unwrap(),
+            xi_prev[0],
+            device,
+        );
         let mut prev_s_eval = claim_combine_ir(g, numer, denom, lambda, device);
         let mut eq_r_acc = eq_r_acc_one;
 
@@ -406,12 +407,7 @@ where
 
             // Fold by r_t → new half-sized buffer.
             let new_size = pq_size / 2;
-            let new_pq = add_frac_ef_buf(
-                g,
-                device,
-                &format!("pq_folded_v2_{round}_{t}"),
-                new_size,
-            );
+            let new_pq = add_frac_ef_buf(g, device, &format!("pq_folded_v2_{round}_{t}"), new_size);
             fold_ef_frac_columns_ir_dsl(g, pq_buffer, new_pq, pq_size, out.r);
             pq_buffer = new_pq;
             pq_size = new_size;
@@ -419,8 +415,14 @@ where
 
         // Extract next-layer claim at (0, 1) of the size-2 folded buffer.
         debug_assert_eq!(pq_size, 2);
-        let claim =
-            extract_claim_pair_ir(g, pq_buffer, pq_size, 1, &format!("claim_v2_{round}"), device);
+        let claim = extract_claim_pair_ir(
+            g,
+            pq_buffer,
+            pq_size,
+            1,
+            &format!("claim_v2_{round}"),
+            device,
+        );
         claims_per_layer.push(claim);
         for buf in claim.as_array() {
             transcript.observe_ext(g, buf);
@@ -462,17 +464,18 @@ mod tests {
 
     use crypto_compiler::{
         graph_exe::GraphCompiler,
-        graph_ir::{ConstBuf, DeviceType, GraphBuilder},
+        graph_ir::{DeviceType, GraphBuilder},
+        passes::fusion::FusionOptions,
         planner::SchedulerMode,
         runtime::CompileOptions,
     };
     use openvm_cuda_common::{
         common::get_device,
+        copy::MemCopyH2D,
         d_buffer::DeviceBuffer,
         stream::{CudaStream, GpuDeviceCtx, StreamGuard},
     };
     use openvm_stark_backend::prover::fractional_sumcheck_gkr::Frac;
-    use openvm_cuda_common::copy::{MemCopyD2H, MemCopyH2D};
     use rand::{rngs::StdRng, Rng, SeedableRng};
 
     use super::*;
@@ -493,6 +496,12 @@ mod tests {
         }
     }
 
+    #[link(name = "cudart")]
+    extern "C" {
+        fn cudaProfilerStart() -> i32;
+        fn cudaProfilerStop() -> i32;
+    }
+
     fn make_host_leaves(len: usize, seed: u64) -> Vec<Frac<EF>> {
         let mut rng = StdRng::seed_from_u64(seed);
         (0..len)
@@ -509,15 +518,6 @@ mod tests {
         }
     }
 
-    fn frac_const_buf(g: &mut GraphBuilder, name: &str, leaves: &[Frac<EF>]) -> BufId {
-        let device = DeviceType::Cuda(0);
-        let init = add_frac_ef_buf(g, device, &format!("{name}_init"), leaves.len());
-        g.insert_const(init, ConstBuf::HostBuf(frac_bytes(leaves).to_vec()));
-        let buf = add_frac_ef_buf(g, device, name, leaves.len());
-        g.insert_memcpy(init, buf);
-        buf
-    }
-
     fn ef_from_bytes(bytes: &[u8]) -> EF {
         assert_eq!(bytes.len(), size_of::<EF>());
         unsafe { std::ptr::read_unaligned(bytes.as_ptr() as *const EF) }
@@ -527,33 +527,111 @@ mod tests {
         leaves.to_device_on(ctx).expect("H2D copy")
     }
 
-    #[allow(clippy::type_complexity)]
-    fn run_irv2_sumcheck(
-        leaves: &[Frac<EF>],
+    /// Everything the v2 GKR sumcheck graph produces at build time. The
+    /// leaves buffer is already registered as the graph's single input
+    /// (fed via `exe.set_input(0, ...)` at run time); callers only need
+    /// to decide how to expose the `proof` buffers — direct
+    /// `register_output` for observability, or a memcpy-into-fresh-buffer
+    /// indirection that keeps producers fusable through the transcript-
+    /// observe path.
+    struct V2GraphBundle {
+        g: GraphBuilder,
+        proof: FracSumcheckProofIR,
+        /// Alpha value baked into the sumcheck at build time. Derived
+        /// deterministically from `log_n` so every caller for the same
+        /// `log_n` gets an identical graph (identical kernel-cache hits)
+        /// — exposed so callers running an eager reference can pass the
+        /// same alpha to their eager code path.
         alpha: EF,
-        ctx: &GpuDeviceCtx,
-    ) -> ((EF, EF), Vec<[EF; 4]>, Vec<Vec<[EF; GKR_S_DEG]>>, Vec<EF>) {
+    }
+
+    /// Builds the v2 GKR sumcheck graph for `n = 2^log_n` leaves and
+    /// registers the leaves buffer as the single graph input. Alpha is
+    /// derived deterministically from `log_n`. Callers hand the leaves
+    /// bytes to the compiled [`GraphExe`] at run time via `set_input`.
+    fn build_v2_graph(log_n: usize) -> V2GraphBundle {
+        let n = 1usize << log_n;
         let device = DeviceType::Cuda(0);
+        let mut rng = StdRng::seed_from_u64(0x5EED_11D0_u64.wrapping_add(log_n as u64));
+        let alpha: EF = rng.random();
         let mut g = GraphBuilder::new();
+        let leaves_in = add_frac_ef_buf(&mut g, device, "leaves_v2", n);
+        g.register_input(leaves_in);
         let mut transcript = DuplexSpongeGpuIR::new(&mut g, device);
-        let leaves_buf = frac_const_buf(&mut g, "leaves_v2", leaves);
         let proof = fractional_sumcheck_gpu_irv2(
             &mut g,
             &mut transcript,
-            leaves_buf,
-            leaves.len(),
+            leaves_in,
+            n,
             alpha,
             false,
             device,
         )
         .expect("fractional_sumcheck_gpu_irv2");
+        V2GraphBundle { g, proof, alpha }
+    }
+
+    /// Direct-registration pattern: register every `FracSumcheckProofIR`
+    /// buffer as a graph output. The producers of these buffers become
+    /// pinned interface writers and can no longer be fused with their
+    /// downstream transcript-observe consumers — use only when observing
+    /// the raw producer output is more important than that specific
+    /// fusion opportunity (dump / benchmark, where readback shape
+    /// simplicity wins).
+    fn register_all_proof_outputs(g: &mut GraphBuilder, proof: &FracSumcheckProofIR) {
+        let (rp, rq) = proof.fractional_sum;
+        g.register_output(rp);
+        g.register_output(rq);
+        for claim in &proof.claims_per_layer {
+            for buf in claim.as_array() {
+                g.register_output(buf);
+            }
+        }
+        for layer_polys in &proof.sumcheck_polys {
+            for s in layer_polys {
+                for &buf in s {
+                    g.register_output(buf);
+                }
+            }
+        }
+        for &buf in &proof.final_randomness {
+            g.register_output(buf);
+        }
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn run_irv2_sumcheck(
+        log_n: usize,
+        leaves: &[Frac<EF>],
+        ctx: &GpuDeviceCtx,
+    ) -> (
+        EF, // alpha the graph was built with
+        (EF, EF),
+        Vec<[EF; 4]>,
+        Vec<Vec<[EF; GKR_S_DEG]>>,
+        Vec<EF>,
+    ) {
+        assert_eq!(
+            leaves.len(),
+            1usize << log_n,
+            "leaves.len() must equal 2^log_n"
+        );
+        let device = DeviceType::Cuda(0);
+        let V2GraphBundle {
+            mut g,
+            proof,
+            alpha,
+        } = build_v2_graph(log_n);
 
         // Every artifact has in-graph readers (transcript observes); memcpy
-        // each into a fresh reader-less buffer so the graph exposes it.
+        // each into a fresh registered output buffer so the graph exposes
+        // it *without* pinning the internal producer as an interface (which
+        // would block its fusion with the downstream transcript-observe).
         let mut exports: Vec<BufId> = Vec::new();
         let export = |g: &mut GraphBuilder, src: BufId, name: String| -> BufId {
             let out = add_ext_scalar_buf(g, device, &name);
             g.insert_memcpy(src, out);
+            g.register_output(out);
             out
         };
         let (rp, rq) = proof.fractional_sum;
@@ -581,19 +659,18 @@ mod tests {
             .compile_options(CompileOptions::default())
             .compile(g)
             .expect("graph compile");
-        let inputs: Vec<DeviceBuffer<u8>> = Vec::new();
-        let mut outputs: Vec<DeviceBuffer<u8>> = (0..exe.num_outputs())
-            .map(|i| DeviceBuffer::<u8>::with_capacity_on(exe.output_size(i), ctx))
-            .collect();
-        let mut scratch =
-            DeviceBuffer::<u8>::with_capacity_on(exe.scratch_bytes().max(1), ctx);
-        exe.run(ctx, &inputs, &mut outputs, &mut scratch)
-            .expect("graph run");
+        // Copy the caller's leaves into the compiled graph's registered
+        // input slot. The graph itself no longer bakes leaves in via a
+        // const + memcpy — leaves are supplied at run time.
+        assert_eq!(exe.num_inputs(), 1);
+        let d_leaves = frac_bytes(leaves).to_device_on(ctx).expect("H2D");
+        exe.set_input(ctx, 0, &d_leaves).expect("set_input");
+        exe.run(ctx).expect("graph run");
         let read = |bid: BufId| -> EF {
             let idx = (0..exe.num_outputs())
                 .find(|&i| exe.output_buf_id(i) == bid)
                 .expect("output buf");
-            let bytes = outputs[idx].to_host_on(ctx).expect("D2H");
+            let bytes = exe.get_output(idx).to_host_on(ctx).expect("D2H");
             ef_from_bytes(&bytes)
         };
         let mut it = exports.into_iter();
@@ -617,17 +694,26 @@ mod tests {
             .map(|_| read(it.next().unwrap()))
             .collect();
         assert!(it.next().is_none(), "leftover exported values");
-        (fractional_sum, claims, polys, final_randomness)
+        (alpha, fractional_sum, claims, polys, final_randomness)
     }
 
     fn assert_irv2_matches_eager(logical_len: usize, seed: u64) {
         use openvm_cuda_common::memory_manager::MemTracker;
 
+        assert!(
+            logical_len.is_power_of_two() && logical_len >= 2,
+            "logical_len must be a power of two ≥ 2"
+        );
+        let log_n = logical_len.trailing_zeros() as usize;
         let ctx = test_ctx();
         let sizes = FractionalInputSize::dense(logical_len);
-        let mut rng = StdRng::seed_from_u64(seed);
-        let alpha: EF = rng.random();
         let leaves = make_host_leaves(logical_len, seed ^ 0xA5A5);
+
+        // v2 graph-IR side. The alpha the graph was built with is derived
+        // from `log_n` inside `build_v2_graph`; we pull it back out so the
+        // eager reference below runs on the same alpha.
+        let (alpha, got_sum, got_claims, got_polys, got_xi) =
+            run_irv2_sumcheck(log_n, &leaves, &ctx);
 
         // Eager reference.
         let mut sponge = DuplexSpongeGpu::default();
@@ -643,9 +729,6 @@ mod tests {
         )
         .expect("eager fractional_sumcheck_gpu");
         ctx.stream.synchronize().expect("sync");
-
-        // v2 graph-IR side.
-        let (got_sum, got_claims, got_polys, got_xi) = run_irv2_sumcheck(&leaves, alpha, &ctx);
 
         assert_eq!(
             got_sum, want_proof.fractional_sum,
@@ -722,28 +805,18 @@ mod tests {
             .unwrap_or(6);
         let n = 1usize << log_n;
         let device = DeviceType::Cuda(0);
-        let mut rng = StdRng::seed_from_u64(0x5EED_11D0);
-        let alpha: EF = rng.random();
-        let leaves = make_host_leaves(n, 0x5EED_11D1);
 
-        let mut g = GraphBuilder::new();
-        let mut transcript = DuplexSpongeGpuIR::new(&mut g, device);
-        let leaves_in = frac_const_buf(&mut g, "leaves_v2", &leaves);
-        let proof = fractional_sumcheck_gpu_irv2(
-            &mut g,
-            &mut transcript,
-            leaves_in,
-            n,
-            alpha,
-            false,
-            device,
-        )
-        .expect("fractional_sumcheck_gpu_irv2");
-        let (root_p, root_q) = proof.fractional_sum;
-        for (src, name) in [(root_p, "out_root_p_v2"), (root_q, "out_root_q_v2")] {
-            let out = add_ext_scalar_buf(&mut g, device, name);
-            g.insert_memcpy(src, out);
-        }
+        let V2GraphBundle {
+            mut g,
+            proof,
+            alpha: _,
+        } = build_v2_graph(log_n);
+        // Register every user-visible proof buffer as a graph output
+        // directly — no intermediate export buffer + memcpy. That pattern
+        // (allocate + memcpy + register) is only necessary when the caller
+        // needs to keep the producing buffer internal; for a dump we just
+        // want the compiler to see the producers as outputs.
+        register_all_proof_outputs(&mut g, &proof);
 
         let dir = std::env::var_os("CRYPTO_COMPILER_DUMP_IR")
             .map(std::path::PathBuf::from)
@@ -752,18 +825,62 @@ mod tests {
             });
         std::fs::create_dir_all(&dir).expect("create dump dir");
 
-        // GraphBuilder text dump — the ordered node list before planning.
-        // Cheap: no JIT, just a `String::push_str` walk over the node list.
+        // Pre-fusion GraphBuilder text dump — the ordered node list before
+        // any pass runs. Cheap: no JIT, just a `String::push_str` walk.
         std::fs::write(
             dir.join(format!("fractional_sumcheck_v2_n{n}.graph.txt")),
             g.print(),
         )
         .expect("write graph dump");
+        // Cytoscape.js elements-JSON for `scripts/serve_graph.py`.
+        std::fs::write(
+            dir.join(format!("fractional_sumcheck_v2_n{n}.cy.json")),
+            g.to_cytoscape_json(),
+        )
+        .expect("write cytoscape dump");
+        let nodes_before = g.nodes.len();
         println!(
-            "v2 graph dump written to {} ({} nodes)",
+            "v2 graph dump written to {} ({nodes_before} nodes before fusion)",
             dir.display(),
-            g.nodes.len()
         );
+
+        // Run validate_interface + fuse_graph without compiling, and dump
+        // the post-fusion graph alongside per-round stats.
+        let fuse_opts = FusionOptions {
+            verbose: true,
+            max_iterations: 50,
+            ..FusionOptions::default()
+        };
+        let (g_fused, fusion_report) = GraphCompiler::new()
+            .device(device)
+            .fusion_options(fuse_opts)
+            .fuse_only(g)
+            .expect("fuse-only pass");
+        let report = fusion_report.expect("fusion enabled");
+        std::fs::write(
+            dir.join(format!("fractional_sumcheck_v2_n{n}.graph.fused.txt")),
+            g_fused.print(),
+        )
+        .expect("write fused graph dump");
+        std::fs::write(
+            dir.join(format!("fractional_sumcheck_v2_n{n}.cy.fused.json")),
+            g_fused.to_cytoscape_json(),
+        )
+        .expect("write fused cytoscape dump");
+        println!(
+            "fusion summary: nodes {} -> {} (deduped modules: {}), rounds: {}",
+            report.nodes_before, report.nodes_after, report.deduped, report.rounds,
+        );
+        for stats in &report.rounds_detail {
+            println!(
+                "  round {}: fused={}, dce_removed={}, nodes_after={}, unique_modules_after={}",
+                stats.round,
+                stats.fused,
+                stats.dce_removed,
+                stats.nodes_after,
+                stats.unique_modules_after,
+            );
+        }
 
         // At very large `n` the full compile (~hundreds of unique nvcc
         // kernels + planner) is prohibitively expensive; skip it when
@@ -775,14 +892,17 @@ mod tests {
             return;
         }
 
+        // Compile the already-fused graph so the exe dump matches the
+        // fused-graph dump we just wrote (avoids running fusion twice).
         let exe = GraphCompiler::new()
             .device(device)
             .scheduler(SchedulerMode::Heuristic)
+            .without_fusion()
             .compile_options(CompileOptions {
                 dump_ir: Some(dir.clone()),
                 ..CompileOptions::default()
             })
-            .compile(g)
+            .compile(g_fused)
             .expect("graph compile");
 
         // GraphExe text dump — planner-ordered nodes with concrete scratch
@@ -808,6 +928,14 @@ mod tests {
     /// leaf counts; default `16,20,22,24`). Byte-equality on `fractional_sum`
     /// is asserted per size — the bench doubles as a correctness check.
     ///
+    /// Three workloads are timed per size:
+    /// - `eager`: reference `fractional_sumcheck_gpu`.
+    /// - `graph`: per-node `GraphExe::run` dispatch (host-side loop over the planner-scheduled
+    ///   nodes).
+    /// - `graph_capture`: CUDA-graph replay of the same nodes via `GraphExe::launch_graph`. The
+    ///   graph is captured + instantiated once in the setup pass, so the timed iterations only
+    ///   measure the `cudaGraphLaunch` replay (host dispatch reduced to a single call).
+    ///
     /// Run explicitly:
     ///
     /// ```sh
@@ -815,12 +943,49 @@ mod tests {
     ///     --run-ignored all --no-capture \
     ///     -E 'test(bench_fractional_sumcheck_eager_vs_irv2)'
     /// ```
+    ///
+    /// nsys profile (env `NSYS_ENABLED=1`): a *single* cudaProfilerStart/Stop
+    /// window wraps only the timed iterations across all sizes. Warmup +
+    /// graph build/compile + one-time graph capture happen in the setup
+    /// pass beforehand, so the profile contains only measured kernel work.
+    /// One NVTX range is pushed *per iteration* (`eager n=2^{k} iter={i}`,
+    /// `graph n=2^{k} iter={i}`, `graph_capture n=2^{k} iter={i}`), tightly
+    /// wrapping the compute — H2D leaf uploads and eager's scalar-result
+    /// readback fall outside the range. Suggested invocation for `LOG_N=20`:
+    ///
+    /// ```sh
+    /// FRAC_V2_BENCH_LOG_N=20 NSYS_ENABLED=1 nsys profile \
+    ///     --capture-range=cudaProfilerApi \
+    ///     --trace=cuda,nvtx --cuda-graph-trace=node \
+    ///     --gpu-metrics-devices=cuda-visible \
+    ///     -o frac_v2_bench_log20 --force-overwrite=true \
+    ///     cargo nextest run -p openvm-cuda-backend --features graph-ir \
+    ///         --run-ignored all --no-capture \
+    ///         -E 'test(bench_fractional_sumcheck_eager_vs_irv2)'
+    /// ```
     #[test]
     #[ignore = "benchmark; run explicitly with --run-ignored"]
     fn bench_fractional_sumcheck_eager_vs_irv2() {
-        use std::time::Instant;
+        // Reproduce the nsys profile at LOG_N=20 (matches the docstring
+        // above; kept as a plain comment here so it's visible from the
+        // function body without navigating up through the doc block):
+        //
+        //   FRAC_V2_BENCH_LOG_N=20 NSYS_ENABLED=1 nsys profile \
+        //       --capture-range=cudaProfilerApi \
+        //       --trace=cuda,nvtx --cuda-graph-trace=node \
+        //       --gpu-metrics-devices=cuda-visible \
+        //       -o frac_v2_bench_log20 --force-overwrite=true \
+        //       cargo nextest run -p openvm-cuda-backend --features graph-ir \
+        //           --run-ignored all --no-capture \
+        //           -E 'test(bench_fractional_sumcheck_eager_vs_irv2)'
+        use std::{
+            sync::Arc,
+            time::{Duration, Instant},
+        };
 
-        use crypto_compiler::graph_exe::GraphExe;
+        use crypto_compiler::{
+            graph_exe::GraphExe, kernel_cache::KernelCache, passes::fusion::FusionOptions,
+        };
         use openvm_cuda_common::memory_manager::MemTracker;
 
         const ITERS: usize = 5;
@@ -833,15 +998,18 @@ mod tests {
             alpha: EF,
             eager_sum: (EF, EF),
             exe: GraphExe,
-            inputs: Vec<DeviceBuffer<u8>>,
-            outputs: Vec<DeviceBuffer<u8>>,
-            scratch: DeviceBuffer<u8>,
             root_exports: [BufId; 2],
             build_ms: f64,
             compile_ms: f64,
+            capture_ms: f64,
             n_nodes: usize,
+            n_nodes_post_fusion: usize,
+            fusion_rounds: usize,
+            fused_total: usize,
+            unique_modules: usize,
             eager_ms: Vec<f64>,
             graph_ms: Vec<f64>,
+            graph_capture_ms: Vec<f64>,
         }
 
         let ctx = test_ctx();
@@ -852,18 +1020,33 @@ mod tests {
             .map(|s| s.trim().parse().expect("FRAC_V2_BENCH_LOG_N entry"))
             .collect();
 
+        let nsys_enabled = std::env::var_os("NSYS_ENABLED").is_some();
+
         // Setup pass: build/compile graph + warmups happen OUTSIDE the timing
         // loop so first-touch JIT / driver init costs don't leak in.
         let mut states: Vec<PerSize> = Vec::with_capacity(log_ns.len());
         for log_n in log_ns {
             let n = 1usize << log_n;
             let leaves = make_host_leaves(n, 0x5EED_BE9C ^ log_n as u64);
-            let mut rng = StdRng::seed_from_u64(0xA1FA ^ log_n as u64);
-            let alpha: EF = rng.random();
 
             println!("\n=== v2 fractional sumcheck: n = 2^{log_n} = {n} leaves ===");
 
-            // Eager warmup — computes the reference `eager_sum`.
+            // v2 graph build. The shared `build_v2_graph` also derives the
+            // alpha (as a deterministic function of `log_n`); the eager
+            // reference below reuses that same alpha.
+            let t0 = Instant::now();
+            let V2GraphBundle {
+                mut g,
+                proof: proof_ir,
+                alpha,
+            } = build_v2_graph(log_n);
+            let root_exports: [BufId; 2] = [proof_ir.fractional_sum.0, proof_ir.fractional_sum.1];
+            register_all_proof_outputs(&mut g, &proof_ir);
+            let build_ms = t0.elapsed().as_secs_f64() * 1e3;
+            let n_nodes = g.nodes.len();
+
+            // Eager warmup — computes the reference `eager_sum` on the same
+            // (leaves, alpha) the graph was built with.
             let eager_sum = {
                 let d_leaves = leaves_to_device(&leaves, &ctx);
                 let mut sponge = DuplexSpongeGpu::default();
@@ -883,68 +1066,84 @@ mod tests {
                 proof.fractional_sum
             };
 
-            // v2 graph build.
-            let t0 = Instant::now();
-            let mut g = GraphBuilder::new();
-            let mut transcript = DuplexSpongeGpuIR::new(&mut g, device);
-            let leaves_in = add_frac_ef_buf(&mut g, device, "leaves_in_v2", n);
-            let proof_ir = fractional_sumcheck_gpu_irv2(
-                &mut g,
-                &mut transcript,
-                leaves_in,
-                n,
-                alpha,
-                false,
-                device,
-            )
-            .expect("fractional_sumcheck_gpu_irv2");
-            let (root_p, root_q) = proof_ir.fractional_sum;
-            let root_exports: [BufId; 2] = [
-                {
-                    let out = add_ext_scalar_buf(&mut g, device, "out_root_p_v2");
-                    g.insert_memcpy(root_p, out);
-                    out
-                },
-                {
-                    let out = add_ext_scalar_buf(&mut g, device, "out_root_q_v2");
-                    g.insert_memcpy(root_q, out);
-                    out
-                },
-            ];
-            let build_ms = t0.elapsed().as_secs_f64() * 1e3;
-            let n_nodes = g.nodes.len();
-
+            // Larger kernel cache — the default 300-entry / 10 GiB cap
+            // evicts previously-compiled kernels when a fresh run produces
+            // >300 unique modules (which the log_n=20 v2 graph does),
+            // forcing repeated nvcc invocations across benchmark runs.
+            let kernel_cache = Arc::new(
+                KernelCache::new()
+                    .max_kernels(4096)
+                    .storage_size(200 * 1024 * 1024 * 1024),
+            );
             let t0 = Instant::now();
             let mut exe = GraphCompiler::new()
                 .device(device)
                 .scheduler(SchedulerMode::Heuristic)
-                .compile_options(CompileOptions::default())
+                .kernel_cache(kernel_cache)
+                .fusion_options(FusionOptions {
+                    verbose: true,
+                    max_iterations: 20,
+                    ..FusionOptions::default()
+                })
+                .compile_options(CompileOptions {
+                    nvcc_timeout: Some(Duration::from_secs(300)),
+                    dump_ir: Some(
+                        std::env::var_os("FRAC_V2_BENCH_DUMP_IR")
+                            .map(std::path::PathBuf::from)
+                            .unwrap_or_else(|| {
+                                std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                                    .join("../../target/frac_v2_bench_timeouts")
+                            }),
+                    ),
+                    ..CompileOptions::default()
+                })
                 .compile(g)
                 .expect("graph compile");
             let compile_ms = t0.elapsed().as_secs_f64() * 1e3;
+            let (n_nodes_post_fusion, fusion_rounds, fused_total) = exe
+                .fusion_report()
+                .map(|r| (r.nodes_after, r.rounds, r.fused.len()))
+                .unwrap_or((n_nodes, 0, 0));
+            let unique_modules = exe.num_unique_modules();
             println!(
-                "graph build: {build_ms:>8.2} ms ({n_nodes} nodes); \
-                 compile: {compile_ms:>8.2} ms ({} unique modules, {} loaded from cache, \
-                 scratch pool {} bytes)",
-                exe.num_unique_modules(),
+                "graph build: {build_ms:>8.2} ms ({n_nodes} nodes pre-fusion, \
+                 {n_nodes_post_fusion} post-fusion via {fusion_rounds} rounds, \
+                 {fused_total} fusions applied); \
+                 compile: {compile_ms:>8.2} ms ({unique_modules} unique modules, \
+                 {} loaded from cache, scratch pool {} bytes)",
                 exe.num_cached_modules(),
                 exe.scratch_bytes(),
             );
 
             assert_eq!(exe.num_inputs(), 1);
             let d_input = frac_bytes(&leaves).to_device_on(&ctx).expect("H2D");
-            let inputs: Vec<DeviceBuffer<u8>> = vec![d_input];
-            let mut outputs: Vec<DeviceBuffer<u8>> = (0..exe.num_outputs())
-                .map(|i| DeviceBuffer::<u8>::with_capacity_on(exe.output_size(i), &ctx))
-                .collect();
-            let mut scratch =
-                DeviceBuffer::<u8>::with_capacity_on(exe.scratch_bytes().max(1), &ctx);
+            exe.set_input(&ctx, 0, &d_input).expect("set_input");
 
             // Graph warmups.
             for _ in 0..WARMUPS {
                 ctx.stream.synchronize().expect("sync");
-                exe.run(&ctx, &inputs, &mut outputs, &mut scratch)
-                    .expect("graph warmup");
+                exe.run(&ctx).expect("graph warmup");
+                ctx.stream.synchronize().expect("sync");
+            }
+
+            // One-time CUDA-graph capture + instantiate, then a replay
+            // warmup so the timed pass measures only `cudaGraphLaunch` cost.
+            // Capture is bound to the same device pool as `run`, so
+            // consecutive `set_input`s and future `launch_graph` calls
+            // resolve the same device addresses (capture-stability
+            // contract enforced by `GraphExe`'s planner).
+            ctx.stream.synchronize().expect("sync");
+            let t0 = Instant::now();
+            exe.capture_graph(&ctx).expect("graph capture");
+            ctx.stream.synchronize().expect("sync");
+            let capture_ms = t0.elapsed().as_secs_f64() * 1e3;
+            println!(
+                "graph capture: {capture_ms:>8.2} ms (single cudaStreamBeginCapture + \
+                 cudaGraphInstantiateWithFlags over the {n_nodes_post_fusion}-node graph)"
+            );
+            for _ in 0..WARMUPS {
+                ctx.stream.synchronize().expect("sync");
+                exe.launch_graph(&ctx).expect("graph capture warmup");
                 ctx.stream.synchronize().expect("sync");
             }
 
@@ -955,25 +1154,46 @@ mod tests {
                 alpha,
                 eager_sum,
                 exe,
-                inputs,
-                outputs,
-                scratch,
                 root_exports,
                 build_ms,
                 compile_ms,
+                capture_ms,
                 n_nodes,
+                n_nodes_post_fusion,
+                fusion_rounds,
+                fused_total,
+                unique_modules,
                 eager_ms: Vec::with_capacity(ITERS),
                 graph_ms: Vec::with_capacity(ITERS),
+                graph_capture_ms: Vec::with_capacity(ITERS),
             });
         }
 
-        // Timed pass.
+        // Timed pass — wrapped in a single cudaProfilerStart/Stop window
+        // when `NSYS_ENABLED=1` so nsys emits one .nsys-rep containing
+        // only the labeled timed work. Setup (build, compile, warmup,
+        // one-shot graph capture) already ran above and is excluded.
+        if nsys_enabled {
+            unsafe { cudaProfilerStart() };
+        }
+        // NVTX ranges are pushed *per iteration* and wrap only the timed
+        // compute (matching the `t0..elapsed` interval). Per-iter H2D setup,
+        // sponge init, and the internal-D2H readback of `proof.fractional_sum`
+        // in the eager path all happen outside the range — for the eager
+        // path the D2H is unavoidable inside `fractional_sumcheck_gpu`, so
+        // we hoist it out by re-ordering: the sync + scalar readback of the
+        // returned `(EF, EF)` on the CPU happens after the range pop.
         for st in states.iter_mut() {
-            for _ in 0..ITERS {
+            for i in 0..ITERS {
+                // Setup (H2D, sponge init) outside the NVTX range and outside
+                // the timed window.
                 let d_leaves = leaves_to_device(&st.leaves, &ctx);
                 let mut sponge = DuplexSpongeGpu::default();
                 let mut mem = MemTracker::start("bench.fractional_v2_eager");
                 ctx.stream.synchronize().expect("sync");
+                if nsys_enabled {
+                    nvtx::range_push!("eager n=2^{} iter={i}", st.log_n);
+                }
                 let t0 = Instant::now();
                 let (proof, _xi) = fractional_sumcheck_gpu::<SC, _>(
                     &mut sponge,
@@ -986,18 +1206,44 @@ mod tests {
                 )
                 .expect("eager");
                 ctx.stream.synchronize().expect("sync");
-                st.eager_ms.push(t0.elapsed().as_secs_f64() * 1e3);
+                let elapsed_ms = t0.elapsed().as_secs_f64() * 1e3;
+                if nsys_enabled {
+                    nvtx::range_pop!();
+                }
+                st.eager_ms.push(elapsed_ms);
                 st.eager_sum = proof.fractional_sum;
             }
-            for _ in 0..ITERS {
+            for i in 0..ITERS {
                 ctx.stream.synchronize().expect("sync");
+                if nsys_enabled {
+                    nvtx::range_push!("graph n=2^{} iter={i}", st.log_n);
+                }
                 let t0 = Instant::now();
-                st.exe
-                    .run(&ctx, &st.inputs, &mut st.outputs, &mut st.scratch)
-                    .expect("graph run");
+                st.exe.run(&ctx).expect("graph run");
                 ctx.stream.synchronize().expect("sync");
-                st.graph_ms.push(t0.elapsed().as_secs_f64() * 1e3);
+                let elapsed_ms = t0.elapsed().as_secs_f64() * 1e3;
+                if nsys_enabled {
+                    nvtx::range_pop!();
+                }
+                st.graph_ms.push(elapsed_ms);
             }
+            for i in 0..ITERS {
+                ctx.stream.synchronize().expect("sync");
+                if nsys_enabled {
+                    nvtx::range_push!("graph_capture n=2^{} iter={i}", st.log_n);
+                }
+                let t0 = Instant::now();
+                st.exe.launch_graph(&ctx).expect("graph launch");
+                ctx.stream.synchronize().expect("sync");
+                let elapsed_ms = t0.elapsed().as_secs_f64() * 1e3;
+                if nsys_enabled {
+                    nvtx::range_pop!();
+                }
+                st.graph_capture_ms.push(elapsed_ms);
+            }
+        }
+        if nsys_enabled {
+            unsafe { cudaProfilerStop() };
         }
 
         // Report + sanity check.
@@ -1009,28 +1255,42 @@ mod tests {
             };
             let eager_median = median(&st.eager_ms);
             let graph_median = median(&st.graph_ms);
+            let capture_median = median(&st.graph_capture_ms);
             println!(
                 "\n--- fractional sumcheck v2: n = 2^{} = {} leaves ---\n\
-                 eager (median): {:.2} ms   raw: {:.2?}\n\
-                 v2 build: {:.2} ms ({} nodes); compile: {:.2} ms\n\
-                 v2 exec (median): {:.2} ms   raw: {:.2?}   ratio: {:.3}× eager",
+                 eager (median):          {:.2} ms   raw: {:.2?}\n\
+                 v2 build: {:.2} ms ({} nodes pre-fusion -> {} post-fusion, \
+                 {} fusions in {} rounds, {} unique modules); compile: {:.2} ms; \
+                 capture: {:.2} ms\n\
+                 v2 exec (median):        {:.2} ms   raw: {:.2?}   ratio: {:.3}× eager\n\
+                 v2 capture (median):     {:.2} ms   raw: {:.2?}   \
+                 ratio: {:.3}× eager, {:.3}× graph",
                 st.log_n,
                 st.n,
                 eager_median,
                 st.eager_ms,
                 st.build_ms,
                 st.n_nodes,
+                st.n_nodes_post_fusion,
+                st.fused_total,
+                st.fusion_rounds,
+                st.unique_modules,
                 st.compile_ms,
+                st.capture_ms,
                 graph_median,
                 st.graph_ms,
                 graph_median / eager_median,
+                capture_median,
+                st.graph_capture_ms,
+                capture_median / eager_median,
+                capture_median / graph_median,
             );
 
             let read_export = |bid: BufId| -> EF {
                 let idx = (0..st.exe.num_outputs())
                     .find(|&i| st.exe.output_buf_id(i) == bid)
                     .expect("export output index");
-                ef_from_bytes(&st.outputs[idx].to_host_on(&ctx).expect("D2H"))
+                ef_from_bytes(&st.exe.get_output(idx).to_host_on(&ctx).expect("D2H"))
             };
             let got_sum = (
                 read_export(st.root_exports[0]),

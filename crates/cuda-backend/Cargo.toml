@@ -44,11 +44,11 @@ test-case.workspace = true
 nvtx.workspace = true
 
 [features]
-default = []
+default = ["graph-ir"]
 baby-bear-bn254-poseidon2 = [
-    "openvm-stark-sdk/baby-bear-bn254-poseidon2",
-    "dep:p3-bn254",
-    "dep:zkhash",
+  "openvm-stark-sdk/baby-bear-bn254-poseidon2",
+  "dep:p3-bn254",
+  "dep:zkhash",
 ]
 touchemall = ["openvm-cuda-common/touchemall"]
 test-utils = ["openvm-stark-backend/test-utils"]
@@ -72,4 +72,9 @@ required-features = ["graph-ir"]
 [[example]]
 name = "dump_ir_eval_round"
 path = "examples/dump_ir_eval_round.rs"
+required-features = ["graph-ir"]
+
+[[example]]
+name = "dump_fold_frac_fusion_chain"
+path = "examples/dump_fold_frac_fusion_chain.rs"
 required-features = ["graph-ir"]

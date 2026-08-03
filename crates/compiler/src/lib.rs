@@ -48,6 +48,12 @@ pub enum CompileError {
     Quast(String),
     #[error("nvcc failed: {0}")]
     Nvcc(String),
+    #[error("nvcc timed out compiling `{name}` after {seconds:.1}s (limit {limit:.1}s)")]
+    NvccTimeout {
+        name: String,
+        seconds: f64,
+        limit: f64,
+    },
     #[error("dlopen failed: {0}")]
     Load(String),
     #[error("runtime error: {0}")]
@@ -192,5 +198,5 @@ pub fn compile_and_load(
         }
     }
     passes::verify(&kprog)?;
-    runtime::KernelModule::load(&kprog, &source, options)
+    runtime::KernelModule::load(&kprog, &source, options, &name)
 }

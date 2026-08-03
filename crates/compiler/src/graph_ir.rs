@@ -146,6 +146,11 @@ pub struct KernelModuleNode {
     pub module: Arc<ir::Module>,
     pub inputs: Vec<BufId>,
     pub outputs: Vec<BufId>,
+    /// Trace of the fusion steps that produced this kernel. `None` on
+    /// un-fused, freshly-lowered kernels; `Some` after
+    /// [`crate::passes::fusion::apply_fusion`] merges two kernels. Metadata
+    /// only — not part of [`module_hash`], and not read by the runtime.
+    pub fusion_history: Option<Arc<FusionHistory>>,
 }
 
 impl fmt::Debug for KernelModuleNode {
@@ -154,7 +159,112 @@ impl fmt::Debug for KernelModuleNode {
             .field("name", &self.module.name)
             .field("inputs", &self.inputs)
             .field("outputs", &self.outputs)
+            .field("fused", &self.fusion_history.is_some())
             .finish_non_exhaustive()
+    }
+}
+
+/// One original kernel captured before it was absorbed by a fusion.
+/// Shape strings are computed at capture time via [`format_size`] because
+/// the buffer table entries the leaf's `BufId`s point at may be rewritten
+/// or removed by later fusion rounds.
+pub struct KernelSnapshot {
+    pub node: Arc<KernelModuleNode>,
+    pub input_shapes: Vec<String>,
+    pub output_shapes: Vec<String>,
+}
+
+impl fmt::Debug for KernelSnapshot {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("KernelSnapshot")
+            .field("name", &self.node.module.name)
+            .field("input_shapes", &self.input_shapes)
+            .field("output_shapes", &self.output_shapes)
+            .finish()
+    }
+}
+
+/// Recursive record of how a fused kernel was built.
+///
+/// A [`FusionHistory::Kernel`] leaf is an original (un-fused) kernel that
+/// went into some later fusion; a [`FusionHistory::Fused`] internal node
+/// records the two operands of a single merge step, where `consumer` was
+/// the destination kernel (the reader) and `producer` was the source (the
+/// writer that got grafted into the consumer's read sites). Both variants
+/// carry a [`KernelSnapshot`] — the leaf's is the original pre-fusion
+/// kernel, the internal node's is the intermediate merged kernel at that
+/// step — so the viewer can render module IR + shapes at any point in
+/// the tree, not just at the leaves.
+#[derive(Debug)]
+pub enum FusionHistory {
+    Kernel(Arc<KernelSnapshot>),
+    Fused {
+        snapshot: Arc<KernelSnapshot>,
+        consumer: Arc<FusionHistory>,
+        producer: Arc<FusionHistory>,
+    },
+}
+
+impl FusionHistory {
+    /// The [`KernelSnapshot`] associated with this node (leaf or fused).
+    pub fn snapshot(&self) -> &KernelSnapshot {
+        match self {
+            FusionHistory::Kernel(s) => s,
+            FusionHistory::Fused { snapshot, .. } => snapshot,
+        }
+    }
+
+    /// Collects the names of every leaf original kernel in this tree, in
+    /// left-to-right (consumer-first) traversal order.
+    pub fn leaf_names(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        self.collect_leaf_names(&mut out);
+        out
+    }
+
+    fn collect_leaf_names(&self, out: &mut Vec<String>) {
+        match self {
+            FusionHistory::Kernel(s) => out.push(s.node.module.name.clone()),
+            FusionHistory::Fused {
+                consumer, producer, ..
+            } => {
+                consumer.collect_leaf_names(out);
+                producer.collect_leaf_names(out);
+            }
+        }
+    }
+}
+
+impl KernelModuleNode {
+    /// Returns this node's fusion history, materializing a fresh leaf
+    /// snapshot (with shape strings resolved via `g`) when the node has
+    /// never been fused. Used by [`crate::passes::fusion::apply_fusion`]
+    /// when assembling the merged tree.
+    pub fn history_or_leaf(&self, g: &GraphBuilder) -> Arc<FusionHistory> {
+        if let Some(h) = &self.fusion_history {
+            return Arc::clone(h);
+        }
+        let node = Arc::new(KernelModuleNode {
+            module: Arc::clone(&self.module),
+            inputs: self.inputs.clone(),
+            outputs: self.outputs.clone(),
+            fusion_history: None,
+        });
+        let input_shapes = self
+            .inputs
+            .iter()
+            .map(|b| format_size(&g.bufs[b.0].size, &g.symbols))
+            .collect();
+        let output_shapes = self
+            .outputs
+            .iter()
+            .map(|b| format_size(&g.bufs[b.0].size, &g.symbols))
+            .collect();
+        Arc::new(FusionHistory::Kernel(Arc::new(KernelSnapshot {
+            node,
+            input_shapes,
+            output_shapes,
+        })))
     }
 }
 
@@ -231,6 +341,14 @@ pub struct GraphBuilder {
     /// once per unique content and replays the cached subgraph on every
     /// later insertion.
     subgraph_cache: HashMap<[u8; 32], Arc<ModuleSubgraph>>,
+    /// Buffers the caller declared as graph inputs, in registration order
+    /// (which defines the `set_input` index order). See
+    /// [`Self::register_input`].
+    input_bufs: Vec<BufId>,
+    /// Buffers the caller declared as graph outputs, in registration order
+    /// (which defines the `get_output` index order). See
+    /// [`Self::register_output`].
+    output_bufs: Vec<BufId>,
 }
 
 impl GraphBuilder {
@@ -255,6 +373,39 @@ impl GraphBuilder {
 
     pub fn buf_info(&self, id: BufId) -> &BufInfo {
         &self.bufs[id.0]
+    }
+
+    /// Declares `id` as a graph input: its contents are supplied by the
+    /// caller at run time via `GraphExe::set_input`. Registration order
+    /// defines the input index order. Inputs must not be written by any
+    /// graph node (validated at compile time).
+    pub fn register_input(&mut self, id: BufId) {
+        self.input_bufs.push(id);
+    }
+
+    /// Declares `id` as a graph output: its final contents are observable
+    /// by the caller via `GraphExe::get_output`. Registration order defines
+    /// the output index order. Outputs must be written by at least one
+    /// graph node (validated at compile time).
+    pub fn register_output(&mut self, id: BufId) {
+        self.output_bufs.push(id);
+    }
+
+    /// Registered graph inputs, in registration order.
+    pub fn input_bufs(&self) -> &[BufId] {
+        &self.input_bufs
+    }
+
+    /// Registered graph outputs, in registration order.
+    pub fn output_bufs(&self) -> &[BufId] {
+        &self.output_bufs
+    }
+
+    /// Whether `id` is part of the registered graph interface (input or
+    /// output). Everything else is internal: graph rewrites (fusion, DCE)
+    /// may freely eliminate it.
+    pub fn buf_is_interface(&self, id: BufId) -> bool {
+        self.input_bufs.contains(&id) || self.output_bufs.contains(&id)
     }
 
     /// Adds a structured kernel: an [`ir::Module`] to be lowered by the
@@ -419,6 +570,7 @@ impl GraphBuilder {
                 module,
                 inputs: in_bufs,
                 outputs: out_bufs.clone(),
+                fusion_history: None,
             }));
             produced.push(out_bufs);
         }
@@ -438,7 +590,7 @@ impl GraphBuilder {
     /// first-seen `Arc` so the graph carries a single canonical handle per
     /// unique kernel and downstream `Arc::as_ptr` identity checks see the
     /// merged set.
-    fn dedup_module(&mut self, module: Arc<ir::Module>) -> Arc<ir::Module> {
+    pub(crate) fn dedup_module(&mut self, module: Arc<ir::Module>) -> Arc<ir::Module> {
         let hash = module_hash(&module);
         self.module_dedup
             .entry(hash)
@@ -635,6 +787,11 @@ impl GraphBuilder {
         };
         let mut last_writer: Vec<Option<String>> = vec![None; self.bufs.len()];
         let mut input_bufs: Vec<BufId> = Vec::new();
+        // Which buffers were read *anywhere* — used together with
+        // `last_writer` after this loop to identify terminal writes that
+        // deserve a synthetic Output node (mirror of the Input synthetic
+        // emitted for reads with no preceding writer).
+        let mut was_read: Vec<bool> = vec![false; self.bufs.len()];
         // (src_id, tgt_id, merged_labels, any_modify)
         let mut edges: Vec<(String, String, Vec<String>, bool)> = Vec::new();
         for (n, (reads, writes)) in node_rw.iter().enumerate() {
@@ -653,6 +810,7 @@ impl GraphBuilder {
                 }
             };
             for &(buf, modifies) in reads {
+                was_read[buf.0] = true;
                 if last_writer[buf.0].is_none() {
                     input_bufs.push(buf);
                     last_writer[buf.0] = Some(format!("in{}", buf.0));
@@ -677,6 +835,38 @@ impl GraphBuilder {
             }
         }
 
+        // Synthetic Output nodes: one per buffer that ended the graph as a
+        // sink (was written but never consumed) OR that the caller
+        // declared as a graph output via `register_output`. Mirror of the
+        // Input synthetics above — makes it clear where the graph's
+        // observable results live, especially after fusion collapses
+        // long producer chains down to a single terminal kernel.
+        let mut output_bufs: Vec<BufId> = Vec::new();
+        for b in 0..self.bufs.len() {
+            let writer = last_writer[b].clone();
+            let bid = BufId(b);
+            let is_registered = self.output_bufs.contains(&bid);
+            let is_natural_sink = writer.is_some() && !was_read[b];
+            if writer.is_some() && (is_natural_sink || is_registered) {
+                output_bufs.push(bid);
+                edges.push((
+                    writer.unwrap(),
+                    format!("out{b}"),
+                    vec![buf_label(bid)],
+                    false,
+                ));
+            }
+        }
+        // Registered graph inputs the emitter above didn't already add as
+        // Input synthetics (either unused, or written before read — the
+        // API forbids the latter but be defensive). Ensures the graph
+        // interface is fully visible.
+        for &bid in &self.input_bufs {
+            if !input_bufs.contains(&bid) {
+                input_bufs.push(bid);
+            }
+        }
+
         // Aggregate producers/consumers per node id from the edge list.
         let mut producers: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
         let mut consumers: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
@@ -692,6 +882,68 @@ impl GraphBuilder {
         }
         let count = |m: &BTreeMap<String, BTreeSet<String>>, id: &str| {
             m.get(id).map(|s| s.len()).unwrap_or(0)
+        };
+
+        // Display name per node id, including synthetic `in{buf}` inputs;
+        // fed into `producer_names` / `consumer_names` so the viewer can
+        // render clickable chips without a second lookup.
+        let mut name_by_id: BTreeMap<String, String> = BTreeMap::new();
+        for (n, node) in self.nodes.iter().enumerate() {
+            let id = format!("n{n}");
+            let name = match node {
+                GraphNode::Kernel(k) => k.module.name.clone(),
+                GraphNode::BlackboxKernel(k) => k.name.clone(),
+                GraphNode::Const(c) => self.buf_name(c.buf),
+                GraphNode::Memcpy(_) => "memcpy".to_string(),
+                GraphNode::Memset(m) => format!("memset {:#x}", m.val),
+            };
+            name_by_id.insert(id, name);
+        }
+        for buf in &input_bufs {
+            name_by_id.insert(format!("in{}", buf.0), self.buf_name(*buf));
+        }
+        for buf in &output_bufs {
+            name_by_id.insert(format!("out{}", buf.0), self.buf_name(*buf));
+        }
+
+        // Emit an ordered ID array + parallel name array for the neighbors
+        // of `id` in `m`. Empty when there are none.
+        let neighbor_arrays = |m: &BTreeMap<String, BTreeSet<String>>, id: &str| {
+            let set = match m.get(id) {
+                Some(s) => s,
+                None => return ("[]".to_string(), "[]".to_string()),
+            };
+            let ids: Vec<String> = set
+                .iter()
+                .map(|s| format!("\"{}\"", json_escape(s)))
+                .collect();
+            let names: Vec<String> = set
+                .iter()
+                .map(|s| {
+                    format!(
+                        "\"{}\"",
+                        json_escape(name_by_id.get(s).map(String::as_str).unwrap_or(""))
+                    )
+                })
+                .collect();
+            (
+                format!("[{}]", ids.join(",")),
+                format!("[{}]", names.join(",")),
+            )
+        };
+
+        // Shape strings (symbolic byte sizes) for a slice of buffers.
+        let shape_array = |bufs: &[BufId]| -> String {
+            let items: Vec<String> = bufs
+                .iter()
+                .map(|b| {
+                    format!(
+                        "\"{}\"",
+                        json_escape(&format_size(&self.bufs[b.0].size, &self.symbols))
+                    )
+                })
+                .collect();
+            format!("[{}]", items.join(","))
         };
 
         // Dedupe modules by Arc pointer identity: two kernels sharing the
@@ -737,6 +989,9 @@ impl GraphBuilder {
                 GraphNode::Memset(m) => (format!("memset {:#x}", m.val), "Memset"),
             };
             let ir_text = self.format_node_line(node);
+            let read_bufs: Vec<BufId> = reads.iter().map(|&(b, _)| b).collect();
+            let (prod_ids, prod_names) = neighbor_arrays(&producers, &id);
+            let (cons_ids, cons_names) = neighbor_arrays(&consumers, &id);
             let mut fields = vec![
                 ("id", format!("\"{id}\"")),
                 (
@@ -750,16 +1005,26 @@ impl GraphBuilder {
                 ("outputs", writes.len().to_string()),
                 ("producers", count(&producers, &id).to_string()),
                 ("consumers", count(&consumers, &id).to_string()),
+                ("input_shapes", shape_array(&read_bufs)),
+                ("output_shapes", shape_array(writes)),
+                ("producer_ids", prod_ids),
+                ("producer_names", prod_names),
+                ("consumer_ids", cons_ids),
+                ("consumer_names", cons_names),
             ];
             if let GraphNode::Kernel(k) = node {
                 let key = module_key(&k.module);
                 fields.push(("module", format!("\"{}\"", json_escape(&key))));
+                if let Some(history) = &k.fusion_history {
+                    fields.push(("fusion_history", fusion_history_json(history)));
+                }
             }
             push_node(&mut nodes_json, fields);
         }
         for buf in &input_bufs {
             let in_id = format!("in{}", buf.0);
             let name = self.buf_name(*buf);
+            let (cons_ids, cons_names) = neighbor_arrays(&consumers, &in_id);
             push_node(
                 &mut nodes_json,
                 vec![
@@ -771,6 +1036,30 @@ impl GraphBuilder {
                     ("name", format!("\"{}\"", json_escape(&name))),
                     ("type", "\"Input\"".to_string()),
                     ("consumers", count(&consumers, &in_id).to_string()),
+                    ("output_shapes", shape_array(std::slice::from_ref(buf))),
+                    ("consumer_ids", cons_ids),
+                    ("consumer_names", cons_names),
+                ],
+            );
+        }
+        for buf in &output_bufs {
+            let out_id = format!("out{}", buf.0);
+            let name = self.buf_name(*buf);
+            let (prod_ids, prod_names) = neighbor_arrays(&producers, &out_id);
+            push_node(
+                &mut nodes_json,
+                vec![
+                    ("id", format!("\"{out_id}\"")),
+                    (
+                        "label",
+                        format!("\"{}\"", json_escape(&format!("{name}\nOutput"))),
+                    ),
+                    ("name", format!("\"{}\"", json_escape(&name))),
+                    ("type", "\"Output\"".to_string()),
+                    ("producers", count(&producers, &out_id).to_string()),
+                    ("input_shapes", shape_array(std::slice::from_ref(buf))),
+                    ("producer_ids", prod_ids),
+                    ("producer_names", prod_names),
                 ],
             );
         }
@@ -803,7 +1092,7 @@ impl GraphBuilder {
     /// where each read carries a flag indicating the node also modifies the
     /// buffer (in-place update). Matches the WAW-aware semantics used for
     /// building cytoscape edges.
-    fn node_reads_writes(&self, node: &GraphNode) -> NodeReadsWrites {
+    pub(crate) fn node_reads_writes(&self, node: &GraphNode) -> NodeReadsWrites {
         let mut reads: Vec<(BufId, bool)> = Vec::new();
         let mut writes: Vec<BufId> = Vec::new();
         match node {
@@ -913,6 +1202,43 @@ impl GraphBuilder {
                 format_size(&m.num_bytes, &self.symbols),
             ),
         }
+    }
+}
+
+/// Serializes a [`FusionHistory`] tree into JSON. Leaves carry the
+/// snapshot's IR (via [`crate::dump::dump_hir`]) plus captured shape
+/// strings; `Fused` internal nodes carry the intermediate merged kernel's
+/// snapshot (same IR + shape fields as a leaf) plus their two children
+/// under `consumer` / `producer` keys.
+fn fusion_history_json(h: &FusionHistory) -> String {
+    let string_array = |ss: &[String]| -> String {
+        let items: Vec<String> = ss
+            .iter()
+            .map(|s| format!("\"{}\"", json_escape(s)))
+            .collect();
+        format!("[{}]", items.join(","))
+    };
+    let snap = h.snapshot();
+    let m = &snap.node.module;
+    let ir = crate::dump::dump_hir(m);
+    let base = format!(
+        "\"name\":\"{name}\",\"ir\":\"{ir}\",\
+         \"input_shapes\":{inputs},\"output_shapes\":{outputs}",
+        name = json_escape(&m.name),
+        ir = json_escape(&ir),
+        inputs = string_array(&snap.input_shapes),
+        outputs = string_array(&snap.output_shapes),
+    );
+    match h {
+        FusionHistory::Kernel(_) => format!("{{\"kind\":\"leaf\",{base}}}"),
+        FusionHistory::Fused {
+            consumer, producer, ..
+        } => format!(
+            "{{\"kind\":\"fused\",{base},\
+             \"consumer\":{consumer},\"producer\":{producer}}}",
+            consumer = fusion_history_json(consumer),
+            producer = fusion_history_json(producer),
+        ),
     }
 }
 
@@ -1086,6 +1412,43 @@ mod tests {
             }
             other => panic!("expected blackbox kernel node, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn subgraph_intermediates_are_not_interface() {
+        let mut ib = IRBuilder::new();
+        let a = ib.input("a", ScalarType::BabyBear, vec![4]);
+        let stage1 = ib.compute(4, |ib, i| {
+            let ai = ib.index(a, &[i]);
+            let two = ib.const_field(2);
+            ib.mul(ai, two)
+        });
+        let t = ib.let_bound(stage1);
+        let body = ib.compute(4, |ib, i| {
+            let ti = ib.index(t, &[i]);
+            ib.add(ti, ti)
+        });
+        let module = ib.finish("two_stage", body);
+
+        let mut b = GraphBuilder::new();
+        let a_buf = buf(&mut b, "a", DeviceType::Cuda(0), Quast::cst(16));
+        let out_buf = buf(&mut b, "out", DeviceType::Cuda(0), Quast::cst(16));
+        b.register_input(a_buf);
+        b.register_output(out_buf);
+        b.insert_kernel(module, [a_buf], [out_buf]);
+
+        assert_eq!(b.nodes.len(), 2);
+        assert!(b.buf_is_interface(a_buf));
+        assert!(b.buf_is_interface(out_buf));
+        assert_eq!(b.input_bufs(), [a_buf]);
+        assert_eq!(b.output_bufs(), [out_buf]);
+        let mid = match &b.nodes[0] {
+            GraphNode::Kernel(k) => k.outputs[0],
+            other => panic!("expected kernel node, got {other:?}"),
+        };
+        assert_ne!(mid, a_buf);
+        assert_ne!(mid, out_buf);
+        assert!(!b.buf_is_interface(mid));
     }
 
     #[test]

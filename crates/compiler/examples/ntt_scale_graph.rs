@@ -19,13 +19,10 @@ use crypto_compiler::{
     ir::{IRBuilder, ScalarType},
     kernel, kernels,
     quast::Quast,
+    runner::{from_monty, to_monty},
     runtime::CompileOptions,
 };
-use openvm_cuda_common::{
-    copy::{MemCopyD2H, MemCopyH2D},
-    d_buffer::DeviceBuffer,
-    stream::GpuDeviceCtx,
-};
+use openvm_cuda_common::{copy::MemCopyH2D, d_buffer::DeviceBuffer, stream::GpuDeviceCtx};
 use p3_baby_bear::BabyBear;
 use p3_dft::{Radix2Dit, TwoAdicSubgroupDft};
 use p3_field::{PrimeCharacteristicRing, PrimeField32};
@@ -48,10 +45,16 @@ fn main() {
     let w_buf = add_dev_buf(&mut g, "twiddles", half_n_bytes);
     let ntt_out = add_dev_buf(&mut g, "ntt_out", n_bytes.clone());
     let scaled_out = add_dev_buf(&mut g, "scaled_out", n_bytes);
+    g.register_input(a_buf);
+    g.register_output(scaled_out);
 
     // Twiddle table: baked into a HostBuf Const, memcpy'd to device by the
-    // graph runtime.
-    let twiddles = kernels::ntt_twiddles(log_n);
+    // graph runtime. The graph path moves raw bytes only (no ModuleRunner
+    // H2D hook), so BabyBear values must be Montgomery-encoded host-side.
+    let twiddles: Vec<u32> = kernels::ntt_twiddles(log_n)
+        .into_iter()
+        .map(to_monty)
+        .collect();
     g.insert_const(w_buf, ConstBuf::HostBuf(u32_to_le_bytes(&twiddles)));
 
     let ntt = kernels::ntt_module(log_n);
@@ -83,26 +86,21 @@ fn main() {
     // ---- Run ---------------------------------------------------------------
     let ctx = GpuDeviceCtx::for_current_device().expect("GPU ctx");
     let coeffs = pseudo_field_elems(n, 1);
-    let coeffs_bytes = u32_to_le_bytes(&coeffs);
+    let coeffs_mont: Vec<u32> = coeffs.iter().copied().map(to_monty).collect();
+    let coeffs_bytes = u32_to_le_bytes(&coeffs_mont);
 
     let input_buf: DeviceBuffer<u8> = coeffs_bytes
         .as_slice()
         .to_device_on(&ctx)
         .expect("input H2D");
-    let mut output_buf: DeviceBuffer<u8> = DeviceBuffer::with_capacity_on(exe.output_size(0), &ctx);
-    let mut scratch: DeviceBuffer<u8> =
-        DeviceBuffer::with_capacity_on(exe.scratch_bytes().max(1), &ctx);
+    exe.set_input(&ctx, 0, &input_buf).expect("set_input");
+    exe.run(&ctx).expect("graph run");
 
-    exe.run(
-        &ctx,
-        &[input_buf],
-        std::slice::from_mut(&mut output_buf),
-        &mut scratch,
-    )
-    .expect("graph run");
-
-    let got_bytes: Vec<u8> = output_buf.to_host_on(&ctx).expect("D2H");
-    let got = le_bytes_to_u32(&got_bytes);
+    let got_bytes: Vec<u8> = exe.get_output(0).to_host_on(&ctx).expect("D2H");
+    let got: Vec<u32> = le_bytes_to_u32(&got_bytes)
+        .into_iter()
+        .map(from_monty)
+        .collect();
 
     // ---- Reference ---------------------------------------------------------
     let want: Vec<u32> = {

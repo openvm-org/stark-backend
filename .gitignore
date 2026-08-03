@@ -23,3 +23,7 @@ __pycache__/
 
 # Generated config files
 .clangd
+
+*.ncu-rep 
+*.nsys-rep
+*.sqlite

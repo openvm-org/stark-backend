@@ -8,6 +8,9 @@
 //! - compute nests deeper than 2 are flattened by merging the innermost pair of computes into one
 //!   over the product bound (indices recovered with div/mod, which is a no-op on the row-major
 //!   memory layout);
+//! - perfect two-level nests with no `#[par]`/`#[grid]` attributes and no let-bound tiles are
+//!   absorbed into a single flat compute over the product bound, provided every rewritten load
+//!   index stays provably emittable;
 //! - a top-level `reduce` is wrapped into `compute [1]`;
 //! - scalar `let`s wrapping a compute body are peeled into an inline environment resolved during
 //!   lowering;
@@ -21,8 +24,8 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::{
     ir::{IRBuilder, Module, Node, NodeId, ScalarType, Type, VarId},
-    passes::type_infer::TypeMap,
-    quast::{NodeEmitter, ParSpec, Quast, ScatterStore},
+    passes::{type_infer::TypeMap, utils::hir_to_quast},
+    quast::{NodeEmitter, ParSpec, Quast, QuastEmitter, ScatterStore},
     CompileError,
 };
 
@@ -440,6 +443,58 @@ impl CanonCx<'_> {
                 (Some((m, j)), inner_par.map(|p| *p), inner_body)
             }
             _ => (None, None, body),
+        };
+
+        // Absorb a perfect nest `compute [N] |i| { compute [M] |j| { e } }`
+        // into one flat `compute [N*M] |t| { e[i := t/M, j := t%M] }` so
+        // downstream graph rewrites see a single flat compute. Only when
+        // nothing depends on the two-level structure: no `#[par]` layout on
+        // the inner compute, no shared-memory tiles (which are materialized
+        // per outer iteration), and no `#[grid(threads = ...)]` hint. The
+        // scatter store map is already expressed over the flat domain, so it
+        // is unaffected. The rewrite from two independent index symbols to
+        // `t/M`/`t%M` forms can defeat the non-negativity proof the emitter
+        // runs on floor-division operands, so the absorption is speculative:
+        // it is kept only if every load index in the rewritten body still
+        // passes that proof.
+        let (outer_bound, outer_var, inner, result_root) = match inner {
+            Some((m, j)) if inner_par.is_none() && inner_lets.is_empty() && threads.is_none() => {
+                let t = self.b.fresh_var();
+                let t_node = self.b.intern(Node::Var(t));
+                self.types.insert(t_node, Type::Scalar(ScalarType::U32));
+                let env = BTreeMap::from([(t, t_node)]);
+                let flat_bound = outer_bound * m;
+                let bounds = BTreeMap::from([(t, flat_bound as u64)]);
+                let flat = Quast::sym(t);
+                let mut em = NodeEmitter {
+                    b: &mut *self.b,
+                    types: &mut self.types,
+                    env: &env,
+                };
+                let i_val = flat.floordiv(m as i64).emit(&bounds, &mut em)?;
+                let j_val = flat.rem_c(m as i64).emit(&bounds, &mut em)?;
+                let map = HashMap::from([(outer_var, i_val), (j, j_val)]);
+                let root_sub = subst(self.b, result_root, &map, &mut self.types);
+                // Substitute in sorted-VarId order: canonicalization must
+                // assign identical NodeIds on every run over the same module
+                // (fusion re-canonicalizes and addresses nodes by id), and
+                // HashMap iteration order is randomized per instance.
+                let mut let_entries: Vec<(VarId, NodeId)> =
+                    inline_lets.iter().map(|(&v, &n)| (v, n)).collect();
+                let_entries.sort_unstable_by_key(|&(v, _)| v);
+                let lets_sub: HashMap<VarId, NodeId> = let_entries
+                    .into_iter()
+                    .map(|(v, n)| (v, subst(self.b, n, &map, &mut self.types)))
+                    .collect();
+                let mut lets_overlay = lets_sub.clone();
+                if loads_emittable(self.b, &self.env, root_sub, &mut lets_overlay, bounds) {
+                    inline_lets = lets_sub;
+                    (flat_bound, t, None, root_sub)
+                } else {
+                    (outer_bound, outer_var, Some((m, j)), result_root)
+                }
+            }
+            inner => (outer_bound, outer_var, inner, result_root),
         };
 
         // Split the result into one expression per output buffer.
@@ -897,4 +952,281 @@ fn subst_rec(
     }
     memo.insert(id, result);
     result
+}
+
+/// Discards the emitted values; used to prove that a [`Quast`] is emittable
+/// (quasi-affine with all floor-division operands non-negative on the symbol
+/// bounds) without generating anything.
+struct ProbeEmitter;
+
+impl QuastEmitter for ProbeEmitter {
+    type Val = ();
+    fn sym(&mut self, _: VarId) {}
+    fn cst(&mut self, _: u32) {}
+    fn add(&mut self, _: (), _: ()) {}
+    fn sub(&mut self, _: (), _: ()) {}
+    fn mul(&mut self, _: (), _: ()) {}
+    fn div(&mut self, _: (), _: ()) {}
+    fn rem(&mut self, _: (), _: ()) {}
+}
+
+/// Whether every load index reachable from `root` — through select branches,
+/// reduce bodies, packs and let values — extracts to a quasi-affine form over
+/// the symbols in `bounds` and passes the emitter's non-negativity proof for
+/// floor-division operands. Lowering rejects any load that fails this, so a
+/// rewrite must not turn a passing body into a failing one. `lets` doubles as
+/// the inline-let environment and is extended with nested lets in passing;
+/// reduce binders contribute their bounds as they are encountered.
+fn loads_emittable(
+    b: &IRBuilder,
+    env: &HashMap<VarId, CanonValue>,
+    root: NodeId,
+    lets: &mut HashMap<VarId, NodeId>,
+    mut bounds: BTreeMap<VarId, u64>,
+) -> bool {
+    fn rec(
+        b: &IRBuilder,
+        env: &HashMap<VarId, CanonValue>,
+        id: NodeId,
+        lets: &mut HashMap<VarId, NodeId>,
+        bounds: &mut BTreeMap<VarId, u64>,
+        visited: &mut HashSet<NodeId>,
+    ) -> bool {
+        if !visited.insert(id) {
+            return true;
+        }
+        match b.node(id).clone() {
+            Node::Input(_) | Node::ConstU32(_) | Node::ConstField(_) | Node::ConstFpExt(_) => true,
+            Node::Var(v) => {
+                let n = lets.get(&v).copied().or_else(|| match env.get(&v) {
+                    Some(CanonValue::Scalar(n)) => Some(*n),
+                    _ => None,
+                });
+                match n {
+                    Some(n) => rec(b, env, n, lets, bounds, visited),
+                    None => true, // index symbol or tensor reference
+                }
+            }
+            Node::LiftFpExt(x) => rec(b, env, x, lets, bounds, visited),
+            Node::Bin(_, x, y) => {
+                rec(b, env, x, lets, bounds, visited) && rec(b, env, y, lets, bounds, visited)
+            }
+            Node::Select {
+                cond,
+                then_val,
+                else_val,
+            } => {
+                rec(b, env, cond, lets, bounds, visited)
+                    && rec(b, env, then_val, lets, bounds, visited)
+                    && rec(b, env, else_val, lets, bounds, visited)
+            }
+            Node::Index { indices, .. } => indices.iter().all(|&ix| {
+                let syms = |v: VarId| bounds.contains_key(&v).then(|| Quast::sym(v));
+                let lets_fn = |v: VarId| {
+                    lets.get(&v).copied().or_else(|| match env.get(&v) {
+                        Some(CanonValue::Scalar(n)) => Some(*n),
+                        _ => None,
+                    })
+                };
+                match hir_to_quast(b, ix, &syms, &lets_fn) {
+                    Ok(q) => q.emit(bounds, &mut ProbeEmitter).is_ok(),
+                    Err(_) => false,
+                }
+            }),
+            Node::Reduce {
+                bound, var, body, ..
+            } => {
+                bounds.insert(var, bound as u64);
+                rec(b, env, body, lets, bounds, visited)
+            }
+            Node::Let { var, value, body } => {
+                if !rec(b, env, value, lets, bounds, visited) {
+                    return false;
+                }
+                lets.insert(var, value);
+                rec(b, env, body, lets, bounds, visited)
+            }
+            Node::Tuple(elems) | Node::Pack(elems) => {
+                elems.iter().all(|&e| rec(b, env, e, lets, bounds, visited))
+            }
+            Node::Proj(tup, _) => rec(b, env, tup, lets, bounds, visited),
+            Node::Compute { .. } => false,
+        }
+    }
+    rec(b, env, root, lets, &mut bounds, &mut HashSet::new())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::passes::{type_infer::type_infer, utils::const_eval_index};
+
+    fn canon(b: IRBuilder, body: NodeId) -> Program {
+        let module = b.finish("k", body);
+        let types = type_infer(&module).unwrap();
+        canonicalize(module, types).unwrap()
+    }
+
+    /// Builds `x[i*8 + j]` for the given outer/inner index nodes.
+    fn flat_load(b: &mut IRBuilder, x: NodeId, i: NodeId, j: NodeId) -> NodeId {
+        let c8 = b.const_u32(8);
+        let row = b.mul(i, c8);
+        let ix = b.add(row, j);
+        b.index(x, &[ix])
+    }
+
+    fn find_index(b: &IRBuilder, id: NodeId) -> Option<NodeId> {
+        match b.node(id) {
+            Node::Index { indices, .. } => Some(indices[0]),
+            Node::Bin(_, x, y) => find_index(b, *x).or_else(|| find_index(b, *y)),
+            Node::LiftFpExt(x) => find_index(b, *x),
+            _ => None,
+        }
+    }
+
+    /// `compute [2] |i| { compute [8] |j| { x[i*8+j] * 2 } }` is absorbed
+    /// into a single flat `compute [16] |t|`, with the load index recovered
+    /// as `(t/8)*8 + t%8` — which evaluates back to `t`.
+    #[test]
+    fn perfect_nest_is_absorbed() {
+        let mut b = IRBuilder::new();
+        let x = b.input("x", ScalarType::BabyBear, vec![16]);
+        let two = b.const_field(2);
+        let body = b.compute(2, |b, i| {
+            b.compute(8, |b, j| {
+                let xi = flat_load(b, x, i, j);
+                b.mul(xi, two)
+            })
+        });
+        let program = canon(b, body);
+        assert!(is_canonicalized(&program));
+        assert_eq!(program.kernels.len(), 1);
+        let ck = program.kernels[0].clone();
+        assert_eq!(ck.outer_bound, 16);
+        assert!(ck.inner.is_none());
+        assert!(ck.inner_lets.is_empty());
+        assert!(ck.scatter_store.is_none());
+
+        let ResultExpr::Scalar(root) = ck.results[0] else {
+            panic!("expected scalar result");
+        };
+        let Program {
+            mut module,
+            mut types,
+            ..
+        } = program;
+        let b = &mut module.builder;
+        let ix = find_index(b, root).expect("load index");
+        for t in 0..16u32 {
+            let tc = b.const_u32(t);
+            let map = HashMap::from([(ck.outer_var, tc)]);
+            let sub = subst(b, ix, &map, &mut types);
+            let lets = |v: VarId| ck.inline_lets.get(&v).copied();
+            assert_eq!(const_eval_index(b, sub, &lets), Some(t as i64));
+        }
+    }
+
+    #[test]
+    fn inner_par_blocks_absorption() {
+        let mut b = IRBuilder::new();
+        let x = b.input("x", ScalarType::BabyBear, vec![16]);
+        let body = b.compute(2, |b, i| {
+            let par = b.par_map(|t, s, _c| t.mul_c(4).add(s));
+            b.compute_with(8, None, Some(par), None, |b, j| flat_load(b, x, i, j))
+        });
+        let program = canon(b, body);
+        let ck = &program.kernels[0];
+        assert_eq!(ck.outer_bound, 2);
+        assert!(matches!(ck.inner, Some((8, _))));
+        assert!(ck.inner_par.is_some());
+    }
+
+    #[test]
+    fn grid_threads_blocks_absorption() {
+        let mut b = IRBuilder::new();
+        let x = b.input("x", ScalarType::BabyBear, vec![16]);
+        let body = b.compute_with(2, None, None, Some(8), |b, i| {
+            b.compute(8, |b, j| flat_load(b, x, i, j))
+        });
+        let program = canon(b, body);
+        let ck = &program.kernels[0];
+        assert_eq!(ck.outer_bound, 2);
+        assert!(matches!(ck.inner, Some((8, _))));
+        assert_eq!(ck.threads, Some(8));
+    }
+
+    #[test]
+    fn tile_let_blocks_absorption() {
+        let mut b = IRBuilder::new();
+        let x = b.input("x", ScalarType::BabyBear, vec![16]);
+        let body = b.compute(2, |b, i| {
+            let tile = b.compute(8, |b, j| flat_load(b, x, i, j));
+            b.bind(tile, |b, tv| {
+                b.compute(8, |b, j| {
+                    let tj = b.index(tv, &[j]);
+                    b.add(tj, tj)
+                })
+            })
+        });
+        let program = canon(b, body);
+        let ck = &program.kernels[0];
+        assert_eq!(ck.outer_bound, 2);
+        assert!(matches!(ck.inner, Some((8, _))));
+        assert_eq!(ck.inner_lets.len(), 1);
+    }
+
+    /// `x[((p % 4) * 8 + t + 1) % 32]` under `compute [12] |p| { compute
+    /// [12] |t| ... }`: absorbed to the flat variable `v`, the `% 32`
+    /// floor-division operand becomes `v - 4*(v/12) + 1`, whose
+    /// non-negativity the interval analysis cannot prove — so the nest must
+    /// be kept (lowering would otherwise reject the kernel).
+    #[test]
+    fn unprovable_absorbed_indices_block_absorption() {
+        let mut b = IRBuilder::new();
+        let x = b.input("x", ScalarType::BabyBear, vec![64]);
+        let body = b.compute(12, |b, p| {
+            b.compute(12, |b, t| {
+                let c4 = b.const_u32(4);
+                let c8 = b.const_u32(8);
+                let c1 = b.const_u32(1);
+                let c32 = b.const_u32(32);
+                let pm = b.rem(p, c4);
+                let row = b.mul(pm, c8);
+                let f = b.add(row, t);
+                let f = b.add(f, c1);
+                let ix = b.rem(f, c32);
+                b.index(x, &[ix])
+            })
+        });
+        let program = canon(b, body);
+        let ck = &program.kernels[0];
+        assert_eq!(ck.outer_bound, 12);
+        assert!(matches!(ck.inner, Some((12, _))));
+    }
+
+    /// An outer `#[scatter]` on a perfect nest composes into a flat store
+    /// map before absorption, so the absorbed kernel keeps the correct
+    /// flat-domain scatter: logical `(i, j) -> (j, i)` on shape `[2, 8]`
+    /// means flat `f -> (f%8)*2 + f/8`.
+    #[test]
+    fn scattered_nest_keeps_flat_scatter_store() {
+        let mut b = IRBuilder::new();
+        let x = b.input("x", ScalarType::BabyBear, vec![16]);
+        let sc = b.scatter_map(2, Some(vec![8, 2]), |s, _c| {
+            vec![s[1].clone(), s[0].clone()]
+        });
+        let body = b.compute_with(2, Some(sc), None, None, |b, i| {
+            b.compute(8, |b, j| flat_load(b, x, i, j))
+        });
+        let program = canon(b, body);
+        let ck = &program.kernels[0];
+        assert_eq!(ck.outer_bound, 16);
+        assert!(ck.inner.is_none());
+        let ss = ck.scatter_store.as_ref().expect("scatter store");
+        assert_eq!(ss.bounds.get(&ss.flat).copied(), Some(16));
+        for f in 0..16i64 {
+            let env = BTreeMap::from([(ss.flat, f)]);
+            assert_eq!(ss.expr.eval(&env), (f % 8) * 2 + f / 8);
+        }
+    }
 }

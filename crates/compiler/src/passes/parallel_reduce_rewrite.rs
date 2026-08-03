@@ -639,7 +639,7 @@ impl RewriteCx<'_> {
     }
 }
 
-fn should_tree_lower(k: usize, outer_par: usize) -> bool {
+pub(crate) fn should_tree_lower(k: usize, outer_par: usize) -> bool {
     k.is_power_of_two() && k >= REDUCE_TREE_MIN && outer_par < OUTER_SATURATION_THRESHOLD
 }
 

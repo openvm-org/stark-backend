@@ -668,8 +668,7 @@ mod tests {
     use crypto_compiler::{graph_exe::GraphCompiler, runtime::CompileOptions};
     use openvm_cuda_common::{
         common::get_device,
-        copy::{MemCopyD2H, MemCopyH2D},
-        d_buffer::DeviceBuffer,
+        copy::MemCopyH2D,
         stream::{CudaStream, GpuDeviceCtx, StreamGuard},
     };
     use openvm_stark_backend::FiatShamirTranscript;
@@ -773,35 +772,32 @@ mod tests {
             }
         }
 
+        // Declare the graph interface: observe values are inputs, sampled
+        // values are outputs; the sponge state chain stays internal.
+        for (buf, _) in &observe_bufs {
+            g.register_input(*buf);
+        }
+        for (buf, _) in &sample_bufs {
+            g.register_output(*buf);
+        }
+
         let mut exe = GraphCompiler::new()
             .device(DeviceType::Cuda(0))
             .compile_options(CompileOptions::default())
             .compile(g)
             .expect("graph compile");
 
-        // Map each declared input/output BufId to its slot in the compiled
-        // exe's input/output lists.
-        let inputs: Vec<DeviceBuffer<u8>> = (0..exe.num_inputs())
-            .map(|i| {
-                let bid = exe.input_buf_id(i);
-                let (_, bytes) = observe_bufs
-                    .iter()
-                    .find(|(b, _)| *b == bid)
-                    .expect("input buf not found");
-                bytes.as_slice().to_device_on(ctx).expect("H2D")
-            })
-            .collect();
-
-        let mut outputs: Vec<DeviceBuffer<u8>> = (0..exe.num_outputs())
-            .map(|i| {
-                let size = exe.output_size(i);
-                DeviceBuffer::<u8>::with_capacity_on(size, ctx)
-            })
-            .collect();
-
-        let mut scratch = DeviceBuffer::<u8>::with_capacity_on(exe.scratch_bytes().max(1), ctx);
-        exe.run(ctx, &inputs, &mut outputs, &mut scratch)
-            .expect("run");
+        // Bind each registered input to its slot in the compiled exe.
+        for i in 0..exe.num_inputs() {
+            let bid = exe.input_buf_id(i);
+            let (_, bytes) = observe_bufs
+                .iter()
+                .find(|(b, _)| *b == bid)
+                .expect("input buf not found");
+            let dbuf = bytes.as_slice().to_device_on(ctx).expect("H2D");
+            exe.set_input(ctx, i, &dbuf).expect("set_input");
+        }
+        exe.run(ctx).expect("run");
 
         // Now collect the sampled bytes in the order the caller requested.
         let mut result = Vec::new();
@@ -809,7 +805,7 @@ mod tests {
             let idx = (0..exe.num_outputs())
                 .find(|&i| exe.output_buf_id(i) == bid)
                 .expect("sample buf not found in exe outputs");
-            let bytes = outputs[idx].to_host_on(ctx).expect("D2H");
+            let bytes = exe.get_output(idx).to_host_on(ctx).expect("D2H");
             for k in 0..len {
                 result.push(bytes_to_f(&bytes[4 * k..4 * (k + 1)]));
             }
@@ -953,28 +949,36 @@ mod tests {
         //
         // Then 15 samples from state (4, 8) walk:
         //   perm (sample_perm) → sample_no_perm[6..=0] → perm → sample_no_perm[6..=1]
-        // — one `sample_perm` module + `sample_no_perm[0..=6]` = 8 unique.
+        // — the `sample_perm` module is split at insertion into two kernels
+        // (`__k0` permute + `__k1` extract; see `passes::split_module`), plus
+        // `sample_no_perm[0..=6]` = 9 unique.
         //
-        // Expected total unique kernel modules: 8 + 8 = 16, vs.
-        // 20 + 15 = 35 emitted `Kernel` graph nodes.
+        // Expected total unique kernel modules: 8 + 9 = 17, vs. the
+        // 20 + 15 = 35 emitted sponge operations.
         let mut g = GraphBuilder::new();
         let mut sponge = DuplexSpongeGpuIR::new(&mut g, DeviceType::Cuda(0));
         for i in 0..20 {
             let buf = add_input_f_buf(&mut g, &format!("in_{i}"));
+            g.register_input(buf);
             sponge.observe(&mut g, buf);
         }
         for _ in 0..15 {
-            let _ = sponge.sample(&mut g);
+            let out = sponge.sample(&mut g);
+            g.register_output(out);
         }
+        // Fusion would rewrite the emitted modules (the state chain is
+        // internal, hence fusable) and change the count under test; this
+        // test is about the Arc/hash dedup accounting of the emitted nodes.
         let exe = GraphCompiler::new()
             .device(DeviceType::Cuda(0))
             .compile_options(CompileOptions::default())
+            .without_fusion()
             .compile(g)
             .expect("graph compile");
         assert_eq!(
             exe.num_unique_modules(),
-            16,
-            "expected exactly 16 unique kernel modules (8 observe + 8 sample) \
+            17,
+            "expected exactly 17 unique kernel modules (8 observe + 9 sample) \
              for the emitted 20 observes + 15 samples"
         );
     }

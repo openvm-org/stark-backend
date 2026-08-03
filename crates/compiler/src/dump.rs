@@ -33,18 +33,47 @@ use crate::{
     quast::{CStrEmitter, ParSpec, Quast, Scatter},
 };
 
+/// Linux filenames are capped at 255 bytes; fusion produces module names
+/// well past that. `stem_for(name, ext, extra)` returns a filename stem
+/// that's safe to write: the raw name if it fits with room for `.ext` and
+/// any `extra` suffix, otherwise the first ~200 chars of the name
+/// followed by a short SHA-256 marker so the stem is deterministic and
+/// stays under the cap.
+fn safe_stem(name: &str, room_for_suffix: usize) -> String {
+    // Reserve some headroom below the 255-byte limit for the suffix (".hir",
+    // ".00.canonical.txt", etc.) and for filesystem safety margin.
+    const MAX_STEM_BYTES: usize = 200;
+    let budget = MAX_STEM_BYTES.saturating_sub(room_for_suffix);
+    if name.len() <= budget {
+        return name.to_string();
+    }
+    // Deterministic 16-hex-char marker so files for the same module cluster.
+    use sha3::{Digest, Sha3_256};
+    let hash = Sha3_256::digest(name.as_bytes());
+    let marker: String = hash.iter().take(8).map(|b| format!("{b:02x}")).collect();
+    // Keep the readable prefix aligned to char boundaries.
+    let head_budget = budget.saturating_sub(marker.len() + 1);
+    let mut head_end = head_budget.min(name.len());
+    while head_end > 0 && !name.is_char_boundary(head_end) {
+        head_end -= 1;
+    }
+    format!("{}#{marker}", &name[..head_end])
+}
+
 /// Writes `{name}.hir` and `{name}.kir` under `dir` (created if needed).
 pub fn write_ir_dumps(dir: &Path, name: &str, hir: &str, kir: &str) -> io::Result<()> {
     std::fs::create_dir_all(dir)?;
-    std::fs::write(dir.join(format!("{name}.hir")), hir)?;
-    std::fs::write(dir.join(format!("{name}.kir")), kir)
+    let stem = safe_stem(name, ".kir".len());
+    std::fs::write(dir.join(format!("{stem}.hir")), hir)?;
+    std::fs::write(dir.join(format!("{stem}.kir")), kir)
 }
 
 /// Writes the generated CUDA C++ as `{name}.cu` under `dir` (created if
 /// needed).
 pub fn write_cuda_dump(dir: &Path, name: &str, source: &str) -> io::Result<()> {
     std::fs::create_dir_all(dir)?;
-    std::fs::write(dir.join(format!("{name}.cu")), source)
+    let stem = safe_stem(name, ".cu".len());
+    std::fs::write(dir.join(format!("{stem}.cu")), source)
 }
 
 /// Writes one file into `dir` at path `{name}.{step:02}.{tag}.{ext}`, so the
@@ -59,7 +88,10 @@ pub fn write_step_dump(
     contents: &str,
 ) -> io::Result<()> {
     std::fs::create_dir_all(dir)?;
-    std::fs::write(dir.join(format!("{name}.{step:02}.{tag}.{ext}")), contents)
+    // Reserve room for `.NN.tag.ext` in the suffix so the composite name fits.
+    let suffix_len = 4 + tag.len() + 1 + ext.len(); // ".NN." + tag + "." + ext
+    let stem = safe_stem(name, suffix_len);
+    std::fs::write(dir.join(format!("{stem}.{step:02}.{tag}.{ext}")), contents)
 }
 
 /// Renders a [`TypeMap`] as a sorted `NodeId(k): Type` listing.

@@ -238,7 +238,8 @@ Every module in this port has a paired test in
 3. **DSL side.** Build a `GraphBuilder`, stage every input as a
    `ConstBuf::HostBuf` (`frac_const_buf`, `ef_slice_const_buf`,
    `ef_const_ext_scalar_buf`), insert the module, memcpy the output
-   into a fresh reader-less buffer so it becomes a graph output,
+   into a fresh buffer and `register_output` it so it becomes a graph
+   output (the shared `run_graph_read_bufs` helper does this),
    compile with `GraphCompiler::new().scheduler(SchedulerMode::Heuristic)`
    (heuristic scheduler runs in ms; the CP-SAT one can time out on
    larger graphs — but for these single-module tests either works),

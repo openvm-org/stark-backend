@@ -3151,6 +3151,8 @@ mod tests {
 
         let layer_out = add_frac_ef_buf(&mut g, device, "layer_out", real_len);
         g.insert_memcpy(layer, layer_out);
+        g.register_input(leaves_in);
+        g.register_output(layer_out);
 
         let mut exe = GraphCompiler::new()
             .device(device)
@@ -3158,22 +3160,18 @@ mod tests {
             .compile(g)
             .expect("graph compile");
 
-        // Wire caller-visible input/output buffers.
         let leaves_dev_bytes: DeviceBuffer<u8> = frac_bytes(leaves)
             .to_device_on(ctx)
             .expect("H2D input leaves");
-        let inputs = vec![leaves_dev_bytes];
-        let mut outputs: Vec<DeviceBuffer<u8>> = (0..exe.num_outputs())
-            .map(|i| DeviceBuffer::<u8>::with_capacity_on(exe.output_size(i), ctx))
-            .collect();
-        let mut scratch = DeviceBuffer::<u8>::with_capacity_on(exe.scratch_bytes().max(1), ctx);
-        exe.run(ctx, &inputs, &mut outputs, &mut scratch)
-            .expect("graph run");
+        exe.set_input(ctx, 0, &leaves_dev_bytes).expect("set_input");
+        exe.run(ctx).expect("graph run");
 
         let out_idx = (0..exe.num_outputs())
             .find(|&i| exe.output_buf_id(i) == layer_out)
             .expect("layer_out is a graph output");
-        outputs[out_idx].to_host_on(ctx).expect("D2H layer_out")
+        exe.get_output(out_idx)
+            .to_host_on(ctx)
+            .expect("D2H layer_out")
     }
 
     fn assert_layer_matches(sizes: FractionalInputSize, alpha: EF, seed: u64) {
@@ -3258,13 +3256,14 @@ mod tests {
             .collect();
         let layers = SqrtEqLayersIR::from_xi(&mut g, &xi_bufs, device);
 
-        // Chain each layer BufId to a graph output via `insert_memcpy` so
-        // the caller can read them after `GraphExe::run`.
+        // Chain each layer BufId to a registered graph output via
+        // `insert_memcpy` so the caller can read them after `GraphExe::run`.
         let low_outs: Vec<BufId> = (0..layers.low.layers.len())
             .map(|i| {
                 let n = 1usize << i;
                 let out = add_ef_buf(&mut g, device, &format!("low_out_{i}"), n);
                 g.insert_memcpy(layers.low.layers[i], out);
+                g.register_output(out);
                 out
             })
             .collect();
@@ -3273,6 +3272,7 @@ mod tests {
                 let n = 1usize << i;
                 let out = add_ef_buf(&mut g, device, &format!("high_out_{i}"), n);
                 g.insert_memcpy(layers.high.layers[i], out);
+                g.register_output(out);
                 out
             })
             .collect();
@@ -3282,13 +3282,7 @@ mod tests {
             .compile_options(CompileOptions::default())
             .compile(g)
             .expect("graph compile");
-        let inputs: Vec<DeviceBuffer<u8>> = Vec::new();
-        let mut outputs: Vec<DeviceBuffer<u8>> = (0..exe.num_outputs())
-            .map(|i| DeviceBuffer::<u8>::with_capacity_on(exe.output_size(i), ctx))
-            .collect();
-        let mut scratch = DeviceBuffer::<u8>::with_capacity_on(exe.scratch_bytes().max(1), ctx);
-        exe.run(ctx, &inputs, &mut outputs, &mut scratch)
-            .expect("graph run");
+        exe.run(ctx).expect("graph run");
 
         let collect = |bids: &[BufId]| -> Vec<Vec<u8>> {
             bids.iter()
@@ -3296,7 +3290,7 @@ mod tests {
                     let idx = (0..exe.num_outputs())
                         .find(|&i| exe.output_buf_id(i) == bid)
                         .expect("layer buf in outputs");
-                    outputs[idx].to_host_on(ctx).expect("D2H")
+                    exe.get_output(idx).to_host_on(ctx).expect("D2H")
                 })
                 .collect()
         };
@@ -3382,25 +3376,21 @@ mod tests {
         g.insert_memcpy(numer, numer_out);
         let denom_out = add_ext_scalar_buf(&mut g, device, "denom_out");
         g.insert_memcpy(denom, denom_out);
+        g.register_output(numer_out);
+        g.register_output(denom_out);
 
         let mut exe = GraphCompiler::new()
             .device(device)
             .compile_options(CompileOptions::default())
             .compile(g)
             .expect("graph compile");
-        let inputs: Vec<DeviceBuffer<u8>> = Vec::new();
-        let mut outputs: Vec<DeviceBuffer<u8>> = (0..exe.num_outputs())
-            .map(|i| DeviceBuffer::<u8>::with_capacity_on(exe.output_size(i), ctx))
-            .collect();
-        let mut scratch = DeviceBuffer::<u8>::with_capacity_on(exe.scratch_bytes().max(1), ctx);
-        exe.run(ctx, &inputs, &mut outputs, &mut scratch)
-            .expect("graph run");
+        exe.run(ctx).expect("graph run");
 
         let ef_from = |bid: BufId| -> EF {
             let idx = (0..exe.num_outputs())
                 .find(|&i| exe.output_buf_id(i) == bid)
                 .expect("output buf");
-            let bytes: Vec<u8> = outputs[idx].to_host_on(ctx).expect("D2H");
+            let bytes: Vec<u8> = exe.get_output(idx).to_host_on(ctx).expect("D2H");
             assert_eq!(bytes.len(), size_of::<EF>());
             unsafe { std::ptr::read_unaligned(bytes.as_ptr() as *const EF) }
         };
@@ -3470,31 +3460,33 @@ mod tests {
     }
 
     /// Compile a graph with no runtime inputs, run it, and read back the
-    /// given buffers as raw bytes. Each buffer must be a graph output —
-    /// either reader-less (auto-detected) or an `insert_memcpy` destination.
+    /// given buffers as raw bytes. Each buffer is registered as a graph
+    /// output here, so it must have a writer (e.g. be an `insert_memcpy`
+    /// destination).
     ///
     /// Uses the heuristic scheduler: the full-driver graphs are too large
     /// for CP-SAT to find an incumbent within its wall-time cap.
-    fn run_graph_read_bufs(g: GraphBuilder, bufs: &[BufId], ctx: &GpuDeviceCtx) -> Vec<Vec<u8>> {
+    fn run_graph_read_bufs(
+        mut g: GraphBuilder,
+        bufs: &[BufId],
+        ctx: &GpuDeviceCtx,
+    ) -> Vec<Vec<u8>> {
+        for &b in bufs {
+            g.register_output(b);
+        }
         let mut exe = GraphCompiler::new()
             .device(DeviceType::Cuda(0))
             .scheduler(SchedulerMode::Heuristic)
             .compile_options(CompileOptions::default())
             .compile(g)
             .expect("graph compile");
-        let inputs: Vec<DeviceBuffer<u8>> = Vec::new();
-        let mut outputs: Vec<DeviceBuffer<u8>> = (0..exe.num_outputs())
-            .map(|i| DeviceBuffer::<u8>::with_capacity_on(exe.output_size(i), ctx))
-            .collect();
-        let mut scratch = DeviceBuffer::<u8>::with_capacity_on(exe.scratch_bytes().max(1), ctx);
-        exe.run(ctx, &inputs, &mut outputs, &mut scratch)
-            .expect("graph run");
+        exe.run(ctx).expect("graph run");
         bufs.iter()
             .map(|&bid| {
                 let idx = (0..exe.num_outputs())
                     .find(|&i| exe.output_buf_id(i) == bid)
                     .expect("output buf");
-                outputs[idx].to_host_on(ctx).expect("D2H")
+                exe.get_output(idx).to_host_on(ctx).expect("D2H")
             })
             .collect()
     }
@@ -4323,8 +4315,8 @@ mod tests {
                 .expect("fractional_sumcheck_gpu_ir");
 
         // Every artifact has in-graph readers (transcript observes / later
-        // kernels), so memcpy each into a fresh reader-less buffer to make
-        // it a graph output.
+        // kernels), so memcpy each into a fresh buffer that
+        // `run_graph_read_efs` registers as a graph output.
         let mut exports: Vec<BufId> = Vec::new();
         let export = |g: &mut GraphBuilder, src: BufId, name: String| {
             let out = add_ext_scalar_buf(g, device, &name);
@@ -4614,12 +4606,14 @@ mod tests {
             device,
         )
         .expect("fractional_sumcheck_gpu_ir");
-        // Give the graph explicit outputs; every proof artifact already has
-        // in-graph readers, so export the root sum via memcpy.
+        // Give the graph registered outputs; every proof artifact already
+        // has in-graph readers, so export the root sum via memcpy. Without
+        // registered outputs DCE would delete the whole graph.
         let (root_p, root_q) = proof.fractional_sum;
         for (src, name) in [(root_p, "out_root_p"), (root_q, "out_root_q")] {
             let out = add_ext_scalar_buf(&mut g, device, name);
             g.insert_memcpy(src, out);
+            g.register_output(out);
         }
 
         let dir = std::env::var_os("CRYPTO_COMPILER_DUMP_IR")
@@ -4730,9 +4724,9 @@ mod tests {
     /// and the graph pipeline split into build (host), compile (planner +
     /// JIT), and execution. Both sides start from device-resident leaves:
     /// the eager prover consumes its input buffer directly, while the
-    /// graph copies its input buffer D2D into a scratch working layer
-    /// (the driver folds the layer in place, so the input would otherwise
-    /// gain writers and stop being a graph input).
+    /// graph copies its registered input D2D into a scratch working layer
+    /// (the driver folds the layer in place, and registered graph inputs
+    /// must not have writers).
     ///
     /// The round strategy follows the ambient `SWIRL_CUDA_GKR_PRECOMPUTE_M*`
     /// env on both sides. Sizes via `FRAC_BENCH_LOG_N` (comma-separated
@@ -4773,9 +4767,6 @@ mod tests {
             alpha: EF,
             eager_sum: (EF, EF),
             exe: GraphExe,
-            inputs: Vec<DeviceBuffer<u8>>,
-            outputs: Vec<DeviceBuffer<u8>>,
-            scratch: DeviceBuffer<u8>,
             exports: Vec<BufId>,
             build_ms: f64,
             compile_ms: f64,
@@ -4834,6 +4825,7 @@ mod tests {
             let input = add_frac_ef_buf(&mut g, device, "leaves_in", n);
             let layer = add_frac_ef_buf(&mut g, device, "leaves_work", n);
             g.insert_memcpy(input, layer);
+            g.register_input(input);
             let proof_ir = fractional_sumcheck_gpu_ir(
                 &mut g,
                 &mut transcript,
@@ -4852,6 +4844,7 @@ mod tests {
                 .map(|(src, name)| {
                     let out = add_ext_scalar_buf(&mut g, device, name);
                     g.insert_memcpy(src, out);
+                    g.register_output(out);
                     out
                 })
                 .collect();
@@ -4876,17 +4869,11 @@ mod tests {
 
             assert_eq!(exe.num_inputs(), 1, "leaves should be the only input");
             let d_input = frac_bytes(&leaves).to_device_on(&ctx).expect("H2D");
-            let inputs: Vec<DeviceBuffer<u8>> = vec![d_input];
-            let mut outputs: Vec<DeviceBuffer<u8>> = (0..exe.num_outputs())
-                .map(|i| DeviceBuffer::<u8>::with_capacity_on(exe.output_size(i), &ctx))
-                .collect();
-            let mut scratch =
-                DeviceBuffer::<u8>::with_capacity_on(exe.scratch_bytes().max(1), &ctx);
+            exe.set_input(&ctx, 0, &d_input).expect("set_input");
 
             // Graph exec warmup.
             ctx.stream.synchronize().expect("sync");
-            exe.run(&ctx, &inputs, &mut outputs, &mut scratch)
-                .expect("graph warmup");
+            exe.run(&ctx).expect("graph warmup");
             ctx.stream.synchronize().expect("sync");
 
             states.push(PerSize {
@@ -4897,9 +4884,6 @@ mod tests {
                 alpha,
                 eager_sum,
                 exe,
-                inputs,
-                outputs,
-                scratch,
                 exports,
                 build_ms,
                 compile_ms,
@@ -4946,9 +4930,7 @@ mod tests {
             for _ in 0..ITERS {
                 ctx.stream.synchronize().expect("sync");
                 let t0 = Instant::now();
-                st.exe
-                    .run(&ctx, &st.inputs, &mut st.outputs, &mut st.scratch)
-                    .expect("graph run");
+                st.exe.run(&ctx).expect("graph run");
                 ctx.stream.synchronize().expect("sync");
                 st.graph_ms.push(t0.elapsed().as_secs_f64() * 1e3);
             }
@@ -4985,7 +4967,7 @@ mod tests {
                 let idx = (0..st.exe.num_outputs())
                     .find(|&i| st.exe.output_buf_id(i) == bid)
                     .expect("export output index");
-                ef_from_bytes(&st.outputs[idx].to_host_on(&ctx).expect("D2H"))
+                ef_from_bytes(&st.exe.get_output(idx).to_host_on(&ctx).expect("D2H"))
             };
             let got_sum = (read_export(st.exports[0]), read_export(st.exports[1]));
             assert_eq!(

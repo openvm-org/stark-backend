@@ -38,7 +38,6 @@ use openvm_cuda_backend::{
 };
 use openvm_cuda_common::{
     common::get_device,
-    d_buffer::DeviceBuffer,
     stream::{CudaStream, GpuDeviceCtx, StreamGuard},
 };
 use openvm_stark_backend::prover::fractional_sumcheck_gkr::Frac;
@@ -185,15 +184,10 @@ fn bench_graph(
         .scheduler(SchedulerMode::Heuristic)
         .compile_options(CompileOptions::default())
         .compile(g)?;
-    let inputs: Vec<DeviceBuffer<u8>> = Vec::new();
-    let mut outputs: Vec<DeviceBuffer<u8>> = (0..exe.num_outputs())
-        .map(|i| DeviceBuffer::<u8>::with_capacity_on(exe.output_size(i), ctx))
-        .collect();
-    let mut scratch = DeviceBuffer::<u8>::with_capacity_on(exe.scratch_bytes().max(1), ctx);
 
     // Warmup.
     for _ in 0..warmup {
-        exe.run(ctx, &inputs, &mut outputs, &mut scratch)?;
+        exe.run(ctx)?;
     }
     ctx.stream.synchronize()?;
 
@@ -201,7 +195,7 @@ fn bench_graph(
     let mut samples: Vec<f64> = Vec::with_capacity(iters);
     for _ in 0..iters {
         let t0 = Instant::now();
-        exe.run(ctx, &inputs, &mut outputs, &mut scratch)?;
+        exe.run(ctx)?;
         ctx.stream.synchronize()?;
         samples.push(t0.elapsed().as_secs_f64() * 1e3);
     }
@@ -286,6 +280,7 @@ fn bench_fold_ef_frac_columns(
         // Add a memcpy target to force `dst_buf` to be materialized.
         let out = add_frac_ef_buf(&mut g, "dst_out", size / 2);
         g.insert_memcpy(dst_buf, out);
+        g.register_output(out);
         bench_graph(g, ctx, warmup, iters)
             .map_err(|e| notes.push_str(&format!("BB err: {e}; ")))
             .ok()
@@ -298,6 +293,7 @@ fn bench_fold_ef_frac_columns(
         fold_ef_frac_columns_ir_dsl(&mut g, src_buf, dst_buf, size, r_buf);
         let out = add_frac_ef_buf(&mut g, "dst_out", size / 2);
         g.insert_memcpy(dst_buf, out);
+        g.register_output(out);
         bench_graph(g, ctx, warmup, iters)
             .map_err(|e| notes.push_str(&format!("DSL err: {e}; ")))
             .ok()
@@ -342,6 +338,7 @@ fn bench_frac_compute_round(
         frac_compute_round_ir_bufid(&mut g, &eq_xi, pq_buf, num_x, lambda_buf, out_buf, tmp_buf);
         let out_out = add_ef_buf(&mut g, "out_out", 2);
         g.insert_memcpy(out_buf, out_out);
+        g.register_output(out_out);
         bench_graph(g, ctx, warmup, iters)
             .map_err(|e| notes.push_str(&format!("BB err: {e}; ")))
             .ok()
@@ -371,6 +368,7 @@ fn bench_frac_compute_round(
         );
         let out_out = add_ef_buf(&mut g, "out_out", 2);
         g.insert_memcpy(out_buf, out_out);
+        g.register_output(out_out);
         bench_graph(g, ctx, warmup, iters)
             .map_err(|e| notes.push_str(&format!("DSL err: {e}; ")))
             .ok()
@@ -421,6 +419,7 @@ fn bench_frac_compute_round_and_revert(
         );
         let out_out = add_ef_buf(&mut g, "out_out", 2);
         g.insert_memcpy(out_buf, out_out);
+        g.register_output(out_out);
         bench_graph(g, ctx, warmup, iters)
             .map_err(|e| notes.push_str(&format!("BB err: {e}; ")))
             .ok()
@@ -449,6 +448,7 @@ fn bench_frac_compute_round_and_revert(
         );
         let out_out = add_ef_buf(&mut g, "out_out", 2);
         g.insert_memcpy(out_buf, out_out);
+        g.register_output(out_out);
         bench_graph(g, ctx, warmup, iters)
             .map_err(|e| notes.push_str(&format!("DSL err: {e}; ")))
             .ok()
@@ -510,6 +510,7 @@ fn bench_frac_compute_round_and_fold(
         );
         let out_out = add_ef_buf(&mut g, "out_out", 2);
         g.insert_memcpy(out_buf, out_out);
+        g.register_output(out_out);
         bench_graph(g, ctx, warmup, iters)
             .map_err(|e| notes.push_str(&format!("BB err: {e}; ")))
             .ok()
@@ -540,6 +541,7 @@ fn bench_frac_compute_round_and_fold(
         );
         let out_out = add_ef_buf(&mut g, "out_out", 2);
         g.insert_memcpy(out_buf, out_out);
+        g.register_output(out_out);
         bench_graph(g, ctx, warmup, iters)
             .map_err(|e| notes.push_str(&format!("DSL err: {e}; ")))
             .ok()
@@ -584,6 +586,7 @@ fn bench_frac_precompute_m_eval_round(
         frac_precompute_m_eval_round_ir(&mut g, m_buf, ep_buf, es_buf, out_buf, w, t);
         let out_out = add_ef_buf(&mut g, "out_out", 2);
         g.insert_memcpy(out_buf, out_out);
+        g.register_output(out_out);
         bench_graph(g, ctx, warmup, iters)
             .map_err(|e| notes.push_str(&format!("BB err: {e}; ")))
             .ok()
@@ -597,6 +600,7 @@ fn bench_frac_precompute_m_eval_round(
         frac_precompute_m_eval_round_ir_dsl(&mut g, m_buf, ep_buf, es_buf, out_buf, w, t);
         let out_out = add_ef_buf(&mut g, "out_out", 2);
         g.insert_memcpy(out_buf, out_out);
+        g.register_output(out_out);
         bench_graph(g, ctx, warmup, iters)
             .map_err(|e| notes.push_str(&format!("DSL err: {e}; ")))
             .ok()
@@ -642,6 +646,7 @@ fn bench_frac_multifold(
         );
         let dst_out = add_frac_ef_buf(&mut g, "dst_out", dst_len);
         g.insert_memcpy(dst_buf, dst_out);
+        g.register_output(dst_out);
         bench_graph(g, ctx, warmup, iters)
             .map_err(|e| notes.push_str(&format!("BB err: {e}; ")))
             .ok()
@@ -654,6 +659,7 @@ fn bench_frac_multifold(
         frac_multifold_ir_dsl(&mut g, src_buf, dst_buf, eq_buf, tail_size, w);
         let dst_out = add_frac_ef_buf(&mut g, "dst_out", dst_len);
         g.insert_memcpy(dst_buf, dst_out);
+        g.register_output(dst_out);
         bench_graph(g, ctx, warmup, iters)
             .map_err(|e| notes.push_str(&format!("DSL err: {e}; ")))
             .ok()
@@ -695,6 +701,7 @@ fn bench_frac_build_tree_layer_revert(
         );
         let layer_out = add_frac_ef_buf(&mut g, "layer_out", layer_size);
         g.insert_memcpy(layer, layer_out);
+        g.register_output(layer_out);
         bench_graph(g, ctx, warmup, iters)
             .map_err(|e| notes.push_str(&format!("BB err: {e}; ")))
             .ok()
@@ -706,6 +713,7 @@ fn bench_frac_build_tree_layer_revert(
         frac_build_tree_layer_revert_ir_dsl(&mut g, src, dst, layer_size);
         let dst_out = add_frac_ef_buf(&mut g, "dst_out", layer_size);
         g.insert_memcpy(dst, dst_out);
+        g.register_output(dst_out);
         bench_graph(g, ctx, warmup, iters)
             .map_err(|e| notes.push_str(&format!("DSL err: {e}; ")))
             .ok()
@@ -742,6 +750,7 @@ fn bench_frac_build_tree_two_layers(
         frac_build_tree_two_layers_ir(&mut g, layer, layer_size, half_i1, layer_size, alpha);
         let layer_out = add_frac_ef_buf(&mut g, "layer_out", layer_size);
         g.insert_memcpy(layer, layer_out);
+        g.register_output(layer_out);
         bench_graph(g, ctx, warmup, iters)
             .map_err(|e| notes.push_str(&format!("BB err: {e}; ")))
             .ok()
@@ -753,6 +762,7 @@ fn bench_frac_build_tree_two_layers(
         frac_build_tree_two_layers_ir_dsl(&mut g, src, dst, half_i1);
         let dst_out = add_frac_ef_buf(&mut g, "dst_out", layer_size);
         g.insert_memcpy(dst, dst_out);
+        g.register_output(dst_out);
         bench_graph(g, ctx, warmup, iters)
             .map_err(|e| notes.push_str(&format!("DSL err: {e}; ")))
             .ok()

@@ -58,3 +58,16 @@ Plonky3 crates are exact-version crates.io dependencies pinned in the workspace 
 - `test-utils` feature gate for test fixtures/helpers — tests that need it use `#[cfg(feature = "test-utils")]`
 - Integration tests in `crates/stark-backend/tests/`
 - Formatting: `imports_granularity = "Crate"`, `group_imports = "StdExternalCrate"`
+
+## NSYS profiling 
+
+For all nsys profiles:
+- use `cudaProfilerStart/Stop` around the core computation, do not include setup time 
+- add nvtx ranges around the core computation with a descriptive name 
+- if there are multiple workloads, you should 
+  1. setup all the workloads prior to cudaProfilerStart 
+  2. wrap each workload in a nvtx range 
+  3. profile all the workloads, do not generate multiple nsys-reps for each workload
+- always use `--cuda-graph-trace=node` unless explicitly asked not to
+- always use `--gpu-metrics-devices=visible` unless explicitly asked not to
+

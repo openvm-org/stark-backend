@@ -1046,27 +1046,29 @@ mod dsl_port_tests {
     }
 
     /// Compile a graph with no runtime inputs, run it, and read back the
-    /// given buffers as raw bytes.
-    fn run_graph_read_bufs(g: GraphBuilder, bufs: &[BufId], ctx: &GpuDeviceCtx) -> Vec<Vec<u8>> {
+    /// given buffers as raw bytes. Registers each buffer as a graph output
+    /// before compiling.
+    fn run_graph_read_bufs(
+        mut g: GraphBuilder,
+        bufs: &[BufId],
+        ctx: &GpuDeviceCtx,
+    ) -> Vec<Vec<u8>> {
+        for &b in bufs {
+            g.register_output(b);
+        }
         let mut exe = GraphCompiler::new()
             .device(DeviceType::Cuda(0))
             .scheduler(SchedulerMode::Heuristic)
             .compile_options(CompileOptions::default())
             .compile(g)
             .expect("graph compile");
-        let inputs: Vec<DeviceBuffer<u8>> = Vec::new();
-        let mut outputs: Vec<DeviceBuffer<u8>> = (0..exe.num_outputs())
-            .map(|i| DeviceBuffer::<u8>::with_capacity_on(exe.output_size(i), ctx))
-            .collect();
-        let mut scratch = DeviceBuffer::<u8>::with_capacity_on(exe.scratch_bytes().max(1), ctx);
-        exe.run(ctx, &inputs, &mut outputs, &mut scratch)
-            .expect("graph run");
+        exe.run(ctx).expect("graph run");
         bufs.iter()
             .map(|&bid| {
                 let idx = (0..exe.num_outputs())
                     .find(|&i| exe.output_buf_id(i) == bid)
                     .expect("output buf");
-                outputs[idx].to_host_on(ctx).expect("D2H")
+                exe.get_output(idx).to_host_on(ctx).expect("D2H")
             })
             .collect()
     }

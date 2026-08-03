@@ -102,9 +102,14 @@ For producer node `P` writing buffer `B`, consumer node `C` reading `B`:
    order (insertion order is a valid topo order). Otherwise recomputing `P`'s expression at
    `C`'s position would read clobbered inputs.
 3. **No output aliasing**: `writes(C) ∩ reads(P) = ∅`.
-4. **Elimination eligibility** (to delete `P` and `B` afterwards): `C` is `B`'s only reader and
-   `B` is internal (allocated by `insert_subgraph_impl`, not a user/planner buffer). Fusion
-   while *retaining* `P` is a v2 extension (see restrictions table).
+4. **Fusability of `B`**: `B` is not a registered interface buffer
+   (`GraphBuilder::buf_is_interface`) — anything not registered via
+   `register_input`/`register_output` is internal and optimizable. `B` may have any number
+   of kernel readers: enumeration emits one candidate per `(P, C_i)` pair, and each pair
+   individually eliminates only `C_i`'s reads of `B`. `P` and `B` are removed only once
+   the last reader has been fused away (DCE, section 9); the cost model (section 7)
+   amortizes those "one-shot" savings over the readers so that the arithmetic mean is
+   what steers per-pair selection.
 
 ---
 
@@ -123,9 +128,13 @@ scalar producer:
     graft:   B[r_s]  ==>  alpha(E_P)[o_P := emit(r_s)]
 
 pack-k producer:
-    c = simplify(r_s mod k, bounds)
-    if c is Const(c0):
-        graft member c0 of E_P with  o_P <- r_s div k
+    # [found during implementation] resolved by a structural splitter
+    # split_div_rem(r_s, k) -> Option<(div, const rem)> rather than a range
+    # analysis: constants split euclid-style, Add carries remainders, Mul
+    # divides through or recurses, Neg flips (k*d + r -> k*(-d-1) + (k-r));
+    # Sym / FloorDiv are opaque -> None.
+    if split_div_rem(r_s, k) == Some((q, c0)):
+        graft member c0 of E_P with  o_P <- q       # q == r_s div k
     else:
         reject in v1                          # v2: Select chain over members
 ```
@@ -229,9 +238,11 @@ b. **Node replacement**: `replace_nodes(b: &mut IRBuilder, root: NodeId, map: &H
    — memoized bottom-up rebuild. Because the IR is hash-consed, syntactically identical `Index`
    nodes are the *same* `NodeId`, so a NodeId-keyed map replaces all occurrences of a read site
    at once.
-c. **Buffer provenance**: add `internal: bool` to `BufInfo`, set by `insert_subgraph_impl` for
-   auto-allocated intermediates (`{subgraph}.k{ki}.o{oi}`). Used for elimination eligibility
-   (precondition 4) and as DCE roots (non-internal = live).
+c. **Buffer provenance**: explicit interface registration on `GraphBuilder`
+   (`register_input`/`register_output`); `buf_is_interface` is the single source of truth for
+   elimination eligibility (precondition 4) and DCE roots (registered = live). Everything
+   unregistered — including user-`add_buf`'d intermediates — is internal and optimizable.
+   (Supersedes the earlier `internal: bool` on `BufInfo` idea.)
 d. **Export `should_tree_lower`** from `parallel_reduce_rewrite` for the MultiKernel classifier.
    Caveat: the classifier must evaluate it against the *pre-canonicalize* nest shape, since
    `rewrite_parallel_reduce` runs before canonicalize in `compile_and_load` and never sees the
@@ -246,7 +257,18 @@ e. **Flatten perfect nests in canonicalize.** Today `flatten_nests` (canonicaliz
    - `inner_lets.is_empty()` — let-bound tiles are per-outer-iteration shared memory;
      flattening the outer domain would scalarize/recompute them;
    - outer `threads.is_none()` — an explicit `#[grid(threads = ...)]` is keyed to the outer
-     domain size.
+     domain size;
+   - **[found during implementation]** every load index in the rewritten body must stay
+     provably emittable. Rewriting two independent symbols `(i, j)` into `t/M`/`t%M` forms
+     can defeat the non-negativity proof `Quast::emit` runs on floor-division operands
+     (interval analysis is non-relational: `v - 4*(v/12) + 1` from
+     `gpu_macro::macro_batch_rotate_pad` gets naive range `[-43, 144]` even though it is
+     always ≥ 1), and `Node::Index` lowering has no fallback for un-emittable indices. So
+     the absorption is *speculative*: substitute into copies, probe every reachable load
+     index with `hir_to_quast` + `Quast::emit` against a no-op `ProbeEmitter`
+     (`loads_emittable` in canonicalize.rs), and keep the nest if any index fails. The
+     reduce-lowered micro-stages have flat contiguous indices (`(t/M)*M + t%M` → `t`), so
+     they always pass.
 
    Scatters are no obstacle: both outer and inner scatters are already composed into a
    flat-domain `scatter_store` before flattening (canonicalize.rs:362, :417), and a flat
@@ -273,6 +295,10 @@ struct AccessRelation {
     cost: KernelCost,
     class: KernelClass,                  // Simple | General | MultiKernel
     write_inverse: Option<InverseMap>,   // for case B
+    // [found during implementation] two extra fields stage 2 needs:
+    inner_var: Option<VarId>,            // trailing inner-compute binder (case-B sigma target)
+    scalar_body: bool,                   // no tiles/#[grid]/inner par/reduce/nested compute;
+                                         // required of every producer (result must graft)
 }
 
 enum InverseMap {
@@ -285,19 +311,28 @@ struct ReadAccess {
     site: NodeId,                        // the Index node (hash-consed => unique per shape)
     expr: Option<Quast>,                 // None => non-affine site, vetoes fusion through it
     inner: Vec<(VarId, usize)>,          // binders in scope at the site + bounds (U_s)
-    site_env: BTreeMap<VarId, NodeId>,   // for re-emission via NodeEmitter
+    // [found during implementation] no site_env field: stage 3 rebuilds the
+    // emission env by interning Var nodes on the (mutable, cloned) consumer
+    // builder — hash-consing returns the existing NodeIds.
 }
 
 struct WriteAccess {
     out_pos: usize,
     len_elems: usize,
     inner_factor: usize,                 // M*k (tile * pack)
+    elem_bytes: usize,                   // |elem| for the mem_saved term
 }
 
 struct KernelCost {
+    // [found during implementation] all quantities are per *outer iteration
+    // point* (per value of the outer compute var), not per output element:
+    // pack width and the trailing inner-compute bound are folded in. The two
+    // coincide for Simple kernels with scalar results — the dominant fusion
+    // producers. Tile (inner_let) bodies are charged at their own bound per
+    // point (computed once per block).
     flops_per_elem: f64,      // weighted op count of the result expr (equivalent-u32-op units)
-    bytes_in_per_elem: f64,   // global-load bytes per output element
-    bytes_out_per_elem: f64,  // global-store bytes per output element (elem size * pack k)
+    bytes_in_per_elem: f64,   // global-load bytes per outer point
+    bytes_out_per_elem: f64,  // global-store bytes per outer point (elem size * pack k * inner bound)
     body_ops: usize,          // raw node count, guards code-size blowup
 }
 ```
@@ -306,7 +341,9 @@ struct KernelCost {
 
 ```text
 extract(g: &GraphBuilder) -> HashMap<node_idx, Arc<AccessRelation>>:
-    cache: HashMap<[u8;32], Arc<AccessRelation>>   # keyed by module_hash, survives rounds
+    cache: HashMap<[u8;32], Option<Arc<AccessRelation>>>
+        # keyed by module_hash, survives rounds; None caches extraction
+        # failures so unsupported kernels are not re-canonicalized per round
     for each GraphNode::Kernel node:
         if cache hit: reuse
         else:
@@ -347,7 +384,13 @@ struct SiteRewrite {
     index_node: NodeId,                 // read site in dst to replace
     sigma: BTreeMap<VarId, Quast>,      // producer binder -> index expr
     pack_elem: Option<usize>,           // which pack member to graft
-    site_env: BTreeMap<VarId, NodeId>,
+    // [found during implementation] no site_env field, same reason as
+    // ReadAccess: the NodeEmitter interns Var nodes on the consumer builder.
+    bounds: BTreeMap<VarId, u64>,       // [found during implementation] bounds of the
+                                        // consumer binders in sigma (outer var + the
+                                        // site's inner binders); Quast::emit requires
+                                        // them, and stage 3 has no other way to
+                                        // reconstruct reduce-binder bounds.
 }
 ```
 
@@ -355,19 +398,25 @@ struct SiteRewrite {
 
 ```text
 enumerate:
-    for each internal buffer B with writers[B] == [src] and readers[B] == [dst]:
-        run dispatch (section 4); if Some -> build FusionInfo
-        WAR check: binary-search sorted writer lists of src's inputs
-                   for a writer index in (src, dst)
+    for each internal buffer B with writers[B] == [src] and readers[B] non-empty:
+        for each dst in readers[B]:                        # one candidate per reader
+            run dispatch (section 4); if Some -> build FusionInfo
+            WAR check: scan writer lists of src's inputs for a writer index in
+                       (src, dst)   # lists are tiny; linear scan in practice
+            score with n_readers = len(readers[B])         # amortizes shared savings
 
 score:
     see "Cost model" below; reject if src.body_ops + dst.body_ops > max_body_ops
     keep candidates with score > 0
 
-select (disjoint pairs):
+select (dst-disjoint):
     greedy max-weight matching:
-        sort candidates by score desc
-        accept candidate iff neither src nor dst already used (FixedBitSet)
+        sort candidates by score desc, ties on (src, dst) for determinism
+        accept candidate iff:
+            - c.dst not already picked as a dst (rewrites clash), AND
+            - c.dst not already picked as a src (would rewrite a shared source), AND
+            - c.src not already picked as a dst (its module was just rewritten)
+        # a src may appear in many picks (apply_fusion never rewrites the src node)
     # 1/2-approximation is fine; the fixpoint loop mops up chains across rounds
 ```
 
@@ -419,24 +468,33 @@ R            = evals_after / |B|          # average recomputes per producer elem
 ```
 
 - `evals_after > |B|`: overlapping reads recompute the producer (the example below has R = 2).
-- `evals_after < |B|`: C subsamples B — the sole-reader precondition means the untouched part
-  of B was dead work, so fusion *saves* producer flops; the delta goes negative on its own.
+- `evals_after < |B| / n_readers`: this reader subsamples its share of B — assuming the
+  other readers cover the rest, the untouched part was dead work; the delta goes negative on
+  its own. (The heuristic assumes uniform reader coverage. In practice, if the total
+  `sum_i evals_after_i` is less than `|B|`, `P` is doing dead work even before fusion, and
+  the amortized model correctly signals a saving whenever every pair fuses.)
 - A site under `reduce [K]` has `vol = C.outer_bound * K`: fusing into reduce bodies is legal
   (case A admits MultiKernel consumers) but the K-fold recompute usually kills profitability
   unless the producer is near-free (broadcast, cheap affine gather).
 - Two sites with the *same* index expression are the same hash-consed `NodeId`, hence one
   site — the model never double-charges reads that CSE will merge anyway.
 
-**Deltas.** Three terms, all in bytes or weighted ops:
+**Deltas.** All in bytes or weighted ops; every quantity is *per pair* `(P, C_i)`. `share =
+1/n_readers` amortizes the "one-shot" savings — the producer's B-store and its launch die
+only once, when the *last* remaining reader is fused (DCE, section 9).
 
 ```text
-mem_saved   = (|B| + evals_after) * bytes(B.elem)
-              # B's store (|B| elems) + every load of B in C (evals_after elems)
+share       = 1 / n_readers                                # 1 when C_i is the sole reader
+b_share     = |B| * share
+excess      = evals_after - b_share
 
-mem_added   = gamma * (evals_after - |B|) * bytes_in_per_elem(P)
+mem_saved   = (b_share + evals_after) * bytes(B.elem)
+              # this reader's B-loads always die + this pair's share of B's store
+
+mem_added   = gamma * excess * bytes_in_per_elem(P)
               # each graft re-reads P's inputs; only the replication excess is charged
 
-extra_flops = (evals_after - |B|) * flops_per_elem(P)
+extra_flops = excess * flops_per_elem(P)
 ```
 
 `gamma ∈ [0, 1]` is a cache discount on the replicated producer loads: grafted sites re-read
@@ -449,9 +507,22 @@ actual overlap ratio.
 
 ```text
 score = (mem_saved - mem_added) / BW_eff
-      + LAUNCH_COST
+      + share * LAUNCH_COST
       - extra_flops / FLOP_eff
 ```
+
+When `n_readers = 1` (`share = 1`, `b_share = |B|`) this collapses to the original
+sole-reader formula — `mem_saved = (|B| + evals_after) * bytes(B.elem)`, full `LAUNCH_COST`,
+`extra_flops = (evals_after - |B|) * flops_per_elem(P)`. When all `n` readers are eventually
+fused (possibly across rounds), the sum of per-pair scores telescopes to that same
+sole-reader saving: `sum_i mem_saved = (|B| + sum_i evals_after_i) * bytes(B.elem)`, `sum_i
+share * LAUNCH_COST = LAUNCH_COST`, and likewise for `mem_added` and `extra_flops`.
+
+**Heuristic caveat.** The amortization over-attributes savings to individual pairs when only
+a proper subset of readers ends up fused (a per-pair score claims a share of a launch that
+doesn't actually die). In practice the read term dominates whenever fusion is close to the
+decision boundary, and the sole-reader case falls out of the same expression at the round
+that fuses the last reader.
 
 Two regimes fall out naturally:
 
@@ -496,28 +567,55 @@ for K beyond a handful the replicated FpExt work swamps the savings.
 
 ## 8. Stage 3 — applying a fusion (module surgery)
 
+> **[found during implementation]** The originally planned
+> `replace_nodes(mb, dst_body, inlined)` on the raw module body is wrong:
+> `canonicalize` returns the *original* body unchanged and exposes the kernel
+> as a peeled **view** — scalar lets are removed into `inline_lets`, and nest
+> absorption creates rewritten nodes that the raw body does not contain. Site
+> `NodeId`s recorded in stage 1 live in those view nodes, so grafting into the
+> raw body silently misses absorbed-nest consumers. The implementation instead
+> **rebuilds the merged module from the canonical kernel view** (below), and
+> `canonicalize`'s absorption probe was made deterministic (sorted inline-let
+> substitution order) so that re-canonicalizing reproduces stage-1 `NodeId`s.
+
 ```text
-apply_fusion(g, cand):
-    mb = clone of dst's IRBuilder                     # IRBuilder: Clone
+apply_fusion(g, cand):                          # error => caller skips, never panic
+    re-canonicalize src and dst modules         # deterministic: stage-1 ids stay valid
+    v1 consumer restrictions: no inner_lets (tiles), no scatter_store
+    mb = dst canonical builder (moved out of the Program)
 
-    # cross-copy of producer body — the main correctness trap:
-    # src and dst modules come from different builders, so their VarIds collide
-    # (split_module preserves VarIds verbatim). Unlike split_module::Extract,
-    # the walker here must ALPHA-RENAME EVERY src binder
-    # (Compute / Reduce / Let vars -> mb.fresh_var()).
-    CrossCopy walker (template: split_module.rs:180 Extract):
-        src Input(k)  ->  if dst already binds the same BufId: reuse that input NodeId
-                          else: fresh mb.input(); record appended BufIds in first-use order
-        src outer/inner vars -> NodeEmitter-emitted sigma exprs per site (typed U32)
-        pack_elem selects the Pack member
+    # phase 1 — per SiteRewrite, prepare the grafted producer expr in mb:
+    sigma exprs emitted via NodeEmitter over site.bounds (typed U32);
+    pack_elem selects the producer Pack member;
+    cross-copy the member expr from src's builder into mb:
+        src binder Vars   -> emitted sigma exprs (no binders are copied, so no
+                             alpha-renaming is needed in v1: scalar_body producers
+                             carry no Compute/Reduce binders, and scalar Lets are
+                             inlined on copy)
+        src inline_lets / env scalars -> chased and inlined
+        src Input(k)      -> reuse a dst input position iff same BufId and
+                             identical decl (elem + shape); else append a fresh
+                             mb.input() (name suffixed on collision); record
+                             appended BufIds in first-use order
+        Reduce/Compute/Tuple/Pack/Proj in the producer expr -> error
 
-    for each SiteRewrite: inlined[site.index_node] = grafted expr
-    body2 = replace_nodes(mb, dst_body, inlined)
-    merged = mb.finish(format!("{dst_name}__f__{src_name}"), body2)
+    # phase 2 — rebuild the consumer from its canonical view:
+    rewrite each result member: graft map first, dst inline_lets / env scalars
+    inlined back, everything else rebuilt structurally (binders verbatim)
+    re-wrap: members -> Pack/Tuple -> optional inner Compute (bound, var,
+    par = inner_par) -> outer Compute (outer_bound, outer_var, threads)
 
-    # validation — error => skip candidate, do not panic:
-    type_infer(merged)?
-    debug_assert!(split_module(&merged)?.kernels.len() == 1)
+    # residual-read check (safety net for any site-id mismatch):
+    walk the rebuilt body; any reachable Input(p) with dst_inputs[p] == B -> error
+
+    # drop fused input decls: one simultaneous replace_nodes renumber
+    # (images are used verbatim, so shifted positions cannot cascade),
+    # then remove_input_decl in descending order
+    merged = Module { name: "{dst_name}__f__{src_name}", builder: mb, body }
+
+    # validation — error => skip candidate:
+    type_infer(merged)? and canonicalize(merged)? must yield a single kernel
+    with dst's output count
 
     # graph surgery:
     nodes[dst] = Kernel(KernelModuleNode {
@@ -530,7 +628,7 @@ apply_fusion(g, cand):
 ```
 
 The single-top-level-compute invariant holds by construction: only scalar expressions are
-inlined into the consumer's existing compute; no new top-level bindings are created.
+inlined into the consumer's rebuilt compute; no new top-level bindings are created.
 
 ---
 
@@ -538,21 +636,30 @@ inlined into the consumer's existing compute; no new top-level bindings are crea
 
 ```text
 dce(g):
-    needed: FixedBitSet over BufIds      # init: all non-internal buffers
-    live:   FixedBitSet over nodes
+    needed: Vec<bool> over BufIds        # init: registered interface bufs (buf_is_interface)
+    live:   Vec<bool> over nodes         # (no fixedbitset dep in the workspace)
     for n in nodes.rev():                                  # reverse topo order
-        (reads, writes) = node_reads_writes(n)             # graph_ir.rs:806
+        (reads, writes) = g.node_reads_writes(n)           # graph_ir.rs, now pub(crate)
         live[n] = is_blackbox(n) || writes.any(|b| needed[b])
         if live[n]:
             needed |= reads                                # never clear bits:
                                                            # partial writes mean an earlier
                                                            # writer of a needed buf stays live
     retain live nodes; leave bufs table untouched
-    # (verify the planner ignores unreferenced bufs; if not, add buf compaction later)
 ```
 
 `BlackboxKernel` nodes are unconditionally live (opaque effects). `Const`/`Memset`/`Memcpy` are
 live iff a written buffer is needed.
+
+> **[found during implementation]** The planner did *not* ignore unreferenced bufs: an
+> orphaned packable buffer got `birth = -1` (no writer) and `death = n` (no reader) in
+> `pack_order`, i.e. a whole-program lifetime that inflates `peak_bytes` for nothing.
+> Rather than compacting the bufs table (which would renumber `BufId`s across every graph
+> node), `PlanCtx::packable` now also requires the buffer to have at least one reader or
+> writer; unreferenced bufs get no pool slot and no offset, which is safe because
+> `graph_exe` only resolves device pointers for buffers referenced by scheduled nodes.
+> Implemented as `pub fn dce(g) -> usize` (removed-node count, for the stage-5 report) in
+> `passes/fusion.rs`.
 
 ---
 
@@ -569,34 +676,55 @@ pub struct FusionOptions {
 }
 
 pub struct FusionReport {
-    pub rounds: usize,
+    pub rounds: usize,                   // rounds with >= 1 selected candidate
     pub fused: Vec<(String, String)>,    // (src_name, dst_name)
     pub nodes_before: usize,
     pub nodes_after: usize,
-    pub deduped: usize,                  // modules collapsed by stage 6
+    pub deduped: usize,                  // distinct-Arc drop from the stage 6 sweep
 }
 ```
 
 ```text
 fuse_graph(g, opts):
-    stage4_dce(g)        # DCE FIRST, before any analysis: a dead reader of B would
-                         # otherwise fail the single-reader precondition and inflate
-                         # evals_after in the cost model; dead producers waste extraction
+    stage4_dce(g)        # DCE FIRST, before any analysis: dead readers of B would
+                         # inflate n_readers (shrinking every pair's amortized share)
+                         # and dead producers waste extraction
     for round in 0..opts.max_iterations:
         (writers, readers) = classify_buf_uses(...)
         rels    = stage1(g)              # module_hash-cached across rounds
-        matched = stage2(g, rels, writers, readers)
+        matched = stage2(g, rels, writers, readers)   # per-pair candidates
         if matched.is_empty(): break
         for cand in matched: stage3(g, cand)     # skip on validation failure
-        stage4_dce(g)                            # clean up fused-away producers + B
+        stage4_dce(g)                            # producers whose last reader just fused
     stage6_dedup(g)      # after all fusion runs: alpha-normalize + dedup fused modules
                          # so identical patterns JIT-compile once (section 11)
     return report
 ```
 
-Termination: every applied fusion removes ≥ 1 node (single-reader precondition guarantees the
-producer dies in DCE), so the node count strictly decreases per productive round;
-`max_iterations` is a backstop.
+Termination: every applied fusion strictly decreases the total number of `(writer, reader)`
+edges over internal buffers — `apply_fusion` drops the fused buffer from `dst`'s inputs (so
+the `(P, C_i)` edge is gone) and adds only new edges to nodes topologically above `P`, which
+cannot re-open the same edge. That count is finite, so rounds eventually enumerate nothing;
+`max_iterations` is a backstop. Node count strictly decreases whenever a round fuses the
+*last* remaining reader of some producer (DCE then removes it). A round that selects
+candidates but applies none (every `apply_fusion` failed validation) also breaks the loop —
+re-enumerating would select the same set again.
+
+> **[found during implementation]** Compilation args: `GraphCompiler` runs `fuse_graph` by
+> default at the top of `compile()`; `.without_fusion()` disables the pass and
+> `.fusion_options(opts)` overrides the tunables. The `FusionReport` is exposed on the
+> compiled exe via `GraphExe::fusion_report()` (`None` when disabled).
+>
+> Orphaned-buffer fallout, part 2: `compile()` used to classify any on-device buffer with
+> no writer as a graph *input* and no reader as a graph *output* — a fusion-orphaned
+> intermediate (no writer *and* no reader) became both, so `run()` demanded phantom input
+> buffers. The auto-derivation is gone entirely: the graph interface is now the explicit
+> `register_input`/`register_output` sets, validated up front by `validate_interface`
+> (`graph_exe.rs`), and unreferenced buffers simply get no pool slot.
+>
+> End-to-end GPU coverage lives in `tests/gpu_graph.rs` (`--features planner`): a 3-kernel
+> chain compiled fused (default) and unfused (`.without_fusion()`) must agree with each
+> other and with a host-side reference, with the fused exe collapsing 3 nodes to 1.
 
 ---
 
@@ -642,6 +770,31 @@ themselves deduped, so equal patterns normally get equal names. If multi-round c
 produce name-divergent but structurally identical modules, either canonicalize merged names or
 split the dedup key from the display name — deferred until observed.
 
+> **[found during implementation]** Lives as `pub fn dedup_modules(g) -> usize` +
+> `renumber_module` in `passes/fusion.rs`; `fuse_graph` runs the sweep after the rounds and
+> records the distinct-Arc drop in `FusionReport::deduped`.
+>
+> Renumbering assigns new `VarId`s in *first-occurrence* order over the canonical post-order
+> walk (not first-*binder*-occurrence as sketched above): post-order emits a compute body
+> before the compute node itself, so `Var` uses precede their binder slot. That's fine — the
+> assignment order only needs to be structural, not scope-shaped. Scatter `bounds` keys are
+> always covered by the structurally-ordered `params` vec, so the `BTreeMap`'s raw-id
+> iteration order never decides an assignment.
+>
+> `apply_fusion` already content-dedups byte-identical merged modules via `dedup_module`
+> (so does `insert_kernel` at graph build time); the sweep specifically catches the
+> α-variants those hash-keyed maps miss.
+>
+> One-time cost: renumbering changes every module's hash, so existing on-disk JIT cache
+> entries (keyed by `module_hash_hex`) miss once and recompile under the new keys.
+> Subsequent compiles re-hit the cache — renumbering is deterministic and idempotent.
+>
+> Coverage: CPU tests in `passes/fusion.rs` (α-variant hash equality incl. scatter modules,
+> idempotence, `dedup_modules` Arc folding, `fuse_graph` end-to-end `deduped` count) and the
+> GPU test `alpha_variant_chains_dedup_and_match` in `tests/gpu_graph.rs` (two α-variant
+> chains fold onto one `Arc<Module>` — one JIT build, two launches — with numerics matching
+> a host reference).
+
 ## 12. v1 restrictions and how they lift
 
 | restriction (v1)                          | how it lifts later                                        |
@@ -649,7 +802,6 @@ split the dedup key from the display name — deferred until observed.
 | producer single-output                    | per-output liveness; fuse one output, retain node          |
 | producer identity write / no scatter      | `to_linear_layout` inversion (case B scatter path)         |
 | producer no inner_lets / par / threads    | tile-aware fusion (case C machinery)                       |
-| single reader of B                        | retained-producer fusion (fuse into one reader, keep P)    |
 | pack member must be constant              | Select chain over pack members                             |
 | no Reduce anywhere in producers           | never for tree-lowering reduces; possibly sequential reduces with recompute cost gating |
 | general × general                         | TODO(polyhedral), section 4C                               |
@@ -673,8 +825,8 @@ CPU-only unit tests (no GPU), in `passes/fusion.rs` + `tests/`:
    aligned tile writer.
 4. **Merged module structure**: `dump_hir` snapshot of fused module; `split_module` reports one
    kernel; type_infer passes; α-renaming produces no VarId collisions.
-5. **DCE**: dead producer + internal buffer removed; blackbox and non-internal-output writers
-   retained.
+5. **DCE**: dead producer + internal buffer removed; blackbox nodes and writers of registered
+   outputs retained.
 6. **Dedup (stage 6)**: fuse the same (P, C) pattern at two graph locations built from
    independently constructed builders (different VarId counters); assert `module_hash`
    equality and pointer-equal `Arc<Module>`s after `stage6_dedup`; assert renumbering is

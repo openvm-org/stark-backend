@@ -138,21 +138,23 @@ pub fn plan(
 /// this entry point exists so [`crate::graph_exe::GraphCompiler`] can inject
 /// synthetic per-kernel scratch buffers into the model.
 ///
-/// `exclude` lists buffers that participate in scheduling (so their reads
-/// and writes still induce precedence edges between nodes) but that are
-/// **not** packed into the returned pool: they get no offset and their
-/// sizes don't count toward `peak_bytes`. This is what
-/// [`crate::graph_exe::GraphCompiler`] uses for graph inputs/outputs — the
-/// caller supplies their storage at run time so no pool slot is needed.
+/// `pin` lists buffers whose lifetime is pinned to the end of the program:
+/// they die at `n_nodes` regardless of where their last access falls, so
+/// no other buffer may reuse their pool slot once they're born. This is
+/// what [`crate::graph_exe::GraphCompiler`] uses for registered graph
+/// inputs/outputs — their pool slots must stay stable and intact across an
+/// entire run (and across replays, e.g. CUDA graph capture), even after
+/// the last node touches them. Pinned buffers are always packed (they get
+/// a slot even if no node accesses them).
 pub fn plan_raw(
     bufs: &[BufInfo],
     nodes: &[NodeAccess],
     env: &BTreeMap<VarId, i64>,
     device: DeviceType,
-    exclude: &[BufId],
+    pin: &[BufId],
     scheduler: &SchedulerMode,
 ) -> Result<MemoryPlan, PlanError> {
-    let ctx = PlanCtx::build(bufs, nodes, env, device, exclude)?;
+    let ctx = PlanCtx::build(bufs, nodes, env, device, pin)?;
     if ctx.n_nodes == 0 {
         return Ok(MemoryPlan {
             order: Vec::new(),
@@ -176,7 +178,8 @@ struct PlanCtx {
     /// Concrete byte sizes, `0` for off-device buffers.
     sizes: Vec<i64>,
     on_device: Vec<bool>,
-    excluded: Vec<bool>,
+    /// Lifetime pinned to program end (`death = n_nodes`); see [`plan_raw`].
+    pinned: Vec<bool>,
     /// Per-buffer node indices that write to it.
     writers: Vec<Vec<usize>>,
     /// Per-buffer node indices that read it.
@@ -189,14 +192,14 @@ impl PlanCtx {
         nodes: &[NodeAccess],
         env: &BTreeMap<VarId, i64>,
         device: DeviceType,
-        exclude: &[BufId],
+        pin: &[BufId],
     ) -> Result<Self, PlanError> {
         let n_nodes = nodes.len();
         let n_bufs = bufs.len();
 
-        let mut excluded = vec![false; n_bufs];
-        for &b in exclude {
-            excluded[b.0] = true;
+        let mut pinned = vec![false; n_bufs];
+        for &b in pin {
+            pinned[b.0] = true;
         }
 
         let mut sizes = vec![0i64; n_bufs];
@@ -233,16 +236,25 @@ impl PlanCtx {
             n_bufs,
             sizes,
             on_device,
-            excluded,
+            pinned,
             writers,
             readers,
         })
     }
 
     /// A packable buffer occupies a slot in the returned plan (on the
-    /// target device, non-zero, not excluded).
+    /// target device with non-zero size).
     fn packable(&self, b: usize) -> bool {
-        self.on_device[b] && self.sizes[b] > 0 && !self.excluded[b]
+        // Buffers no node reads or writes (e.g. internal intermediates
+        // orphaned by fusion DCE, which leaves the bufs table untouched)
+        // need no pool slot; without this check they'd be packed with a
+        // whole-program lifetime (no writer => birth -1, no reader =>
+        // death n) and inflate peak_bytes for nothing. Pinned buffers are
+        // exempt: registered interface buffers must keep a stable slot
+        // even if optimization removed every access.
+        self.on_device[b]
+            && self.sizes[b] > 0
+            && (self.pinned[b] || !(self.writers[b].is_empty() && self.readers[b].is_empty()))
     }
 
     /// Direct precedence edges implied by the read/write sets, using node
@@ -348,10 +360,7 @@ fn plan_cpsat(bufs: &[BufInfo], ctx: &PlanCtx, max_secs: f64) -> Result<MemoryPl
         }
     }
 
-    // Device buffers with non-zero size and not in `exclude` are what we're
-    // packing. Excluded buffers still participate in precedence (their
-    // writers/readers appear in `writers`/`readers` above) but aren't
-    // assigned offsets or interfered with in memory.
+    // Device buffers with non-zero size are what we're packing.
     let device_bufs: Vec<usize> = (0..n_bufs).filter(|&b| ctx.packable(b)).collect();
 
     // Live interval [birth, death] per device buffer. Using the sentinel
@@ -359,7 +368,9 @@ fn plan_cpsat(bufs: &[BufInfo], ctx: &PlanCtx, max_secs: f64) -> Result<MemoryPl
     // inputs) be born at -1 and buffers that are never read (graph
     // outputs) die at n_nodes, so they interfere with everything. Death is
     // the last *access* (read or write): a buffer that is overwritten after
-    // its last read must keep its slot until that write lands.
+    // its last read must keep its slot until that write lands. Pinned
+    // buffers die at n_nodes unconditionally — their slot must survive the
+    // whole run no matter where the solver places their last access.
     let mut birth: BTreeMap<usize, IntVar> = BTreeMap::new();
     let mut death: BTreeMap<usize, IntVar> = BTreeMap::new();
     for &b in &device_bufs {
@@ -372,7 +383,7 @@ fn plan_cpsat(bufs: &[BufInfo], ctx: &PlanCtx, max_secs: f64) -> Result<MemoryPl
         } else {
             m.add_min_eq(birth_v, writers[b].iter().map(|&w| t[w]));
         }
-        if readers[b].is_empty() {
+        if ctx.pinned[b] || readers[b].is_empty() {
             m.add_eq(death_v, n_nodes as i64);
         } else {
             let accesses: std::collections::BTreeSet<usize> = readers[b]
@@ -599,7 +610,7 @@ fn greedy_topo(ctx: &PlanCtx, succ: &[Vec<usize>], initial_indeg: &[usize]) -> V
             if remaining_readers[b] > 0 {
                 remaining_readers[b] -= 1;
             }
-            if remaining_readers[b] == 0 && ctx.packable(b) && alive[b] {
+            if remaining_readers[b] == 0 && ctx.packable(b) && alive[b] && !ctx.pinned[b] {
                 alive[b] = false;
             }
         }
@@ -640,7 +651,8 @@ fn score_node(
     }
     let mut freed = 0i64;
     for &b in &node_reads[node] {
-        if remaining_readers[b] == 1 && ctx.packable(b) {
+        // Pinned buffers never free their slot (death = n_nodes).
+        if remaining_readers[b] == 1 && ctx.packable(b) && !ctx.pinned[b] {
             // Buffer is either currently alive or about to be born by
             // this same node (scratch / in-place modifier pattern): it
             // will be gone after this node runs either way.
@@ -698,7 +710,7 @@ fn pack_order(ctx: &PlanCtx, bufs: &[BufInfo], order: &[usize]) -> (Vec<Option<u
         if ctx.writers[b].is_empty() {
             birth[b] = -1;
         }
-        if ctx.readers[b].is_empty() {
+        if ctx.pinned[b] || ctx.readers[b].is_empty() {
             death[b] = n as i64;
         }
     }

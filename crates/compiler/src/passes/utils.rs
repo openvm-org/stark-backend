@@ -3,13 +3,309 @@
 use std::collections::HashMap;
 
 use crate::{
-    ir::{IRBuilder, Node, NodeId, VarId},
+    ir::{BinOp, IRBuilder, Node, NodeId, VarId},
     passes::canonicalize::{CanonValue, TensorRef},
+    quast::Quast,
     CompileError,
 };
 
 pub(crate) fn ceil_log2(n: usize) -> usize {
     n.max(1).next_power_of_two().trailing_zeros() as usize
+}
+
+/// Extracts an HIR index expression as a quasi-affine [`Quast`].
+///
+/// `syms` maps in-scope binder variables (outer compute var, par index, loop
+/// induction vars, ...) to the Quast the caller wants them to appear as;
+/// `lets` resolves scalar let-bound variables to their defining nodes.
+/// `Let`s encountered inside the expression itself are chased locally.
+pub(crate) fn hir_to_quast(
+    b: &IRBuilder,
+    id: NodeId,
+    syms: &dyn Fn(VarId) -> Option<Quast>,
+    lets: &dyn Fn(VarId) -> Option<NodeId>,
+) -> Result<Quast, CompileError> {
+    hir_to_quast_impl(b, id, syms, lets, &mut HashMap::new())
+}
+
+fn hir_to_quast_impl(
+    b: &IRBuilder,
+    id: NodeId,
+    syms: &dyn Fn(VarId) -> Option<Quast>,
+    lets: &dyn Fn(VarId) -> Option<NodeId>,
+    local: &mut HashMap<VarId, NodeId>,
+) -> Result<Quast, CompileError> {
+    match b.node(id).clone() {
+        Node::ConstU32(c) => Ok(Quast::cst(c as i64)),
+        Node::Var(v) => {
+            if let Some(q) = syms(v) {
+                Ok(q)
+            } else if let Some(&n) = local.get(&v) {
+                hir_to_quast_impl(b, n, syms, lets, local)
+            } else if let Some(n) = lets(v) {
+                hir_to_quast_impl(b, n, syms, lets, local)
+            } else {
+                Err(CompileError::Lower(format!(
+                    "variable {v:?} is not usable in an index expression"
+                )))
+            }
+        }
+        Node::Bin(op, x, y) => match op {
+            BinOp::Add => Ok(hir_to_quast_impl(b, x, syms, lets, local)?
+                .add(&hir_to_quast_impl(b, y, syms, lets, local)?)),
+            BinOp::Sub => Ok(hir_to_quast_impl(b, x, syms, lets, local)?
+                .sub(&hir_to_quast_impl(b, y, syms, lets, local)?)),
+            BinOp::Mul => {
+                if let Some(c) = const_eval_impl(b, x, lets, local) {
+                    Ok(hir_to_quast_impl(b, y, syms, lets, local)?.mul_c(c))
+                } else if let Some(c) = const_eval_impl(b, y, lets, local) {
+                    Ok(hir_to_quast_impl(b, x, syms, lets, local)?.mul_c(c))
+                } else {
+                    Err(CompileError::Lower(
+                        "non-affine multiplication in index expression".into(),
+                    ))
+                }
+            }
+            BinOp::Div => {
+                let c = const_eval_impl(b, y, lets, local)
+                    .filter(|&c| c > 0)
+                    .ok_or_else(|| {
+                        CompileError::Lower(
+                            "index division requires a positive constant divisor".into(),
+                        )
+                    })?;
+                Ok(hir_to_quast_impl(b, x, syms, lets, local)?.floordiv(c))
+            }
+            BinOp::Rem => {
+                let c = const_eval_impl(b, y, lets, local)
+                    .filter(|&c| c > 0)
+                    .ok_or_else(|| {
+                        CompileError::Lower(
+                            "index remainder requires a positive constant divisor".into(),
+                        )
+                    })?;
+                Ok(hir_to_quast_impl(b, x, syms, lets, local)?.rem_c(c))
+            }
+            BinOp::Lt | BinOp::Le | BinOp::Eq => {
+                Err(CompileError::Lower("comparison in index expression".into()))
+            }
+        },
+        Node::Let { var, value, body } => {
+            local.insert(var, value);
+            hir_to_quast_impl(b, body, syms, lets, local)
+        }
+        other => Err(CompileError::Lower(format!(
+            "non-quasi-affine index expression: {other:?}"
+        ))),
+    }
+}
+
+/// Constant-folds an index subexpression, resolving variables through `lets`.
+#[cfg_attr(not(test), allow(dead_code))] // exercised by pass unit tests
+pub(crate) fn const_eval_index(
+    b: &IRBuilder,
+    id: NodeId,
+    lets: &dyn Fn(VarId) -> Option<NodeId>,
+) -> Option<i64> {
+    const_eval_impl(b, id, lets, &HashMap::new())
+}
+
+fn const_eval_impl(
+    b: &IRBuilder,
+    id: NodeId,
+    lets: &dyn Fn(VarId) -> Option<NodeId>,
+    local: &HashMap<VarId, NodeId>,
+) -> Option<i64> {
+    match b.node(id) {
+        Node::ConstU32(c) => Some(*c as i64),
+        Node::Var(v) => {
+            let n = local.get(v).copied().or_else(|| lets(*v))?;
+            const_eval_impl(b, n, lets, local)
+        }
+        Node::Bin(op, x, y) => {
+            let a = const_eval_impl(b, *x, lets, local)?;
+            let c = const_eval_impl(b, *y, lets, local)?;
+            match op {
+                BinOp::Add => a.checked_add(c),
+                BinOp::Sub => a.checked_sub(c),
+                BinOp::Mul => a.checked_mul(c),
+                BinOp::Div => (c != 0).then(|| a.div_euclid(c)),
+                BinOp::Rem => (c != 0).then(|| a.rem_euclid(c)),
+                BinOp::Lt | BinOp::Le | BinOp::Eq => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Rebuilds `root` with every node in `map` replaced by its image.
+///
+/// Hash-consing makes syntactically identical subtrees a single [`NodeId`],
+/// so one map entry replaces every occurrence. Untouched subtrees keep their
+/// ids; binders are not renamed; replacement images are used verbatim (not
+/// themselves rewritten). Callers must re-run type inference afterwards.
+pub(crate) fn replace_nodes(
+    b: &mut IRBuilder,
+    root: NodeId,
+    map: &HashMap<NodeId, NodeId>,
+) -> NodeId {
+    replace_nodes_impl(b, root, map, &mut HashMap::new())
+}
+
+fn replace_nodes_impl(
+    b: &mut IRBuilder,
+    id: NodeId,
+    map: &HashMap<NodeId, NodeId>,
+    memo: &mut HashMap<NodeId, NodeId>,
+) -> NodeId {
+    if let Some(&r) = map.get(&id) {
+        return r;
+    }
+    if let Some(&r) = memo.get(&id) {
+        return r;
+    }
+    let new = match b.node(id).clone() {
+        Node::Input(_)
+        | Node::Var(_)
+        | Node::ConstU32(_)
+        | Node::ConstField(_)
+        | Node::ConstFpExt(_) => id,
+        Node::LiftFpExt(x) => {
+            let x2 = replace_nodes_impl(b, x, map, memo);
+            if x2 == x {
+                id
+            } else {
+                b.intern(Node::LiftFpExt(x2))
+            }
+        }
+        Node::Bin(op, x, y) => {
+            let x2 = replace_nodes_impl(b, x, map, memo);
+            let y2 = replace_nodes_impl(b, y, map, memo);
+            if (x2, y2) == (x, y) {
+                id
+            } else {
+                b.intern(Node::Bin(op, x2, y2))
+            }
+        }
+        Node::Select {
+            cond,
+            then_val,
+            else_val,
+        } => {
+            let c2 = replace_nodes_impl(b, cond, map, memo);
+            let t2 = replace_nodes_impl(b, then_val, map, memo);
+            let e2 = replace_nodes_impl(b, else_val, map, memo);
+            if (c2, t2, e2) == (cond, then_val, else_val) {
+                id
+            } else {
+                b.intern(Node::Select {
+                    cond: c2,
+                    then_val: t2,
+                    else_val: e2,
+                })
+            }
+        }
+        Node::Index { tensor, indices } => {
+            let t2 = replace_nodes_impl(b, tensor, map, memo);
+            let ix2: Vec<NodeId> = indices
+                .iter()
+                .map(|&ix| replace_nodes_impl(b, ix, map, memo))
+                .collect();
+            if t2 == tensor && ix2 == indices {
+                id
+            } else {
+                b.intern(Node::Index {
+                    tensor: t2,
+                    indices: ix2,
+                })
+            }
+        }
+        Node::Compute {
+            bound,
+            var,
+            body,
+            scatter,
+            par,
+            threads,
+        } => {
+            let body2 = replace_nodes_impl(b, body, map, memo);
+            if body2 == body {
+                id
+            } else {
+                b.intern(Node::Compute {
+                    bound,
+                    var,
+                    body: body2,
+                    scatter,
+                    par,
+                    threads,
+                })
+            }
+        }
+        Node::Reduce {
+            op,
+            bound,
+            var,
+            body,
+        } => {
+            let body2 = replace_nodes_impl(b, body, map, memo);
+            if body2 == body {
+                id
+            } else {
+                b.intern(Node::Reduce {
+                    op,
+                    bound,
+                    var,
+                    body: body2,
+                })
+            }
+        }
+        Node::Let { var, value, body } => {
+            let v2 = replace_nodes_impl(b, value, map, memo);
+            let b2 = replace_nodes_impl(b, body, map, memo);
+            if (v2, b2) == (value, body) {
+                id
+            } else {
+                b.intern(Node::Let {
+                    var,
+                    value: v2,
+                    body: b2,
+                })
+            }
+        }
+        Node::Tuple(elems) => {
+            let e2: Vec<NodeId> = elems
+                .iter()
+                .map(|&e| replace_nodes_impl(b, e, map, memo))
+                .collect();
+            if e2 == elems {
+                id
+            } else {
+                b.intern(Node::Tuple(e2))
+            }
+        }
+        Node::Proj(t, k) => {
+            let t2 = replace_nodes_impl(b, t, map, memo);
+            if t2 == t {
+                id
+            } else {
+                b.intern(Node::Proj(t2, k))
+            }
+        }
+        Node::Pack(elems) => {
+            let e2: Vec<NodeId> = elems
+                .iter()
+                .map(|&e| replace_nodes_impl(b, e, map, memo))
+                .collect();
+            if e2 == elems {
+                id
+            } else {
+                b.intern(Node::Pack(e2))
+            }
+        }
+    };
+    memo.insert(id, new);
+    new
 }
 
 /// Resolves a tensor-typed HIR expression to a top-level tensor reference.
@@ -56,6 +352,107 @@ pub(crate) fn resolve_tensor_ref(
             "cannot index expression {other:?}; only module inputs and \
              top-level let results can be indexed"
         ))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ir::BinOp;
+
+    fn sym_of(target: VarId) -> impl Fn(VarId) -> Option<Quast> {
+        move |v| (v == target).then(|| Quast::sym(target))
+    }
+
+    #[test]
+    fn hir_to_quast_affine_forms() {
+        let mut b = IRBuilder::new();
+        let i = b.fresh_var();
+        let iv = b.intern(Node::Var(i));
+        let c2 = b.const_u32(2);
+        let c5 = b.const_u32(5);
+        let c4 = b.const_u32(4);
+        let c3 = b.const_u32(3);
+        let e = b.mul(iv, c2);
+        let e = b.add(e, c5);
+        let e = b.div(e, c4);
+        let e = b.rem(e, c3);
+        let q = hir_to_quast(&b, e, &sym_of(i), &|_| None).unwrap();
+        let expected = Quast::sym(i)
+            .mul_c(2)
+            .add(&Quast::cst(5))
+            .floordiv(4)
+            .rem_c(3);
+        assert_eq!(q, expected);
+    }
+
+    #[test]
+    fn hir_to_quast_chases_lets() {
+        let mut b = IRBuilder::new();
+        let i = b.fresh_var();
+        let iv = b.intern(Node::Var(i));
+        let c4 = b.const_u32(4);
+        let s_val = b.mul(iv, c4);
+        // `let s = i * 4 in s + 1` inside the index expression itself.
+        let c1 = b.const_u32(1);
+        let expr = b.bind(s_val, |b, s| b.add(s, c1));
+        let q = hir_to_quast(&b, expr, &sym_of(i), &|_| None).unwrap();
+        assert_eq!(q, Quast::sym(i).mul_c(4).add(&Quast::cst(1)));
+
+        // The same binding resolved through the external `lets` closure.
+        let t = b.fresh_var();
+        let tv = b.intern(Node::Var(t));
+        let expr2 = b.add(tv, c1);
+        let lets = |v: VarId| (v == t).then_some(s_val);
+        let q2 = hir_to_quast(&b, expr2, &sym_of(i), &lets).unwrap();
+        assert_eq!(q2, Quast::sym(i).mul_c(4).add(&Quast::cst(1)));
+    }
+
+    #[test]
+    fn hir_to_quast_rejects_non_affine() {
+        let mut b = IRBuilder::new();
+        let i = b.fresh_var();
+        let iv = b.intern(Node::Var(i));
+        let e = b.mul(iv, iv);
+        assert!(hir_to_quast(&b, e, &sym_of(i), &|_| None).is_err());
+        let e = b.div(iv, iv);
+        assert!(hir_to_quast(&b, e, &sym_of(i), &|_| None).is_err());
+    }
+
+    #[test]
+    fn const_eval_index_folds() {
+        let mut b = IRBuilder::new();
+        let c2 = b.const_u32(2);
+        let c3 = b.const_u32(3);
+        let c4 = b.const_u32(4);
+        let e = b.add(c2, c3);
+        let e = b.mul(e, c4);
+        assert_eq!(const_eval_index(&b, e, &|_| None), Some(20));
+        let i = b.fresh_var();
+        let iv = b.intern(Node::Var(i));
+        assert_eq!(const_eval_index(&b, iv, &|_| None), None);
+    }
+
+    #[test]
+    fn replace_nodes_replaces_all_occurrences() {
+        let mut b = IRBuilder::new();
+        let one = b.const_u32(1);
+        let c7 = b.const_u32(7);
+        // Hash-consing: both operands are the same NodeId.
+        let sum = b.add(one, one);
+        let outer = b.mul(sum, c7);
+
+        let map = HashMap::from([(one, b.const_u32(2))]);
+        let two = b.const_u32(2);
+        let r = replace_nodes(&mut b, outer, &map);
+        let Node::Bin(BinOp::Mul, s2, k) = *b.node(r) else {
+            panic!("expected Mul, got {:?}", b.node(r));
+        };
+        assert_eq!(*b.node(s2), Node::Bin(BinOp::Add, two, two));
+        assert_eq!(k, c7); // untouched subtree keeps its id
+
+        // Empty map is the identity.
+        assert_eq!(replace_nodes(&mut b, outer, &HashMap::new()), outer);
     }
 }
 

@@ -90,7 +90,7 @@ impl WalkCtx<'_> {
     }
 }
 
-fn children_of(node: &Node) -> Vec<NodeId> {
+pub(crate) fn children_of(node: &Node) -> Vec<NodeId> {
     match node {
         Node::Input(_)
         | Node::Var(_)
