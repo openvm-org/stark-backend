@@ -28,12 +28,15 @@
 //! still expand one HIR kernel into several CUDA kernels inside its compiled
 //! [`crate::runtime::KernelModule`].
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{BTreeSet, HashMap},
+    sync::Arc,
+};
 
 #[cfg(doc)]
 use crate::passes::canonicalize::CanonKernel;
 use crate::{
-    ir::{IRBuilder, Module, Node, NodeId, ScalarType, Type},
+    ir::{IRBuilder, Module, Node, NodeId, ScalarType, SizeExpr, Type, VarId},
     passes::{
         canonicalize::{canonicalize, CanonValue, Program, TensorRef},
         type_infer::type_infer,
@@ -51,16 +54,19 @@ pub enum SubgraphValue {
 }
 
 /// Element type and count of one split-kernel output, matching the buffer
-/// the compiled kernel will write (`num_elements * elem.size_bytes()` bytes).
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+/// the compiled kernel will write (`num_elems * elem.size_bytes()` bytes).
+/// The count may reference module parameters; graph insertion evaluates it
+/// through the node's inferred bindings.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OutputSpec {
     pub elem: ScalarType,
-    pub num_elements: usize,
+    pub num_elems: SizeExpr,
 }
 
 impl OutputSpec {
-    pub fn size_bytes(&self) -> usize {
-        self.num_elements * self.elem.size_bytes()
+    /// Concrete byte size; `None` while the count references parameters.
+    pub fn size_bytes(&self) -> Option<usize> {
+        Some(self.num_elems.as_const()? as usize * self.elem.size_bytes())
     }
 }
 
@@ -123,10 +129,14 @@ pub fn split_module(module: &Module) -> Result<ModuleSubgraph, CompileError> {
                         ck.name
                     ))
                 })?;
-                Ok(OutputSpec {
-                    elem,
-                    num_elements: t.num_elements(),
-                })
+                let num_elems = SizeExpr::product(t.shape()).ok_or_else(|| {
+                    CompileError::Canonicalize(format!(
+                        "kernel `{}` output shape ({t:?}) multiplies two compound symbolic \
+                         dimensions; the element count is not representable",
+                        ck.name
+                    ))
+                })?;
+                Ok(OutputSpec { elem, num_elems })
             })
             .collect::<Result<Vec<_>, CompileError>>()?;
         kernels.push(SubgraphKernel {
@@ -168,12 +178,34 @@ fn extract_kernel(
         inputs: Vec::new(),
         input_nodes: HashMap::new(),
         memo: HashMap::new(),
+        used_params: BTreeSet::new(),
     };
     let body = ex.copy(source)?;
     let Extract {
-        mut dst, inputs, ..
+        mut dst,
+        inputs,
+        used_params,
+        ..
     } = ex;
-    dst.raise_var_watermark(program.module.builder.var_watermark());
+
+    // Inherit the parent's parameter declarations referenced by the copied
+    // subtree (bounds and input shapes), in parent declaration order so
+    // splitting stays deterministic; slice the shape hint to match.
+    let src = &program.module.builder;
+    let mut hint = Vec::new();
+    for (idx, (v, pname)) in src.params().iter().enumerate() {
+        if used_params.contains(v) {
+            dst.inherit_param(*v, pname.clone());
+            if let Some(h) = src.shape_hint() {
+                hint.push(h[idx]);
+            }
+        }
+    }
+    if src.shape_hint().is_some() && !dst.params().is_empty() {
+        dst.add_shape_hint(&hint);
+    }
+
+    dst.raise_var_watermark(src.var_watermark());
     Ok((dst.finish(name, body), inputs))
 }
 
@@ -186,6 +218,8 @@ struct Extract<'a> {
     input_nodes: HashMap<SubgraphValue, NodeId>,
     /// Source `NodeId` -> copied `dst` `NodeId`.
     memo: HashMap<NodeId, NodeId>,
+    /// Parent-module parameter `VarId`s referenced by copied bounds/shapes.
+    used_params: BTreeSet<VarId>,
 }
 
 impl Extract<'_> {
@@ -227,6 +261,9 @@ impl Extract<'_> {
                 (format!("t{kernel}_{out_idx}"), elem, shape)
             }
         };
+        for dim in &shape {
+            dim.param_syms(&mut self.used_params);
+        }
         let n = self.dst.input(name, elem, shape);
         self.inputs.push(val);
         self.input_nodes.insert(val, n);
@@ -240,6 +277,10 @@ impl Extract<'_> {
         let node = self.src().node(id).clone();
         let result = match node {
             Node::Input(k) => self.value_input(SubgraphValue::Input(k), id)?,
+            Node::ConstSym(ref e) => {
+                e.param_syms(&mut self.used_params);
+                self.dst.intern(node)
+            }
             Node::Var(v) => match self.program.env.get(&v).cloned() {
                 // Kernel-local binder (loop index, inner let): preserved.
                 None => self.dst.intern(Node::Var(v)),
@@ -315,6 +356,7 @@ impl Extract<'_> {
                 par,
                 threads,
             } => {
+                bound.param_syms(&mut self.used_params);
                 let body2 = self.copy(body)?;
                 self.dst.intern(Node::Compute {
                     bound,
@@ -331,6 +373,7 @@ impl Extract<'_> {
                 var,
                 body,
             } => {
+                bound.param_syms(&mut self.used_params);
                 let body2 = self.copy(body)?;
                 self.dst.intern(Node::Reduce {
                     op,
@@ -405,7 +448,7 @@ mod tests {
             k0.outputs,
             vec![OutputSpec {
                 elem: ScalarType::BabyBear,
-                num_elements: 8
+                num_elems: 8usize.into()
             }]
         );
 
@@ -529,7 +572,7 @@ mod tests {
             sg.kernels[0].outputs,
             vec![OutputSpec {
                 elem: ScalarType::BabyBear,
-                num_elements: 1
+                num_elems: 1usize.into()
             }]
         );
         // k1 declares the sum as a shape-[] scalar input.
@@ -545,8 +588,43 @@ mod tests {
             ]
         );
         let decls = k1.module.builder.inputs();
-        assert_eq!(decls[1].shape, Vec::<usize>::new());
+        assert!(decls[1].shape.is_empty());
         assert_eq!(decls[1].elem, ScalarType::BabyBear);
+    }
+
+    #[test]
+    fn split_inherits_referenced_params() {
+        // k0's reduce bound references `n`, k1's references `m`; each split
+        // module inherits only its own parameter (VarId preserved) plus the
+        // matching slice of the shape hint. Outputs stay concrete so the
+        // split itself succeeds.
+        let mut b = IRBuilder::new();
+        let n = b.symbol("n");
+        let m = b.symbol("m");
+        b.add_shape_hint(&[8, 16]);
+        let a = b.input("a", ScalarType::BabyBear, vec![n]);
+        let t = b.compute(4, |b, _i| b.reduce_add(n, |b, j| b.index(a, &[j])));
+        let t = b.let_bound(t);
+        let out = b.compute(4, |b, i| {
+            let s = b.reduce_add(m, |b, _j| b.index(t, &[i]));
+            let ti = b.index(t, &[i]);
+            b.add(ti, s)
+        });
+        let module = b.finish("sym_chain", out);
+
+        let sg = split_module(&module).expect("split");
+        assert_eq!(sg.kernels.len(), 2);
+
+        let src_params = module.builder.params();
+        let b0 = &sg.kernels[0].module.builder;
+        assert_eq!(b0.params(), &src_params[..1]);
+        assert_eq!(b0.shape_hint(), Some(&[8i64][..]));
+        // k0's input `a` keeps its symbolic shape.
+        assert!(b0.inputs()[0].shape[0].as_const().is_none());
+
+        let b1 = &sg.kernels[1].module.builder;
+        assert_eq!(b1.params(), &src_params[1..]);
+        assert_eq!(b1.shape_hint(), Some(&[16i64][..]));
     }
 
     #[test]

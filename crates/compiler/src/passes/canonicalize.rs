@@ -20,14 +20,29 @@
 //! All rewrites preserve types, and the [`TypeMap`] is extended for every
 //! node they create.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use crate::{
-    ir::{IRBuilder, Module, Node, NodeId, ScalarType, Type, VarId},
-    passes::{type_infer::TypeMap, utils::hir_to_quast},
-    quast::{NodeEmitter, ParSpec, Quast, QuastEmitter, ScatterStore},
+    ir::{IRBuilder, Module, Node, NodeId, ScalarType, SizeExpr, Type, VarId},
+    passes::{
+        type_infer::TypeMap,
+        utils::{hir_to_quast, hir_to_sexpr},
+    },
+    quast::{NodeEmitter, ParSpec, Quast, QuastEmitter, SExpr, ScatterStore, SymConst},
     CompileError,
 };
+
+/// Converts symbolic dims to concrete sizes, failing when any dim is not a
+/// literal. Used where canonicalization genuinely needs numbers (scatter
+/// binding), which requires concrete shapes by construction.
+fn concrete_dims(dims: &[SizeExpr], what: &str) -> Result<Vec<usize>, CompileError> {
+    dims.iter()
+        .map(|d| d.as_const().map(|c| c as usize))
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(|| {
+            CompileError::Canonicalize(format!("{what} requires concrete sizes, got {dims:?}"))
+        })
+}
 
 /// Reference to a top-level tensor value: a module input or one output of a
 /// top-level let (kernel).
@@ -62,13 +77,13 @@ pub enum ResultExpr {
 #[derive(Clone, Debug)]
 pub struct InnerLet {
     pub var: VarId,
-    pub bound: usize,
+    pub bound: SizeExpr,
     pub iter_var: VarId,
     pub result: ResultExpr,
     pub elem: ScalarType,
     /// Physical row-major shape of the tile (e.g. `[bound]`, or `[bound, k]`
     /// for a pack body), after applying any scatter.
-    pub shape: Vec<usize>,
+    pub shape: Vec<SizeExpr>,
     /// Store map composed from the tile's `#[scatter(...)]` attribute:
     /// logical flat index -> physical flat index (`None` = identity).
     /// Readers index the physical layout.
@@ -82,10 +97,10 @@ pub struct InnerLet {
 /// otherwise consists of scalar expressions.
 #[derive(Clone, Debug)]
 pub struct CanonKernel {
-    pub outer_bound: usize,
+    pub outer_bound: SizeExpr,
     pub outer_var: VarId,
     /// `Some((bound, var))` if the body is an inner `compute` over threads.
-    pub inner: Option<(usize, VarId)>,
+    pub inner: Option<(SizeExpr, VarId)>,
     /// Let-bound inner computes (shared-memory tiles), in binding order.
     pub inner_lets: Vec<InnerLet>,
     /// One entry per output buffer.
@@ -328,14 +343,14 @@ impl CanonCx<'_> {
                 let var_node = self.b.intern(Node::Var(var));
                 self.types.insert(var_node, Type::Scalar(ScalarType::U32));
                 let wrapped = self.b.intern(Node::Compute {
-                    bound: 1,
+                    bound: 1.into(),
                     var,
                     body: id,
                     scatter: None,
                     par: None,
                     threads: None,
                 });
-                let ty = Type::Tensor(elem, vec![1]);
+                let ty = Type::Tensor(elem, vec![1.into()]);
                 self.types.insert(wrapped, ty.clone());
                 (wrapped, ty)
             }
@@ -365,8 +380,9 @@ impl CanonCx<'_> {
         let mut scatter_store = match scatter {
             None => None,
             Some(sc) => {
-                let mut logical = vec![outer_bound];
+                let mut logical = vec![outer_bound.clone()];
                 logical.extend_from_slice(self.ty(body)?.shape());
+                let logical = concrete_dims(&logical, "scatter")?;
                 let mut sc = *sc;
                 sc.bind_and_validate(&logical)?;
                 Some(sc.store_map(self.b.fresh_var())?)
@@ -402,15 +418,16 @@ impl CanonCx<'_> {
                 let inner_store = match inner_scatter {
                     None => None,
                     Some(sc) => {
-                        let mut logical = vec![m];
+                        let mut logical = vec![m.clone()];
                         logical.extend_from_slice(self.ty(inner_body)?.shape());
+                        let logical = concrete_dims(&logical, "scatter")?;
                         let mut sc = *sc;
                         sc.bind_and_validate(&logical)?;
                         let block_len = logical.iter().product::<usize>();
                         Some((sc.store_map(self.b.fresh_var())?, block_len))
                     }
                 };
-                let m0 = m;
+                let m0 = m.clone();
                 let (m, j, inner_body) = self.flatten_nests(m, j, inner_body)?;
                 if inner_par.is_some() && m != m0 {
                     return Err(CompileError::Canonicalize(
@@ -418,6 +435,12 @@ impl CanonCx<'_> {
                     ));
                 }
                 if let Some((inner, block_len)) = inner_store {
+                    let ob = outer_bound.as_const().ok_or_else(|| {
+                        CompileError::Canonicalize(
+                            "scatter on a compute with a symbolic outer bound is not supported"
+                                .into(),
+                        )
+                    })? as usize;
                     let f = self.b.fresh_var();
                     let fq = Quast::sym(f);
                     let within = inner
@@ -431,7 +454,7 @@ impl CanonCx<'_> {
                         None => lifted,
                         Some(o) => o.expr.substitute(&BTreeMap::from([(o.flat, lifted)])),
                     };
-                    let bounds = BTreeMap::from([(f, (outer_bound * block_len) as u64)]);
+                    let bounds = BTreeMap::from([(f, (ob * block_len) as u64)]);
                     let expr = composed.simplify(&bounds)?;
                     scatter_store = Some(ScatterStore {
                         flat: f,
@@ -450,29 +473,47 @@ impl CanonCx<'_> {
         // downstream graph rewrites see a single flat compute. Only when
         // nothing depends on the two-level structure: no `#[par]` layout on
         // the inner compute, no shared-memory tiles (which are materialized
-        // per outer iteration), and no `#[grid(threads = ...)]` hint. The
-        // scatter store map is already expressed over the flat domain, so it
-        // is unaffected. The rewrite from two independent index symbols to
-        // `t/M`/`t%M` forms can defeat the non-negativity proof the emitter
-        // runs on floor-division operands, so the absorption is speculative:
-        // it is kept only if every load index in the rewritten body still
-        // passes that proof.
+        // per outer iteration), no `#[grid(threads = ...)]` hint, and a
+        // concrete inner bound (index recovery divides by it). The outer
+        // bound may stay symbolic: the flat bound is then symbolic too,
+        // handled by the flat-kernel symbolic-grid lowering (this is the
+        // only lowering for such nests — the grid kernel path needs a
+        // concrete block count). The scatter store map is already expressed
+        // over the flat domain, so it is unaffected. The rewrite from two
+        // independent index symbols to `t/M`/`t%M` forms can defeat the
+        // non-negativity proof the emitter runs on floor-division operands,
+        // so the absorption is speculative: it is kept only if every load
+        // index in the rewritten body still passes that proof.
         let (outer_bound, outer_var, inner, result_root) = match inner {
-            Some((m, j)) if inner_par.is_none() && inner_lets.is_empty() && threads.is_none() => {
+            Some((m, j))
+                if inner_par.is_none()
+                    && inner_lets.is_empty()
+                    && threads.is_none()
+                    && m.as_const().is_some() =>
+            {
+                let mc = m.as_const().unwrap();
+                let flat_bound = match outer_bound.as_const() {
+                    Some(ob) => SizeExpr::from((ob * mc) as usize),
+                    None => outer_bound.mul_c(SymConst::Lit(mc)),
+                };
                 let t = self.b.fresh_var();
                 let t_node = self.b.intern(Node::Var(t));
                 self.types.insert(t_node, Type::Scalar(ScalarType::U32));
                 let env = BTreeMap::from([(t, t_node)]);
-                let flat_bound = outer_bound * m;
-                let bounds = BTreeMap::from([(t, flat_bound as u64)]);
+                // With a symbolic flat bound `t` stays out of the bounds
+                // map; the emitter skips range proofs for unbounded symbols.
+                let mut bounds = BTreeMap::new();
+                if let Some(fb) = flat_bound.as_const() {
+                    bounds.insert(t, fb as u64);
+                }
                 let flat = Quast::sym(t);
                 let mut em = NodeEmitter {
                     b: &mut *self.b,
                     types: &mut self.types,
                     env: &env,
                 };
-                let i_val = flat.floordiv(m as i64).emit(&bounds, &mut em)?;
-                let j_val = flat.rem_c(m as i64).emit(&bounds, &mut em)?;
+                let i_val = flat.floordiv(mc).emit(&bounds, &mut em)?;
+                let j_val = flat.rem_c(mc).emit(&bounds, &mut em)?;
                 let map = HashMap::from([(outer_var, i_val), (j, j_val)]);
                 let root_sub = subst(self.b, result_root, &map, &mut self.types);
                 // Substitute in sorted-VarId order: canonicalization must
@@ -487,7 +528,7 @@ impl CanonCx<'_> {
                     .map(|(v, n)| (v, subst(self.b, n, &map, &mut self.types)))
                     .collect();
                 let mut lets_overlay = lets_sub.clone();
-                if loads_emittable(self.b, &self.env, root_sub, &mut lets_overlay, bounds) {
+                if loads_emittable(self.b, &self.env, root_sub, &mut lets_overlay, bounds, &[t]) {
                     inline_lets = lets_sub;
                     (flat_bound, t, None, root_sub)
                 } else {
@@ -581,8 +622,9 @@ impl CanonCx<'_> {
                     let tile_scatter = match scatter {
                         None => None,
                         Some(sc) => {
-                            let mut logical = vec![bound];
+                            let mut logical = vec![bound.clone()];
                             logical.extend_from_slice(self.ty(tile_body)?.shape());
+                            let logical = concrete_dims(&logical, "scatter")?;
                             let mut sc = *sc;
                             sc.bind_and_validate(&logical)?;
                             Some(sc.store_map(self.b.fresh_var())?)
@@ -596,7 +638,7 @@ impl CanonCx<'_> {
                             )))
                         }
                     };
-                    let bound0 = bound;
+                    let bound0 = bound.clone();
                     let (bound, iter_var, tile_body) =
                         self.flatten_nests(bound, iter_var, tile_body)?;
                     if par.is_some() && bound != bound0 {
@@ -663,13 +705,14 @@ impl CanonCx<'_> {
     /// Flattens `compute [m] |j| { compute [k] |l| { e } }` chains into a
     /// single `compute [m*k] |t| { e[j := t/k, l := t%k] }`, repeatedly,
     /// until the inner body is not a compute. Row-major layouts make this a
-    /// metadata-only change.
+    /// metadata-only change. `m` may be symbolic; the nested bounds `k` must
+    /// be concrete since index recovery divides by them.
     fn flatten_nests(
         &mut self,
-        mut m: usize,
+        mut m: SizeExpr,
         mut j: VarId,
         mut body: NodeId,
-    ) -> Result<(usize, VarId, NodeId), CompileError> {
+    ) -> Result<(SizeExpr, VarId, NodeId), CompileError> {
         loop {
             let Node::Compute {
                 bound: k,
@@ -694,25 +737,36 @@ impl CanonCx<'_> {
                         .into(),
                 ));
             }
+            let kc = k.as_const().ok_or_else(|| {
+                CompileError::Canonicalize(
+                    "computes nested below the thread level must have concrete bounds".into(),
+                )
+            })?;
             let t = self.b.fresh_var();
             let t_node = self.b.intern(Node::Var(t));
             self.types.insert(t_node, Type::Scalar(ScalarType::U32));
             // Index recovery as quasi-affine expressions of the flat index.
+            // The flat bound is only usable for the emitter's range proofs
+            // when it is concrete; without it the proofs are skipped.
+            let flat_bound = m.mul_c(SymConst::Lit(kc)).fold_lits();
             let env = BTreeMap::from([(t, t_node)]);
-            let bounds = BTreeMap::from([(t, (m * k) as u64)]);
+            let mut bounds = BTreeMap::new();
+            if let Some(mk) = flat_bound.as_const() {
+                bounds.insert(t, mk as u64);
+            }
             let flat = Quast::sym(t);
             let mut em = NodeEmitter {
                 b: &mut *self.b,
                 types: &mut self.types,
                 env: &env,
             };
-            let j_val = flat.floordiv(k as i64).emit(&bounds, &mut em)?;
-            let l_val = flat.rem_c(k as i64).emit(&bounds, &mut em)?;
+            let j_val = flat.floordiv(kc).emit(&bounds, &mut em)?;
+            let l_val = flat.rem_c(kc).emit(&bounds, &mut em)?;
             let mut map = HashMap::new();
             map.insert(j, j_val);
             map.insert(l, l_val);
             body = subst(self.b, inner, &map, &mut self.types);
-            m *= k;
+            m = flat_bound;
             j = t;
         }
     }
@@ -787,7 +841,11 @@ fn is_scalar_form(
         return true;
     }
     match b.node(id) {
-        Node::ConstU32(_) | Node::ConstField(_) | Node::ConstFpExt(_) | Node::Input(_) => true,
+        Node::ConstU32(_)
+        | Node::ConstField(_)
+        | Node::ConstFpExt(_)
+        | Node::ConstSym(_)
+        | Node::Input(_) => true,
         Node::LiftFpExt(x) => is_scalar_form(b, program, ck, *x, visited),
         Node::Var(v) => {
             if let Some(&n) = ck.inline_lets.get(v) {
@@ -857,7 +915,11 @@ fn subst_rec(
     let node = b.node(id).clone();
     let result = match node {
         Node::Var(v) => map.get(&v).copied().unwrap_or(id),
-        Node::Input(_) | Node::ConstU32(_) | Node::ConstField(_) | Node::ConstFpExt(_) => id,
+        Node::Input(_)
+        | Node::ConstU32(_)
+        | Node::ConstField(_)
+        | Node::ConstFpExt(_)
+        | Node::ConstSym(_) => id,
         Node::LiftFpExt(x) => {
             let x2 = subst_rec(b, x, map, types, memo);
             b.lift_fpext(x2)
@@ -972,17 +1034,22 @@ impl QuastEmitter for ProbeEmitter {
 
 /// Whether every load index reachable from `root` — through select branches,
 /// reduce bodies, packs and let values — extracts to a quasi-affine form over
-/// the symbols in `bounds` and passes the emitter's non-negativity proof for
-/// floor-division operands. Lowering rejects any load that fails this, so a
-/// rewrite must not turn a passing body into a failing one. `lets` doubles as
-/// the inline-let environment and is extended with nested lets in passing;
-/// reduce binders contribute their bounds as they are encountered.
+/// the recognized index symbols and passes the emitter's non-negativity proof
+/// for floor-division operands. Lowering rejects any load that fails this, so
+/// a rewrite must not turn a passing body into a failing one. `lets` doubles
+/// as the inline-let environment and is extended with nested lets in passing;
+/// reduce binders contribute their bounds as they are encountered. Index
+/// symbols are the `bounds` keys, `extra_syms` (symbols with no usable bound,
+/// e.g. a symbolic flat compute index) and reduce binders; the emitter skips
+/// range proofs for the unbounded ones, matching what real emission of the
+/// rewritten body would do.
 fn loads_emittable(
     b: &IRBuilder,
     env: &HashMap<VarId, CanonValue>,
     root: NodeId,
     lets: &mut HashMap<VarId, NodeId>,
     mut bounds: BTreeMap<VarId, u64>,
+    extra_syms: &[VarId],
 ) -> bool {
     fn rec(
         b: &IRBuilder,
@@ -990,70 +1057,99 @@ fn loads_emittable(
         id: NodeId,
         lets: &mut HashMap<VarId, NodeId>,
         bounds: &mut BTreeMap<VarId, u64>,
+        syms: &mut BTreeSet<VarId>,
         visited: &mut HashSet<NodeId>,
     ) -> bool {
         if !visited.insert(id) {
             return true;
         }
         match b.node(id).clone() {
-            Node::Input(_) | Node::ConstU32(_) | Node::ConstField(_) | Node::ConstFpExt(_) => true,
+            Node::Input(_)
+            | Node::ConstU32(_)
+            | Node::ConstField(_)
+            | Node::ConstFpExt(_)
+            | Node::ConstSym(_) => true,
             Node::Var(v) => {
                 let n = lets.get(&v).copied().or_else(|| match env.get(&v) {
                     Some(CanonValue::Scalar(n)) => Some(*n),
                     _ => None,
                 });
                 match n {
-                    Some(n) => rec(b, env, n, lets, bounds, visited),
+                    Some(n) => rec(b, env, n, lets, bounds, syms, visited),
                     None => true, // index symbol or tensor reference
                 }
             }
-            Node::LiftFpExt(x) => rec(b, env, x, lets, bounds, visited),
+            Node::LiftFpExt(x) => rec(b, env, x, lets, bounds, syms, visited),
             Node::Bin(_, x, y) => {
-                rec(b, env, x, lets, bounds, visited) && rec(b, env, y, lets, bounds, visited)
+                rec(b, env, x, lets, bounds, syms, visited)
+                    && rec(b, env, y, lets, bounds, syms, visited)
             }
             Node::Select {
                 cond,
                 then_val,
                 else_val,
             } => {
-                rec(b, env, cond, lets, bounds, visited)
-                    && rec(b, env, then_val, lets, bounds, visited)
-                    && rec(b, env, else_val, lets, bounds, visited)
+                rec(b, env, cond, lets, bounds, syms, visited)
+                    && rec(b, env, then_val, lets, bounds, syms, visited)
+                    && rec(b, env, else_val, lets, bounds, syms, visited)
             }
             Node::Index { indices, .. } => indices.iter().all(|&ix| {
-                let syms = |v: VarId| bounds.contains_key(&v).then(|| Quast::sym(v));
+                let syms_fn = |v: VarId| syms.contains(&v).then(|| Quast::sym(v));
                 let lets_fn = |v: VarId| {
                     lets.get(&v).copied().or_else(|| match env.get(&v) {
                         Some(CanonValue::Scalar(n)) => Some(*n),
                         _ => None,
                     })
                 };
-                match hir_to_quast(b, ix, &syms, &lets_fn) {
+                match hir_to_quast(b, ix, &syms_fn, &lets_fn) {
                     Ok(q) => q.emit(bounds, &mut ProbeEmitter).is_ok(),
-                    Err(_) => false,
+                    // Mirror lowering's fallback: a non-quasi-affine index
+                    // that still extracts as a symbolic `SExpr` (module
+                    // parameters in the mix) lowers as an author-trusted
+                    // SExpr access, which has no emit proof to fail.
+                    Err(_) => {
+                        let sexpr_syms = |v: VarId| syms.contains(&v).then(|| SExpr::sym(v));
+                        hir_to_sexpr(b, ix, &sexpr_syms, &lets_fn).is_ok()
+                    }
                 }
             }),
             Node::Reduce {
                 bound, var, body, ..
             } => {
-                bounds.insert(var, bound as u64);
-                rec(b, env, body, lets, bounds, visited)
+                // A symbolic bound stays out of the map: the emitter's range
+                // proofs are skipped for unbounded symbols, matching what
+                // real emission of the rewritten body would do.
+                if let Some(c) = bound.as_const() {
+                    bounds.insert(var, c as u64);
+                }
+                syms.insert(var);
+                rec(b, env, body, lets, bounds, syms, visited)
             }
             Node::Let { var, value, body } => {
-                if !rec(b, env, value, lets, bounds, visited) {
+                if !rec(b, env, value, lets, bounds, syms, visited) {
                     return false;
                 }
                 lets.insert(var, value);
-                rec(b, env, body, lets, bounds, visited)
+                rec(b, env, body, lets, bounds, syms, visited)
             }
-            Node::Tuple(elems) | Node::Pack(elems) => {
-                elems.iter().all(|&e| rec(b, env, e, lets, bounds, visited))
-            }
-            Node::Proj(tup, _) => rec(b, env, tup, lets, bounds, visited),
+            Node::Tuple(elems) | Node::Pack(elems) => elems
+                .iter()
+                .all(|&e| rec(b, env, e, lets, bounds, syms, visited)),
+            Node::Proj(tup, _) => rec(b, env, tup, lets, bounds, syms, visited),
             Node::Compute { .. } => false,
         }
     }
-    rec(b, env, root, lets, &mut bounds, &mut HashSet::new())
+    let mut syms: BTreeSet<VarId> = bounds.keys().copied().collect();
+    syms.extend(extra_syms.iter().copied());
+    rec(
+        b,
+        env,
+        root,
+        lets,
+        &mut bounds,
+        &mut syms,
+        &mut HashSet::new(),
+    )
 }
 
 #[cfg(test)]
@@ -1102,7 +1198,7 @@ mod tests {
         assert!(is_canonicalized(&program));
         assert_eq!(program.kernels.len(), 1);
         let ck = program.kernels[0].clone();
-        assert_eq!(ck.outer_bound, 16);
+        assert_eq!(ck.outer_bound.as_const(), Some(16));
         assert!(ck.inner.is_none());
         assert!(ck.inner_lets.is_empty());
         assert!(ck.scatter_store.is_none());
@@ -1136,8 +1232,8 @@ mod tests {
         });
         let program = canon(b, body);
         let ck = &program.kernels[0];
-        assert_eq!(ck.outer_bound, 2);
-        assert!(matches!(ck.inner, Some((8, _))));
+        assert_eq!(ck.outer_bound.as_const(), Some(2));
+        assert!(matches!(&ck.inner, Some((m, _)) if m.as_const() == Some(8)));
         assert!(ck.inner_par.is_some());
     }
 
@@ -1150,8 +1246,8 @@ mod tests {
         });
         let program = canon(b, body);
         let ck = &program.kernels[0];
-        assert_eq!(ck.outer_bound, 2);
-        assert!(matches!(ck.inner, Some((8, _))));
+        assert_eq!(ck.outer_bound.as_const(), Some(2));
+        assert!(matches!(&ck.inner, Some((m, _)) if m.as_const() == Some(8)));
         assert_eq!(ck.threads, Some(8));
     }
 
@@ -1170,29 +1266,35 @@ mod tests {
         });
         let program = canon(b, body);
         let ck = &program.kernels[0];
-        assert_eq!(ck.outer_bound, 2);
-        assert!(matches!(ck.inner, Some((8, _))));
+        assert_eq!(ck.outer_bound.as_const(), Some(2));
+        assert!(matches!(&ck.inner, Some((m, _)) if m.as_const() == Some(8)));
         assert_eq!(ck.inner_lets.len(), 1);
     }
 
-    /// `x[((p % 4) * 8 + t + 1) % 32]` under `compute [12] |p| { compute
-    /// [12] |t| ... }`: absorbed to the flat variable `v`, the `% 32`
-    /// floor-division operand becomes `v - 4*(v/12) + 1`, whose
-    /// non-negativity the interval analysis cannot prove — so the nest must
-    /// be kept (lowering would otherwise reject the kernel).
+    /// `x[((p % 4) * 8 + (t % 5) * 2 + 1) % 32]` under `compute [12] |p| {
+    /// compute [12] |t| ... }`: absorbed to the flat variable `v`, `t % 5`
+    /// becomes `(v % 12) % 5` — since 5 does not divide 12 the inner rem
+    /// survives as a compound floor-division whose correlation the interval
+    /// analysis loses, so the `% 32` operand's non-negativity is unprovable
+    /// and the nest must be kept (lowering would otherwise reject the
+    /// kernel).
     #[test]
     fn unprovable_absorbed_indices_block_absorption() {
         let mut b = IRBuilder::new();
         let x = b.input("x", ScalarType::BabyBear, vec![64]);
         let body = b.compute(12, |b, p| {
             b.compute(12, |b, t| {
+                let c2 = b.const_u32(2);
                 let c4 = b.const_u32(4);
+                let c5 = b.const_u32(5);
                 let c8 = b.const_u32(8);
                 let c1 = b.const_u32(1);
                 let c32 = b.const_u32(32);
                 let pm = b.rem(p, c4);
                 let row = b.mul(pm, c8);
-                let f = b.add(row, t);
+                let tm = b.rem(t, c5);
+                let col = b.mul(tm, c2);
+                let f = b.add(row, col);
                 let f = b.add(f, c1);
                 let ix = b.rem(f, c32);
                 b.index(x, &[ix])
@@ -1200,8 +1302,8 @@ mod tests {
         });
         let program = canon(b, body);
         let ck = &program.kernels[0];
-        assert_eq!(ck.outer_bound, 12);
-        assert!(matches!(ck.inner, Some((12, _))));
+        assert_eq!(ck.outer_bound.as_const(), Some(12));
+        assert!(matches!(&ck.inner, Some((m, _)) if m.as_const() == Some(12)));
     }
 
     /// An outer `#[scatter]` on a perfect nest composes into a flat store
@@ -1212,15 +1314,18 @@ mod tests {
     fn scattered_nest_keeps_flat_scatter_store() {
         let mut b = IRBuilder::new();
         let x = b.input("x", ScalarType::BabyBear, vec![16]);
-        let sc = b.scatter_map(2, Some(vec![8, 2]), |s, _c| {
-            vec![s[1].clone(), s[0].clone()]
-        });
+        let sc = b.scatter_map(
+            2,
+            Some(vec![8, 2]),
+            |s, _c| vec![s[1].clone(), s[0].clone()],
+            |q, _c| vec![q[1].clone(), q[0].clone()],
+        );
         let body = b.compute_with(2, Some(sc), None, None, |b, i| {
             b.compute(8, |b, j| flat_load(b, x, i, j))
         });
         let program = canon(b, body);
         let ck = &program.kernels[0];
-        assert_eq!(ck.outer_bound, 16);
+        assert_eq!(ck.outer_bound.as_const(), Some(16));
         assert!(ck.inner.is_none());
         let ss = ck.scatter_store.as_ref().expect("scatter store");
         assert_eq!(ss.bounds.get(&ss.flat).copied(), Some(16));

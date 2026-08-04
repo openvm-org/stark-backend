@@ -120,7 +120,7 @@ pub fn dump_program(program: &Program) -> String {
     for (k, ck) in program.kernels.iter().enumerate() {
         writeln!(s, "\nkernel[{k}] {}", ck.name).unwrap();
         write!(s, "  outer[{}] |v{}|", ck.outer_bound, ck.outer_var.0).unwrap();
-        if let Some((b, v)) = ck.inner {
+        if let Some((b, v)) = &ck.inner {
             write!(s, " inner[{b}] |v{}|", v.0).unwrap();
         }
         if let Some(t) = ck.threads {
@@ -138,8 +138,11 @@ pub fn dump_program(program: &Program) -> String {
             for (i, il) in ck.inner_lets.iter().enumerate() {
                 writeln!(
                     s,
-                    "    [{i}] v{} : {:?}{:?} bound={} iter=v{}",
-                    il.var.0, il.elem, il.shape, il.bound, il.iter_var.0
+                    "    [{i}] v{} : {} bound={} iter=v{}",
+                    il.var.0,
+                    tensor_ty(il.elem, &il.shape),
+                    il.bound,
+                    il.iter_var.0
                 )
                 .unwrap();
             }
@@ -210,6 +213,14 @@ pub fn dump_hir(module: &Module) -> String {
     let b = &module.builder;
     let mut s = String::new();
     writeln!(s, "module {}", module.name).unwrap();
+    if !b.params().is_empty() {
+        let ps: Vec<String> = b
+            .params()
+            .iter()
+            .map(|(v, name)| format!("{name}=s{}", v.0))
+            .collect();
+        writeln!(s, "  params [{}]", ps.join(", ")).unwrap();
+    }
     for (k, decl) in b.inputs().iter().enumerate() {
         writeln!(
             s,
@@ -226,11 +237,12 @@ pub fn dump_hir(module: &Module) -> String {
     s
 }
 
-fn tensor_ty(elem: ScalarType, shape: &[usize]) -> String {
+fn tensor_ty(elem: ScalarType, shape: &[impl std::fmt::Display]) -> String {
     if shape.is_empty() {
         format!("{elem:?}")
     } else {
-        format!("{elem:?}{shape:?}")
+        let dims: Vec<String> = shape.iter().map(|d| d.to_string()).collect();
+        format!("{elem:?}[{}]", dims.join(", "))
     }
 }
 
@@ -241,7 +253,8 @@ fn children(node: &Node) -> Vec<NodeId> {
         | Node::Var(_)
         | Node::ConstU32(_)
         | Node::ConstField(_)
-        | Node::ConstFpExt(_) => vec![],
+        | Node::ConstFpExt(_)
+        | Node::ConstSym(_) => vec![],
         Node::LiftFpExt(x) => vec![*x],
         Node::Bin(_, a, b) => vec![*a, *b],
         Node::Select {
@@ -339,6 +352,7 @@ impl<'a> HirPrinter<'a> {
                             | Node::Var(_)
                             | Node::ConstU32(_)
                             | Node::ConstField(_)
+                            | Node::ConstSym(_)
                             | Node::Let { .. }
                     )
             })
@@ -443,6 +457,7 @@ impl<'a> HirPrinter<'a> {
             Node::ConstFpExt(c) => {
                 write!(self.out, "fpext({}, {}, {}, {})", c[0], c[1], c[2], c[3]).unwrap()
             }
+            Node::ConstSym(e) => write!(self.out, "#{e}").unwrap(),
             Node::LiftFpExt(x) => {
                 self.out.push_str("lift_fpext(");
                 self.print_expr(*x, 0, ind);
@@ -503,7 +518,7 @@ impl<'a> HirPrinter<'a> {
                 par,
                 threads,
             } => {
-                let (bound, var, body, threads) = (*bound, *var, *body, *threads);
+                let (bound, var, body, threads) = (bound.clone(), *var, *body, *threads);
                 let sc = scatter.as_deref().map(scatter_str);
                 let pr = par.as_deref().map(par_str);
                 write!(self.out, "compute[{bound}] |v{}|", var.0).unwrap();
@@ -524,7 +539,7 @@ impl<'a> HirPrinter<'a> {
                 var,
                 body,
             } => {
-                let (bound, var, body) = (*bound, *var, *body);
+                let (bound, var, body) = (bound.clone(), *var, *body);
                 let name = match op {
                     ReduceOp::Add => "add",
                     ReduceOp::Mul => "mul",
@@ -648,7 +663,19 @@ fn scatter_str(sc: &Scatter) -> String {
         .map(|e| quast_str(e, &sc.bounds))
         .collect::<Vec<_>>()
         .join(", ");
-    let mut s = format!("scatter ({params}) -> [{exprs}]");
+    let inv_params = sc
+        .inv_params
+        .iter()
+        .map(|p| format!("v{}", p.0))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let inv_exprs = sc
+        .inv_exprs
+        .iter()
+        .map(|e| quast_str(e, &sc.bounds))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut s = format!("scatter ({params}) -> [{exprs}] inverse ({inv_params}) -> [{inv_exprs}]");
     if let Some(out) = &sc.out_shape {
         write!(s, " into {out:?}").unwrap();
     }
@@ -847,6 +874,9 @@ fn dump_ops(s: &mut String, k: &Kernel, body: &[SSANode], depth: usize) {
             SSAOpCode::ConstU32(c) => {
                 writeln!(s, "{pad}{} = const_u32 {c}", val(op.results[0])).unwrap();
             }
+            SSAOpCode::ConstSym(e) => {
+                writeln!(s, "{pad}{} = const_sym {e}", val(op.results[0])).unwrap();
+            }
             SSAOpCode::ConstField(c) => {
                 writeln!(s, "{pad}{} = const_field {c}", val(op.results[0])).unwrap();
             }
@@ -940,6 +970,10 @@ fn access_str(access: &Access, vid: SSARes) -> String {
         IndexMap::Linear(ll) if ll.is_identity() => val(vid),
         IndexMap::Linear(ll) => format!("layout{}({})", ll_str(ll), val(vid)),
         IndexMap::Affine { expr, bounds } => quast_str(expr, bounds),
+        // `Expr::Sym` prints `v{n}` (a kernel value), `SymConst::Sym`
+        // prints `s{n}` (a module parameter).
+        IndexMap::SExpr(e) => format!("{e}"),
+        IndexMap::Blackbox(e) => format!("blackbox({e})"),
     };
     format!("b{}[{index}]", access.buf.0)
 }
@@ -1043,15 +1077,36 @@ mod tests {
     fn hir_dump_shows_scatter() {
         let mut b = IRBuilder::new();
         let a = b.input("a", ScalarType::BabyBear, vec![12]);
-        let sc = b.scatter_map(1, Some(vec![4, 3]), |p, _| {
-            vec![p[0].rem_c(4), p[0].floordiv(4)]
-        });
+        let sc = b.scatter_map(
+            1,
+            Some(vec![4, 3]),
+            |p, _| vec![p[0].rem_c(4), p[0].floordiv(4)],
+            |q, _| vec![q[1].mul_c(4).add(&q[0])],
+        );
         let body = b.compute_scatter(12, sc, |b, i| b.index(a, &[i]));
         let module = b.finish("scatter_mod", body);
         let hir = dump_hir(&module);
         assert!(hir.contains("scatter (v0) ->"), "{hir}");
+        assert!(hir.contains("inverse (v1, v2) ->"), "{hir}");
         assert!(hir.contains("into [4, 3]"), "{hir}");
-        assert!(hir.contains("{ a[v1] }"), "{hir}");
+        assert!(hir.contains("{ a[v3] }"), "{hir}");
+    }
+
+    /// A symbolic parameter (`IRBuilder::symbol`) used as a macro compute
+    /// bound and spliced into a value expression (`#(n - 1)`) lands on the
+    /// HIR as a symbolic bound and a `ConstSym` node, and prints back.
+    #[test]
+    fn hir_dump_shows_symbolic_bound_and_splice() {
+        let mut b = IRBuilder::new();
+        let n = b.symbol("n");
+        let a = b.input("a", ScalarType::BabyBear, vec![n]);
+        let body = crate::kernel!(b, compute [n] |i| { a[#(n - 1) - i] });
+        let module = b.finish("sym_rev", body);
+        let hir = dump_hir(&module);
+        assert!(hir.contains("params [n=s0]"), "{hir}");
+        assert!(hir.contains("input0 \"a\": BabyBear[s0]"), "{hir}");
+        assert!(hir.contains("compute[s0]"), "{hir}");
+        assert!(hir.contains("a[#(s0 + (-1)) - v1]"), "{hir}");
     }
 
     /// `#[grid(threads = ...)]` and `#[par((t, s) -> ...)]` parse through the

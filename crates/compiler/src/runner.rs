@@ -67,32 +67,68 @@ impl ModuleRunner {
     /// JIT-compiles `module`, allocates and binds device buffers for every
     /// input and output, and reserves the module's scratch. The runner is
     /// ready to `set_inputs` + `run` after this call.
+    ///
+    /// Modules with runtime parameters defer buffer allocation until every
+    /// parameter is bound via [`Self::set_symbol`] (sizes are functions of
+    /// the parameters).
     pub fn new(module: &Module, options: &CompileOptions) -> Result<Self, CompileError> {
         let ctx = GpuDeviceCtx::for_current_device()
             .map_err(|e| CompileError::Runtime(format!("GpuDeviceCtx: {e:?}")))?;
-        let mut km = compile_and_load(module, options)?;
+        let km = compile_and_load(module, options)?;
 
-        let in_bufs: Vec<DeviceBuffer<u32>> = (0..km.num_inputs())
-            .map(|i| DeviceBuffer::with_capacity_on(km.input_size(i) / 4, &ctx))
-            .collect();
-        for (i, buf) in in_bufs.iter().enumerate() {
-            km.set_input(i, buf)?;
-        }
-        let out_bufs: Vec<DeviceBuffer<u32>> = (0..km.num_outputs())
-            .map(|i| DeviceBuffer::with_capacity_on(km.output_size(i) / 4, &ctx))
-            .collect();
-        for (i, buf) in out_bufs.iter().enumerate() {
-            km.set_output(i, buf)?;
-        }
-        km.ensure_scratch(&ctx);
-
-        Ok(Self {
+        let mut runner = Self {
             module: km,
             name: module.name.clone(),
             ctx,
-            in_bufs,
-            out_bufs,
-        })
+            in_bufs: Vec::new(),
+            out_bufs: Vec::new(),
+        };
+        if runner.module.params().is_empty() {
+            runner.bind_buffers()?;
+        }
+        Ok(runner)
+    }
+
+    /// (Re)allocates one device buffer per input / output at the module's
+    /// current sizes, binds them and the scratch through the C ABI.
+    fn bind_buffers(&mut self) -> Result<(), CompileError> {
+        let km = &mut self.module;
+        self.in_bufs = (0..km.num_inputs())
+            .map(|i| DeviceBuffer::with_capacity_on(km.input_size(i) / 4, &self.ctx))
+            .collect();
+        for (i, buf) in self.in_bufs.iter().enumerate() {
+            km.set_input(i, buf)?;
+        }
+        self.out_bufs = (0..km.num_outputs())
+            .map(|i| DeviceBuffer::with_capacity_on(km.output_size(i) / 4, &self.ctx))
+            .collect();
+        for (i, buf) in self.out_bufs.iter().enumerate() {
+            km.set_output(i, buf)?;
+        }
+        km.ensure_scratch(&self.ctx);
+        Ok(())
+    }
+
+    /// Binds the module's runtime parameter `name` to `value`. Once every
+    /// parameter is bound, the input / output device buffers are
+    /// (re)allocated at the implied sizes.
+    pub fn set_symbol(&mut self, name: &str, value: i64) -> Result<(), CompileError> {
+        let i = self
+            .module
+            .params()
+            .iter()
+            .position(|p| p == name)
+            .ok_or_else(|| {
+                CompileError::Runtime(format!(
+                    "module `{}` has no runtime parameter `{name}`",
+                    self.name
+                ))
+            })?;
+        self.module.set_param(i, value);
+        if self.module.params_bound() {
+            self.bind_buffers()?;
+        }
+        Ok(())
     }
 
     pub fn name(&self) -> &str {

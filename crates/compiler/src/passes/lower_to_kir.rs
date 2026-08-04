@@ -6,11 +6,13 @@
 //!   compute that nests a thread-level compute or binds inner tiles becomes a grid of `outer_bound`
 //!   blocks with per-block `Par` statements.
 //! - Let-bound inner computes become shared-memory buffers written by their own `Par`.
-//! - A par is a primitive compute block: all loads are declared up front as read accesses with
-//!   quasi-affine indices and enter its SSA block as operands; stores leave as yields, mirrored as
-//!   the op's results. Region ops (par, loop) list every value they capture from enclosing scopes
-//!   in their operands. Index expressions are extracted as [`Quast`]s over the par / grid / loop
-//!   induction variables, so data-dependent indexing is rejected here.
+//! - A par is a primitive compute block: all loads are declared up front as read accesses and enter
+//!   its SSA block as operands; stores leave as yields, mirrored as the op's results. Region ops
+//!   (par, loop) list every value they capture from enclosing scopes in their operands. Index
+//!   expressions are classified: quasi-affine over the par / grid / loop induction variables →
+//!   [`IndexMap::Affine`]; symbolic (referencing module parameters) → [`IndexMap::SExpr`];
+//!   data-dependent (referencing loaded values, only at a par's top level) →
+//!   [`IndexMap::Blackbox`].
 //! - A reduce whose body loads from memory is hoisted out of its par into a register accumulator
 //!   ([`BufferKind::Register`]) initialized by one `Par` and updated by a `Par` inside a sequential
 //!   [`SSAOpCode::Loop`]. A load-free reduce stays inside the par as a carried-value loop.
@@ -22,21 +24,48 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use smallvec::{smallvec, SmallVec};
 
 use crate::{
-    ir::{BinOp, IRBuilder, Node, NodeId, ReduceOp, ScalarType, Type, VarId},
+    ir::{BinOp, IRBuilder, Node, NodeId, ReduceOp, ScalarType, SizeExpr, Type, VarId},
     kernel_ir::{
-        Access, AddressSpace, BufId, BufferDecl, BufferKind, IndexMap, Kernel, KernelProgram,
-        ParAttr, SSABlock, SSANode, SSAOp, SSAOpCode, SSARes,
+        Access, AddressSpace, BufId, BufferDecl, BufferKind, IndexMap, KBound, Kernel,
+        KernelProgram, ParAttr, SSABlock, SSANode, SSAOp, SSAOpCode, SSARes,
     },
     passes::{
         canonicalize::{is_canonicalized, CanonKernel, CanonValue, Program, ResultExpr, TensorRef},
+        monomorphize::block_size_policy,
         plan_global_scratch::GlobalScratchPlan,
-        utils::{hir_to_quast, resolve_tensor_ref},
+        utils::{hir_to_quast, hir_to_sexpr, resolve_tensor_ref},
     },
-    quast::{self, ParSpec, Quast, ScatterStore},
+    quast::{self, ParSpec, Quast, ScatterStore, SymConst},
     CompileError,
 };
 
 const BLOCK_SIZE: usize = 256;
+
+/// KIR is concrete: every bound and shape must be a literal by the time it
+/// reaches lowering. Symbolic modules must be monomorphized first.
+fn concrete(e: &SizeExpr, what: &str) -> Result<usize, CompileError> {
+    e.as_const().map(|c| c as usize).ok_or_else(|| {
+        CompileError::Lower(format!(
+            "{what} must be concrete for lowering (monomorphize first), got {e}"
+        ))
+    })
+}
+
+fn concrete_shape(shape: &[SizeExpr], what: &str) -> Result<Vec<SizeExpr>, CompileError> {
+    shape
+        .iter()
+        .map(|d| concrete(d, what).map(SizeExpr::from))
+        .collect()
+}
+
+/// Global buffer shapes may keep a symbolic outermost dim (row-major
+/// strides never involve it); inner dims must be concrete.
+fn global_shape(shape: &[SizeExpr], what: &str) -> Result<Vec<SizeExpr>, CompileError> {
+    for d in shape.iter().skip(1) {
+        concrete(d, &format!("inner dim of {what}"))?;
+    }
+    Ok(shape.iter().map(|d| d.fold_lits()).collect())
+}
 
 pub fn lower_to_kir(
     program: &Program,
@@ -55,7 +84,7 @@ pub fn lower_to_kir(
         buffers.push(BufferDecl {
             name: decl.name.clone(),
             elem: decl.elem,
-            shape: decl.shape.clone(),
+            shape: global_shape(&decl.shape, "input shape")?,
             kind: BufferKind::Input(k),
             space: AddressSpace::Global,
             layout: None,
@@ -74,7 +103,7 @@ pub fn lower_to_kir(
     for (let_id, kernel) in program.kernels.iter().enumerate() {
         for (out_idx, member_ty) in kernel.member_types.iter().enumerate() {
             let (elem, shape) = match member_ty {
-                Type::Tensor(s, shape) => (*s, shape.clone()),
+                Type::Tensor(s, shape) => (*s, global_shape(shape, "kernel output shape")?),
                 other => {
                     return Err(CompileError::Lower(format!(
                         "kernel {} output {out_idx} has non-tensor type {other:?}",
@@ -116,7 +145,7 @@ pub fn lower_to_kir(
             buffers.push(BufferDecl {
                 name: format!("{}_tile{t_idx}", kernel.name),
                 elem: il.elem,
-                shape: il.shape.clone(),
+                shape: concrete_shape(&il.shape, "tile shape")?,
                 kind: BufferKind::Shared,
                 space: AddressSpace::Shared,
                 layout: None,
@@ -138,25 +167,70 @@ pub fn lower_to_kir(
             }
         }
         let flat = ck.inner.is_none() && ck.inner_lets.is_empty();
-        let (grid_bound, block) = if flat {
-            let n = ck.outer_bound;
-            let block = ck.threads.unwrap_or_else(|| n.min(BLOCK_SIZE));
-            (n.div_ceil(block), block)
-        } else {
-            let max_par = ck
-                .inner_lets
-                .iter()
-                .map(|il| il.bound)
-                .chain(ck.inner.map(|(m, _)| m))
-                .max()
-                .unwrap_or(1);
-            let block = ck.threads.unwrap_or_else(|| max_par.min(BLOCK_SIZE));
-            (ck.outer_bound, block)
+        let (grid_bound, block) = match ck.outer_bound.as_const() {
+            Some(outer_bound) => {
+                let outer_bound = outer_bound as usize;
+                if flat {
+                    let block = ck.threads.unwrap_or_else(|| outer_bound.min(BLOCK_SIZE));
+                    (KBound::Const(outer_bound.div_ceil(block)), block)
+                } else {
+                    let mut max_par = 1;
+                    for il in &ck.inner_lets {
+                        max_par = max_par.max(concrete(&il.bound, "tile bound")?);
+                    }
+                    if let Some((m, _)) = &ck.inner {
+                        max_par = max_par.max(concrete(m, "inner bound")?);
+                    }
+                    let block = ck.threads.unwrap_or_else(|| max_par.min(BLOCK_SIZE));
+                    (KBound::Const(outer_bound), block)
+                }
+            }
+            None => {
+                if !flat {
+                    return Err(CompileError::Lower(format!(
+                        "kernel {} has a symbolic outer bound {}; only flat kernels \
+                         support symbolic bounds",
+                        ck.name, ck.outer_bound
+                    )));
+                }
+                // Block size policy for symbolic bounds: an explicit block
+                // hint (stamped by the graph compiler) wins; otherwise
+                // evaluate the compute size M from the module's shape hint
+                // and apply the policy (warp multiple, capped at BLOCK_SIZE).
+                let block = match (ck.threads, b.block_hint()) {
+                    (Some(t), _) => t,
+                    (None, Some(bh)) => bh,
+                    (None, None) => {
+                        let hint = b.shape_hint().ok_or_else(|| {
+                            CompileError::Lower(format!(
+                                "kernel {} has a symbolic outer bound {}; a shape or block \
+                                 hint is required to pick a block size",
+                                ck.name, ck.outer_bound
+                            ))
+                        })?;
+                        let env: BTreeMap<VarId, i64> = b
+                            .params()
+                            .iter()
+                            .zip(hint)
+                            .map(|((v, _), &val)| (*v, val))
+                            .collect();
+                        block_size_policy(ck.outer_bound.eval(&env) as usize)
+                    }
+                };
+                let grid = ck
+                    .outer_bound
+                    .add(&SizeExpr::from(block - 1))
+                    .floordiv(SymConst::Lit(block as i64))
+                    .fold_lits();
+                (KBound::Expr(grid), block)
+            }
         };
 
-        let k = Kernel::new(format!("{mod_name}_{}", ck.name), grid_bound, block);
+        let k = Kernel::new(format!("{mod_name}_{}", ck.name), grid_bound.clone(), block);
         let mut sym_bounds = BTreeMap::new();
-        sym_bounds.insert(VarId(k.grid_var().0), grid_bound as u64);
+        if let Some(gb) = grid_bound.as_const() {
+            sym_bounds.insert(VarId(k.grid_var().0), gb as u64);
+        }
         let mut cx = LowerCx {
             b,
             program,
@@ -210,6 +284,7 @@ pub fn lower_to_kir(
         scratch_bytes: scratch.total_bytes,
         input_bufs,
         output_bufs,
+        params: b.params().to_vec(),
     })
 }
 
@@ -353,9 +428,12 @@ impl<'a> LowerCx<'a> {
 
         if self.flat {
             // Flat kernel: one grid-spanning par over all iteration points.
-            let n = ck.outer_bound;
+            let n = match ck.outer_bound.as_const() {
+                Some(c) => KBound::Const(c as usize),
+                None => KBound::Expr(ck.outer_bound.fold_lits()),
+            };
             for result in &ck.results {
-                self.hoist_result_reduces(result, n, None)?;
+                self.hoist_result_reduces(result, &n, None)?;
             }
             return self.build_par(n, None, |bx| {
                 let base = Quast::sym(VarId(bx.vid.0));
@@ -368,8 +446,9 @@ impl<'a> LowerCx<'a> {
             let buf = self.shared_bufs[&il.var];
             self.push_alloc(buf);
             self.cur_spec = il.par.clone();
-            self.hoist_result_reduces(&il.result, il.bound, Some(il.iter_var))?;
-            self.build_par(il.bound, Some(il.iter_var), |bx| {
+            let ilb = KBound::Const(concrete(&il.bound, "tile bound")?);
+            self.hoist_result_reduces(&il.result, &ilb, Some(il.iter_var))?;
+            self.build_par(ilb, Some(il.iter_var), |bx| {
                 let base = Quast::sym(VarId(bx.vid.0));
                 bx.store_result(buf, &base, &il.result, il.scatter.as_ref())
             })?;
@@ -377,13 +456,14 @@ impl<'a> LowerCx<'a> {
         }
 
         let g = self.k.grid_var();
-        match ck.inner {
+        match &ck.inner {
             Some((m, j)) => {
+                let (m, j) = (concrete(m, "inner bound")?, *j);
                 self.cur_spec = ck.inner_par.clone();
                 for result in &ck.results {
-                    self.hoist_result_reduces(result, m, Some(j))?;
+                    self.hoist_result_reduces(result, &KBound::Const(m), Some(j))?;
                 }
-                self.build_par(m, Some(j), |bx| {
+                self.build_par(KBound::Const(m), Some(j), |bx| {
                     let base = Quast::sym(VarId(g.0))
                         .mul_c(m as i64)
                         .add(&Quast::sym(VarId(bx.vid.0)));
@@ -394,9 +474,9 @@ impl<'a> LowerCx<'a> {
             // one thread stores them.
             None => {
                 for result in &ck.results {
-                    self.hoist_result_reduces(result, 1, None)?;
+                    self.hoist_result_reduces(result, &KBound::Const(1), None)?;
                 }
-                self.build_par(1, None, |bx| {
+                self.build_par(KBound::Const(1), None, |bx| {
                     let base = Quast::sym(VarId(g.0));
                     bx.store_results(let_id, &base, scatter)
                 })
@@ -446,16 +526,23 @@ impl<'a> LowerCx<'a> {
 
     /// Emits `f` as the body of a new `Par` statement over `bound` logical
     /// indices, binding `var` (if given) to the par index.
-    fn build_par<F>(&mut self, bound: usize, var: Option<VarId>, f: F) -> Result<(), CompileError>
+    fn build_par<F>(&mut self, bound: KBound, var: Option<VarId>, f: F) -> Result<(), CompileError>
     where
         F: FnOnce(&mut BlockCx<'_, 'a>) -> Result<(), CompileError>,
     {
         let attr = match &self.cur_spec {
-            Some(spec) => Some(self.spec_attr(spec, bound)?),
+            Some(spec) => {
+                let b = bound.as_const().ok_or_else(|| {
+                    CompileError::Lower("#[par] requires a concrete compute bound".into())
+                })?;
+                Some(self.spec_attr(spec, b)?)
+            }
             None => None,
         };
         let vid = self.k.fresh_val();
-        self.sym_bounds.insert(VarId(vid.0), bound as u64);
+        if let Some(c) = bound.as_const() {
+            self.sym_bounds.insert(VarId(vid.0), c as u64);
+        }
         let spans_grid = self.flat;
         let mut bx = BlockCx {
             cx: self,
@@ -516,7 +603,7 @@ impl<'a> LowerCx<'a> {
     fn hoist_result_reduces(
         &mut self,
         result: &ResultExpr,
-        par_bound: usize,
+        par_bound: &KBound,
         par_var: Option<VarId>,
     ) -> Result<(), CompileError> {
         match result {
@@ -536,7 +623,7 @@ impl<'a> LowerCx<'a> {
     fn hoist_reduces(
         &mut self,
         id: NodeId,
-        par_bound: usize,
+        par_bound: &KBound,
         par_var: Option<VarId>,
     ) -> Result<(), CompileError> {
         if !self.hoist_seen.insert(id) {
@@ -550,6 +637,7 @@ impl<'a> LowerCx<'a> {
                 body,
             } => {
                 if self.contains_loads(body) && !self.hoisted.contains_key(&id) {
+                    let bound = concrete(&bound, "reduce bound")?;
                     self.emit_hoisted_reduce(id, op, bound, var, body, par_bound, par_var)?;
                 }
                 Ok(())
@@ -597,7 +685,7 @@ impl<'a> LowerCx<'a> {
         bound: usize,
         var: VarId,
         body: NodeId,
-        par_bound: usize,
+        par_bound: &KBound,
         par_var: Option<VarId>,
     ) -> Result<(), CompileError> {
         let ty = self.scalar_ty(body)?;
@@ -607,14 +695,14 @@ impl<'a> LowerCx<'a> {
         self.buffers.push(BufferDecl {
             name: format!("{}_acc{}", self.ck.name, self.hoisted.len()),
             elem: ty,
-            shape: vec![par_bound],
+            shape: vec![par_bound.to_expr()],
             kind: BufferKind::Register,
             space: AddressSpace::Register,
             layout: None,
         });
         self.push_alloc(acc);
 
-        self.build_par(par_bound, None, |bx| {
+        self.build_par(par_bound.clone(), None, |bx| {
             let v = bx.push_elem(init, smallvec![]);
             bx.write(acc, Quast::sym(VarId(bx.vid.0)), v);
             Ok(())
@@ -625,7 +713,7 @@ impl<'a> LowerCx<'a> {
         self.sym_bounds.insert(VarId(r.0), bound as u64);
         self.sinks.push(SmallVec::new());
         self.hoist_reduces(body, par_bound, par_var)?;
-        self.build_par(par_bound, par_var, |bx| {
+        self.build_par(par_bound.clone(), par_var, |bx| {
             let idx = Quast::sym(VarId(bx.vid.0));
             let cur = bx.read(acc, idx.clone());
             let value = bx.emit(body)?;
@@ -713,7 +801,7 @@ struct BlockCx<'x, 'a> {
     operands: SmallVec<[SSARes; 2]>,
     /// Stack of op sinks: the par body, then nested SSA loop bodies.
     bodies: Vec<SmallVec<[SSANode; 8]>>,
-    read_keys: Vec<(BufId, Quast)>,
+    read_keys: Vec<(BufId, IndexMap)>,
     read_vals: Vec<SSARes>,
     reads: Vec<Access>,
     writes: Vec<Access>,
@@ -744,27 +832,31 @@ impl BlockCx<'_, '_> {
         self.push_elem(SSAOpCode::Bin(op, ty), smallvec![a, b])
     }
 
+    /// Declares a quasi-affine read access and returns the block operand
+    /// holding the loaded value.
+    fn read(&mut self, buf: BufId, expr: Quast) -> SSARes {
+        let index = IndexMap::Affine {
+            expr,
+            bounds: self.cx.sym_bounds.clone(),
+        };
+        self.read_ix(buf, index)
+    }
+
     /// Declares a read access and returns the block operand holding the
     /// loaded value (deduplicated per `(buffer, index)`).
-    fn read(&mut self, buf: BufId, expr: Quast) -> SSARes {
+    fn read_ix(&mut self, buf: BufId, index: IndexMap) -> SSARes {
         if let Some(i) = self
             .read_keys
             .iter()
-            .position(|(rb, rq)| *rb == buf && *rq == expr)
+            .position(|(rb, ri)| *rb == buf && *ri == index)
         {
             return self.read_vals[i];
         }
         let v = self.cx.k.fresh_val();
-        self.read_keys.push((buf, expr.clone()));
+        self.read_keys.push((buf, index.clone()));
         self.read_vals.push(v);
         self.operands.push(v);
-        self.reads.push(Access {
-            buf,
-            index: IndexMap::Affine {
-                expr,
-                bounds: self.cx.sym_bounds.clone(),
-            },
-        });
+        self.reads.push(Access { buf, index });
         if self.cx.buffers[buf.0 as usize].space == AddressSpace::Global {
             self.cx.reads.insert(buf);
         }
@@ -865,6 +957,20 @@ impl BlockCx<'_, '_> {
                 }
             }
             Node::ConstU32(c) => self.push_elem(SSAOpCode::ConstU32(c), smallvec![]),
+            Node::ConstSym(e) => {
+                let e = e.fold_lits();
+                match e.as_const() {
+                    Some(c) => {
+                        let c = u32::try_from(c).map_err(|_| {
+                            CompileError::Lower(format!(
+                                "symbolic constant folds to {c}, out of u32 range"
+                            ))
+                        })?;
+                        self.push_elem(SSAOpCode::ConstU32(c), smallvec![])
+                    }
+                    None => self.push_elem(SSAOpCode::ConstSym(e), smallvec![]),
+                }
+            }
             Node::ConstField(c) => self.push_elem(SSAOpCode::ConstField(c), smallvec![]),
             Node::ConstFpExt(c) => self.push_elem(SSAOpCode::ConstFpExt(c), smallvec![]),
             Node::LiftFpExt(x) => {
@@ -954,11 +1060,52 @@ impl BlockCx<'_, '_> {
                         self.cx.buffers[buf.0 as usize].name
                     )));
                 }
-                let exprs = indices
+                // Row-major strides never involve the outermost dim, so a
+                // symbolic shape[0] can be stubbed out.
+                let dims: Vec<usize> = shape
+                    .iter()
+                    .map(|d| d.as_const().map(|c| c as usize).unwrap_or(0))
+                    .collect();
+                // Classify the access: quasi-affine over index symbols →
+                // Affine; symbolic (module parameters in the mix) → SExpr;
+                // referencing loaded values → Blackbox.
+                if let Ok(exprs) = indices
                     .iter()
                     .map(|&ix| self.extract_quast(ix))
-                    .collect::<Result<Vec<_>, _>>()?;
-                self.read(buf, quast::linearize(&exprs, &shape))
+                    .collect::<Result<Vec<_>, _>>()
+                {
+                    self.read(buf, quast::linearize(&exprs, &dims))
+                } else if let Ok(exprs) = indices
+                    .iter()
+                    .map(|&ix| self.extract_sexpr(ix))
+                    .collect::<Result<Vec<_>, _>>()
+                {
+                    self.read_ix(buf, IndexMap::SExpr(linearize_sexpr(&exprs, &dims)))
+                } else {
+                    // Blackbox: the index references loaded data. The
+                    // index-producing loads must be plain block operands,
+                    // so this is only representable at a par's top level
+                    // (not inside a select branch or SSA loop body).
+                    if self.bodies.len() != 1 {
+                        return Err(CompileError::Lower(format!(
+                            "data-dependent index into {} inside a nested scope \
+                             (select branch or reduce body) is not supported",
+                            self.cx.buffers[buf.0 as usize].name
+                        )));
+                    }
+                    let mut exprs = Vec::with_capacity(indices.len());
+                    for &ix in &indices {
+                        let e = match self.extract_sexpr(ix) {
+                            Ok(e) => e,
+                            Err(_) => {
+                                let v = self.emit(ix)?;
+                                SizeExpr::sym(VarId(v.0))
+                            }
+                        };
+                        exprs.push(e);
+                    }
+                    self.read_ix(buf, IndexMap::Blackbox(linearize_sexpr(&exprs, &dims)))
+                }
             }
             // A scalar module input (declared with empty shape).
             Node::Input(k) => {
@@ -975,6 +1122,7 @@ impl BlockCx<'_, '_> {
                     self.read(acc, Quast::sym(VarId(self.vid.0)))
                 } else {
                     // Hoisting guarantees the body is load-free here.
+                    let bound = concrete(&bound, "reduce bound")?;
                     self.emit_ssaloop(op, bound, var, body)?
                 }
             }
@@ -1044,34 +1192,61 @@ impl BlockCx<'_, '_> {
         Ok(result)
     }
 
+    /// The kernel SSA value an in-scope binder variable maps to, as an index
+    /// symbol by the `VarId(i) <-> SSARes(i)` convention.
+    fn index_sym(&self, v: VarId) -> Option<VarId> {
+        if v == self.cx.ck.outer_var {
+            Some(if self.cx.flat {
+                VarId(self.vid.0)
+            } else {
+                VarId(self.cx.k.grid_var().0)
+            })
+        } else if self.par_var == Some(v) {
+            Some(VarId(self.vid.0))
+        } else {
+            self.cx.loop_vars.get(&v).map(|r| VarId(r.0))
+        }
+    }
+
+    /// Resolves a scalar let-bound variable to its defining node for index
+    /// extraction.
+    fn index_let(&self, v: VarId) -> Option<NodeId> {
+        self.let_nodes
+            .get(&v)
+            .or_else(|| self.cx.ck.inline_lets.get(&v))
+            .copied()
+            .or_else(|| match self.cx.program.env.get(&v) {
+                Some(CanonValue::Scalar(n)) => Some(*n),
+                _ => None,
+            })
+    }
+
     /// Extracts an index expression as a quasi-affine [`Quast`] over the
     /// kernel's index symbols (par index, grid var, loop induction vars).
     fn extract_quast(&self, id: NodeId) -> Result<Quast, CompileError> {
-        let syms = |v: VarId| {
-            if v == self.cx.ck.outer_var {
-                Some(if self.cx.flat {
-                    Quast::sym(VarId(self.vid.0))
-                } else {
-                    Quast::sym(VarId(self.cx.k.grid_var().0))
-                })
-            } else if self.par_var == Some(v) {
-                Some(Quast::sym(VarId(self.vid.0)))
-            } else {
-                self.cx.loop_vars.get(&v).map(|r| Quast::sym(VarId(r.0)))
-            }
-        };
-        let lets = |v: VarId| {
-            self.let_nodes
-                .get(&v)
-                .or_else(|| self.cx.ck.inline_lets.get(&v))
-                .copied()
-                .or_else(|| match self.cx.program.env.get(&v) {
-                    Some(CanonValue::Scalar(n)) => Some(*n),
-                    _ => None,
-                })
-        };
+        let syms = |v: VarId| self.index_sym(v).map(Quast::sym);
+        let lets = |v: VarId| self.index_let(v);
         hir_to_quast(self.cx.b, id, &syms, &lets)
     }
+
+    /// Extracts an index expression as a symbolic [`SizeExpr`] whose
+    /// `Expr::Sym` positions are the kernel's index symbols and whose
+    /// `SymConst::Sym` positions are module parameters.
+    fn extract_sexpr(&self, id: NodeId) -> Result<SizeExpr, CompileError> {
+        let syms = |v: VarId| self.index_sym(v).map(SizeExpr::sym);
+        let lets = |v: VarId| self.index_let(v);
+        hir_to_sexpr(self.cx.b, id, &syms, &lets)
+    }
+}
+
+/// Row-major flatten of per-dim symbolic indices (the [`quast::linearize`]
+/// analogue). `dims[0]` never enters a stride, so it may be a stub.
+fn linearize_sexpr(exprs: &[SizeExpr], dims: &[usize]) -> SizeExpr {
+    let mut acc = SizeExpr::cst(SymConst::Lit(0));
+    for (e, &d) in exprs.iter().zip(dims) {
+        acc = acc.mul_c(SymConst::Lit(d as i64)).add(e);
+    }
+    acc.fold_lits()
 }
 
 #[cfg(test)]
@@ -1118,7 +1293,7 @@ mod tests {
             .filter(|b| b.kind == BufferKind::Register)
             .collect();
         assert_eq!(regs.len(), 1);
-        assert_eq!(regs[0].shape, vec![n]);
+        assert_eq!(regs[0].shape, vec![SizeExpr::from(n)]);
 
         let loop_id = kernel.grid.block.body[2];
         let loop_op = kernel.op(loop_id);
@@ -1205,7 +1380,7 @@ mod tests {
         let SSAOpCode::Par { bound, attr, .. } = &par.opcode else {
             panic!("expected par");
         };
-        assert_eq!(*bound, 512);
+        assert_eq!(bound.as_const(), Some(512));
         let attr = attr.as_ref().expect("par attr");
         assert_eq!(attr.seq_size, 16);
         assert_eq!(attr.layout.offset, 0);

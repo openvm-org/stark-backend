@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use crate::{
     ir::{BinOp, IRBuilder, Node, NodeId, VarId},
     passes::canonicalize::{CanonValue, TensorRef},
-    quast::Quast,
+    quast::{Quast, SExpr, SymConst},
     CompileError,
 };
 
@@ -100,6 +100,114 @@ fn hir_to_quast_impl(
     }
 }
 
+/// Extracts an HIR index expression as a symbolic [`SExpr`].
+///
+/// The fallback for indices that are not quasi-affine ([`hir_to_quast`])
+/// but still only combine in-scope binders, module parameters and literals.
+/// `syms` maps in-scope binder variables to the `SExpr` (an `Expr::Sym`)
+/// the caller wants them to appear as; module parameters enter through
+/// `Node::ConstSym` in `SymConst::Sym` position. Symbolic divisors are
+/// trusted to be positive (the author knows their parameters).
+pub(crate) fn hir_to_sexpr(
+    b: &IRBuilder,
+    id: NodeId,
+    syms: &dyn Fn(VarId) -> Option<SExpr>,
+    lets: &dyn Fn(VarId) -> Option<NodeId>,
+) -> Result<SExpr, CompileError> {
+    hir_to_sexpr_impl(b, id, syms, lets, &mut HashMap::new())
+}
+
+/// A subexpression that folds to a (possibly symbolic) constant, for the
+/// coefficient / divisor positions of [`hir_to_sexpr`].
+fn sexpr_const_side(
+    b: &IRBuilder,
+    id: NodeId,
+    syms: &dyn Fn(VarId) -> Option<SExpr>,
+    lets: &dyn Fn(VarId) -> Option<NodeId>,
+    local: &mut HashMap<VarId, NodeId>,
+) -> Option<SymConst> {
+    match hir_to_sexpr_impl(b, id, syms, lets, local)
+        .ok()?
+        .fold_lits()
+    {
+        SExpr::Const(c) => Some(c),
+        _ => None,
+    }
+}
+
+fn hir_to_sexpr_impl(
+    b: &IRBuilder,
+    id: NodeId,
+    syms: &dyn Fn(VarId) -> Option<SExpr>,
+    lets: &dyn Fn(VarId) -> Option<NodeId>,
+    local: &mut HashMap<VarId, NodeId>,
+) -> Result<SExpr, CompileError> {
+    match b.node(id).clone() {
+        Node::ConstU32(c) => Ok(SExpr::cst(SymConst::Lit(c as i64))),
+        Node::ConstSym(e) => Ok(e),
+        Node::Var(v) => {
+            if let Some(e) = syms(v) {
+                Ok(e)
+            } else if let Some(&n) = local.get(&v) {
+                hir_to_sexpr_impl(b, n, syms, lets, local)
+            } else if let Some(n) = lets(v) {
+                hir_to_sexpr_impl(b, n, syms, lets, local)
+            } else {
+                Err(CompileError::Lower(format!(
+                    "variable {v:?} is not usable in an index expression"
+                )))
+            }
+        }
+        Node::Bin(op, x, y) => match op {
+            BinOp::Add => Ok(hir_to_sexpr_impl(b, x, syms, lets, local)?
+                .add(&hir_to_sexpr_impl(b, y, syms, lets, local)?)),
+            BinOp::Sub => Ok(hir_to_sexpr_impl(b, x, syms, lets, local)?
+                .sub(&hir_to_sexpr_impl(b, y, syms, lets, local)?)),
+            BinOp::Mul => {
+                if let Some(c) = sexpr_const_side(b, x, syms, lets, local) {
+                    Ok(hir_to_sexpr_impl(b, y, syms, lets, local)?.mul_c(c))
+                } else if let Some(c) = sexpr_const_side(b, y, syms, lets, local) {
+                    Ok(hir_to_sexpr_impl(b, x, syms, lets, local)?.mul_c(c))
+                } else {
+                    Err(CompileError::Lower(
+                        "non-affine multiplication in index expression".into(),
+                    ))
+                }
+            }
+            BinOp::Div => {
+                let c = sexpr_const_side(b, y, syms, lets, local)
+                    .filter(|c| c.as_lit().is_none_or(|l| l > 0))
+                    .ok_or_else(|| {
+                        CompileError::Lower(
+                            "index division requires a positive constant divisor".into(),
+                        )
+                    })?;
+                Ok(hir_to_sexpr_impl(b, x, syms, lets, local)?.floordiv(c))
+            }
+            BinOp::Rem => {
+                let c = sexpr_const_side(b, y, syms, lets, local)
+                    .filter(|c| c.as_lit().is_none_or(|l| l > 0))
+                    .ok_or_else(|| {
+                        CompileError::Lower(
+                            "index remainder requires a positive constant divisor".into(),
+                        )
+                    })?;
+                Ok(hir_to_sexpr_impl(b, x, syms, lets, local)?.rem_c(c))
+            }
+            BinOp::Lt | BinOp::Le | BinOp::Eq => {
+                Err(CompileError::Lower("comparison in index expression".into()))
+            }
+        },
+        Node::Let { var, value, body } => {
+            local.insert(var, value);
+            hir_to_sexpr_impl(b, body, syms, lets, local)
+        }
+        other => Err(CompileError::Lower(format!(
+            "non-symbolic index expression: {other:?}"
+        ))),
+    }
+}
+
 /// Constant-folds an index subexpression, resolving variables through `lets`.
 #[cfg_attr(not(test), allow(dead_code))] // exercised by pass unit tests
 pub(crate) fn const_eval_index(
@@ -169,7 +277,8 @@ fn replace_nodes_impl(
         | Node::Var(_)
         | Node::ConstU32(_)
         | Node::ConstField(_)
-        | Node::ConstFpExt(_) => id,
+        | Node::ConstFpExt(_)
+        | Node::ConstSym(_) => id,
         Node::LiftFpExt(x) => {
             let x2 = replace_nodes_impl(b, x, map, memo);
             if x2 == x {
@@ -417,6 +526,41 @@ mod tests {
         assert!(hir_to_quast(&b, e, &sym_of(i), &|_| None).is_err());
         let e = b.div(iv, iv);
         assert!(hir_to_quast(&b, e, &sym_of(i), &|_| None).is_err());
+    }
+
+    #[test]
+    fn hir_to_sexpr_symbolic_forms() {
+        let mut b = IRBuilder::new();
+        let n = b.symbol("n");
+        let i = b.fresh_var();
+        let iv = b.intern(Node::Var(i));
+        let syms = |v: VarId| (v == i).then(|| SExpr::sym(i));
+
+        // `#(n - 1) - i`: quasi-affine extraction fails, symbolic succeeds.
+        let cs = b.const_sym(n - 1);
+        let e = b.sub(cs, iv);
+        assert!(hir_to_quast(&b, e, &sym_of(i), &|_| None).is_err());
+        let se = hir_to_sexpr(&b, e, &syms, &|_| None).unwrap();
+        let n_expr = SExpr::cst(SymConst::Sym(n.0));
+        let expected = n_expr
+            .sub(&SExpr::cst(SymConst::Lit(1)))
+            .sub(&SExpr::sym(i));
+        assert_eq!(se, expected);
+
+        // A symbolic multiplication coefficient: `i * #n`.
+        let cn = b.const_sym(n);
+        let e2 = b.mul(iv, cn);
+        let se2 = hir_to_sexpr(&b, e2, &syms, &|_| None).unwrap();
+        assert_eq!(se2, SExpr::sym(i).mul_c(SymConst::Sym(n.0)));
+
+        // A symbolic divisor is trusted; `i * i` still has no constant side.
+        let e3 = b.div(iv, cn);
+        assert_eq!(
+            hir_to_sexpr(&b, e3, &syms, &|_| None).unwrap(),
+            SExpr::sym(i).floordiv(SymConst::Sym(n.0))
+        );
+        let e4 = b.mul(iv, iv);
+        assert!(hir_to_sexpr(&b, e4, &syms, &|_| None).is_err());
     }
 
     #[test]

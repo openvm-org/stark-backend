@@ -46,7 +46,7 @@ use std::{
 use crypto_compiler::{
     field_ext::ef_inverse_coeffs,
     graph_ir::{BufId, BufInfo, DeviceType, GraphBuilder},
-    ir::{IRBuilder, Module, NodeId, ScalarType},
+    ir::{IRBuilder, Module, NodeId, ScalarType, SizeExpr},
 };
 use openvm_cuda_common::d_buffer::DeviceBuffer;
 use openvm_stark_backend::prover::fractional_sumcheck_gkr::{Frac, FractionalGkrMemoryModel};
@@ -897,22 +897,27 @@ pub fn eq_hypercube_nonoverlapping_stage_ext_ir(
     x_i: BufId,
     step: usize,
 ) {
-    g.insert_kernel(build_eq_hypercube_stage_module(step), [src, x_i], [dst]);
+    assert!(step >= 1, "eq stage needs at least one source element");
+    g.insert_kernel(build_eq_hypercube_stage_module(), [src, x_i], [dst]);
 }
 
 /// The `ir::Module` behind [`eq_hypercube_nonoverlapping_stage_ext_ir`].
 ///
-/// The module has two inputs — `src: [step] FpExt` and
-/// `x_i: [D_EF] BabyBear` — and one `[2*step] FpExt` output produced by
-/// a single `compute(2*step, ..)` loop.
+/// The module is symbolic over the stage size `s` (= `step`): its two
+/// inputs are `src: [s] FpExt` and `x_i: [D_EF] BabyBear`, and its one
+/// `[2*s] FpExt` output is produced by a single `compute(s*2, ..)` loop.
+/// `s` binds from the `src` buffer shape at [`GraphBuilder::insert_kernel`]
+/// time, so every stage of the expansion shares one module (and one JIT
+/// compilation).
 ///
 /// The four `x_i` base-field coefficients are lifted to `FpExt` and
 /// recombined against the extension basis `{1, t, t², t³}` once per
 /// kernel invocation, then re-used inside every thread. `1 - x_i` is
 /// computed the same way.
-fn build_eq_hypercube_stage_module(step: usize) -> Module {
+fn build_eq_hypercube_stage_module() -> Module {
     let mut b = IRBuilder::new();
-    let src = b.input("src", ScalarType::FpExt, vec![step]);
+    let s = b.symbol("s");
+    let src = b.input("src", ScalarType::FpExt, vec![SizeExpr::from(s)]);
     let x_i = b.input("x_i", ScalarType::BabyBear, vec![D_EF]);
 
     // x_i as an FpExt scalar: lift each of the four BabyBear coeffs and
@@ -926,27 +931,22 @@ fn build_eq_hypercube_stage_module(step: usize) -> Module {
     let one_minus_x = b.sub(one_ext, x_i_ext);
     let one_minus_x = b.let_bound(one_minus_x);
 
-    let body = b.compute(2 * step, |b, j| {
-        // src index is `j mod step`; over `j ∈ [0, 2*step)` and
-        // `step = 2^k` this is `j - (j / step) * step`, which the
-        // DSL's index-expression checker recognizes as quasi-affine
-        // (floor-div of a compute var, times a constant, subtracted
-        // from the var itself).
-        let step_c = b.const_u32(step as u32);
+    let body = b.compute(s * 2, move |b, j| {
+        // src index is `j mod s`; over `j ∈ [0, 2*s)` this is
+        // `j - (j / s) * s`. With `s` symbolic the access lowers to an
+        // author-trusted `IndexMap::SExpr`.
+        let step_c = b.const_sym(s);
         let quot = b.div(j, step_c);
         let offset = b.mul(quot, step_c);
         let src_idx = b.sub(j, offset);
         let src_val = b.index(src, &[src_idx]);
-        // Coefficient branches on the value of `j / step`, not on an
+        // Coefficient branches on the value of `j / s`, not on an
         // index — `select` on FpExt is fine.
         let is_lower = b.lt(j, step_c);
         let coeff = b.select(is_lower, one_minus_x, x_i_ext);
         b.mul(src_val, coeff)
     });
-    b.finish(
-        format!("eq_hypercube_nonoverlapping_stage_ext_{step}"),
-        body,
-    )
+    b.finish("eq_hypercube_nonoverlapping_stage_ext", body)
 }
 
 // ---------------------------------------------------------------------------

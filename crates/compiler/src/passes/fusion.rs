@@ -39,7 +39,7 @@
 //! plan).
 
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     sync::Arc,
 };
 
@@ -49,15 +49,15 @@ use crate::{
     graph_ir::{
         classify_buf_uses, BufId, FusionHistory, GraphBuilder, GraphNode, KernelModuleNode,
     },
-    ir::{BinOp, IRBuilder, Module, Node, NodeId, ReduceOp, ScalarType, VarId},
+    ir::{BinOp, IRBuilder, Module, Node, NodeId, ReduceOp, ScalarType, SizeExpr, VarId},
     module_hash::{children_of, module_hash},
     passes::{
         canonicalize::{canonicalize, CanonValue, Program, ResultExpr, TensorRef},
         parallel_reduce_rewrite::should_tree_lower,
         type_infer::{type_infer, TypeMap},
-        utils::{hir_to_quast, replace_nodes, resolve_tensor_ref},
+        utils::{hir_to_quast, hir_to_sexpr, replace_nodes, resolve_tensor_ref},
     },
-    quast::{self, NodeEmitter, Quast},
+    quast::{self, NodeEmitter, Quast, SymConst},
     CompileError,
 };
 
@@ -153,9 +153,22 @@ pub struct KernelCost {
     pub body_ops: usize,
 }
 
-/// `module_hash` -> extraction result, surviving fusion rounds. `None`
-/// caches an extraction failure so it is not retried every round.
-pub type RelationCache = HashMap<[u8; 32], Option<Arc<AccessRelation>>>;
+/// `(module_hash, param_bindings)` -> extraction result, surviving fusion
+/// rounds. The same symbolic module yields a different *concrete* relation
+/// per binding vector, hence the compound key. `None` caches an extraction
+/// failure so it is not retried every round.
+pub type RelationCache = HashMap<([u8; 32], Vec<i64>), Option<Arc<AccessRelation>>>;
+
+/// The node's parameter environment: module param `VarId` -> bound value.
+fn binding_env(kn: &KernelModuleNode) -> BTreeMap<VarId, i64> {
+    kn.module
+        .builder
+        .params()
+        .iter()
+        .zip(&kn.param_bindings)
+        .map(|((v, _), &val)| (*v, val))
+        .collect()
+}
 
 /// Extracts an [`AccessRelation`] for every `GraphNode::Kernel` in the
 /// graph, keyed by node index. Kernels whose extraction fails (unsupported
@@ -170,8 +183,8 @@ pub fn extract_relations(
             continue;
         };
         let rel = cache
-            .entry(module_hash(&kn.module))
-            .or_insert_with(|| extract_one(&kn.module).ok().map(Arc::new));
+            .entry((module_hash(&kn.module), kn.param_bindings.clone()))
+            .or_insert_with(|| extract_one(&kn.module, &binding_env(kn)).ok().map(Arc::new));
         if let Some(rel) = rel {
             out.insert(idx, Arc::clone(rel));
         }
@@ -179,12 +192,19 @@ pub fn extract_relations(
     out
 }
 
-/// Extracts the access relation of a split (single-kernel) module.
-pub fn extract_one(module: &Module) -> Result<AccessRelation, CompileError> {
+/// Extracts the access relation of a split (single-kernel) module. The
+/// relation is fully concrete: symbolic bounds and shapes are resolved
+/// through `params` (the node's param bindings), so a symbolic module
+/// participates in fusion with per-node concrete geometry while its HIR
+/// stays symbolic.
+pub fn extract_one(
+    module: &Module,
+    params: &BTreeMap<VarId, i64>,
+) -> Result<AccessRelation, CompileError> {
     // `rewrite_parallel_reduce` runs on the raw module at JIT time (before
     // canonicalize), so multi-kernel detection must mirror its walk on the
     // raw body.
-    let multi = has_tree_lowered_reduce(module);
+    let multi = has_tree_lowered_reduce(module, params);
 
     let types = type_infer(module)?;
     let program = canonicalize(module.clone(), types)?;
@@ -196,12 +216,24 @@ pub fn extract_one(module: &Module) -> Result<AccessRelation, CompileError> {
         )));
     }
     let k = &program.kernels[0];
-    let m = k.inner.map_or(1, |(mb, _)| mb);
+    let sym_err = || {
+        CompileError::Lower(
+            "fusion: kernel bound is not concrete under the node's param bindings".into(),
+        )
+    };
+    let resolve = |e: &SizeExpr| e.concretize(params).as_const().map(|c| c as usize);
+    let outer_bound = resolve(&k.outer_bound).ok_or_else(sym_err)?;
+    let inner = match &k.inner {
+        None => None,
+        Some((mb, mv)) => Some((resolve(mb).ok_or_else(sym_err)?, *mv)),
+    };
+    let m = inner.map_or(1, |(mb, _)| mb);
 
     let mut w = Walker {
         b: &program.module.builder,
         types: &program.types,
         env: &program.env,
+        params,
         inline_lets: &k.inline_lets,
         tile_vars: k.inner_lets.iter().map(|l| l.var).collect(),
         let_overlay: HashMap::new(),
@@ -219,12 +251,13 @@ pub fn extract_one(module: &Module) -> Result<AccessRelation, CompileError> {
 
     // Shared-memory tiles run once per outer iteration point.
     for l in &k.inner_lets {
-        w.scope.push((l.iter_var, l.bound));
-        w.walk_result(&l.result, l.bound as f64);
+        let lb = resolve(&l.bound).ok_or_else(sym_err)?;
+        w.scope.push((l.iter_var, lb));
+        w.walk_result(&l.result, lb as f64);
         w.scope.pop();
     }
     // Result expressions run once per (outer, inner) point.
-    if let Some((mb, mv)) = k.inner {
+    if let Some((mb, mv)) = inner {
         w.scope.push((mv, mb));
     }
     for r in &k.results {
@@ -251,7 +284,7 @@ pub fn extract_one(module: &Module) -> Result<AccessRelation, CompileError> {
         bytes_out += (inner_factor * elem_bytes) as f64;
         writes.push(WriteAccess {
             out_pos: j,
-            len_elems: k.outer_bound * inner_factor,
+            len_elems: outer_bound * inner_factor,
             inner_factor,
             elem_bytes,
         });
@@ -278,7 +311,7 @@ pub fn extract_one(module: &Module) -> Result<AccessRelation, CompileError> {
 
     Ok(AccessRelation {
         outer_var: k.outer_var,
-        outer_bound: k.outer_bound,
+        outer_bound,
         reads: w.reads,
         writes,
         cost: KernelCost {
@@ -289,7 +322,7 @@ pub fn extract_one(module: &Module) -> Result<AccessRelation, CompileError> {
         },
         class,
         write_inverse,
-        inner_var: k.inner.map(|(_, v)| v),
+        inner_var: inner.map(|(_, v)| v),
         scalar_body,
     })
 }
@@ -297,26 +330,29 @@ pub fn extract_one(module: &Module) -> Result<AccessRelation, CompileError> {
 /// Whether `rewrite_parallel_reduce` would expand this module into several
 /// CUDA kernels. Mirrors its top-level walk: bare reduces and
 /// attribute-free `compute { reduce }` values trigger tree lowering per
-/// [`should_tree_lower`].
-fn has_tree_lowered_reduce(module: &Module) -> bool {
+/// [`should_tree_lower`]. Bounds resolve through `params`.
+fn has_tree_lowered_reduce(module: &Module, params: &BTreeMap<VarId, i64>) -> bool {
     let b = &module.builder;
     let mut cur = module.body;
     loop {
         match b.node(cur) {
             Node::Let { value, body, .. } => {
-                if top_value_tree_lowers(b, *value) {
+                if top_value_tree_lowers(b, *value, params) {
                     return true;
                 }
                 cur = *body;
             }
-            _ => return top_value_tree_lowers(b, cur),
+            _ => return top_value_tree_lowers(b, cur, params),
         }
     }
 }
 
-fn top_value_tree_lowers(b: &IRBuilder, id: NodeId) -> bool {
+fn top_value_tree_lowers(b: &IRBuilder, id: NodeId, params: &BTreeMap<VarId, i64>) -> bool {
+    let resolve = |e: &SizeExpr| e.concretize(params).as_const();
     match b.node(id) {
-        Node::Reduce { bound, .. } => should_tree_lower(*bound, 1),
+        Node::Reduce { bound, .. } => {
+            resolve(bound).is_some_and(|k| should_tree_lower(k as usize, 1))
+        }
         Node::Compute {
             bound,
             body,
@@ -324,11 +360,13 @@ fn top_value_tree_lowers(b: &IRBuilder, id: NodeId) -> bool {
             par: None,
             threads: None,
             ..
-        } => {
-            matches!(b.node(*body),
-                Node::Reduce { bound: k, .. } if should_tree_lower(*k, *bound))
-        }
-        Node::Tuple(elems) => elems.iter().any(|&e| top_value_tree_lowers(b, e)),
+        } => match (b.node(*body), resolve(bound)) {
+            (Node::Reduce { bound: k, .. }, Some(m)) => {
+                resolve(k).is_some_and(|k| should_tree_lower(k as usize, m as usize))
+            }
+            _ => false,
+        },
+        Node::Tuple(elems) => elems.iter().any(|&e| top_value_tree_lowers(b, e, params)),
         _ => false,
     }
 }
@@ -363,6 +401,8 @@ struct Walker<'a> {
     b: &'a IRBuilder,
     types: &'a TypeMap,
     env: &'a HashMap<VarId, CanonValue>,
+    /// Module param -> bound value (the node's `param_bindings`).
+    params: &'a BTreeMap<VarId, i64>,
     inline_lets: &'a HashMap<VarId, NodeId>,
     /// Tile (`InnerLet`) variables: reads from these are shared memory,
     /// not global accesses.
@@ -407,7 +447,11 @@ impl Walker<'_> {
             return;
         }
         match self.b.node(id).clone() {
-            Node::Input(_) | Node::ConstU32(_) | Node::ConstField(_) | Node::ConstFpExt(_) => {}
+            Node::Input(_)
+            | Node::ConstU32(_)
+            | Node::ConstField(_)
+            | Node::ConstFpExt(_)
+            | Node::ConstSym(_) => {}
             Node::Var(v) => {
                 if let Some(&n) = self.inline_lets.get(&v) {
                     self.walk(n, scale);
@@ -452,10 +496,17 @@ impl Walker<'_> {
                 body,
             } => {
                 self.saw_reduce = true;
+                let Some(bc) = bound.concretize(self.params).as_const().map(|c| c as usize) else {
+                    self.resolve_error = Some(CompileError::Lower(
+                        "fusion: kernel bound is not concrete under the node's param bindings"
+                            .into(),
+                    ));
+                    return;
+                };
                 let st = self.types.try_get(id).and_then(|t| t.scalar_type());
-                self.charge(scale * bound as f64 * scalar_op_weight(op == ReduceOp::Mul, st));
-                self.scope.push((var, bound));
-                self.walk(body, scale * bound as f64);
+                self.charge(scale * bc as f64 * scalar_op_weight(op == ReduceOp::Mul, st));
+                self.scope.push((var, bc));
+                self.walk(body, scale * bc as f64);
                 self.scope.pop();
             }
             Node::Compute {
@@ -466,8 +517,15 @@ impl Walker<'_> {
                 // defensively so the relation still carries a conservative
                 // cost and the kernel is kept out of the Simple class.
                 self.saw_compute = true;
-                self.scope.push((var, bound));
-                self.walk(body, scale * bound as f64);
+                let Some(bc) = bound.concretize(self.params).as_const().map(|c| c as usize) else {
+                    self.resolve_error = Some(CompileError::Lower(
+                        "fusion: kernel bound is not concrete under the node's param bindings"
+                            .into(),
+                    ));
+                    return;
+                };
+                self.scope.push((var, bc));
+                self.walk(body, scale * bc as f64);
                 self.scope.pop();
             }
             Node::Let { var, value, body } => {
@@ -514,11 +572,18 @@ impl Walker<'_> {
         });
     }
 
-    fn site_quast(&self, indices: &[NodeId], shape: &[usize]) -> Option<Quast> {
-        let syms = |v: VarId| {
-            (v == self.outer_var || self.scope.iter().any(|&(sv, _)| sv == v))
-                .then(|| Quast::sym(v))
-        };
+    fn site_quast(&self, indices: &[NodeId], shape: &[SizeExpr]) -> Option<Quast> {
+        // Shape dims and index expressions resolve through the node's param
+        // bindings; a dim that stays symbolic means the linearized site
+        // expression is unknown and the read is recorded without one
+        // (conservative).
+        let shape: Vec<usize> = shape
+            .iter()
+            .map(|d| d.concretize(self.params).as_const().map(|c| c as usize))
+            .collect::<Option<_>>()?;
+        let in_scope = |v: VarId| v == self.outer_var || self.scope.iter().any(|&(sv, _)| sv == v);
+        let q_syms = |v: VarId| in_scope(v).then(|| Quast::sym(v));
+        let s_syms = |v: VarId| in_scope(v).then(|| SizeExpr::sym(v));
         let lets = |v: VarId| {
             self.inline_lets
                 .get(&v)
@@ -529,11 +594,20 @@ impl Walker<'_> {
                     _ => None,
                 })
         };
-        let exprs: Result<Vec<Quast>, _> = indices
+        let exprs: Option<Vec<Quast>> = indices
             .iter()
-            .map(|&ix| hir_to_quast(self.b, ix, &syms, &lets))
+            .map(|&ix| {
+                // Param-bearing sites (`Node::ConstSym`) are not quasi-affine
+                // as written; extract symbolically and concretize instead.
+                hir_to_quast(self.b, ix, &q_syms, &lets).ok().or_else(|| {
+                    hir_to_sexpr(self.b, ix, &s_syms, &lets)
+                        .ok()?
+                        .concretize(self.params)
+                        .try_to_quast()
+                })
+            })
             .collect();
-        exprs.ok().map(|e| quast::linearize(&e, shape))
+        exprs.map(|e| quast::linearize(&e, &shape))
     }
 }
 
@@ -1105,6 +1179,8 @@ pub fn apply_fusion(g: &mut GraphBuilder, cand: &FusionCandidate) -> Result<(), 
     let src_bufs = kn_src.inputs.clone();
     let dst_bufs = kn_dst.inputs.clone();
     let dst_outputs = kn_dst.outputs.clone();
+    let src_param_bindings = kn_src.param_bindings.clone();
+    let dst_param_bindings = kn_dst.param_bindings.clone();
     // Capture the pre-merge history now — after the graft below the src
     // BufIds may no longer resolve to live buffer-table entries, so
     // shape-string snapshots must happen against the current graph.
@@ -1147,6 +1223,37 @@ pub fn apply_fusion(g: &mut GraphBuilder, cand: &FusionCandidate) -> Result<(), 
         builder: mut mb, ..
     } = dst_mod;
 
+    // Consumer input positions bound to the fused buffer: needed for seam
+    // unification here and for the residual-read check after grafting.
+    let removed: Vec<usize> = dst_bufs
+        .iter()
+        .enumerate()
+        .filter(|&(_, &b)| b == cand.buf)
+        .map(|(p, _)| p)
+        .collect();
+    if removed.is_empty() {
+        return Err(ferr("fused buffer is not a consumer input"));
+    }
+
+    // Seam-based param unification (structural, not value-based): a flat
+    // scalar-body pack-1 producer writes exactly `outer_bound` elements,
+    // and the consumer states that same element count as the removed
+    // input's shape — both sides were checked against the buffer at
+    // insertion, so the two expressions agree under their bindings. When
+    // the producer bound is a bare param it is remapped onto the
+    // consumer-side product expression; every other producer param is
+    // appended to the merged module on first use (its bound value travels
+    // with the merged bindings, so the kernel stays correct either way —
+    // un-unified params only cost dedup opportunities).
+    let mut param_remap: BTreeMap<VarId, SizeExpr> = BTreeMap::new();
+    if ks.inner.is_none() && matches!(ks.results[0], ResultExpr::Scalar(_)) {
+        if let SizeExpr::Const(SymConst::Sym(p)) = ks.outer_bound.fold_lits() {
+            if let Some(prod) = SizeExpr::product(&mb.inputs()[removed[0]].shape) {
+                param_remap.insert(p, prod);
+            }
+        }
+    }
+
     // Phase 1: prepare one grafted producer expression per read site.
     let mut cx = GraftCx {
         src_b: &src_prog.module.builder,
@@ -1154,6 +1261,9 @@ pub fn apply_fusion(g: &mut GraphBuilder, cand: &FusionCandidate) -> Result<(), 
         src_inline_lets: &ks.inline_lets,
         src_bufs: &src_bufs,
         dst_bufs: &dst_bufs,
+        src_param_bindings: &src_param_bindings,
+        param_remap,
+        appended_params: Vec::new(),
         input_map: HashMap::new(),
         appended: Vec::new(),
     };
@@ -1191,6 +1301,13 @@ pub fn apply_fusion(g: &mut GraphBuilder, cand: &FusionCandidate) -> Result<(), 
         grafts.insert(rw.index_node, grafted);
     }
     let appended = cx.appended;
+    // Merged bindings: consumer params keep their positions (mb is the
+    // consumer's builder), producer params appended by the graft follow in
+    // declaration order.
+    let merged_bindings: Vec<i64> = dst_param_bindings
+        .into_iter()
+        .chain(cx.appended_params)
+        .collect();
 
     // Phase 2: rebuild the consumer body from the canonical view with the
     // grafts applied and every peeled scalar let inlined back.
@@ -1218,10 +1335,10 @@ pub fn apply_fusion(g: &mut GraphBuilder, cand: &FusionCandidate) -> Result<(), 
     } else {
         mb.intern(Node::Tuple(member_nodes))
     };
-    if let Some((m, j)) = kd.inner {
+    if let Some((m, j)) = &kd.inner {
         root = mb.intern(Node::Compute {
-            bound: m,
-            var: j,
+            bound: m.clone(),
+            var: *j,
             body: root,
             scatter: None,
             par: kd.inner_par.clone().map(Box::new),
@@ -1229,7 +1346,7 @@ pub fn apply_fusion(g: &mut GraphBuilder, cand: &FusionCandidate) -> Result<(), 
         });
     }
     let body = mb.intern(Node::Compute {
-        bound: kd.outer_bound,
+        bound: kd.outer_bound.clone(),
         var: kd.outer_var,
         body: root,
         scatter: None,
@@ -1240,15 +1357,6 @@ pub fn apply_fusion(g: &mut GraphBuilder, cand: &FusionCandidate) -> Result<(), 
     // Residual-read check: no reference to the fused buffer's input
     // positions may survive grafting (a missed site would keep the data
     // dependency while DCE later removes the producer).
-    let removed: Vec<usize> = dst_bufs
-        .iter()
-        .enumerate()
-        .filter(|&(_, &b)| b == cand.buf)
-        .map(|(p, _)| p)
-        .collect();
-    if removed.is_empty() {
-        return Err(ferr("fused buffer is not a consumer input"));
-    }
     let mut stack = vec![body];
     let mut seen = HashSet::new();
     while let Some(id) = stack.pop() {
@@ -1352,6 +1460,7 @@ pub fn apply_fusion(g: &mut GraphBuilder, cand: &FusionCandidate) -> Result<(), 
     let snapshot = Arc::new(crate::graph_ir::KernelSnapshot {
         node: Arc::new(KernelModuleNode {
             module: Arc::clone(&module),
+            param_bindings: merged_bindings.clone(),
             inputs: inputs.clone(),
             outputs: dst_outputs.clone(),
             fusion_history: None,
@@ -1366,6 +1475,7 @@ pub fn apply_fusion(g: &mut GraphBuilder, cand: &FusionCandidate) -> Result<(), 
     });
     g.nodes[cand.dst] = GraphNode::Kernel(KernelModuleNode {
         module,
+        param_bindings: merged_bindings,
         inputs,
         outputs: dst_outputs,
         fusion_history: Some(fusion_history),
@@ -1385,6 +1495,14 @@ struct GraftCx<'a> {
     src_inline_lets: &'a HashMap<VarId, NodeId>,
     src_bufs: &'a [BufId],
     dst_bufs: &'a [BufId],
+    /// Producer param bindings, parallel to `src_b.params()`.
+    src_param_bindings: &'a [i64],
+    /// Producer param -> merged-module size expression. Seeded with the
+    /// seam-unified params; the rest are appended lazily on first use
+    /// ([`Self::map_params`]).
+    param_remap: BTreeMap<VarId, SizeExpr>,
+    /// Bound values of the lazily appended params, in append order.
+    appended_params: Vec<i64>,
     /// src input position -> consumer-builder node, shared across sites.
     input_map: HashMap<usize, NodeId>,
     /// Buffers of the inputs appended to the consumer, in append order.
@@ -1392,15 +1510,57 @@ struct GraftCx<'a> {
 }
 
 impl GraftCx<'_> {
-    fn map_input(&mut self, mb: &mut IRBuilder, p: usize) -> NodeId {
+    /// Rewrites a producer-side size expression into the merged module's
+    /// param namespace. Producer params without a seam mapping are
+    /// re-declared as fresh params (fresh `VarId`, so no collision with
+    /// consumer vars) with their bound value recorded for the merged
+    /// bindings.
+    fn map_params(&mut self, mb: &mut IRBuilder, e: &SizeExpr) -> Result<SizeExpr, CompileError> {
+        let mut ps = BTreeSet::new();
+        e.param_syms(&mut ps);
+        for v in ps {
+            if self.param_remap.contains_key(&v) {
+                continue;
+            }
+            let pos = self
+                .src_b
+                .params()
+                .iter()
+                .position(|(pv, _)| *pv == v)
+                .ok_or_else(|| ferr(format!("undeclared producer param {v:?}")))?;
+            let base = &self.src_b.params()[pos].1;
+            let mut name = base.clone();
+            let mut k = 0;
+            while mb.params().iter().any(|(_, n)| *n == name) {
+                k += 1;
+                name = format!("{base}__f{k}");
+            }
+            let value = self.src_param_bindings[pos];
+            let fresh = mb.symbol(name);
+            mb.extend_shape_hint(value);
+            self.param_remap
+                .insert(v, SizeExpr::cst(SymConst::Sym(fresh.0)));
+            self.appended_params.push(value);
+        }
+        e.subst_params(&self.param_remap).ok_or_else(|| {
+            ferr("a producer param in a coefficient position maps to a compound expression")
+        })
+    }
+
+    fn map_input(&mut self, mb: &mut IRBuilder, p: usize) -> Result<NodeId, CompileError> {
         if let Some(&n) = self.input_map.get(&p) {
-            return n;
+            return Ok(n);
         }
         let buf = self.src_bufs[p];
         let sdecl = self.src_b.inputs()[p].clone();
+        let shape: Vec<SizeExpr> = sdecl
+            .shape
+            .iter()
+            .map(|d| self.map_params(mb, d))
+            .collect::<Result<_, _>>()?;
         let reuse = (0..self.dst_bufs.len()).find(|&q| {
             let d = &mb.inputs()[q];
-            self.dst_bufs[q] == buf && d.elem == sdecl.elem && d.shape == sdecl.shape
+            self.dst_bufs[q] == buf && d.elem == sdecl.elem && d.shape == shape
         });
         let n = match reuse {
             Some(q) => mb.intern(Node::Input(q)),
@@ -1411,11 +1571,11 @@ impl GraftCx<'_> {
                     sdecl.name
                 };
                 self.appended.push(buf);
-                mb.input(name, sdecl.elem, sdecl.shape)
+                mb.input(name, sdecl.elem, shape)
             }
         };
         self.input_map.insert(p, n);
-        n
+        Ok(n)
     }
 
     fn copy(
@@ -1433,7 +1593,19 @@ impl GraftCx<'_> {
             Node::ConstU32(c) => mb.intern(Node::ConstU32(c)),
             Node::ConstField(c) => mb.intern(Node::ConstField(c)),
             Node::ConstFpExt(c) => mb.intern(Node::ConstFpExt(c)),
-            Node::Input(p) => self.map_input(mb, p),
+            Node::ConstSym(e) => {
+                // σ substitution rewrites producer binders at `Node::Var`
+                // sites; it cannot reach a loop var embedded inside an
+                // `SExpr`, so such an expression cannot be grafted soundly.
+                let mut loop_vars = BTreeSet::new();
+                e.syms(&mut loop_vars);
+                if !loop_vars.is_empty() {
+                    return Err(ferr("producer param expression references loop variables"));
+                }
+                let e2 = self.map_params(mb, &e)?;
+                mb.intern(Node::ConstSym(e2))
+            }
+            Node::Input(p) => self.map_input(mb, p)?,
             Node::Var(v) => {
                 if let Some(&n) = subst.get(&v) {
                     n
@@ -1474,7 +1646,7 @@ impl GraftCx<'_> {
             }
             Node::Index { tensor, indices } => {
                 let t = match resolve_tensor_ref(self.src_b, self.src_env, tensor)? {
-                    TensorRef::Input(p) => self.map_input(mb, p),
+                    TensorRef::Input(p) => self.map_input(mb, p)?,
                     TensorRef::Let { .. } => {
                         return Err(ferr("producer reads a top-level let output"))
                     }
@@ -1531,7 +1703,11 @@ fn rewrite_body(
         return r;
     }
     let new = match mb.node(id).clone() {
-        Node::Input(_) | Node::ConstU32(_) | Node::ConstField(_) | Node::ConstFpExt(_) => id,
+        Node::Input(_)
+        | Node::ConstU32(_)
+        | Node::ConstField(_)
+        | Node::ConstFpExt(_)
+        | Node::ConstSym(_) => id,
         Node::Var(v) => {
             if let Some(&n) = inline_lets.get(&v) {
                 rewrite_body(mb, n, grafts, inline_lets, env, memo)
@@ -1897,7 +2073,7 @@ pub fn dedup_modules(g: &mut GraphBuilder) -> usize {
 /// that differ only by a `VarId` bijection renumber to hash-identical
 /// modules; renumbering an already-canonical module is a no-op (up to
 /// arena garbage, which the hash never sees).
-fn renumber_module(m: &Module) -> Module {
+pub(crate) fn renumber_module(m: &Module) -> Module {
     let b = &m.builder;
 
     // Canonical post-order over reachable nodes (mirrors module_hash's
@@ -1938,6 +2114,12 @@ fn renumber_module(m: &Module) -> Module {
         }
     }
     let mut vmap: HashMap<VarId, VarId> = HashMap::new();
+    // Module parameters are declarations, not walk-reachable nodes: number
+    // them first, in declaration order, so bounds and input shapes that
+    // mention them renumber deterministically.
+    for (v, _) in b.params() {
+        visit_var(&mut vmap, *v);
+    }
     for &id in &order {
         match b.node(id) {
             Node::Var(v) => visit_var(&mut vmap, *v),
@@ -1950,6 +2132,12 @@ fn renumber_module(m: &Module) -> Module {
                         visit_var(&mut vmap, p);
                     }
                     for e in &s.exprs {
+                        visit_quast(&mut vmap, e);
+                    }
+                    for &p in &s.inv_params {
+                        visit_var(&mut vmap, p);
+                    }
+                    for e in &s.inv_exprs {
                         visit_quast(&mut vmap, e);
                     }
                     for &v in s.bounds.keys() {
@@ -1971,8 +2159,18 @@ fn renumber_module(m: &Module) -> Module {
     // every VarId; children precede parents in `order`, so operand ids
     // are always already mapped.
     let mut nb = IRBuilder::new();
+    for (v, name) in b.params() {
+        nb.inherit_param(vmap[v], name.clone());
+    }
+    if let Some(h) = b.shape_hint() {
+        nb.add_shape_hint(h);
+    }
+    if let Some(block) = b.block_hint() {
+        nb.set_block_hint(block);
+    }
     for d in b.inputs() {
-        nb.input(d.name.clone(), d.elem, d.shape.clone());
+        let shape: Vec<SizeExpr> = d.shape.iter().map(|e| remap_sexpr(e, &vmap)).collect();
+        nb.input(d.name.clone(), d.elem, shape);
     }
     let mut node_map: HashMap<NodeId, NodeId> = HashMap::new();
     for &id in &order {
@@ -1982,6 +2180,7 @@ fn renumber_module(m: &Module) -> Module {
             Node::ConstU32(c) => nb.const_u32(*c),
             Node::ConstField(c) => nb.const_field(*c),
             Node::ConstFpExt(c) => nb.const_fpext(*c),
+            Node::ConstSym(e) => nb.intern(Node::ConstSym(remap_sexpr(e, &vmap))),
             Node::LiftFpExt(x) => nb.lift_fpext(node_map[x]),
             Node::Bin(op, x, y) => nb.bin(*op, node_map[x], node_map[y]),
             Node::Select {
@@ -2001,7 +2200,7 @@ fn renumber_module(m: &Module) -> Module {
                 par,
                 threads,
             } => nb.intern(Node::Compute {
-                bound: *bound,
+                bound: remap_sexpr(bound, &vmap),
                 var: vmap[var],
                 body: node_map[body],
                 scatter: scatter.as_ref().map(|s| Box::new(remap_scatter(s, &vmap))),
@@ -2015,7 +2214,7 @@ fn renumber_module(m: &Module) -> Module {
                 body,
             } => nb.intern(Node::Reduce {
                 op: *op,
-                bound: *bound,
+                bound: remap_sexpr(bound, &vmap),
                 var: vmap[var],
                 body: node_map[body],
             }),
@@ -2044,6 +2243,28 @@ fn renumber_module(m: &Module) -> Module {
     }
 }
 
+/// Remaps module-parameter `VarId`s (`SymConst` positions) in a bound or
+/// shape expression. Sizes never contain loop-var `Sym` nodes, but those are
+/// remapped too for uniformity.
+fn remap_sexpr(e: &SizeExpr, vmap: &HashMap<VarId, VarId>) -> SizeExpr {
+    use quast::SymConst;
+    let c = |k: &SymConst| match k {
+        SymConst::Sym(v) => SymConst::Sym(vmap[v]),
+        lit => *lit,
+    };
+    match e {
+        SizeExpr::Sym(v) => SizeExpr::Sym(vmap[v]),
+        SizeExpr::Const(k) => SizeExpr::Const(c(k)),
+        SizeExpr::Add(a, b) => SizeExpr::Add(
+            Arc::new(remap_sexpr(a, vmap)),
+            Arc::new(remap_sexpr(b, vmap)),
+        ),
+        SizeExpr::Mul(a, k) => SizeExpr::Mul(Arc::new(remap_sexpr(a, vmap)), c(k)),
+        SizeExpr::FloorDiv(a, k) => SizeExpr::FloorDiv(Arc::new(remap_sexpr(a, vmap)), c(k)),
+        SizeExpr::Neg(a) => SizeExpr::Neg(Arc::new(remap_sexpr(a, vmap))),
+    }
+}
+
 fn remap_quast(q: &Quast, vmap: &HashMap<VarId, VarId>) -> Quast {
     match q {
         Quast::Sym(v) => Quast::Sym(vmap[v]),
@@ -2062,6 +2283,8 @@ fn remap_scatter(s: &quast::Scatter, vmap: &HashMap<VarId, VarId>) -> quast::Sca
     quast::Scatter {
         params: s.params.iter().map(|p| vmap[p]).collect(),
         exprs: s.exprs.iter().map(|e| remap_quast(e, vmap)).collect(),
+        inv_params: s.inv_params.iter().map(|p| vmap[p]).collect(),
+        inv_exprs: s.inv_exprs.iter().map(|e| remap_quast(e, vmap)).collect(),
         out_shape: s.out_shape.clone(),
         bounds: s.bounds.iter().map(|(v, &bnd)| (vmap[v], bnd)).collect(),
     }
@@ -2082,7 +2305,7 @@ mod tests {
 
     fn extract(b: IRBuilder, body: NodeId) -> AccessRelation {
         let module = b.finish("k", body);
-        extract_one(&module).unwrap()
+        extract_one(&module, &BTreeMap::new()).unwrap()
     }
 
     #[test]
@@ -2234,9 +2457,12 @@ mod tests {
     fn scatter_store_is_general_without_inverse() {
         let mut b = IRBuilder::new();
         let x = b.input("x", ScalarType::BabyBear, vec![16]);
-        let sc = b.scatter_map(1, None, |p, _c| {
-            vec![p[0].rem_c(8).mul_c(2).add(&p[0].floordiv(8))]
-        });
+        let sc = b.scatter_map(
+            1,
+            None,
+            |p, _c| vec![p[0].rem_c(8).mul_c(2).add(&p[0].floordiv(8))],
+            |q, _c| vec![q[0].rem_c(2).mul_c(8).add(&q[0].floordiv(2))],
+        );
         let body = b.compute_scatter(16, sc, |b, i| b.index(x, &[i]));
         let r = extract(b, body);
         assert_eq!(r.class, KernelClass::General);
@@ -2551,18 +2777,23 @@ mod tests {
     fn general_producer_fuses_via_case_b() {
         let mut b = IRBuilder::new();
         let x = b.input("x", ScalarType::BabyBear, vec![32]);
-        // a[p][t] = x[((p % 4) * 8 + t + 1) % 32]: the unprovable absorbed
-        // index keeps the nest un-absorbed, so the producer is General
-        // with a trailing inner compute.
+        // a[p][t] = x[((p % 4) * 8 + (t % 5) * 2 + 1) % 32]: the absorbed
+        // `(v % 12) % 5` (5 does not divide 12) keeps the index unprovable
+        // and the nest un-absorbed, so the producer is General with a
+        // trailing inner compute.
         let a = b.compute(12, |b, p| {
             b.compute(12, |b, t| {
+                let c2 = b.const_u32(2);
                 let c4 = b.const_u32(4);
+                let c5 = b.const_u32(5);
                 let c8 = b.const_u32(8);
                 let c1 = b.const_u32(1);
                 let c32 = b.const_u32(32);
                 let pm = b.rem(p, c4);
                 let row = b.mul(pm, c8);
-                let s = b.add(row, t);
+                let tm = b.rem(t, c5);
+                let col = b.mul(tm, c2);
+                let s = b.add(row, col);
                 let s1 = b.add(s, c1);
                 let ix = b.rem(s1, c32);
                 b.index(x, &[ix])
@@ -2681,7 +2912,7 @@ mod tests {
         apply_fusion(&mut g, &cands[0]).unwrap();
         let kn = kernel_at(&g, cands[0].dst);
         assert_eq!(kn.inputs, vec![ins[0]]);
-        let r = extract_one(&kn.module).unwrap();
+        let r = extract_one(&kn.module, &BTreeMap::new()).unwrap();
         assert_eq!(r.class, KernelClass::Simple);
         assert_eq!(r.outer_bound, 16);
         // Both grafted sites read `x` directly through the composed indices.
@@ -2726,7 +2957,7 @@ mod tests {
         apply_fusion(&mut g, &cands[0]).unwrap();
         let kn = kernel_at(&g, cands[0].dst);
         assert_eq!(kn.inputs, vec![ins[0]]);
-        let r = extract_one(&kn.module).unwrap();
+        let r = extract_one(&kn.module, &BTreeMap::new()).unwrap();
         assert_eq!(r.class, KernelClass::Simple);
         assert_eq!(r.reads.len(), 1);
         assert_eq!(r.reads[0].expr, Some(Quast::sym(r.outer_var)));
@@ -2768,7 +2999,7 @@ mod tests {
         apply_fusion(&mut g, &cands[0]).unwrap();
         let kn = kernel_at(&g, cands[0].dst);
         assert_eq!(kn.inputs, vec![ins[0]]);
-        let r = extract_one(&kn.module).unwrap();
+        let r = extract_one(&kn.module, &BTreeMap::new()).unwrap();
         assert_eq!(r.class, KernelClass::Simple);
         assert_eq!(r.outer_bound, 144);
         assert_eq!(r.reads.len(), 1);
@@ -2803,7 +3034,7 @@ mod tests {
         apply_fusion(&mut g, &cands[0]).unwrap();
         let kn = kernel_at(&g, cands[0].dst);
         assert_eq!(kn.inputs, vec![ins[0]]);
-        let r = extract_one(&kn.module).unwrap();
+        let r = extract_one(&kn.module, &BTreeMap::new()).unwrap();
         assert_eq!(r.class, KernelClass::General);
         assert_eq!(r.reads.len(), 1);
         assert_eq!(r.reads[0].inner.len(), 1);
@@ -2840,7 +3071,7 @@ mod tests {
         let mut want = vec![ins[0], ins[1]];
         want.sort_by_key(|b| b.0);
         assert_eq!(got, want);
-        let r = extract_one(&kn.module).unwrap();
+        let r = extract_one(&kn.module, &BTreeMap::new()).unwrap();
         assert_eq!(r.reads.len(), 2);
     }
 
@@ -2869,9 +3100,150 @@ mod tests {
         let kn = kernel_at(&g, cands[0].dst);
         assert_eq!(kn.inputs, vec![ins[0]]);
         assert_eq!(kn.module.builder.inputs().len(), 1);
-        let r = extract_one(&kn.module).unwrap();
+        let r = extract_one(&kn.module, &BTreeMap::new()).unwrap();
         // x[i]*2 + x[i]: a single hash-consed load site feeds both terms.
         assert_eq!(r.reads.len(), 1);
+    }
+
+    /// A graph buffer holding `elems` 4-byte elements: binding inference on
+    /// symbolic modules solves params from these byte sizes.
+    fn sized_buf(g: &mut GraphBuilder, name: &str, elems: i64) -> BufId {
+        g.add_buf(BufInfo {
+            name: Some(name.into()),
+            device_type: DeviceType::Cuda(0),
+            size: Quast::cst(elems * 4),
+            elem_size: 4,
+        })
+    }
+
+    /// Seam unification: a flat symbolic producer whose bound is the bare
+    /// param `n` fuses into the symbolic consumer with `n` remapped onto
+    /// the consumer's param — the merged module keeps a single param and
+    /// the consumer's bindings.
+    #[test]
+    fn apply_unifies_bare_param_seam() {
+        let mut b = IRBuilder::new();
+        let n = b.symbol("n");
+        let x = b.input("x", ScalarType::BabyBear, vec![n]);
+        let two = b.const_field(2);
+        let a = b.compute(n, |b, i| {
+            let xi = b.index(x, &[i]);
+            b.mul(xi, two)
+        });
+        let body = b.bind(a, |b, av| {
+            b.compute(n, |b, i| {
+                let ai = b.index(av, &[i]);
+                let c1 = b.const_u32(1);
+                let cn = b.const_sym(n);
+                let i1 = b.add(i, c1);
+                let iw = b.rem(i1, cn);
+                let ai1 = b.index(av, &[iw]);
+                b.add(ai, ai1)
+            })
+        });
+        let module = b.finish("symchain", body);
+
+        let mut g = GraphBuilder::new();
+        let xin = sized_buf(&mut g, "x", 32);
+        let out = sized_buf(&mut g, "out", 32);
+        g.register_input(xin);
+        g.register_output(out);
+        g.insert_kernel(module, vec![xin], vec![out]);
+
+        let cands = candidates(&g, &FusionOptions::default());
+        assert_eq!(cands.len(), 1);
+        apply_fusion(&mut g, &cands[0]).unwrap();
+        let kn = kernel_at(&g, cands[0].dst);
+        assert_eq!(kn.inputs, vec![xin]);
+        assert_eq!(kn.module.builder.params().len(), 1);
+        assert_eq!(kn.param_bindings, vec![32]);
+        let r = extract_one(&kn.module, &binding_env(kn)).unwrap();
+        assert_eq!(r.class, KernelClass::Simple);
+        assert_eq!(r.outer_bound, 32);
+        assert_eq!(r.reads.len(), 2);
+        assert!(r.reads.iter().all(|ra| ra.input_pos == 0));
+    }
+
+    /// A producer param the seam cannot unify (compound producer bound) is
+    /// appended to the merged module as a fresh param, with its bound value
+    /// recorded on the merged node's bindings.
+    #[test]
+    fn apply_appends_ununified_producer_param() {
+        let prod = {
+            let mut b = IRBuilder::new();
+            let m = b.symbol("m");
+            let x = b.input("x", ScalarType::BabyBear, vec![m * 2]);
+            let two = b.const_field(2);
+            let body = b.compute(m * 2, |b, i| {
+                let xi = b.index(x, &[i]);
+                b.mul(xi, two)
+            });
+            b.finish("symprod", body)
+        };
+        let cons = {
+            let mut b = IRBuilder::new();
+            let a = b.input("a", ScalarType::BabyBear, vec![32]);
+            let body = b.compute(32, |b, i| {
+                let ai = b.index(a, &[i]);
+                b.add(ai, ai)
+            });
+            b.finish("cons", body)
+        };
+        let mut g = GraphBuilder::new();
+        let xin = sized_buf(&mut g, "x", 32);
+        let mid = sized_buf(&mut g, "a", 32);
+        let out = sized_buf(&mut g, "out", 32);
+        g.register_input(xin);
+        g.register_output(out);
+        g.insert_kernel(prod, vec![xin], vec![mid]);
+        g.insert_kernel(cons, vec![mid], vec![out]);
+
+        let cands = candidates(&g, &FusionOptions::default());
+        assert_eq!(cands.len(), 1);
+        apply_fusion(&mut g, &cands[0]).unwrap();
+        let kn = kernel_at(&g, cands[0].dst);
+        assert_eq!(kn.inputs, vec![xin]);
+        let params = kn.module.builder.params();
+        assert_eq!(params.len(), 1);
+        assert_eq!(params[0].1, "m");
+        assert_eq!(kn.param_bindings, vec![16]);
+        // The appended input decl still states its shape through the param.
+        assert_eq!(
+            kn.module.builder.inputs()[0].shape,
+            vec![SizeExpr::cst(SymConst::Sym(params[0].0)).mul_c(SymConst::Lit(2))]
+        );
+        let r = extract_one(&kn.module, &binding_env(kn)).unwrap();
+        assert_eq!(r.outer_bound, 32);
+        assert_eq!(r.reads.len(), 1);
+        assert_eq!(r.reads[0].expr, Some(Quast::sym(r.outer_var)));
+    }
+
+    /// A producer whose `ConstSym` embeds a loop var cannot be grafted (σ
+    /// substitution only reaches `Node::Var` sites): apply_fusion vetoes
+    /// the candidate.
+    #[test]
+    fn apply_vetoes_loop_var_in_producer_const_sym() {
+        let mut b = IRBuilder::new();
+        let x = b.input("x", ScalarType::U32, vec![16]);
+        let a = b.compute(16, |b, i| {
+            let Node::Var(iv) = *b.node(i) else {
+                panic!("compute binder is not a var");
+            };
+            let cs = b.const_sym(SizeExpr::sym(iv));
+            let xi = b.index(x, &[i]);
+            b.add(xi, cs)
+        });
+        let body = b.bind(a, |b, av| {
+            b.compute(16, |b, i| {
+                let ai = b.index(av, &[i]);
+                b.add(ai, ai)
+            })
+        });
+        let (mut g, _) = graph_of(b.finish("loopsym", body), 1, 1);
+        let cands = candidates(&g, &FusionOptions::default());
+        assert_eq!(cands.len(), 1);
+        let err = apply_fusion(&mut g, &cands[0]).unwrap_err();
+        assert!(err.to_string().contains("loop variables"), "{err}");
     }
 
     /// A candidate whose site ids don't land (simulating a stale relation)
@@ -3213,9 +3585,12 @@ mod tests {
                 b.fresh_var();
             }
             let x = b.input("x", ScalarType::BabyBear, vec![16]);
-            let sc = b.scatter_map(1, None, |p, _c| {
-                vec![p[0].rem_c(8).mul_c(2).add(&p[0].floordiv(8))]
-            });
+            let sc = b.scatter_map(
+                1,
+                None,
+                |p, _c| vec![p[0].rem_c(8).mul_c(2).add(&p[0].floordiv(8))],
+                |q, _c| vec![q[0].rem_c(2).mul_c(8).add(&q[0].floordiv(2))],
+            );
             let body = b.compute_scatter(16, sc, |b, i| b.index(x, &[i]));
             b.finish("scat", body)
         };
@@ -3225,6 +3600,62 @@ mod tests {
             module_hash(&renumber_module(&a)),
             module_hash(&renumber_module(&b))
         );
+    }
+
+    /// Module parameters (in bounds and input shapes) renumber too.
+    #[test]
+    fn renumber_covers_symbolic_params() {
+        let build = |shift: u32| {
+            let mut b = IRBuilder::new();
+            for _ in 0..shift {
+                b.fresh_var();
+            }
+            let n = b.symbol("n");
+            let x = b.input("x", ScalarType::BabyBear, vec![n]);
+            let body = b.compute(n, |b, i| {
+                let xi = b.index(x, &[i]);
+                b.mul(xi, xi)
+            });
+            b.finish("sym_scale", body)
+        };
+        let (a, b) = (build(0), build(9));
+        assert_ne!(module_hash(&a), module_hash(&b));
+        let (ra, rb) = (renumber_module(&a), renumber_module(&b));
+        assert_eq!(module_hash(&ra), module_hash(&rb));
+        assert_eq!(module_hash(&ra), module_hash(&renumber_module(&ra)));
+        // The remapped param is still declared and still referenced by the
+        // input shape.
+        assert_eq!(ra.builder.params().len(), 1);
+        let pv = ra.builder.params()[0].0;
+        let mut syms = std::collections::BTreeSet::new();
+        ra.builder.inputs()[0].shape[0].param_syms(&mut syms);
+        assert_eq!(syms.into_iter().collect::<Vec<_>>(), vec![pv]);
+    }
+
+    /// `Node::ConstSym` participates in α-renumbering and hashing: the
+    /// embedded parameter syms remap together with the module params, so
+    /// shifted α-variants converge to one hash.
+    #[test]
+    fn renumber_covers_const_sym() {
+        let build = |shift: u32| {
+            let mut b = IRBuilder::new();
+            for _ in 0..shift {
+                b.fresh_var();
+            }
+            let n = b.symbol("n");
+            let x = b.input("x", ScalarType::U32, vec![n]);
+            let body = b.compute(n, |b, i| {
+                let xi = b.index(x, &[i]);
+                let c = b.const_sym(n - 1);
+                b.mul(xi, c)
+            });
+            b.finish("sym_splice", body)
+        };
+        let (a, b) = (build(0), build(9));
+        assert_ne!(module_hash(&a), module_hash(&b));
+        let (ra, rb) = (renumber_module(&a), renumber_module(&b));
+        assert_eq!(module_hash(&ra), module_hash(&rb));
+        assert_eq!(module_hash(&ra), module_hash(&renumber_module(&ra)));
     }
 
     #[test]

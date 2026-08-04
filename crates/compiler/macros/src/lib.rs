@@ -14,19 +14,24 @@
 //! - `let v = e; e'` (or `let v = e in e'`) — let binding (`IRBuilder::bind`);
 //! - `if c then e else e'` — select (both branches are evaluated);
 //! - `compute [bound] |i| { e }` / `reduce [bound] |i| { e }` — the parallel primitives; `bound` is
-//!   a host Rust expression;
-//! - `#[scatter(params -> exprs, [bounds])] compute ...` — stores the compute's results through a
-//!   bijective quasi-affine map from logical to physical coordinates. `params` is one identifier
-//!   per logical output dimension (parenthesized when more than one); `exprs` is one quasi-affine
-//!   expression per physical dimension (`+ - * / %` and unary `-`, where `* / %` take a constant
-//!   operand: an integer literal or a `#`-splice); the physical `[bounds]` may be omitted when the
-//!   rank is unchanged. E.g. `#[scatter(i -> (i / 4, i % 4), [3, 4])]`;
+//!   a host Rust expression: a concrete `usize` or a symbolic `Sym`/`SymExpr` module parameter
+//!   (declared with `IRBuilder::symbol`);
+//! - `#[scatter(params -> exprs, inverse = params -> exprs, [bounds])] compute ...` — stores the
+//!   compute's results through a bijective quasi-affine map from logical to physical coordinates.
+//!   `params` is one identifier per logical output dimension (parenthesized when more than one);
+//!   `exprs` is one quasi-affine expression per physical dimension (`+ - * / %` and unary `-`,
+//!   where `* / %` take a constant operand: an integer literal or a concrete `#`-splice). The
+//!   mandatory `inverse` clause declares the physical-to-logical inverse in the same syntax (one
+//!   parameter per physical dimension, one expression per logical dimension); validation checks it
+//!   inverts the map pointwise. The physical `[bounds]` may be omitted when the rank is unchanged.
+//!   E.g. `#[scatter(i -> (i / 4, i % 4), inverse = (q, r) -> q * 4 + r, [3, 4])]`;
 //! - `#[par((t, s) -> expr)] compute ...` — the compute layout: maps the physical thread index `t`
 //!   and per-thread repeat index `s` to the logical compute index through a quasi-affine expression
 //!   (same grammar as `scatter`), e.g. `#[par((t, s) -> t * 16 + s)]`. The map must be convertible
 //!   to a linear layout;
 //! - `#[grid(threads = N)] compute ...` — block-size hint on the outer compute: run the kernel with
-//!   `N` threads per block instead of the default;
+//!   `N` threads per block instead of the default. `N` and all `#`-splices inside `#[par]` /
+//!   `#[scatter]` maps must be concrete `usize` values — symbolic parameters are rejected;
 //! - `t[i, j, ...]` — tensor indexing;
 //! - `+ - * / % < <= ==` with the usual precedence;
 //! - `& ^ |` bitwise operators (in that precedence order, tighter than comparisons and looser than
@@ -36,7 +41,9 @@
 //! - `(a, b, ...)` — tuple; `[a, b, ...]` — pack (array literal);
 //! - `17` / `17u32` — u32 constant; `17bb` — BabyBear constant;
 //! - `#x` / `#(expr)` — u32 constant from a host Rust expression; the paren form accepts any Rust
-//!   expression (e.g. `#(i + f(j))`);
+//!   expression (e.g. `#(i + f(j))`). A concrete `usize` value interns a literal; a `Sym`/`SymExpr`
+//!   module parameter (e.g. `#n`, `#(n - 1)`) interns a symbolic constant resolved at
+//!   monomorphization;
 //! - `foo(a, b)` — calls the Rust function `foo(builder, a, b)`: a function used with n arguments
 //!   must take n+1, the builder first. Identifier arguments are passed through verbatim (so host
 //!   values of any type can be forwarded); all other arguments are built as DSL expressions.
@@ -65,6 +72,7 @@ mod kw {
     syn::custom_keyword!(par);
     syn::custom_keyword!(grid);
     syn::custom_keyword!(threads);
+    syn::custom_keyword!(inverse);
 }
 
 enum DslExpr {
@@ -134,10 +142,13 @@ impl ComputeAttrs {
     }
 }
 
-/// `#[scatter(params -> exprs, [bounds])]` on top of a `compute`.
+/// `#[scatter(params -> exprs, inverse = params -> exprs, [bounds])]` on
+/// top of a `compute`.
 struct ScatterAttr {
     params: Vec<Ident>,
     exprs: Vec<QExpr>,
+    inv_params: Vec<Ident>,
+    inv_exprs: Vec<QExpr>,
     bounds: Option<Vec<Expr>>,
 }
 
@@ -279,11 +290,10 @@ fn parse_compute_attrs(input: ParseStream) -> syn::Result<ComputeAttrs> {
     Ok(attrs)
 }
 
-/// `scatter(params -> exprs, [bounds])` (inside the `#[...]` bracket).
-fn parse_scatter_attr(bracket: ParseStream) -> syn::Result<ScatterAttr> {
-    bracket.parse::<kw::scatter>()?;
-    let paren;
-    parenthesized!(paren in bracket);
+/// `params -> exprs`: one identifier per input dimension (parenthesized
+/// when more than one), then one quasi-affine expression per output
+/// dimension.
+fn parse_scatter_map(paren: ParseStream) -> syn::Result<(Vec<Ident>, Vec<QExpr>)> {
     let params: Vec<Ident> = if paren.peek(syn::token::Paren) {
         let p;
         parenthesized!(p in paren);
@@ -306,8 +316,38 @@ fn parse_scatter_attr(bracket: ParseStream) -> syn::Result<ScatterAttr> {
         let list: Punctuated<QExpr, Token![,]> = p.parse_terminated(parse_qexpr, Token![,])?;
         list.into_iter().collect()
     } else {
-        vec![parse_qexpr(&paren)?]
+        vec![parse_qexpr(paren)?]
     };
+    Ok((params, exprs))
+}
+
+/// `scatter(params -> exprs, inverse = params -> exprs, [bounds])` (inside
+/// the `#[...]` bracket).
+fn parse_scatter_attr(bracket: ParseStream) -> syn::Result<ScatterAttr> {
+    bracket.parse::<kw::scatter>()?;
+    let paren;
+    parenthesized!(paren in bracket);
+    let (params, exprs) = parse_scatter_map(&paren)?;
+    paren
+        .parse::<Token![,]>()
+        .map_err(|_| paren.error("scatter requires an inverse: `, inverse = params -> exprs`"))?;
+    paren.parse::<kw::inverse>()?;
+    paren.parse::<Token![=]>()?;
+    let (inv_params, inv_exprs) = parse_scatter_map(&paren)?;
+    if inv_params.len() != exprs.len() {
+        return Err(paren.error(format!(
+            "scatter inverse has {} parameters but the forward map has {} output expressions",
+            inv_params.len(),
+            exprs.len()
+        )));
+    }
+    if inv_exprs.len() != params.len() {
+        return Err(paren.error(format!(
+            "scatter inverse has {} expressions but the forward map has {} parameters",
+            inv_exprs.len(),
+            params.len()
+        )));
+    }
     let bounds = if paren.peek(Token![,]) {
         paren.parse::<Token![,]>()?;
         let b;
@@ -323,6 +363,8 @@ fn parse_scatter_attr(bracket: ParseStream) -> syn::Result<ScatterAttr> {
     Ok(ScatterAttr {
         params,
         exprs,
+        inv_params,
+        inv_exprs,
         bounds,
     })
 }
@@ -673,7 +715,7 @@ fn gen_expr(e: &DslExpr) -> TokenStream2 {
         DslExpr::Var(path) => quote!(#path),
         DslExpr::LitU32(v) => quote!(__cc_b.const_u32(#v)),
         DslExpr::LitField(v) => quote!(__cc_b.const_field(#v)),
-        DslExpr::Splice(expr) => quote!(__cc_b.const_u32((#expr) as u32)),
+        DslExpr::Splice(expr) => quote!(__cc_b.dsl_const(#expr)),
         DslExpr::Bin { method, lhs, rhs } => {
             let m = format_ident!("{method}");
             let l = gen_expr(lhs);
@@ -766,7 +808,7 @@ fn gen_expr(e: &DslExpr) -> TokenStream2 {
         } => {
             let b = gen_expr(body);
             if attrs.is_empty() {
-                return quote!(__cc_b.compute((#bound) as usize, |__cc_b, #var| #b));
+                return quote!(__cc_b.compute((#bound), |__cc_b, #var| #b));
             }
             let sc = match &attrs.scatter {
                 None => quote!(::core::option::Option::None),
@@ -775,19 +817,30 @@ fn gen_expr(e: &DslExpr) -> TokenStream2 {
                     let out_opt = match &sc.bounds {
                         None => quote!(::core::option::Option::None),
                         Some(bs) => {
-                            quote!(::core::option::Option::Some(
-                                ::std::vec![#((#bs) as usize),*]
-                            ))
+                            quote!(::core::option::Option::Some(::std::vec![#(
+                                    ::crypto_compiler::ir::IntoDslConcrete::into_dsl_concrete(#bs)
+                                ),*]))
                         }
                     };
                     let params = &sc.params;
                     let idxs = 0..n;
                     let exprs: Vec<TokenStream2> = sc.exprs.iter().map(gen_qexpr).collect();
+                    let inv_params = &sc.inv_params;
+                    let inv_idxs = 0..sc.inv_params.len();
+                    let inv_exprs: Vec<TokenStream2> = sc.inv_exprs.iter().map(gen_qexpr).collect();
                     quote!(::core::option::Option::Some(
-                        __cc_b.scatter_map(#n, #out_opt, |__cc_qs, _cc_cst| {
-                            #(let #params = __cc_qs[#idxs].clone();)*
-                            ::std::vec![#(#exprs),*]
-                        })
+                        __cc_b.scatter_map(
+                            #n,
+                            #out_opt,
+                            |__cc_qs, _cc_cst| {
+                                #(let #params = __cc_qs[#idxs].clone();)*
+                                ::std::vec![#(#exprs),*]
+                            },
+                            |__cc_qs, _cc_cst| {
+                                #(let #inv_params = __cc_qs[#inv_idxs].clone();)*
+                                ::std::vec![#(#inv_exprs),*]
+                            },
+                        )
                     ))
                 }
             };
@@ -807,17 +860,19 @@ fn gen_expr(e: &DslExpr) -> TokenStream2 {
             };
             let threads = match &attrs.threads {
                 None => quote!(::core::option::Option::None),
-                Some(t) => quote!(::core::option::Option::Some((#t) as usize)),
+                Some(t) => quote!(::core::option::Option::Some(
+                    ::crypto_compiler::ir::IntoDslConcrete::into_dsl_concrete(#t)
+                )),
             };
             quote!({
                 let __cc_sc = #sc;
                 let __cc_par = #par;
-                __cc_b.compute_with((#bound) as usize, __cc_sc, __cc_par, #threads, |__cc_b, #var| #b)
+                __cc_b.compute_with((#bound), __cc_sc, __cc_par, #threads, |__cc_b, #var| #b)
             })
         }
         DslExpr::Reduce { bound, var, body } => {
             let b = gen_expr(body);
-            quote!(__cc_b.reduce_add((#bound) as usize, |__cc_b, #var| #b))
+            quote!(__cc_b.reduce_add((#bound), |__cc_b, #var| #b))
         }
     }
 }
@@ -892,7 +947,9 @@ fn gen_qconst(e: &QExpr) -> TokenStream2 {
     match e {
         QExpr::Param(_) => unreachable!("const subtrees have no params"),
         QExpr::Lit(v) => quote!(#v),
-        QExpr::Splice(expr) => quote!(((#expr) as i64)),
+        QExpr::Splice(expr) => {
+            quote!((::crypto_compiler::ir::IntoDslConcrete::into_dsl_concrete(#expr) as i64))
+        }
         QExpr::Add(a, b) => {
             let (a, b) = (gen_qconst(a), gen_qconst(b));
             quote!((#a + #b))

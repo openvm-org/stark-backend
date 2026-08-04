@@ -36,11 +36,15 @@ pub fn plan_global_scratch(program: &Program) -> Result<GlobalScratchPlan, Compi
                 continue;
             }
             // Non-tensor members are reported by lowering.
-            let Type::Tensor(elem, shape) = member_ty else {
+            let Type::Tensor(elem, _) = member_ty else {
                 continue;
             };
-            let size = (shape.iter().product::<usize>() * elem.size_bytes())
-                .next_multiple_of(SCRATCH_ALIGN);
+            let n = member_ty.num_elements().ok_or_else(|| {
+                CompileError::Lower(format!(
+                    "global scratch planning requires concrete shapes, got {member_ty:?}"
+                ))
+            })?;
+            let size = (n * elem.size_bytes()).next_multiple_of(SCRATCH_ALIGN);
             index_of.insert(tref, intervals.len());
             intervals.push((tref, let_id, let_id, size));
         }

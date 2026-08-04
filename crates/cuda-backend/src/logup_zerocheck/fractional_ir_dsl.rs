@@ -16,14 +16,13 @@
 //! index-expression checker cannot express. When the CUDA body branches on
 //! `virtual_mode`, only the `else` (dense) branch is ported.
 //!
-//! # Alpha as a compile-time host EF constant
+//! # Alpha as an input buffer
 //!
-//! `alpha` remains a Rust-side `EF` value baked into each `ir::Module` as
-//! `b.const_fpext([...])`. Its four coefficients are the *canonical*
-//! `u32`s of the EF value's basis representation — codegen converts to
-//! Montgomery internally, so no conversion is needed on the Rust side.
-//! (In the dense case the modules that don't consume padding never touch
-//! `alpha`, but we keep the API mirroring the blackbox wrappers.)
+//! `alpha` is bound like any other challenge: a `[D_EF] BabyBear` input
+//! buffer lifted to an `FpExt` scalar inside the module (see
+//! [`bind_challenge_as_fpext`]), so the module hash — and hence the JIT
+//! cache — is stable across alphas. (In the dense case the modules that
+//! don't consume padding never touch `alpha` at all.)
 //!
 //! # Data-dependent challenges as `[D_EF] BabyBear` `BufId`s
 //!
@@ -44,7 +43,7 @@
 use crypto_compiler::{
     field_ext::ef_inverse_coeffs,
     graph_ir::{BufId, GraphBuilder},
-    ir::{IRBuilder, Module, NodeId, ScalarType},
+    ir::{IRBuilder, Module, NodeId, ScalarType, SizeExpr},
 };
 
 use super::fractional_ir::{fpext_from_coeffs, load_ext_coeffs, FRAC_EF_BYTES};
@@ -56,7 +55,7 @@ use crate::{logup_zerocheck::fractional_ir::GKR_S_DEG, types::D_EF};
 /// Bind a `[D_EF]`-shaped BabyBear challenge input, lift it to an `FpExt`
 /// scalar, and `let_bound` it so the recombine fires once per launch
 /// rather than once per compute thread.
-fn bind_challenge_as_fpext(b: &mut IRBuilder, name: &str) -> NodeId {
+pub(crate) fn bind_challenge_as_fpext(b: &mut IRBuilder, name: &str) -> NodeId {
     let x = b.input(name, ScalarType::BabyBear, vec![D_EF]);
     let coeffs = load_ext_coeffs(b, x);
     let combined = fpext_from_coeffs(b, coeffs);
@@ -90,31 +89,34 @@ fn assert_frac_size(_n: usize) {
 /// Build the DSL module for a dense out-of-place `fold_ef_frac_columns`.
 ///
 /// Inputs:
-///   - `src : [size, 2] FpExt` (a Frac<EF> buffer, `size` elements)
+///   - `src : [q*4, 2] FpExt` (a Frac<EF> buffer, `size = q*4` elements)
 ///   - `r   : [D_EF] BabyBear` (folding challenge)
 ///
 /// Output:
-///   - `dst : [size/2, 2] FpExt` (a Frac<EF> buffer of half the length)
+///   - `dst : [q*2, 2] FpExt` (a Frac<EF> buffer of half the length)
+///
+/// Fully symbolic over `q = size / 4`: `q` is inferred from the bound
+/// `src` buffer at [`GraphBuilder::insert_kernel`] and survives as a
+/// runtime parameter, so every fold size shares ONE compiled kernel.
 ///
 /// Dense-only (`real_len == logical_len == size`).
-pub fn build_fold_ef_frac_columns_module(size: usize) -> Module {
-    assert!(
-        size >= 4 && size.is_power_of_two(),
-        "fold module: size must be a power of two >= 4, got {size}"
-    );
-    let out_len = size / 2;
-    let quarter = size / 4;
+pub fn build_fold_ef_frac_columns_module() -> Module {
     let mut b = IRBuilder::new();
-    let src = b.input("src", ScalarType::FpExt, vec![size, 2]);
+    let q = b.symbol("q");
+    let src = b.input(
+        "src",
+        ScalarType::FpExt,
+        vec![SizeExpr::from(q * 4), 2usize.into()],
+    );
     let r = bind_challenge_as_fpext(&mut b, "r");
 
-    let body = b.compute(out_len, move |b, i| {
+    let body = b.compute(q * 2, move |b, i| {
         // Determine the two source indices for output row `i`:
         //   a_idx = i + (i / quarter) * quarter
         //   b_idx = a_idx + quarter
         // For `i in [0, quarter)`: a_idx = i,           b_idx = i + quarter
         // For `i in [quarter, 2q)`: a_idx = i + quarter, b_idx = i + 2*quarter
-        let quarter_c = b.const_u32(quarter as u32);
+        let quarter_c = b.const_sym(q);
         let g = b.div(i, quarter_c);
         let off = b.mul(g, quarter_c);
         let a_idx = b.add(i, off);
@@ -136,7 +138,7 @@ pub fn build_fold_ef_frac_columns_module(size: usize) -> Module {
         let oq = b.add(aq, rdq);
         b.pack(&[op, oq])
     });
-    b.finish(format!("fold_ef_frac_columns_dsl_{size}"), body)
+    b.finish("fold_ef_frac_columns_dsl", body)
 }
 
 /// Insert an out-of-place dense fold as a structured [`GraphNode::Kernel`].
@@ -149,8 +151,12 @@ pub fn fold_ef_frac_columns_ir_dsl(
     size: usize,
     r: BufId,
 ) {
+    assert!(
+        size >= 4 && size.is_power_of_two(),
+        "fold: size must be a power of two >= 4, got {size}"
+    );
     assert_frac_size(size);
-    g.insert_kernel(build_fold_ef_frac_columns_module(size), [src, r], [dst]);
+    g.insert_kernel(build_fold_ef_frac_columns_module(), [src, r], [dst]);
 }
 
 // ---------------------------------------------------------------------------

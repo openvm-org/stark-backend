@@ -196,7 +196,7 @@ mod tests {
 
         assert_eq!(kprog.kernels.len(), 1);
         let kernel = &kprog.kernels[0];
-        assert_eq!(kernel.grid.bound, blocks);
+        assert_eq!(kernel.grid.bound.as_const(), Some(blocks));
         assert_eq!(kernel.block, t);
         assert_eq!(
             stmt_kinds(kernel),
@@ -222,7 +222,7 @@ mod tests {
             .filter(|b| b.space == AddressSpace::Shared)
             .collect();
         assert_eq!(shared.len(), 1, "the bouncing consumer gets one mirror");
-        assert_eq!(shared[0].shape, vec![t]);
+        assert_eq!(shared[0].shape, vec![crate::ir::SizeExpr::from(t)]);
         assert!(shared[0].layout.as_ref().unwrap().is_identity());
 
         let source = codegen(&kprog).unwrap();

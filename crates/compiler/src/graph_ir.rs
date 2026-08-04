@@ -27,7 +27,7 @@ use crate::{
     ir::{self, VarId},
     module_hash::module_hash,
     passes::split_module::{split_module, ModuleSubgraph, SubgraphValue},
-    quast::Quast,
+    quast::{Quast, SExpr, SymConst},
 };
 
 /// Index of a buffer in the graph's buffer table.
@@ -144,6 +144,12 @@ pub struct MemSetNode {
 /// parallel JIT.
 pub struct KernelModuleNode {
     pub module: Arc<ir::Module>,
+    /// Concrete value of each `module.builder.params()` entry for *this*
+    /// node, inferred at insertion by unifying the module's input shape
+    /// expressions against the bound graph buffers (see
+    /// [`GraphBuilder::infer_param_bindings`]). Empty iff the module
+    /// declares no parameters. Order-aligned with the params registry.
+    pub param_bindings: Vec<i64>,
     pub inputs: Vec<BufId>,
     pub outputs: Vec<BufId>,
     /// Trace of the fusion steps that produced this kernel. `None` on
@@ -246,6 +252,7 @@ impl KernelModuleNode {
         }
         let node = Arc::new(KernelModuleNode {
             module: Arc::clone(&self.module),
+            param_bindings: self.param_bindings.clone(),
             inputs: self.inputs.clone(),
             outputs: self.outputs.clone(),
             fusion_history: None,
@@ -320,6 +327,13 @@ impl fmt::Debug for GraphNode {
     }
 }
 
+/// Key of [`GraphBuilder::subgraph_cache`]: (module_hash, shape hint).
+/// `module_hash` treats the hint as metadata, but the cached split kernels
+/// carry hint *values* (sliced per kernel) that `insert_subgraph_impl` uses
+/// for param-binding inference, so same-HIR modules with different hints
+/// must not share an entry.
+type SubgraphCacheKey = ([u8; 32], Option<Vec<i64>>);
+
 #[derive(Default)]
 pub struct GraphBuilder {
     pub bufs: Vec<BufInfo>,
@@ -340,7 +354,7 @@ pub struct GraphBuilder {
     /// its split subgraph. [`GraphBuilder::insert_kernel`] splits a module
     /// once per unique content and replays the cached subgraph on every
     /// later insertion.
-    subgraph_cache: HashMap<[u8; 32], Arc<ModuleSubgraph>>,
+    subgraph_cache: HashMap<SubgraphCacheKey, Arc<ModuleSubgraph>>,
     /// Buffers the caller declared as graph inputs, in registration order
     /// (which defines the `set_input` index order). See
     /// [`Self::register_input`].
@@ -449,8 +463,11 @@ impl GraphBuilder {
             module.name,
             module.builder.inputs().len(),
         );
-        let hash = module_hash(&module);
-        let subgraph = match self.subgraph_cache.get(&hash) {
+        let key = (
+            module_hash(&module),
+            module.builder.shape_hint().map(<[i64]>::to_vec),
+        );
+        let subgraph = match self.subgraph_cache.get(&key) {
             Some(sg) => sg.clone(),
             None => {
                 let sg = split_module(&module).unwrap_or_else(|e| {
@@ -460,7 +477,7 @@ impl GraphBuilder {
                     )
                 });
                 let sg = Arc::new(sg);
-                self.subgraph_cache.insert(hash, sg.clone());
+                self.subgraph_cache.insert(key, sg.clone());
                 sg
             }
         };
@@ -482,8 +499,9 @@ impl GraphBuilder {
     /// outputs, one per [`ModuleSubgraph::outputs`] entry.
     ///
     /// Intermediate and output buffers are allocated on the first input's
-    /// device (`Cuda(0)` if the subgraph has no inputs) with their concrete
-    /// byte sizes from the split kernels' [`crate::passes::OutputSpec`]s.
+    /// device (`Cuda(0)` if the subgraph has no inputs) with byte sizes
+    /// from the split kernels' [`crate::passes::OutputSpec`]s, evaluated
+    /// under each kernel's inferred parameter bindings.
     ///
     /// `inputs.len()` must equal [`ModuleSubgraph::num_inputs`].
     pub fn insert_subgraph(&mut self, subgraph: &ModuleSubgraph, inputs: &[BufId]) -> Vec<BufId> {
@@ -545,6 +563,15 @@ impl GraphBuilder {
                     SubgraphValue::KernelOutput { kernel, out_idx } => produced[kernel][out_idx],
                 })
                 .collect();
+            let param_bindings = self.infer_param_bindings(&k.module, &in_bufs);
+            let env: BTreeMap<VarId, i64> = k
+                .module
+                .builder
+                .params()
+                .iter()
+                .map(|(v, _)| *v)
+                .zip(param_bindings.iter().copied())
+                .collect();
             let out_bufs: Vec<BufId> = k
                 .outputs
                 .iter()
@@ -557,10 +584,21 @@ impl GraphBuilder {
                     if let Some(&b) = bound.get(&val) {
                         return b;
                     }
+                    let num_elems =
+                        spec.num_elems
+                            .concretize(&env)
+                            .as_const()
+                            .unwrap_or_else(|| {
+                                panic!(
+                                    "insert_kernel: output {oi} of split kernel `{}` has element \
+                                 count `{}` that stays symbolic after binding parameters",
+                                    k.module.name, spec.num_elems,
+                                )
+                            });
                     self.add_buf(BufInfo {
                         name: Some(format!("{}.k{ki}.o{oi}", subgraph.name)),
                         device_type: device,
-                        size: Quast::cst(spec.size_bytes() as i64),
+                        size: Quast::cst(num_elems * spec.elem.size_bytes() as i64),
                         elem_size: spec.elem.size_bytes(),
                     })
                 })
@@ -568,6 +606,7 @@ impl GraphBuilder {
             let module = self.dedup_module(k.module.clone());
             self.nodes.push(GraphNode::Kernel(KernelModuleNode {
                 module,
+                param_bindings,
                 inputs: in_bufs,
                 outputs: out_bufs.clone(),
                 fusion_history: None,
@@ -583,6 +622,140 @@ impl GraphBuilder {
                 SubgraphValue::KernelOutput { kernel, out_idx } => produced[kernel][out_idx],
             })
             .collect()
+    }
+
+    /// Infers a concrete value for each of `module`'s parameters by
+    /// unifying its input shape expressions against the bound graph
+    /// buffers, one binding per `module.builder.params()` entry (in
+    /// registry order). Returns an empty vec iff the module declares no
+    /// parameters.
+    ///
+    /// Inference runs to a fixpoint over the inputs: an input whose shape
+    /// mixes several parameters may only become solvable once another
+    /// input has bound some of them. Per round, an input contributes when
+    /// its buffer's byte size is concrete and, after substituting the
+    /// bindings so far, at most one shape dimension remains symbolic; that
+    /// dimension is then solved structurally against the buffer's element
+    /// count (see [`solve_size_expr`]). Parameters still unbound at the
+    /// fixpoint fall back to the module's shape hint. Panics if a
+    /// parameter cannot be inferred, or if the bindings are inconsistent
+    /// with any concrete input buffer size.
+    fn infer_param_bindings(&self, module: &ir::Module, in_bufs: &[BufId]) -> Vec<i64> {
+        let params = module.builder.params();
+        if params.is_empty() {
+            return Vec::new();
+        }
+        let decls = module.builder.inputs();
+
+        // Element count of each input whose graph buffer has a concrete
+        // byte size; symbolic-size buffers can't constrain parameters.
+        let targets: Vec<Option<i64>> = decls
+            .iter()
+            .zip(in_bufs)
+            .map(|(decl, b)| {
+                let size = &self.bufs[b.0].size;
+                let mut syms = BTreeSet::new();
+                size.syms(&mut syms);
+                if !syms.is_empty() {
+                    return None;
+                }
+                let bytes = size.eval(&BTreeMap::new());
+                let elem = decl.elem.size_bytes() as i64;
+                assert!(
+                    bytes % elem == 0,
+                    "insert_kernel: module `{}` input `{}` is bound to a {bytes}-byte \
+                     buffer, not a multiple of the {elem}-byte element size",
+                    module.name,
+                    decl.name,
+                );
+                Some(bytes / elem)
+            })
+            .collect();
+
+        let mut env: BTreeMap<VarId, i64> = BTreeMap::new();
+        loop {
+            let before = env.len();
+            for (decl, target) in decls.iter().zip(&targets) {
+                let Some(elems) = *target else { continue };
+                let mut known: i64 = 1;
+                let mut unknown: Option<SExpr> = None;
+                let mut skip = false;
+                for dim in decl.shape.iter() {
+                    let dim = dim.concretize(&env).fold_lits();
+                    match dim.as_const() {
+                        Some(c) => known *= c,
+                        None if unknown.is_none() => unknown = Some(dim),
+                        None => {
+                            skip = true;
+                            break;
+                        }
+                    }
+                }
+                let (Some(dim), false) = (unknown, skip) else {
+                    continue;
+                };
+                if known == 0 || elems % known != 0 {
+                    continue; // the final verification reports the mismatch
+                }
+                solve_size_expr(&dim, elems / known, &mut env);
+            }
+            if env.len() == before {
+                break;
+            }
+        }
+
+        // Parameters the input shapes don't pin down fall back to the
+        // author's shape hint (aligned with the params registry).
+        if env.len() < params.len() {
+            if let Some(hint) = module.builder.shape_hint() {
+                for ((v, _), &h) in params.iter().zip(hint) {
+                    env.entry(*v).or_insert(h);
+                }
+            }
+        }
+
+        let bindings: Vec<i64> = params
+            .iter()
+            .map(|(v, name)| {
+                *env.get(v).unwrap_or_else(|| {
+                    panic!(
+                        "insert_kernel: cannot infer parameter `{name}` of module `{}` \
+                         from its input buffer sizes (add a shape hint or bind the \
+                         parameter through an input shape)",
+                        module.name,
+                    )
+                })
+            })
+            .collect();
+
+        // Every concrete input buffer must agree with the bindings.
+        for (decl, target) in decls.iter().zip(&targets) {
+            let Some(elems) = *target else { continue };
+            let product: i64 = decl
+                .shape
+                .iter()
+                .map(|dim| {
+                    dim.concretize(&env).as_const().unwrap_or_else(|| {
+                        panic!(
+                            "insert_kernel: module `{}` input `{}` dimension `{dim}` \
+                             stays symbolic after binding all parameters",
+                            module.name, decl.name,
+                        )
+                    })
+                })
+                .product();
+            assert!(
+                product == elems,
+                "insert_kernel: module `{}` input `{}` has shape {:?} = {product} \
+                 elements under the inferred parameter bindings, but its graph \
+                 buffer holds {elems} elements",
+                module.name,
+                decl.name,
+                decl.shape,
+            );
+        }
+
+        bindings
     }
 
     /// Content-dedup: two callers can build structurally identical modules
@@ -843,18 +1016,14 @@ impl GraphBuilder {
         // long producer chains down to a single terminal kernel.
         let mut output_bufs: Vec<BufId> = Vec::new();
         for b in 0..self.bufs.len() {
-            let writer = last_writer[b].clone();
             let bid = BufId(b);
             let is_registered = self.output_bufs.contains(&bid);
-            let is_natural_sink = writer.is_some() && !was_read[b];
-            if writer.is_some() && (is_natural_sink || is_registered) {
-                output_bufs.push(bid);
-                edges.push((
-                    writer.unwrap(),
-                    format!("out{b}"),
-                    vec![buf_label(bid)],
-                    false,
-                ));
+            let is_natural_sink = !was_read[b];
+            if let Some(writer) = last_writer[b].clone() {
+                if is_natural_sink || is_registered {
+                    output_bufs.push(bid);
+                    edges.push((writer, format!("out{b}"), vec![buf_label(bid)], false));
+                }
             }
         }
         // Registered graph inputs the emitter above didn't already add as
@@ -1242,6 +1411,65 @@ fn fusion_history_json(h: &FusionHistory) -> String {
     }
 }
 
+/// Structural solver for one symbolic shape dimension: binds parameters in
+/// `env` so that `e` (already concretized against `env`, so any remaining
+/// [`SymConst::Sym`] is unbound) evaluates to `target`.
+///
+/// Returns `false` when the expression's structure doesn't determine the
+/// parameters (e.g. two unbound parameters multiplied together, or a
+/// `FloorDiv`, which is not invertible) — the caller just tries again next
+/// fixpoint round or falls back to the shape hint. Arithmetic
+/// contradictions (a literal that doesn't match, a non-divisible
+/// coefficient) panic: the module cannot fit the buffer it was bound to.
+fn solve_size_expr(e: &SExpr, target: i64, env: &mut BTreeMap<VarId, i64>) -> bool {
+    match e {
+        SExpr::Const(SymConst::Lit(c)) => {
+            assert!(
+                *c == target,
+                "insert_kernel: shape dimension `{e}` = {c} but the bound buffer \
+                 requires {target}",
+            );
+            true
+        }
+        SExpr::Const(SymConst::Sym(v)) => {
+            env.insert(*v, target);
+            true
+        }
+        SExpr::Mul(inner, c) => {
+            let k = match c {
+                SymConst::Lit(k) => *k,
+                SymConst::Sym(v) => match inner.as_const() {
+                    // `const * p`: the coefficient is the unknown.
+                    Some(k) => {
+                        assert!(
+                            k != 0 && target % k == 0,
+                            "insert_kernel: cannot solve `{e}` = {target}: {target} \
+                             is not a multiple of {k}",
+                        );
+                        env.insert(*v, target / k);
+                        return true;
+                    }
+                    None => return false,
+                },
+            };
+            assert!(
+                k != 0 && target % k == 0,
+                "insert_kernel: cannot solve `{e}` = {target}: {target} is not a \
+                 multiple of {k}",
+            );
+            solve_size_expr(inner, target / k, env)
+        }
+        SExpr::Add(a, b) => match (a.as_const(), b.as_const()) {
+            (Some(c), _) => solve_size_expr(b, target - c, env),
+            (_, Some(c)) => solve_size_expr(a, target - c, env),
+            _ => false,
+        },
+        SExpr::Neg(a) => solve_size_expr(a, -target, env),
+        // Loop vars can't appear in input shapes; FloorDiv is lossy.
+        SExpr::Sym(_) | SExpr::FloorDiv(..) => false,
+    }
+}
+
 fn json_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
@@ -1356,7 +1584,7 @@ pub(crate) fn classify_buf_uses(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::{IRBuilder, ScalarType};
+    use crate::ir::{IRBuilder, ScalarType, SizeExpr};
 
     fn buf(builder: &mut GraphBuilder, name: &str, device_type: DeviceType, size: Quast) -> BufId {
         builder.add_buf(BufInfo {
@@ -1587,6 +1815,171 @@ mod tests {
         assert_eq!(out_info.name.as_deref(), Some("chain.k1.o0"));
         assert_eq!(out_info.size.eval(&BTreeMap::new()), 32);
         assert_eq!(out_info.elem_size, 4);
+    }
+
+    /// `let t = a * 2; out = t + a` over a symbolic length `n`.
+    fn symbolic_two_kernel_chain(name: &str) -> ir::Module {
+        let mut ib = IRBuilder::new();
+        let n = ib.symbol("n");
+        let a = ib.input("a", ScalarType::BabyBear, vec![n]);
+        let t = ib.compute(n, |ib, i| {
+            let ai = ib.index(a, &[i]);
+            let two = ib.const_field(2);
+            ib.mul(ai, two)
+        });
+        let t = ib.let_bound(t);
+        let out = ib.compute(n, |ib, i| {
+            let ti = ib.index(t, &[i]);
+            let ai = ib.index(a, &[i]);
+            ib.add(ti, ai)
+        });
+        ib.finish(name, out)
+    }
+
+    fn kernel_nodes(b: &GraphBuilder) -> Vec<&KernelModuleNode> {
+        b.nodes
+            .iter()
+            .map(|n| match n {
+                GraphNode::Kernel(k) => k,
+                other => panic!("expected structured kernel node, got {other:?}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn infers_binding_from_bare_input_dim() {
+        let mut b = GraphBuilder::new();
+        let a_buf = buf(&mut b, "a", DeviceType::Cuda(0), Quast::cst(32));
+        let out_buf = buf(&mut b, "out", DeviceType::Cuda(0), Quast::cst(32));
+        b.insert_kernel(symbolic_two_kernel_chain("chain"), [a_buf], [out_buf]);
+
+        // Both split kernels bind `n = 8` from the 32-byte (8-element)
+        // input buffer, and the intermediate is sized through the binding.
+        let kernels = kernel_nodes(&b);
+        assert_eq!(kernels.len(), 2);
+        assert_eq!(kernels[0].param_bindings, vec![8]);
+        assert_eq!(kernels[1].param_bindings, vec![8]);
+        let mid = kernels[0].outputs[0];
+        assert_eq!(b.buf_info(mid).size.eval(&BTreeMap::new()), 32);
+    }
+
+    #[test]
+    fn infers_binding_from_compound_input_dim() {
+        let mut ib = IRBuilder::new();
+        let n = ib.symbol("n");
+        let a = ib.input(
+            "a",
+            ScalarType::BabyBear,
+            vec![SizeExpr::from(n), 64usize.into()],
+        );
+        let body = ib.compute(n, |ib, i| {
+            let zero = ib.const_u32(0);
+            let av = ib.index(a, &[i, zero]);
+            ib.add(av, av)
+        });
+        let module = ib.finish("rows", body);
+
+        let mut b = GraphBuilder::new();
+        // 4 bytes * 64 columns * 32 rows: `n` must come out as 32.
+        let a_buf = buf(&mut b, "a", DeviceType::Cuda(0), Quast::cst(4 * 64 * 32));
+        let out_buf = buf(&mut b, "out", DeviceType::Cuda(0), Quast::cst(4 * 32));
+        b.insert_kernel(module, [a_buf], [out_buf]);
+
+        assert_eq!(kernel_nodes(&b)[0].param_bindings, vec![32]);
+    }
+
+    #[test]
+    fn binding_falls_back_to_shape_hint() {
+        let mut ib = IRBuilder::new();
+        let n = ib.symbol("n");
+        let m = ib.symbol("m");
+        let a = ib.input("a", ScalarType::BabyBear, vec![n * m]);
+        let body = ib.compute(n * m, |ib, i| {
+            let av = ib.index(a, &[i]);
+            ib.add(av, av)
+        });
+        ib.add_shape_hint(&[8, 16]);
+        let module = ib.finish("prod", body);
+
+        let mut b = GraphBuilder::new();
+        // `n * m` is structurally unsolvable (two unbound parameters), so
+        // both come from the hint; the buffer still checks out (128 elems).
+        let a_buf = buf(&mut b, "a", DeviceType::Cuda(0), Quast::cst(4 * 128));
+        let out_buf = buf(&mut b, "out", DeviceType::Cuda(0), Quast::cst(4 * 128));
+        b.insert_kernel(module, [a_buf], [out_buf]);
+
+        assert_eq!(kernel_nodes(&b)[0].param_bindings, vec![8, 16]);
+    }
+
+    #[test]
+    fn same_module_different_hints_bind_independently() {
+        // Same HIR (hence same `module_hash`, which excludes the hint), but
+        // different hint values. The subgraph cache must not replay the
+        // first module's hint for the second insert.
+        let build = |hint: &[i64]| {
+            let mut ib = IRBuilder::new();
+            let n = ib.symbol("n");
+            let m = ib.symbol("m");
+            let a = ib.input("a", ScalarType::BabyBear, vec![n * m]);
+            let body = ib.compute(n * m, |ib, i| {
+                let av = ib.index(a, &[i]);
+                ib.add(av, av)
+            });
+            ib.add_shape_hint(hint);
+            ib.finish("prod", body)
+        };
+
+        let mut b = GraphBuilder::new();
+        let a_buf = buf(&mut b, "a", DeviceType::Cuda(0), Quast::cst(4 * 128));
+        let out1 = buf(&mut b, "out1", DeviceType::Cuda(0), Quast::cst(4 * 128));
+        let out2 = buf(&mut b, "out2", DeviceType::Cuda(0), Quast::cst(4 * 128));
+        b.insert_kernel(build(&[8, 16]), [a_buf], [out1]);
+        b.insert_kernel(build(&[4, 32]), [a_buf], [out2]);
+
+        let kernels = kernel_nodes(&b);
+        assert_eq!(kernels[0].param_bindings, vec![8, 16]);
+        assert_eq!(kernels[1].param_bindings, vec![4, 32]);
+    }
+
+    #[test]
+    #[should_panic(expected = "cannot infer parameter")]
+    fn unsolvable_binding_without_hint_panics() {
+        let mut ib = IRBuilder::new();
+        let n = ib.symbol("n");
+        let m = ib.symbol("m");
+        let a = ib.input("a", ScalarType::BabyBear, vec![n * m]);
+        let body = ib.compute(n * m, |ib, i| {
+            let av = ib.index(a, &[i]);
+            ib.add(av, av)
+        });
+        let module = ib.finish("prod", body);
+
+        let mut b = GraphBuilder::new();
+        let a_buf = buf(&mut b, "a", DeviceType::Cuda(0), Quast::cst(4 * 128));
+        let out_buf = buf(&mut b, "out", DeviceType::Cuda(0), Quast::cst(4 * 128));
+        b.insert_kernel(module, [a_buf], [out_buf]);
+    }
+
+    #[test]
+    #[should_panic(expected = "elements under the inferred parameter bindings")]
+    fn inconsistent_binding_panics() {
+        let mut ib = IRBuilder::new();
+        let n = ib.symbol("n");
+        let a = ib.input("a", ScalarType::BabyBear, vec![n]);
+        let c = ib.input("c", ScalarType::BabyBear, vec![n]);
+        let body = ib.compute(n, |ib, i| {
+            let av = ib.index(a, &[i]);
+            let cv = ib.index(c, &[i]);
+            ib.add(av, cv)
+        });
+        let module = ib.finish("mismatch", body);
+
+        let mut b = GraphBuilder::new();
+        // `a` binds n = 8, but `c`'s buffer holds 16 elements.
+        let a_buf = buf(&mut b, "a", DeviceType::Cuda(0), Quast::cst(32));
+        let c_buf = buf(&mut b, "c", DeviceType::Cuda(0), Quast::cst(64));
+        let out_buf = buf(&mut b, "out", DeviceType::Cuda(0), Quast::cst(32));
+        b.insert_kernel(module, [a_buf, c_buf], [out_buf]);
     }
 
     #[test]

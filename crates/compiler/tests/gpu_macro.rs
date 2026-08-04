@@ -446,7 +446,7 @@ fn macro_scatter_reshape_transpose() {
     let a_in = ib.input("a", ScalarType::BabyBear, vec![n]);
     let body = kernel!(
         ib,
-        #[scatter(i -> (i % 4, i / 4), [4, 3])]
+        #[scatter(i -> (i % 4, i / 4), inverse = (a, b) -> b * 4 + a, [4, 3])]
         compute[n]
             | i
             | { a_in[i] * 2bb }
@@ -474,7 +474,7 @@ fn macro_scatter_reverse_permutation() {
     let a_in = ib.input("a", ScalarType::BabyBear, vec![n]);
     let body = kernel!(
         ib,
-        #[scatter(i -> #(n - 1) - i)]
+        #[scatter(i -> #(n - 1) - i, inverse = p -> #(n - 1) - p)]
         compute[n]
             | i
             | { a_in[i] + 1bb }
@@ -503,7 +503,7 @@ fn macro_scatter_deinterleave() {
     let a_in = ib.input("a", ScalarType::BabyBear, vec![n]);
     let body = kernel!(
         ib,
-        #[scatter(i -> i % 2 * #(n / 2) + i / 2)]
+        #[scatter(i -> i % 2 * #(n / 2) + i / 2, inverse = p -> p / #(n / 2) + p % #(n / 2) * 2)]
         compute[n]
             | i
             | { a_in[i] * 3bb }
@@ -530,7 +530,7 @@ fn macro_scatter_nested_transpose() {
     let mut ib = IRBuilder::new();
     let x_in = ib.input("x", ScalarType::BabyBear, vec![r, c]);
     let body = kernel!(ib,
-        #[scatter((i, j) -> (j, i), [c, r])]
+        #[scatter((i, j) -> (j, i), inverse = (a, b) -> (b, a), [c, r])]
         compute [r] |i| { compute [c] |j| { x_in[i, j] * 2bb } }
     );
     let module = ib.finish("scatter_nested_transpose_macro", body);
@@ -560,7 +560,7 @@ fn macro_scatter_inner_compute() {
     let a_in = ib.input("a", ScalarType::BabyBear, vec![n]);
     let body = kernel!(ib,
         compute [blocks] |i| {
-            #[scatter(j -> #(t - 1) - j)]
+            #[scatter(j -> #(t - 1) - j, inverse = p -> #(t - 1) - p)]
             compute [t] |j| { a_in[i * #t + j] * 2bb }
         }
     );
@@ -591,7 +591,7 @@ fn macro_scatter_shared_tile() {
     let a_in = ib.input("a", ScalarType::BabyBear, vec![n]);
     let body = kernel!(ib,
         compute [blocks] |i| {
-            let buf = #[scatter(j -> #(t - 1) - j)]
+            let buf = #[scatter(j -> #(t - 1) - j, inverse = p -> #(t - 1) - p)]
             compute [t] |j| { a_in[i * #t + j] };
             compute [t] |j| { buf[j] + 1bb }
         }
@@ -1857,7 +1857,7 @@ fn macro_matrix_transpose_ext() {
     let mut ib = IRBuilder::new();
     let x_in = ib.input("x", ScalarType::FpExt, vec![r, c]);
     let body = kernel!(ib,
-        #[scatter((i, j) -> (j, i), [c, r])]
+        #[scatter((i, j) -> (j, i), inverse = (a, b) -> (b, a), [c, r])]
         compute [r] |i| { compute [c] |j| { x_in[i, j] } }
     );
     let module = ib.finish("matrix_transpose_ext_macro", body);
@@ -2241,7 +2241,8 @@ fn select_emits_if_else_block_not_ternary() {
 /// `#(expr)` splice. `i & #(n - 1)` lowers to `i % n` (low-bit mask). For
 /// `i < n`, `i ^ #n` and `i | #n` both lower to `i + n` (bits disjoint), so
 /// indexing `c[i ^ #n]` and `c[i | #n]` both read the upper half of `c`.
-/// The `#(base + 0)` splice shows a compound Rust expression as the operand.
+/// The `#(2 * n - base)` splice shows a compound Rust expression as the
+/// operand.
 #[test]
 fn macro_bitwise_ops_lower_to_quasi_affine() {
     let log_n = 5usize;
@@ -2258,7 +2259,7 @@ fn macro_bitwise_ops_lower_to_quasi_affine() {
     let body = kernel!(ib,
         compute [2 * n] |i| {
             let lo = i & #(n - 1);
-            if i < #(base + 0) then c_in[lo | 0] else c_in[lo ^ #base]
+            if i < #(2 * n - base) then c_in[lo | 0] else c_in[lo ^ #base]
         }
     );
     let module = ib.finish("bitwise_ops", body);
@@ -2325,4 +2326,134 @@ fn macro_compute_reduce_fpext_weighted_sums() {
         want.extend_from_slice(&ef_to_u32s(acc));
     }
     assert_eq!(outs[0], want);
+}
+
+/// A param used in an inner reduce bound must be concrete before lowering,
+/// so the shape hint monomorphizes it away: the residual module flows
+/// through the concrete pipeline unchanged.
+#[test]
+fn symbolic_module_monomorphizes_via_shape_hint() {
+    let mv = 16usize;
+    let mut ib = IRBuilder::new();
+    let m = ib.symbol("m");
+    ib.add_shape_hint(&[mv as i64]);
+    let x = ib.input("x", ScalarType::BabyBear, vec![m * 64]);
+    let body = kernel!(ib, compute [64] |i| { reduce [m] |j| { x[i * #m + j] } });
+    let module = ib.finish("sym_hint_rowsum", body);
+
+    let input = pseudo_field_elems(mv * 64, 9);
+    let outs = run_module(module, std::slice::from_ref(&input));
+    assert_eq!(outs.len(), 1);
+    assert_eq!(outs[0].len(), 64);
+    for i in 0..64 {
+        let want = (0..mv).fold(0u64, |acc, j| (acc + input[i * mv + j] as u64) % P);
+        assert_eq!(outs[0][i] as u64, want, "mismatch at {i}");
+    }
+}
+
+/// One compiled artifact serves multiple sizes: `n` stays a runtime kernel
+/// parameter (only `required_params` are monomorphized away), is bound via
+/// `ModuleRunner::set_symbol`, and the same runner is re-run at 2^10 and
+/// 2^12.
+#[test]
+fn symbolic_flat_scale_two_sizes() {
+    let mut ib = IRBuilder::new();
+    let n = ib.symbol("n");
+    ib.add_shape_hint(&[1 << 10]);
+    let x = ib.input("x", ScalarType::BabyBear, vec![n]);
+    let scaled = kernel!(ib, compute[n] | i | { x[i] * 3bb });
+    let module = ib.finish("sym_scale", scaled);
+
+    let mut runner = ModuleRunner::new(&module, &CompileOptions::default()).unwrap();
+    for log_n in [10usize, 12] {
+        let nv = 1usize << log_n;
+        runner.set_symbol("n", nv as i64).unwrap();
+        let input = pseudo_field_elems(nv, 5);
+        runner.set_inputs(std::slice::from_ref(&input));
+        runner.run();
+        let outs = runner.read_outputs();
+        assert_eq!(outs.len(), 1);
+        assert_eq!(outs[0].len(), nv);
+        for i in 0..nv {
+            let want = (input[i] as u64) * 3 % P;
+            assert_eq!(outs[0][i] as u64, want, "n=2^{log_n}: mismatch at {i}");
+        }
+    }
+}
+
+/// A symbolic constant inside an index expression: `x[#(n - 1) - i]` is
+/// affine in `i` with a symbolic offset — an `SExpr` access that cannot
+/// convert to a `LinearLayout` and must still lower and run correctly. `n`
+/// stays a runtime parameter, so one artifact serves both sizes.
+#[test]
+fn symbolic_reversed_read() {
+    let mut ib = IRBuilder::new();
+    let n = ib.symbol("n");
+    ib.add_shape_hint(&[1 << 8]);
+    let x = ib.input("x", ScalarType::BabyBear, vec![n]);
+    let rev = kernel!(ib, compute [n] |i| { x[#(n - 1) - i] * 2bb });
+    let module = ib.finish("sym_rev", rev);
+
+    let mut runner = ModuleRunner::new(&module, &CompileOptions::default()).unwrap();
+    for log_n in [8usize, 10] {
+        let nv = 1usize << log_n;
+        runner.set_symbol("n", nv as i64).unwrap();
+        let input = pseudo_field_elems(nv, 9);
+        runner.set_inputs(std::slice::from_ref(&input));
+        runner.run();
+        let outs = runner.read_outputs();
+        for i in 0..nv {
+            let want = (input[nv - 1 - i] as u64) * 2 % P;
+            assert_eq!(outs[0][i] as u64, want, "n=2^{log_n}: mismatch at {i}");
+        }
+    }
+}
+
+/// A value-position splice `#n`: the symbolic constant is read as a `U32`
+/// device parameter at runtime instead of being monomorphized away.
+#[test]
+fn symbolic_value_splice() {
+    let mut ib = IRBuilder::new();
+    let n = ib.symbol("n");
+    ib.add_shape_hint(&[1 << 8]);
+    let x = ib.input("x", ScalarType::U32, vec![n]);
+    let body = kernel!(ib, compute [n] |i| { x[i] + #n });
+    let module = ib.finish("sym_value_splice", body);
+
+    let mut runner = ModuleRunner::new(&module, &CompileOptions::default()).unwrap();
+    for log_n in [8usize, 10] {
+        let nv = 1usize << log_n;
+        runner.set_symbol("n", nv as i64).unwrap();
+        let input: Vec<u32> = (0..nv as u32).map(|i| i.wrapping_mul(2654435761)).collect();
+        runner.set_inputs(std::slice::from_ref(&input));
+        runner.run();
+        let outs = runner.read_outputs();
+        for i in 0..nv {
+            let want = input[i].wrapping_add(nv as u32);
+            assert_eq!(outs[0][i], want, "n=2^{log_n}: mismatch at {i}");
+        }
+    }
+}
+
+/// A data-dependent gather `x[idx[i]]`: the index references a loaded SSA
+/// value, so the access lowers to `IndexMap::Blackbox` and the
+/// index-producing load must be emitted before the dependent access.
+#[test]
+fn data_dependent_gather() {
+    let nv = 256usize;
+    let mut ib = IRBuilder::new();
+    let x = ib.input("x", ScalarType::BabyBear, vec![nv]);
+    let idx = ib.input("idx", ScalarType::U32, vec![nv]);
+    let body = kernel!(ib, compute[nv] | i | { x[idx[i]] + x[i] });
+    let module = ib.finish("gather", body);
+
+    let input = pseudo_field_elems(nv, 11);
+    // A permutation of 0..nv (multiplication by an odd constant mod 2^8).
+    let perm: Vec<u32> = (0..nv as u32).map(|i| (i * 77) % nv as u32).collect();
+    let outs = run_module(module, &[input.clone(), perm.clone()]);
+    assert_eq!(outs.len(), 1);
+    for i in 0..nv {
+        let want = (input[perm[i] as usize] as u64 + input[i] as u64) % P;
+        assert_eq!(outs[0][i] as u64, want, "mismatch at {i}");
+    }
 }

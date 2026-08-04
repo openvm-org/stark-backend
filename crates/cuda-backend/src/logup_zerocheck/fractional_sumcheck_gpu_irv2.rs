@@ -28,9 +28,9 @@
 
 use crypto_compiler::{
     graph_ir::{BufId, DeviceType, GraphBuilder},
-    ir::{IRBuilder, Module, NodeId, ScalarType},
+    ir::{IRBuilder, Module, NodeId, ScalarType, SizeExpr},
 };
-use p3_field::{BasedVectorSpace, PrimeCharacteristicRing, PrimeField32};
+use p3_field::PrimeCharacteristicRing;
 use p3_util::log2_strict_usize;
 
 // (`PrimeCharacteristicRing` is used below for `EF::ONE` via the trait.)
@@ -41,7 +41,9 @@ use super::{
         extract_root_pq_ir, reduce_to_single_evaluation_ir, FracSumcheckProofIR, GkrLayerClaimIR,
         SqrtEqLayersIR,
     },
-    fractional_ir_dsl::{fold_ef_frac_columns_ir_dsl, frac_compute_round_ir_dsl},
+    fractional_ir_dsl::{
+        bind_challenge_as_fpext, fold_ef_frac_columns_ir_dsl, frac_compute_round_ir_dsl,
+    },
 };
 use crate::{
     logup_zerocheck::fractional_ir::{add_ef_buf, add_ext_scalar_buf, observe_and_update_ir},
@@ -51,19 +53,6 @@ use crate::{
 
 // ---------------------------------------------------------------------------
 // DSL bit-reversal helper.
-
-/// Convert an `EF` value into the four canonical `BabyBear` coefficients
-/// [`IRBuilder::const_fpext`] expects.
-fn ef_to_const_coeffs(x: EF) -> [u32; 4] {
-    let coeffs: &[crate::prelude::F] = x.as_basis_coefficients_slice();
-    debug_assert_eq!(coeffs.len(), 4);
-    [
-        coeffs[0].as_canonical_u32(),
-        coeffs[1].as_canonical_u32(),
-        coeffs[2].as_canonical_u32(),
-        coeffs[3].as_canonical_u32(),
-    ]
-}
 
 /// Build a DSL expression tree for the bit-reversal of `i` on `k` bits.
 ///
@@ -124,41 +113,45 @@ fn bit_rev_expr(b: &mut IRBuilder, i: NodeId, k: usize) -> NodeId {
 /// bit-reverse read index because it decomposes into a sum of
 /// `((i mod 2^{b+1}) / 2^b) · 2^{k-1-b}` terms — mod / floor-div by
 /// compile-time powers of two, then a sum with constant multipliers.
-pub fn build_bit_rev_and_alpha_module(n: usize, alpha: EF) -> Module {
+///
+/// `alpha` is a `[D_EF] BabyBear` input buffer (not a baked constant), so
+/// the module hash — and hence the JIT cache entry — is stable across
+/// alphas. `n` stays concrete: the bit-reverse expression has `log2(n)`
+/// terms, so the module structure itself depends on it.
+pub fn build_bit_rev_and_alpha_module(n: usize) -> Module {
     assert!(
         n >= 2 && n.is_power_of_two(),
         "bit_rev_and_alpha: n must be a power of two >= 2, got {n}"
     );
     let k = log2_strict_usize(n);
-    let alpha_coeffs = ef_to_const_coeffs(alpha);
     let mut b = IRBuilder::new();
     let leaves = b.input("leaves", ScalarType::FpExt, vec![n, 2]);
+    let alpha = bind_challenge_as_fpext(&mut b, "alpha");
     let body = b.compute(n, move |b, i| {
         let br = bit_rev_expr(b, i, k);
         let idx0 = b.const_u32(0);
         let idx1 = b.const_u32(1);
         let p = b.index(leaves, &[br, idx0]);
         let q_raw = b.index(leaves, &[br, idx1]);
-        let alpha_c = b.const_fpext(alpha_coeffs);
-        let q = b.add(q_raw, alpha_c);
+        let q = b.add(q_raw, alpha);
         b.pack(&[p, q])
     });
     b.finish(format!("bit_rev_and_alpha_dsl_{n}"), body)
 }
 
 /// Insert the DSL bit-rev + alpha-shift kernel: fills `layer_out` (size `n`
-/// `Frac<EF>`) with `leaves` in bit-reversed order and `alpha` added to every
-/// `q` slot.
+/// `Frac<EF>`) with `leaves` in bit-reversed order and `alpha` (an EF-scalar
+/// `[D_EF] BabyBear` buffer) added to every `q` slot.
 pub fn bit_rev_and_alpha_ir_dsl(
     g: &mut GraphBuilder,
     leaves: BufId,
     layer_out: BufId,
     n: usize,
-    alpha: EF,
+    alpha: BufId,
 ) {
     g.insert_kernel(
-        build_bit_rev_and_alpha_module(n, alpha),
-        [leaves],
+        build_bit_rev_and_alpha_module(n),
+        [leaves, alpha],
         [layer_out],
     );
 }
@@ -168,24 +161,28 @@ pub fn bit_rev_and_alpha_ir_dsl(
 
 /// Build a DSL module for one forward tree-layer combine.
 ///
-/// Reads `layer_in : [layer_in_size, 2] FpExt` (a `Frac<EF>` buffer) and
-/// produces `layer_out : [layer_in_size / 2, 2] FpExt` where each output
-/// row `i` is the fractional addition of `(layer_in[i], layer_in[i + half])`.
+/// Reads `layer_in : [h*2, 2] FpExt` (a `Frac<EF>` buffer) and produces
+/// `layer_out : [h, 2] FpExt` where each output row `i` is the fractional
+/// addition of `(layer_in[i], layer_in[i + h])`.
 ///
-/// Dense-only. `layer_in_size` must be a power of two `>= 2`.
-pub fn build_frac_tree_layer_forward_module(layer_in_size: usize) -> Module {
-    assert!(
-        layer_in_size >= 2 && layer_in_size.is_power_of_two(),
-        "tree forward module: layer_in_size must be a power of two >= 2, got {layer_in_size}"
-    );
-    let half = layer_in_size / 2;
+/// Fully symbolic over `h = layer_in_size / 2`: `h` is inferred from the
+/// bound input buffer at [`GraphBuilder::insert_kernel`] and survives as a
+/// runtime parameter, so every tree layer shares ONE compiled kernel.
+///
+/// Dense-only.
+pub fn build_frac_tree_layer_forward_module() -> Module {
     let mut b = IRBuilder::new();
-    let layer_in = b.input("layer_in", ScalarType::FpExt, vec![layer_in_size, 2]);
+    let h = b.symbol("h");
+    let layer_in = b.input(
+        "layer_in",
+        ScalarType::FpExt,
+        vec![SizeExpr::from(h * 2), 2usize.into()],
+    );
 
-    let body = b.compute(half, move |b, i| {
+    let body = b.compute(h, move |b, i| {
         let zero_c = b.const_u32(0);
         let one_c = b.const_u32(1);
-        let half_c = b.const_u32(half as u32);
+        let half_c = b.const_sym(h);
         let j = b.add(i, half_c);
 
         let pa = b.index(layer_in, &[i, zero_c]);
@@ -200,7 +197,7 @@ pub fn build_frac_tree_layer_forward_module(layer_in_size: usize) -> Module {
         let out_q = b.mul(qa, qb);
         b.pack(&[out_p, out_q])
     });
-    b.finish(format!("frac_tree_layer_forward_dsl_{layer_in_size}"), body)
+    b.finish("frac_tree_layer_forward_dsl", body)
 }
 
 /// Insert a forward tree-layer combine as a structured DSL kernel node.
@@ -214,8 +211,12 @@ pub fn frac_tree_layer_forward_ir_dsl(
     layer_out: BufId,
     layer_in_size: usize,
 ) {
+    assert!(
+        layer_in_size >= 2 && layer_in_size.is_power_of_two(),
+        "tree forward: layer_in_size must be a power of two >= 2, got {layer_in_size}"
+    );
     g.insert_kernel(
-        build_frac_tree_layer_forward_module(layer_in_size),
+        build_frac_tree_layer_forward_module(),
         [layer_in],
         [layer_out],
     );
@@ -299,11 +300,13 @@ where
     let mut tree: Vec<BufId> = Vec::with_capacity(total_rounds + 1);
     tree.resize(total_rounds + 1, leaves); // sentinel; will overwrite
 
-    // Layer N: bit-reversed leaves with alpha baked into every `q` slot.
+    // Layer N: bit-reversed leaves with alpha added to every `q` slot.
     // One DSL kernel — the bit-reverse permutation is quasi-affine per
-    // `build_bit_rev_and_alpha_module`.
+    // `build_bit_rev_and_alpha_module`. Alpha rides in as a const EF-scalar
+    // buffer so the kernel is reusable across alphas.
     tree[total_rounds] = add_frac_ef_buf(g, device, "tree_layer_N", logical_len);
-    bit_rev_and_alpha_ir_dsl(g, leaves, tree[total_rounds], logical_len, alpha);
+    let alpha_buf = ef_const_ext_scalar_buf(g, device, "frac_alpha_v2", alpha);
+    bit_rev_and_alpha_ir_dsl(g, leaves, tree[total_rounds], logical_len, alpha_buf);
 
     // Forward combines: layer[k] from layer[k+1], for k = N-1 down to 0.
     for k in (0..total_rounds).rev() {

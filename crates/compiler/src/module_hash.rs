@@ -20,21 +20,38 @@ use sha3::{Digest, Sha3_256};
 
 use crate::{
     ir::{BinOp, IRBuilder, Module, Node, NodeId, ReduceOp, ScalarType, VarId},
-    quast::{ParSpec, Quast, Scatter},
+    quast::{ParSpec, Quast, SExpr, Scatter, SymConst},
 };
 
 /// Deterministic 32-byte structural fingerprint of `module`.
 pub fn module_hash(module: &Module) -> [u8; 32] {
     let mut h = Hasher::new();
     h.str(&module.name);
+    // Param declarations: count and VarIds (α-relevant identity), NOT names
+    // or shape-hint bindings — those are metadata, not semantics.
+    let params = module.builder.params();
+    h.u64(params.len() as u64);
+    for (v, _name) in params {
+        h.u64(v.0 as u64);
+    }
+    // The block hint is semantic (it fixes the launch geometry of
+    // symbolic-bound kernels), unlike the shape hint: two residuals that
+    // differ only in block size are distinct compiled variants.
+    match module.builder.block_hint() {
+        None => h.tag(0),
+        Some(block) => {
+            h.tag(1);
+            h.u64(block as u64);
+        }
+    }
     let inputs = module.builder.inputs();
     h.u64(inputs.len() as u64);
     for decl in inputs {
         h.str(&decl.name);
         h.scalar_ty(decl.elem);
         h.u64(decl.shape.len() as u64);
-        for &d in &decl.shape {
-            h.u64(d as u64);
+        for d in &decl.shape {
+            h.sexpr(d);
         }
     }
     let mut ctx = WalkCtx {
@@ -96,7 +113,8 @@ pub(crate) fn children_of(node: &Node) -> Vec<NodeId> {
         | Node::Var(_)
         | Node::ConstU32(_)
         | Node::ConstField(_)
-        | Node::ConstFpExt(_) => vec![],
+        | Node::ConstFpExt(_)
+        | Node::ConstSym(_) => vec![],
         Node::LiftFpExt(x) => vec![*x],
         Node::Bin(_, a, b) => vec![*a, *b],
         Node::Select {
@@ -172,6 +190,51 @@ impl Hasher {
         self.0.update([byte]);
     }
 
+    fn sym_const(&mut self, c: &SymConst) {
+        match c {
+            SymConst::Lit(l) => {
+                self.tag(0);
+                self.i64(*l);
+            }
+            SymConst::Sym(v) => {
+                self.tag(1);
+                self.u64(v.0 as u64);
+            }
+        }
+    }
+
+    fn sexpr(&mut self, e: &SExpr) {
+        match e {
+            SExpr::Sym(v) => {
+                self.tag(0);
+                self.u64(v.0 as u64);
+            }
+            SExpr::Const(c) => {
+                self.tag(1);
+                self.sym_const(c);
+            }
+            SExpr::Add(a, b) => {
+                self.tag(2);
+                self.sexpr(a);
+                self.sexpr(b);
+            }
+            SExpr::Mul(a, c) => {
+                self.tag(3);
+                self.sexpr(a);
+                self.sym_const(c);
+            }
+            SExpr::FloorDiv(a, c) => {
+                self.tag(4);
+                self.sexpr(a);
+                self.sym_const(c);
+            }
+            SExpr::Neg(a) => {
+                self.tag(5);
+                self.sexpr(a);
+            }
+        }
+    }
+
     fn quast(&mut self, q: &Quast) {
         match q {
             Quast::Sym(v) => {
@@ -211,6 +274,14 @@ impl Hasher {
         }
         self.u64(s.exprs.len() as u64);
         for e in &s.exprs {
+            self.quast(e);
+        }
+        self.u64(s.inv_params.len() as u64);
+        for p in &s.inv_params {
+            self.u64(p.0 as u64);
+        }
+        self.u64(s.inv_exprs.len() as u64);
+        for e in &s.inv_exprs {
             self.quast(e);
         }
         match &s.out_shape {
@@ -261,6 +332,10 @@ impl Hasher {
                     self.u64(x as u64);
                 }
             }
+            Node::ConstSym(e) => {
+                self.tag(15);
+                self.sexpr(e);
+            }
             Node::LiftFpExt(x) => {
                 self.tag(5);
                 self.u64(ctx.n(*x) as u64);
@@ -298,7 +373,7 @@ impl Hasher {
                 threads,
             } => {
                 self.tag(9);
-                self.u64(*bound as u64);
+                self.sexpr(bound);
                 self.u64(var.0 as u64);
                 self.u64(ctx.n(*body) as u64);
                 match scatter {
@@ -331,7 +406,7 @@ impl Hasher {
             } => {
                 self.tag(10);
                 self.reduce_op(*op);
-                self.u64(*bound as u64);
+                self.sexpr(bound);
                 self.u64(var.0 as u64);
                 self.u64(ctx.n(*body) as u64);
             }

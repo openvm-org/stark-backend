@@ -12,6 +12,7 @@
 //! void set_input(Prog*, uint64_t, void*);
 //! void set_output(Prog*, uint64_t, void*);
 //! void set_scratch_buf(Prog*, void*);
+//! void set_param(Prog*, uint64_t, int64_t);
 //! cudaError_t run(Prog*, cudaStream_t);
 //! ```
 //!
@@ -29,21 +30,68 @@
 //! encode inputs and decode outputs; `ConstField`s in the IR are canonical
 //! and converted at emission time. See [`to_monty`].
 
-use std::{collections::HashMap, fmt::Write};
+use std::{
+    collections::{BTreeSet, HashMap, HashSet},
+    fmt::Write,
+};
 
 use crate::{
-    ir::{BinOp, ScalarType, VarId},
+    ir::{BinOp, ScalarType, SizeExpr, VarId},
     kernel_ir::{
-        classify_convert, Access, BufId, BufferKind, ConvertKind, IndexMap, Kernel, KernelProgram,
-        LinearLayout, ParAttr, SSABlock, SSANode, SSAOpCode, SSARes,
+        classify_convert, Access, BufId, BufferKind, ConvertKind, IndexMap, KBound, Kernel,
+        KernelProgram, LinearLayout, ParAttr, SSABlock, SSANode, SSAOpCode, SSARes,
     },
     passes::plan_shared_mem::{plan_shared_mem, SharedMemPlan},
-    quast::{CStrEmitter, Quast},
+    quast::{CStrEmitter, Expr, Quast, SymConst},
     CompileError,
 };
 
 fn reg_name(buf: BufId) -> String {
     format!("r{}", buf.0)
+}
+
+/// Device-code C identifier for a module parameter: `p_{name}` with
+/// non-alphanumeric characters mapped to `_`.
+fn param_ident(name: &str) -> String {
+    let ident: String = name
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
+    format!("p_{ident}")
+}
+
+fn device_param(p: &KernelProgram, v: VarId) -> String {
+    let (_, name) = p
+        .params
+        .iter()
+        .find(|(pv, _)| *pv == v)
+        .expect("size expression references an undeclared module parameter");
+    param_ident(name)
+}
+
+/// C expression for a [`SizeExpr`], fully parenthesized; `var_sym` renders
+/// `Expr::Sym` positions (kernel SSA values in access indices, host / device
+/// symbols elsewhere) and `const_sym` renders `SymConst::Sym` positions
+/// (module parameters). C integer division on non-negative sizes matches
+/// floor division.
+fn sexpr_str(
+    e: &SizeExpr,
+    var_sym: &dyn Fn(VarId) -> String,
+    const_sym: &dyn Fn(VarId) -> String,
+) -> String {
+    let sc = |c: &SymConst| match c {
+        SymConst::Lit(v) => format!("{v}"),
+        SymConst::Sym(v) => const_sym(*v),
+    };
+    let rec = |e: &SizeExpr| sexpr_str(e, var_sym, const_sym);
+    match e {
+        Expr::Sym(v) => var_sym(*v),
+        Expr::Const(c) => sc(c),
+        Expr::Add(a, b) => format!("({} + {})", rec(a), rec(b)),
+        Expr::Mul(a, c) => format!("({} * {})", rec(a), sc(c)),
+        Expr::FloorDiv(a, c) => format!("({} / {})", rec(a), sc(c)),
+        Expr::Neg(a) => format!("(-{})", rec(a)),
+    }
 }
 
 /// BabyBear prime.
@@ -79,7 +127,7 @@ fn compute_val_types(p: &KernelProgram, k: &Kernel) -> ValTypes {
         for &nid in body {
             let op = k.op(nid);
             match &op.opcode {
-                SSAOpCode::ConstU32(_) => {
+                SSAOpCode::ConstU32(_) | SSAOpCode::ConstSym(_) => {
                     types.insert(op.results[0], ScalarType::U32);
                 }
                 SSAOpCode::ConstField(_) => {
@@ -300,7 +348,7 @@ fn gen_kernel(
     plan: &SharedMemPlan,
     ki: usize,
 ) -> Result<(), CompileError> {
-    let params = k
+    let mut params = k
         .params
         .iter()
         .map(|&(buf, writable)| {
@@ -311,8 +359,11 @@ fn gen_kernel(
                 buf.0
             )
         })
-        .collect::<Vec<_>>()
-        .join(", ");
+        .collect::<Vec<_>>();
+    for (_, name) in &p.params {
+        params.push(format!("const uint32_t {}", param_ident(name)));
+    }
+    let params = params.join(", ");
     // The launch-bounds hint lets ptxas budget registers against the
     // actual thread count so a fixed 512-thread block doesn't blow past
     // the 65,536-register per-SM cap.
@@ -372,6 +423,11 @@ fn kernel_uses(k: &Kernel, res: SSARes) -> bool {
                     reads.iter().chain(writes).any(|a| match &a.index {
                         IndexMap::Affine { expr, .. } => quast_uses(expr, sym),
                         IndexMap::Linear(_) => false,
+                        IndexMap::SExpr(e) | IndexMap::Blackbox(e) => {
+                            let mut syms = std::collections::BTreeSet::new();
+                            e.syms(&mut syms);
+                            syms.contains(&sym)
+                        }
                     })
                 }
                 _ => false,
@@ -457,7 +513,7 @@ fn gen_stmts(
                     p,
                     k,
                     types,
-                    *bound,
+                    bound,
                     *spans_grid,
                     attr,
                     reads,
@@ -506,7 +562,7 @@ fn gen_par(
     p: &KernelProgram,
     k: &Kernel,
     types: &ValTypes,
-    bound: usize,
+    bound: &KBound,
     spans_grid: bool,
     attr: &Option<ParAttr>,
     reads: &[Access],
@@ -530,16 +586,32 @@ fn gen_par(
             "{pad}const uint32_t {v} = blockIdx.x * blockDim.x + threadIdx.x;"
         )
         .unwrap();
-        let guard = k.grid.bound * k.block > bound;
-        if guard {
-            writeln!(s, "{pad}if ({v} < {bound}u) {{").unwrap();
+        let guard = match bound {
+            KBound::Const(b) => {
+                // Skip the guard only when the grid provably has no slack.
+                let needed = k.grid.bound.as_const().is_none_or(|g| g * k.block > *b);
+                needed.then(|| format!("{b}u"))
+            }
+            KBound::Expr(e) => {
+                let dp = |v: VarId| device_param(p, v);
+                Some(format!("(uint32_t)({})", sexpr_str(e, &dp, &dp)))
+            }
+        };
+        if let Some(b) = &guard {
+            writeln!(s, "{pad}if ({v} < {b}) {{").unwrap();
         }
-        let d = depth + usize::from(guard);
+        let d = depth + usize::from(guard.is_some());
         gen_par_body(s, p, k, types, attr, reads, writes, block, "0u", d)?;
-        if guard {
+        if guard.is_some() {
             writeln!(s, "{pad}}}").unwrap();
         }
-    } else if attr.layout.is_identity() {
+        return Ok(());
+    }
+
+    let bound = bound
+        .as_const()
+        .expect("non-grid-spanning par bounds are concrete");
+    if attr.layout.is_identity() {
         // Identity layout is the strided factorization `i = s * blockDim +
         // t`, realized as a strided loop whose condition doubles as the
         // bounds guard. The `_s` counter tracks the register slot.
@@ -602,8 +674,162 @@ fn gen_par(
     Ok(())
 }
 
+/// Reads whose value is only used inside one select branch, to be emitted
+/// at that branch's entry instead of at the top of the par body. This keeps
+/// [`SSAOpCode::Select`]'s short-circuit guarantee: the untaken side's
+/// loads (and their possibly out-of-bounds address arithmetic) never
+/// execute.
+struct ReadSinks<'a> {
+    reads: &'a [Access],
+    /// The par block's operands (`[par index, one value per read...]`).
+    operands: &'a [SSARes],
+    attr: &'a ParAttr,
+    vid: SSARes,
+    slot: &'a str,
+    /// Read indices sunk to each `(select node, is-else)` branch entry.
+    sunk: HashMap<(SSANode, bool), Vec<usize>>,
+}
+
+impl ReadSinks<'_> {
+    fn emit(
+        &self,
+        s: &mut String,
+        p: &KernelProgram,
+        nid: SSANode,
+        is_else: bool,
+        depth: usize,
+    ) -> Result<(), CompileError> {
+        let Some(rs) = self.sunk.get(&(nid, is_else)) else {
+            return Ok(());
+        };
+        let pad = "    ".repeat(depth);
+        for &ri in rs {
+            let src = access_str(p, &self.reads[ri], self.attr, self.vid, self.slot)?;
+            writeln!(
+                s,
+                "{pad}const {} {} = {src};",
+                c_type(p.buffer(self.reads[ri].buf).elem),
+                val(self.operands[1 + ri])
+            )
+            .unwrap();
+        }
+        Ok(())
+    }
+}
+
+/// For each value, the first select crossing on the path from the par block
+/// to its use sites: absent = unused, `Some(None)` = some use is reached
+/// without entering a select branch (or uses disagree on the first
+/// crossing), `Some(Some(c))` = every use sits below crossing `c`.
+fn mark_use(
+    first: &mut HashMap<SSARes, Option<(SSANode, bool)>>,
+    v: SSARes,
+    c: Option<(SSANode, bool)>,
+) {
+    match first.entry(v) {
+        std::collections::hash_map::Entry::Vacant(e) => {
+            e.insert(c);
+        }
+        std::collections::hash_map::Entry::Occupied(mut e) => {
+            if *e.get() != c {
+                e.insert(None);
+            }
+        }
+    }
+}
+
+fn walk_uses(
+    k: &Kernel,
+    body: &[SSANode],
+    yields: &[SSARes],
+    crossing: Option<(SSANode, bool)>,
+    first: &mut HashMap<SSARes, Option<(SSANode, bool)>>,
+) {
+    for &nid in body {
+        let op = k.op(nid);
+        for &o in &op.operands {
+            mark_use(first, o, crossing);
+        }
+        if let SSAOpCode::Select { else_block } = &op.opcode {
+            let then = crossing.or(Some((nid, false)));
+            walk_uses(k, &op.block.body, &op.block.yields, then, first);
+            let other = crossing.or(Some((nid, true)));
+            walk_uses(k, &else_block.body, &else_block.yields, other, first);
+        } else {
+            walk_uses(k, &op.block.body, &op.block.yields, crossing, first);
+        }
+    }
+    for &y in yields {
+        mark_use(first, y, crossing);
+    }
+}
+
+/// Decides which reads sink into a select branch: every use of the read's
+/// value must sit below one branch crossing, the read's index must not
+/// depend on anything defined inside the par block (so it is emittable at
+/// the branch entry), and no other read's index may consume the value (a
+/// gather's index load must stay eager or the gather never becomes ready).
+///
+/// Also consulted by `check_accesses`: a sunk read only executes on the
+/// taken side of its select, so the checker exempts it from bounds
+/// validation. The two must agree — an eagerly emitted read must always be
+/// checked.
+pub(crate) fn compute_read_sinks(
+    k: &Kernel,
+    reads: &[Access],
+    block: &SSABlock,
+) -> HashMap<(SSANode, bool), Vec<usize>> {
+    let mut defined_inside: HashSet<SSARes> = block.operands[1..].iter().copied().collect();
+    fn collect_defs(k: &Kernel, body: &[SSANode], out: &mut HashSet<SSARes>) {
+        for &nid in body {
+            let op = k.op(nid);
+            out.extend(op.results.iter().copied());
+            out.extend(op.block.operands.iter().copied());
+            collect_defs(k, &op.block.body, out);
+            if let SSAOpCode::Select { else_block } = &op.opcode {
+                collect_defs(k, &else_block.body, out);
+            }
+        }
+    }
+    collect_defs(k, &block.body, &mut defined_inside);
+
+    let mut index_deps = BTreeSet::new();
+    for r in reads {
+        r.index_syms(&mut index_deps);
+    }
+
+    let mut first = HashMap::new();
+    walk_uses(k, &block.body, &block.yields, None, &mut first);
+
+    let mut sunk: HashMap<(SSANode, bool), Vec<usize>> = HashMap::new();
+    for (ri, read) in reads.iter().enumerate() {
+        let operand = block.operands[1 + ri];
+        let Some(&Some(crossing)) = first.get(&operand) else {
+            continue;
+        };
+        if index_deps.contains(&operand) {
+            continue;
+        }
+        let mut syms = BTreeSet::new();
+        read.index_syms(&mut syms);
+        if syms.iter().any(|v| defined_inside.contains(v)) {
+            continue;
+        }
+        sunk.entry(crossing).or_default().push(ri);
+    }
+    sunk
+}
+
 /// The body of one par point: bind the loaded block operands, run the SSA
 /// ops, store the yields.
+///
+/// A [`IndexMap::Blackbox`] read's index references other loaded values or
+/// op results, so reads are emitted as soon as every kernel value their
+/// index uses is defined, interleaved with the ops. For kernels without
+/// data-dependent reads this degenerates to the plain reads / ops / writes
+/// order. Reads used only inside one select branch are sunk to that
+/// branch's entry (see [`ReadSinks`]) so the untaken side never executes
+/// them.
 #[allow(clippy::too_many_arguments)]
 fn gen_par_body(
     s: &mut String,
@@ -619,18 +845,109 @@ fn gen_par_body(
 ) -> Result<(), CompileError> {
     let pad = "    ".repeat(depth);
     let vid = block.operands[0];
-    for (i, access) in reads.iter().enumerate() {
-        let operand = block.operands[1 + i];
-        let src = access_str(p, access, attr, vid, slot)?;
-        writeln!(
-            s,
-            "{pad}const {} {} = {src};",
-            c_type(p.buffer(access.buf).elem),
-            val(operand)
-        )
-        .unwrap();
+
+    // Values not yet defined at the current emission point: the loaded
+    // block operands plus the results of the block's top-level ops.
+    let mut undefined: HashSet<SSARes> = block.operands[1..].iter().copied().collect();
+    for &nid in &block.body {
+        undefined.extend(k.op(nid).results.iter().copied());
     }
-    gen_ops(s, k, types, &block.body, depth)?;
+    let sinks = ReadSinks {
+        reads,
+        operands: &block.operands,
+        attr,
+        vid,
+        slot,
+        sunk: compute_read_sinks(k, reads, block),
+    };
+    let sunk_set: HashSet<usize> = sinks.sunk.values().flatten().copied().collect();
+    let mut pending: Vec<usize> = (0..reads.len())
+        .filter(|ri| !sunk_set.contains(ri))
+        .collect();
+
+    // Emits every pending read whose index no longer references an
+    // undefined value; repeats until a fixpoint (a gather's index buffer
+    // load can itself unblock the gather).
+    fn emit_ready(
+        s: &mut String,
+        p: &KernelProgram,
+        pad: &str,
+        reads: &[Access],
+        block: &SSABlock,
+        attr: &ParAttr,
+        vid: SSARes,
+        slot: &str,
+        undefined: &mut HashSet<SSARes>,
+        pending: &mut Vec<usize>,
+    ) -> Result<(), CompileError> {
+        loop {
+            let mut progress = false;
+            let mut i = 0;
+            while i < pending.len() {
+                let ri = pending[i];
+                let mut syms = BTreeSet::new();
+                reads[ri].index_syms(&mut syms);
+                if syms.iter().any(|v| undefined.contains(v)) {
+                    i += 1;
+                    continue;
+                }
+                let operand = block.operands[1 + ri];
+                let src = access_str(p, &reads[ri], attr, vid, slot)?;
+                writeln!(
+                    s,
+                    "{pad}const {} {} = {src};",
+                    c_type(p.buffer(reads[ri].buf).elem),
+                    val(operand)
+                )
+                .unwrap();
+                undefined.remove(&operand);
+                pending.remove(i);
+                progress = true;
+            }
+            if !progress {
+                return Ok(());
+            }
+        }
+    }
+
+    emit_ready(
+        s,
+        p,
+        &pad,
+        reads,
+        block,
+        attr,
+        vid,
+        slot,
+        &mut undefined,
+        &mut pending,
+    )?;
+    for &nid in &block.body {
+        gen_ops(s, p, k, types, std::slice::from_ref(&nid), depth, &sinks)?;
+        for r in &k.op(nid).results {
+            undefined.remove(r);
+        }
+        if !pending.is_empty() {
+            emit_ready(
+                s,
+                p,
+                &pad,
+                reads,
+                block,
+                attr,
+                vid,
+                slot,
+                &mut undefined,
+                &mut pending,
+            )?;
+        }
+    }
+    if !pending.is_empty() {
+        return Err(CompileError::Codegen(format!(
+            "unresolvable data-dependent read cycle in kernel {}",
+            k.name
+        )));
+    }
     for (i, access) in writes.iter().enumerate() {
         let dst = access_str(p, access, attr, vid, slot)?;
         writeln!(s, "{pad}{dst} = {};", val(block.yields[i])).unwrap();
@@ -861,10 +1178,12 @@ fn gen_shuffle(
 
 fn gen_ops(
     s: &mut String,
+    p: &KernelProgram,
     k: &Kernel,
     types: &ValTypes,
     body: &[SSANode],
     depth: usize,
+    sinks: &ReadSinks,
 ) -> Result<(), CompileError> {
     let pad = "    ".repeat(depth);
     for &nid in body {
@@ -872,6 +1191,16 @@ fn gen_ops(
         match &op.opcode {
             SSAOpCode::ConstU32(c) => {
                 writeln!(s, "{pad}const uint32_t {} = {c}u;", val(op.results[0])).unwrap();
+            }
+            SSAOpCode::ConstSym(e) => {
+                let dp = |v: VarId| device_param(p, v);
+                writeln!(
+                    s,
+                    "{pad}const uint32_t {} = (uint32_t)({});",
+                    val(op.results[0]),
+                    sexpr_str(e, &dp, &dp)
+                )
+                .unwrap();
             }
             SSAOpCode::ConstField(c) => {
                 // IR-level BabyBear constants are canonical `u32` in `[0, P)`;
@@ -934,10 +1263,12 @@ fn gen_ops(
                 let cond = val(op.operands[0]);
                 writeln!(s, "{pad}{} {res}{{}};", c_type(res_ty)).unwrap();
                 writeln!(s, "{pad}if ({cond}) {{").unwrap();
-                gen_ops(s, k, types, &op.block.body, depth + 1)?;
+                sinks.emit(s, p, nid, false, depth + 1)?;
+                gen_ops(s, p, k, types, &op.block.body, depth + 1, sinks)?;
                 writeln!(s, "{pad}    {res} = {};", val(op.block.yields[0])).unwrap();
                 writeln!(s, "{pad}}} else {{").unwrap();
-                gen_ops(s, k, types, &else_block.body, depth + 1)?;
+                sinks.emit(s, p, nid, true, depth + 1)?;
+                gen_ops(s, p, k, types, &else_block.body, depth + 1, sinks)?;
                 writeln!(s, "{pad}    {res} = {};", val(else_block.yields[0])).unwrap();
                 writeln!(s, "{pad}}}").unwrap();
             }
@@ -969,7 +1300,7 @@ fn gen_ops(
                     )
                     .unwrap();
                 }
-                gen_ops(s, k, types, &op.block.body, depth + 1)?;
+                gen_ops(s, p, k, types, &op.block.body, depth + 1, sinks)?;
                 for (i, y) in op.block.yields.iter().enumerate() {
                     writeln!(s, "{pad}    {} = {};", val(op.results[i]), val(*y)).unwrap();
                 }
@@ -1059,6 +1390,9 @@ fn access_str(
     let logical = match &access.index {
         IndexMap::Linear(ll) => ll_apply_str(ll, &val(vid)),
         IndexMap::Affine { expr, bounds } => expr.emit(bounds, &mut CStrEmitter)?,
+        IndexMap::SExpr(e) | IndexMap::Blackbox(e) => {
+            sexpr_str(e, &|v| val(SSARes(v.0)), &|v| device_param(p, v))
+        }
     };
     Ok(match &decl.layout {
         Some(l) if !l.is_identity() => {
@@ -1139,18 +1473,33 @@ fn buf_arg(p: &KernelProgram, buf: BufId, writable: bool) -> String {
 fn gen_host(s: &mut String, p: &KernelProgram) {
     let n_in = p.input_bufs.len();
     let n_out = p.output_bufs.len();
-    let in_sizes = p
-        .input_bufs
-        .iter()
-        .map(|&b| format!("{}ull", p.buffer(b).size_bytes()))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let out_sizes = p
-        .output_bufs
-        .iter()
-        .map(|&b| format!("{}ull", p.buffer(b).size_bytes()))
-        .collect::<Vec<_>>()
-        .join(", ");
+    let n_par = p.params.len();
+    let host_sym = |v: VarId| {
+        let i = p
+            .params
+            .iter()
+            .position(|(pv, _)| *pv == v)
+            .expect("size expression references an undeclared module parameter");
+        format!("p->params[{i}]")
+    };
+    // Buffer sizes are expressions over the runtime parameters (constants
+    // fold to literals), so they're emitted as switches rather than static
+    // arrays.
+    let size_cases = |bufs: &[BufId]| -> String {
+        bufs.iter()
+            .enumerate()
+            .map(|(i, &b)| {
+                let d = p.buffer(b);
+                format!(
+                    "        case {i}: return (uint64_t)({}) * {}ull;\n",
+                    sexpr_str(&d.len_expr(), &host_sym, &host_sym),
+                    d.elem.size_bytes()
+                )
+            })
+            .collect()
+    };
+    let in_cases = size_cases(&p.input_bufs);
+    let out_cases = size_cases(&p.output_bufs);
 
     writeln!(
         s,
@@ -1158,10 +1507,8 @@ fn gen_host(s: &mut String, p: &KernelProgram) {
     void* inputs[{in_cap}];
     void* outputs[{out_cap}];
     void* scratch;
+    int64_t params[{par_cap}];
 }};
-
-static const uint64_t kInputSizes[{in_cap}] = {{{in_sizes}}};
-static const uint64_t kOutputSizes[{out_cap}] = {{{out_sizes}}};
 
 extern "C" Prog* make_module() {{
     Prog* p = new Prog;
@@ -1169,19 +1516,29 @@ extern "C" Prog* make_module() {{
     return p;
 }}
 extern "C" void destroy_module(Prog* p) {{ delete p; }}
+extern "C" void set_param(Prog* p, uint64_t i, int64_t v) {{ p->params[i] = v; }}
 extern "C" uint64_t scratch_size(Prog*) {{ return {scratch}ull; }}
 extern "C" uint64_t num_outputs(Prog*) {{ return {n_out}ull; }}
-extern "C" uint64_t output_size(Prog*, uint64_t i) {{ return kOutputSizes[i]; }}
+extern "C" uint64_t output_size(Prog* p, uint64_t i) {{
+    (void)p;
+    switch (i) {{
+{out_cases}        default: return 0ull;
+    }}
+}}
 extern "C" uint64_t num_inputs(Prog*) {{ return {n_in}ull; }}
-extern "C" uint64_t input_size(Prog*, uint64_t i) {{ return kInputSizes[i]; }}
+extern "C" uint64_t input_size(Prog* p, uint64_t i) {{
+    (void)p;
+    switch (i) {{
+{in_cases}        default: return 0ull;
+    }}
+}}
 extern "C" void set_input(Prog* p, uint64_t i, void* ptr) {{ p->inputs[i] = ptr; }}
 extern "C" void set_output(Prog* p, uint64_t i, void* ptr) {{ p->outputs[i] = ptr; }}
 extern "C" void set_scratch_buf(Prog* p, void* ptr) {{ p->scratch = ptr; }}
 "#,
         in_cap = n_in.max(1),
         out_cap = n_out.max(1),
-        in_sizes = if n_in == 0 { "0ull".into() } else { in_sizes },
-        out_sizes = if n_out == 0 { "0ull".into() } else { out_sizes },
+        par_cap = n_par.max(1),
         scratch = p.scratch_bytes,
         n_out = n_out,
         n_in = n_in,
@@ -1194,16 +1551,23 @@ extern "C" void set_scratch_buf(Prog* p, void* ptr) {{ p->scratch = ptr; }}
     )
     .unwrap();
     for k in &p.kernels {
-        let args = k
+        let mut args = k
             .params
             .iter()
             .map(|&(buf, writable)| buf_arg(p, buf, writable))
-            .collect::<Vec<_>>()
-            .join(", ");
+            .collect::<Vec<_>>();
+        for i in 0..n_par {
+            args.push(format!("(uint32_t)p->params[{i}]"));
+        }
+        let args = args.join(", ");
+        let grid = match &k.grid.bound {
+            KBound::Const(c) => format!("{c}u"),
+            KBound::Expr(e) => format!("(uint32_t)({})", sexpr_str(e, &host_sym, &host_sym)),
+        };
         writeln!(
             s,
-            "    {}<<<dim3({}u), dim3({}u), 0, stream>>>({args});",
-            k.name, k.grid.bound, k.block
+            "    {}<<<dim3({grid}), dim3({}u), 0, stream>>>({args});",
+            k.name, k.block
         )
         .unwrap();
         writeln!(

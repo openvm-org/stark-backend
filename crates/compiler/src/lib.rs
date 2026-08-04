@@ -9,6 +9,11 @@
 //! --plan_shared_mem--> --codegen--> CUDA C++ --nvcc/dlopen-->
 //! [`runtime::KernelModule`].
 
+// `kernel!`-generated code names crate items by their external path
+// (`::crypto_compiler::...`); this alias makes that path resolve when the
+// macro expands inside this crate too.
+extern crate self as crypto_compiler;
+
 pub use crypto_compiler_macros::kernel;
 
 pub mod dump;
@@ -38,6 +43,8 @@ pub enum CompileError {
     Type(String),
     #[error("canonicalization error: {0}")]
     Canonicalize(String),
+    #[error("monomorphization error: {0}")]
+    Monomorphize(String),
     #[error("lowering error: {0}")]
     Lower(String),
     #[error("codegen error: {0}")]
@@ -46,6 +53,8 @@ pub enum CompileError {
     Verify(String),
     #[error("quasi-affine expression error: {0}")]
     Quast(String),
+    #[error("access check failed: {0}")]
+    AccessCheck(String),
     #[error("nvcc failed: {0}")]
     Nvcc(String),
     #[error("nvcc timed out compiling `{name}` after {seconds:.1}s (limit {limit:.1}s)")]
@@ -94,7 +103,17 @@ pub fn compile_and_load(
         dump::write_step_dump(dir, &name, 0, "hir", "hir", hir)?;
     }
 
-    let types = passes::type_infer(module)?;
+    if options.check_accesses {
+        passes::check_accesses_from_hint(module)?;
+    }
+
+    // Partial monomorphization: parameters that must be concrete before
+    // lowering (inner bounds, inner shape dims) are substituted from the
+    // shape hint; the rest survive into the runtime parameter ABI, so one
+    // compiled artifact serves many sizes.
+    let module = passes::monomorphize_from_hint(module)?;
+
+    let types = passes::type_infer(&module)?;
     if let (Some(dir), true) = (dump_dir, verbose) {
         dump::write_step_dump(dir, &name, 1, "types", "txt", &dump::dump_types(&types))?;
     }

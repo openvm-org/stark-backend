@@ -160,19 +160,23 @@ impl RewriteCx<'_> {
         id: NodeId,
     ) -> Result<(Vec<(VarId, NodeId)>, NodeId), CompileError> {
         match self.b.node(id).clone() {
+            // The rewrite only fires on concrete bounds: picking G and the
+            // halving-tree depth needs numbers. Symbolic reduces keep the
+            // default sequential lowering.
             Node::Reduce {
                 op,
                 bound: k,
                 var: i,
                 body,
             } => {
-                if should_tree_lower(k, 1) {
-                    let (extras, final_expr) = self.build_block_reduce(op, 1, None, k, i, body);
-                    self.changed = true;
-                    Ok((extras, final_expr))
-                } else {
-                    Ok((Vec::new(), id))
+                if let Some(k) = k.as_const().map(|c| c as usize) {
+                    if should_tree_lower(k, 1) {
+                        let (extras, final_expr) = self.build_block_reduce(op, 1, None, k, i, body);
+                        self.changed = true;
+                        return Ok((extras, final_expr));
+                    }
                 }
+                Ok((Vec::new(), id))
             }
             Node::Compute {
                 bound: m,
@@ -189,11 +193,14 @@ impl RewriteCx<'_> {
                     body,
                 } = self.b.node(compute_body).clone()
                 {
-                    if should_tree_lower(k, m) {
-                        let (extras, final_expr) =
-                            self.build_block_reduce(op, m, Some(t), k, i, body);
-                        self.changed = true;
-                        return Ok((extras, final_expr));
+                    if let (Some(k), Some(m)) = (k.as_const(), m.as_const()) {
+                        let (k, m) = (k as usize, m as usize);
+                        if should_tree_lower(k, m) {
+                            let (extras, final_expr) =
+                                self.build_block_reduce(op, m, Some(t), k, i, body);
+                            self.changed = true;
+                            return Ok((extras, final_expr));
+                        }
                     }
                 }
                 Ok((Vec::new(), id))
@@ -339,14 +346,14 @@ impl RewriteCx<'_> {
             // SSA loop.
             let reduce = self.b.intern(Node::Reduce {
                 op,
-                bound: seq,
+                bound: seq.into(),
                 var: c_var,
                 body: load,
             });
             (BLOCK_SIZE, reduce)
         };
         let tile_compute = self.b.intern(Node::Compute {
-            bound: tile_bound,
+            bound: tile_bound.into(),
             var: tile_iter_var,
             body: tile_body,
             scatter: None,
@@ -378,7 +385,7 @@ impl RewriteCx<'_> {
             });
             let combined = self.b.bin(bin_op, lo, hi);
             let level_compute = self.b.intern(Node::Compute {
-                bound: s,
+                bound: s.into(),
                 var: j_var,
                 body: combined,
                 scatter: None,
@@ -408,7 +415,7 @@ impl RewriteCx<'_> {
         }
 
         self.b.intern(Node::Compute {
-            bound: total_blocks,
+            bound: total_blocks.into(),
             var: bid_var,
             body: body_expr,
             scatter: None,
@@ -508,7 +515,11 @@ impl RewriteCx<'_> {
                 Some(n) => n,
                 None => expr,
             },
-            Node::Input(_) | Node::ConstU32(_) | Node::ConstField(_) | Node::ConstFpExt(_) => expr,
+            Node::Input(_)
+            | Node::ConstU32(_)
+            | Node::ConstField(_)
+            | Node::ConstFpExt(_)
+            | Node::ConstSym(_) => expr,
             Node::LiftFpExt(x) => {
                 let nx = self.substitute(x);
                 if nx == x {

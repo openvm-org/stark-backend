@@ -5,11 +5,8 @@
 //! `$DUMP_DIR` (defaults to `target/frac_fusion_chain/`):
 //!
 //!   000.frac_compute_round_dsl_n32_c16.hir
-//!   001.fold_ef_frac_columns_dsl_128.hir
-//!   ...
-//!   005.fold_ef_frac_columns_dsl_2048.hir
-//!   fusion/000.frac_compute_round_dsl_n32_c16__f__fold_ef_frac_columns_dsl_128.hir
-//!   fusion/001.frac_compute_round_dsl_n32_c16__f__..._128__f__..._256.hir
+//!   001.fold_ef_frac_columns_dsl.hir      (symbolic: one module, all sizes)
+//!   fusion/000.frac_compute_round_dsl_n32_c16__f__fold_ef_frac_columns_dsl.hir
 //!   ...
 //!
 //! Run:
@@ -81,17 +78,10 @@ fn main() {
     println!("=== bare module HIRs ===");
     let cr_module = Arc::new(build_frac_compute_round_module(cr_num_x, cr_eq_low_cap));
     write_module(&dump_dir, 0, &cr_module);
-    let fold_modules: Vec<Arc<Module>> = fold_sizes
-        .iter()
-        .rev()
-        .enumerate()
-        .map(|(i, &sz)| {
-            let m = Arc::new(build_fold_ef_frac_columns_module(sz));
-            write_module(&dump_dir, i + 1, &m);
-            m
-        })
-        .collect();
-    // fold_modules is now in [fold_128, fold_256, fold_512, fold_1024, fold_2048] order.
+    // The fold module is symbolic over its size: one module serves every
+    // stage of the chain (the per-stage size binds from the buffer shapes).
+    let fold_module = Arc::new(build_fold_ef_frac_columns_module());
+    write_module(&dump_dir, 1, &fold_module);
 
     // --- Stage 2: assemble the chain into a graph ---
     println!("\n=== graph assembly ===");
@@ -102,15 +92,14 @@ fn main() {
     let mut sizes = fold_sizes.to_vec();
     sizes.push(cr_num_x * 2);
     // Insert fold_{2048,1024,512,256,128} one after the other.
-    for (i, &size_in) in fold_sizes.iter().enumerate() {
+    for &size_in in fold_sizes.iter() {
         let out_len = size_in / 2;
         let out = add_frac_ef_buf(&mut g, &format!("fold_out_{size_in}"), out_len);
         // Every fold takes a scalar challenge `r`. The DSL declares it as
         // `[D_EF]` BabyBear, so allocate one dedicated buf per stage.
         let r = add_buf(&mut g, &format!("r_{size_in}"), D_EF * BB_BYTES);
         g.register_input(r);
-        let m = &fold_modules[fold_modules.len() - 1 - i]; // fold_2048 first
-        g.insert_kernel((**m).clone(), [chain_buf, r], [out]);
+        g.insert_kernel((*fold_module).clone(), [chain_buf, r], [out]);
         chain_buf = out;
     }
     // frac_compute_round: reads (eq_low[16], eq_high[1], pq[64,2], lambda[4]).
@@ -166,7 +155,7 @@ fn main() {
     // --- Enumerate what got written ---
     let mut files: Vec<_> = std::fs::read_dir(&fusion_dir)
         .expect("read fusion dir")
-        .filter_map(|e| e.ok().map(|e| e.file_name().into_string().ok()).flatten())
+        .filter_map(|e| e.ok().and_then(|e| e.file_name().into_string().ok()))
         .collect();
     files.sort();
     println!("\n=== fusion/ contents ({} files) ===", files.len());

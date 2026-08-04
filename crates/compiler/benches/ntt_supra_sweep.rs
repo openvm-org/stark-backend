@@ -9,8 +9,12 @@
 //!
 //! Run with: `cargo bench -p crypto-compiler --bench ntt_supra_sweep`
 
+// Parked pending scatter-inverse migration: `ntt_supra_module` is
+// `#[cfg(any())]`-gated in kernels.rs (refactor-plan.md).
+#[cfg(any())]
 use std::time::Instant;
 
+#[cfg(any())]
 use crypto_compiler::{
     compile_and_load,
     ir::Module,
@@ -18,18 +22,23 @@ use crypto_compiler::{
     runner::{from_monty, to_monty},
     runtime::{CompileOptions, KernelModule},
 };
+#[cfg(any())]
 use openvm_cuda_backend::{ntt::batch_ntt, prelude::F};
+#[cfg(any())]
 use openvm_cuda_common::{
     copy::{MemCopyD2H, MemCopyH2D},
     d_buffer::DeviceBuffer,
     stream::GpuDeviceCtx,
 };
+#[cfg(any())]
 use p3_field::PrimeField32;
 
+#[cfg(any())]
 const P: u64 = 2013265921;
 
 /// Domain sizes to time — same as the main NTT bench so results are
 /// directly comparable.
+#[cfg(any())]
 const LOG_SIZES: &[usize] = &[12, 14, 16, 18, 20, 22, 24];
 
 /// `(nthreads, z_count)` pairs. `radix = 1 + log2(nthreads) +
@@ -41,6 +50,7 @@ const LOG_SIZES: &[usize] = &[12, 14, 16, 18, 20, 22, 24];
 /// - `nthreads * z_count` matched across (128, 4), (256, 2), (512, 1) and again at (256, 4), (512,
 ///   2), (1024, 1) so per-thread batching and block-size scaling can be compared at fixed tile
 ///   width (`radix` constant).
+#[cfg(any())]
 const CONFIGS: &[(usize, usize)] = &[
     (128, 1),
     (256, 1),
@@ -52,6 +62,7 @@ const CONFIGS: &[(usize, usize)] = &[
     (512, 2),
 ];
 
+#[cfg(any())]
 fn pseudo_field_elems(n: usize, seed: u64) -> Vec<u32> {
     let mut x = seed;
     (0..n)
@@ -66,6 +77,7 @@ fn pseudo_field_elems(n: usize, seed: u64) -> Vec<u32> {
         .collect()
 }
 
+#[cfg(any())]
 fn measure(ctx: &GpuDeviceCtx, warmup: usize, iters: usize, mut f: impl FnMut()) -> f64 {
     for _ in 0..warmup {
         f();
@@ -79,6 +91,7 @@ fn measure(ctx: &GpuDeviceCtx, warmup: usize, iters: usize, mut f: impl FnMut())
     start.elapsed().as_secs_f64() * 1e3 / iters as f64
 }
 
+#[cfg(any())]
 fn setup_jit(
     module: Module,
     ctx: &GpuDeviceCtx,
@@ -98,6 +111,7 @@ fn setup_jit(
 /// entry of `CONFIGS`. Every value in the row is Gelem/s (higher is
 /// better). The supra column is timed once, then each config's kernel
 /// is JIT-compiled and cross-checked against supra before timing.
+#[cfg(any())]
 fn bench_row(ctx: &GpuDeviceCtx, log_n: usize) -> (f64, Vec<f64>) {
     let n = 1usize << log_n;
     let input = pseudo_field_elems(n, 1);
@@ -173,6 +187,13 @@ fn bench_row(ctx: &GpuDeviceCtx, log_n: usize) -> (f64, Vec<f64>) {
 }
 
 fn main() {
+    eprintln!(
+        "ntt_supra_sweep is disabled: ntt_supra_module is parked pending scatter-inverse migration"
+    );
+}
+
+#[cfg(any())]
+fn main_disabled() {
     let ctx = GpuDeviceCtx::for_current_device().expect("CUDA context");
     println!(
         "BabyBear forward NTT, natural-order input/output, single column. Cells are Gelem/s (higher is better)."

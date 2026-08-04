@@ -27,6 +27,10 @@ use crate::{ir::ScalarType, kernel_ir::KernelProgram, CompileError};
 struct SavedMetadata {
     input_types: Vec<u8>,
     output_types: Vec<u8>,
+    /// Runtime parameter names, in `KernelProgram::params` order. Defaults
+    /// to empty so metadata written before the parameter ABI still loads.
+    #[serde(default)]
+    params: Vec<String>,
 }
 
 fn scalar_ty_to_tag(t: &ScalarType) -> u8 {
@@ -79,6 +83,14 @@ pub struct CompileOptions {
     pub dump_ir: Option<PathBuf>,
     /// How much to dump when `dump_ir` is set.
     pub verbosity: Verbosity,
+    /// Validate every memory access of each concrete instantiation before
+    /// compiling it (see [`crate::passes::check_accesses`]): bounds for
+    /// reads and writes, injectivity across parallel points for writes,
+    /// plus the scatter bijectivity/inverse checks that fire during
+    /// concrete canonicalization. Author-trusted (`SExpr`/`Blackbox`)
+    /// accesses are skipped. Defaults to the `CRYPTO_COMPILER_CHECK_ACCESSES`
+    /// environment variable.
+    pub check_accesses: bool,
     /// Per-invocation wall-clock limit for nvcc. `None` disables the
     /// timeout (unbounded wait, the previous behaviour). On timeout the
     /// nvcc process group is SIGKILL'd and [`CompileError::NvccTimeout`]
@@ -100,6 +112,9 @@ impl Default for CompileOptions {
                 Ok("verbose") | Ok("Verbose") | Ok("VERBOSE") => Verbosity::Verbose,
                 _ => Verbosity::Basic,
             },
+            check_accesses: std::env::var("CRYPTO_COMPILER_CHECK_ACCESSES")
+                .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
+                .unwrap_or(false),
             nvcc_timeout: std::env::var("NVCC_TIMEOUT_SECS")
                 .ok()
                 .and_then(|s| s.parse::<u64>().ok())
@@ -114,6 +129,7 @@ type QueryFn = unsafe extern "C" fn(*mut c_void) -> u64;
 type QueryIdxFn = unsafe extern "C" fn(*mut c_void, u64) -> u64;
 type SetIdxPtrFn = unsafe extern "C" fn(*mut c_void, u64, *mut c_void);
 type SetPtrFn = unsafe extern "C" fn(*mut c_void, *mut c_void);
+type SetParamFn = unsafe extern "C" fn(*mut c_void, u64, i64);
 type RunFn = unsafe extern "C" fn(*mut c_void, cudaStream_t) -> i32;
 
 struct VTable {
@@ -126,6 +142,7 @@ struct VTable {
     set_input: SetIdxPtrFn,
     set_output: SetIdxPtrFn,
     set_scratch_buf: SetPtrFn,
+    set_param: SetParamFn,
     run: RunFn,
 }
 
@@ -138,6 +155,13 @@ pub struct KernelModule {
     /// through [`KernelModule::ensure_scratch`] (owned) or
     /// [`KernelModule::set_scratch`] (external).
     scratch_bound: bool,
+    /// Runtime parameter names, in `KernelProgram::params` order. Buffer
+    /// sizes and grid dims are functions of these values, so every
+    /// parameter must be bound via [`KernelModule::set_param`] before the
+    /// sizes are queried or the module is run.
+    params: Vec<String>,
+    /// Which parameters have been bound so far.
+    params_set: Vec<bool>,
     source: String,
     /// Scalar element type of each module input, in declaration order.
     /// Populated from `kprog.input_bufs` so callers know which buffers hold
@@ -193,11 +217,13 @@ impl KernelModule {
             .iter()
             .map(|&b| kprog.buffer(b).elem)
             .collect();
+        let params = kprog.params.iter().map(|(_, n)| n.clone()).collect();
         let module = Self::load_from_so(
             &so_path,
             source.to_string(),
             input_types,
             output_types,
+            params,
             Some(dir),
         )?;
         debug_assert_eq!(module.num_inputs(), kprog.input_bufs.len());
@@ -328,6 +354,7 @@ impl KernelModule {
         source: String,
         input_types: Vec<ScalarType>,
         output_types: Vec<ScalarType>,
+        params: Vec<String>,
         owned_dir: Option<tempfile::TempDir>,
     ) -> Result<Self, CompileError> {
         let lib = unsafe { Library::new(so_path) }
@@ -350,6 +377,7 @@ impl KernelModule {
             set_input: sym!("set_input", SetIdxPtrFn),
             set_output: sym!("set_output", SetIdxPtrFn),
             set_scratch_buf: sym!("set_scratch_buf", SetPtrFn),
+            set_param: sym!("set_param", SetParamFn),
             run: sym!("run", RunFn),
         };
 
@@ -357,11 +385,14 @@ impl KernelModule {
         if prog.is_null() {
             return Err(CompileError::Load("make_module returned null".into()));
         }
+        let params_set = vec![false; params.len()];
         Ok(Self {
             prog,
             vt,
             scratch: None,
             scratch_bound: false,
+            params,
+            params_set,
             source,
             input_types,
             output_types,
@@ -395,6 +426,7 @@ impl KernelModule {
         let meta = SavedMetadata {
             input_types: self.input_types.iter().map(scalar_ty_to_tag).collect(),
             output_types: self.output_types.iter().map(scalar_ty_to_tag).collect(),
+            params: self.params.clone(),
         };
         fs::write(
             dir.join(KERNEL_MODULE_METADATA),
@@ -428,6 +460,7 @@ impl KernelModule {
             source,
             input_types,
             output_types,
+            meta.params,
             None,
         )
     }
@@ -444,9 +477,28 @@ impl KernelModule {
         unsafe { (self.vt.num_outputs)(self.prog) as usize }
     }
 
+    /// Runtime parameter names, in declaration order.
+    pub fn params(&self) -> &[String] {
+        &self.params
+    }
+
+    /// Binds runtime parameter `i` (see [`Self::params`] for the order).
+    pub fn set_param(&mut self, i: usize, v: i64) {
+        assert!(i < self.params.len(), "param index out of range");
+        unsafe { (self.vt.set_param)(self.prog, i as u64, v) };
+        self.params_set[i] = true;
+    }
+
+    /// Whether every runtime parameter has been bound. Vacuously true for
+    /// fully concrete modules.
+    pub fn params_bound(&self) -> bool {
+        self.params_set.iter().all(|&b| b)
+    }
+
     /// Size of input `i` in bytes.
     pub fn input_size(&self, i: usize) -> usize {
         assert!(i < self.num_inputs(), "input index out of range");
+        assert!(self.params_bound(), "input_size before params are bound");
         unsafe { (self.vt.input_size)(self.prog, i as u64) as usize }
     }
 
@@ -466,10 +518,12 @@ impl KernelModule {
     /// Size of output `i` in bytes.
     pub fn output_size(&self, i: usize) -> usize {
         assert!(i < self.num_outputs(), "output index out of range");
+        assert!(self.params_bound(), "output_size before params are bound");
         unsafe { (self.vt.output_size)(self.prog, i as u64) as usize }
     }
 
     pub fn scratch_size(&self) -> usize {
+        assert!(self.params_bound(), "scratch_size before params are bound");
         unsafe { (self.vt.scratch_size)(self.prog) as usize }
     }
 
@@ -535,6 +589,11 @@ impl KernelModule {
 
     /// Launches the whole kernel sequence on `stream` (asynchronous).
     pub fn run(&self, stream: &CudaStream) -> Result<(), CompileError> {
+        if !self.params_bound() {
+            return Err(CompileError::Runtime(
+                "module parameters not bound; call set_param for every parameter first".into(),
+            ));
+        }
         if self.scratch_size() > 0 && !self.scratch_bound {
             return Err(CompileError::Runtime(
                 "scratch buffer not set; call ensure_scratch or set_scratch first".into(),

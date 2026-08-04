@@ -202,8 +202,8 @@ pub fn verify_whir<SC: StarkProtocolConfig, TS: FiatShamirTranscript<SC>>(
 
                     for c in 0..width {
                         let mu_pow = mu_pow_iter.next().unwrap(); // ok; mu_pows has total_width length
-                        for j in 0..(1 << k_whir) {
-                            codeword_vals[j] += *mu_pow * opened_rows[j][c];
+                        for (val, row) in codeword_vals.iter_mut().zip(opened_rows) {
+                            *val += *mu_pow * row[c];
                         }
                     }
                 }

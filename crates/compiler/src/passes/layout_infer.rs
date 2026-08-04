@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{
-    ir::VarId,
+    ir::{SizeExpr, VarId},
     kernel_ir::{
         classify_convert, AddressSpace, BufId, BufferDecl, BufferKind, ConvertKind, IndexMap,
         Kernel, KernelProgram, LinearLayout, ParAttr, SSABlock, SSANode, SSAOp, SSAOpCode,
@@ -56,7 +56,10 @@ pub fn layout_infer(p: &mut KernelProgram) {
                     let seq_size = if *spans_grid {
                         1
                     } else {
-                        bound.div_ceil(block)
+                        bound
+                            .as_const()
+                            .expect("non-grid-spanning par bounds are concrete")
+                            .div_ceil(block)
                     };
                     *attr = Some(ParAttr {
                         seq_size,
@@ -185,7 +188,7 @@ fn promote_tiles(p: &mut KernelProgram, ki: usize) {
             unreachable!("tile writer is a par")
         };
         let n = p.buffers[buf.0 as usize].len();
-        if *spans_grid || *bound != n || !n.is_power_of_two() {
+        if *spans_grid || bound.as_const() != Some(n) || !n.is_power_of_two() {
             continue;
         }
         let kb = n.trailing_zeros() as usize;
@@ -234,7 +237,12 @@ fn promote_tiles(p: &mut KernelProgram, ki: usize) {
                 continue 'tiles;
             }
             let plan = match &a.index {
-                IndexMap::Linear(g) if !*rgrid && *rbound <= n && rbound.is_power_of_two() => {
+                IndexMap::Linear(g)
+                    if !*rgrid
+                        && rbound
+                            .as_const()
+                            .is_some_and(|rb| rb <= n && rb.is_power_of_two()) =>
+                {
                     // For readers whose par bound is smaller than the
                     // writer's tile (halving-tree pattern), extend the
                     // reader's linear-layout inputs with identity bases
@@ -306,7 +314,7 @@ fn promote_tiles(p: &mut KernelProgram, ki: usize) {
                             p.buffers.push(BufferDecl {
                                 name: format!("{name}_v{}", views.len()),
                                 elem,
-                                shape: vec![1 << kb],
+                                shape: vec![SizeExpr::from(1usize << kb)],
                                 kind: BufferKind::Register,
                                 space: AddressSpace::Register,
                                 layout: Some(eff.clone()),
@@ -486,7 +494,7 @@ mod tests {
             .filter(|b| b.kind == BufferKind::Register)
             .collect();
         assert_eq!(regs.len(), 1);
-        assert_eq!(regs[0].shape, vec![t]);
+        assert_eq!(regs[0].shape, vec![SizeExpr::from(t)]);
         assert!(regs[0].layout.as_ref().unwrap().is_identity());
         assert!(!kprog.buffers.iter().any(|b| b.kind == BufferKind::Shared));
 
@@ -580,10 +588,72 @@ mod tests {
         let tile = kprog.buffers.iter().find(|b| b.name.ends_with("_sm"));
         let mirror = tile.expect("mirror buffer");
         assert_eq!(mirror.kind, BufferKind::Shared);
-        assert_eq!(mirror.shape, vec![t]);
+        assert_eq!(mirror.shape, vec![SizeExpr::from(t)]);
 
         let source = codegen(&kprog).unwrap();
         assert!(source.contains("__shared__"), "{source}");
+        assert_eq!(source.matches("__syncthreads();").count(), 1, "{source}");
+    }
+
+    /// A tile read whose index contains a symbolic constant lowers to an
+    /// [`IndexMap::SExpr`] access; layout inference is not able to analyze
+    /// it, so the read is routed through a shared-memory mirror (the
+    /// non-linear catch-all) while the tile itself is still promoted.
+    #[test]
+    fn sexpr_reader_gets_shared_mirror() {
+        let (blocks, t) = (2usize, 8usize);
+        let mut b = IRBuilder::new();
+        let m = b.symbol("m");
+        let a = b.input("a", ScalarType::BabyBear, vec![blocks * t]);
+        let body = b.compute(blocks, |b, i| {
+            let tile = own_index_tile(b, a, i, t);
+            b.bind(tile, |b, tile| {
+                b.compute(t, |b, j| {
+                    // `(j + #m) % t`: symbolic, closed over binders + params.
+                    let mv = b.const_sym(m);
+                    let off = b.add(j, mv);
+                    let tc = b.const_u32(t as u32);
+                    let ix = b.rem(off, tc);
+                    let x = b.index(tile, &[ix]);
+                    let y = b.index(tile, &[j]);
+                    b.add(x, y)
+                })
+            })
+        });
+        let module = b.finish("sexpr_mirror_tile", body);
+
+        let mut kprog = lowered(module);
+        layout_infer(&mut kprog);
+        insert_sync(&mut kprog);
+        verify(&kprog).unwrap();
+
+        assert_eq!(
+            stmt_kinds(&kprog.kernels[0]),
+            ["alloc", "alloc", "par", "convert", "sync", "par"]
+        );
+        let mirror_id = kprog
+            .buffers
+            .iter()
+            .position(|b| b.name.ends_with("_sm"))
+            .expect("mirror buffer");
+        assert_eq!(kprog.buffers[mirror_id].kind, BufferKind::Shared);
+
+        // The symbolic read kept its SExpr index and was rewired to the
+        // mirror.
+        let sexpr_read = kprog.kernels[0]
+            .ops()
+            .iter()
+            .filter_map(|op| match &op.opcode {
+                SSAOpCode::Par { reads, .. } => Some(reads),
+                _ => None,
+            })
+            .flatten()
+            .find(|a| matches!(a.index, IndexMap::SExpr(_)))
+            .expect("SExpr read access");
+        assert_eq!(sexpr_read.buf, BufId(mirror_id as u32));
+
+        let source = codegen(&kprog).unwrap();
+        assert!(source.contains("p_m"), "{source}");
         assert_eq!(source.matches("__syncthreads();").count(), 1, "{source}");
     }
 

@@ -159,10 +159,10 @@ fn bitrev_expr(b: &mut IRBuilder, x: NodeId, bits: usize) -> NodeId {
         let q = if bit == 0 {
             x
         } else {
-            let shift = 1u32 << bit;
+            let shift = 1usize << bit;
             kernel!(b, x / #shift)
         };
-        let scale = 1u32 << (bits - 1 - bit);
+        let scale = 1usize << (bits - 1 - bit);
         rev = kernel!(b, rev + q % 2 * #scale);
     }
     rev
@@ -173,10 +173,10 @@ fn extract_bits(b: &mut IRBuilder, x: NodeId, pos: usize, width: usize) -> NodeI
     let q = if pos == 0 {
         x
     } else {
-        let shift = 1u32 << pos;
+        let shift = 1usize << pos;
         kernel!(b, x / #shift)
     };
-    let m = 1u32 << width;
+    let m = 1usize << width;
     kernel!(b, q % #m)
 }
 
@@ -298,6 +298,9 @@ pub fn ntt_partial_twiddles(log_n: usize) -> Vec<u32> {
 /// The composed form produces cross-terms like `-65535 * (i / 256)`
 /// that Quast can't fold against the paired `256 * i`, so `layout_infer`
 /// refuses the read as "operand may be negative".
+// Parked pending scatter-inverse migration: `ntt_supra_module`'s scatter
+// store predates the mandatory inverse annotation (refactor-plan.md).
+#[cfg(any())]
 #[derive(Clone, Copy)]
 struct TwiddleSource {
     node: NodeId,
@@ -312,6 +315,7 @@ struct TwiddleSource {
 /// entirely below `log_step`'s zero-fill or entirely above every source's
 /// contribution — so callers can drop the lookup + multiply-by-1 pair
 /// instead of loading `partial_twiddles[wi, 0]` for a wasted `* 1`.
+#[cfg(any())]
 fn window_digit(
     b: &mut IRBuilder,
     sources: &[TwiddleSource],
@@ -365,6 +369,7 @@ fn window_digit(
 /// or above every source's contribution) are elided, so early stages
 /// with a small `start + t - 1` bit exponent avoid the `* 1` lookups
 /// that a fixed unroll count would emit.
+#[cfg(any())]
 fn windowed_twiddle_lookup(
     b: &mut IRBuilder,
     partial_twiddles: NodeId,
@@ -396,7 +401,7 @@ const NTT_GROUP_MAX_BITS: usize = 8;
 
 /// Indexes a row-major `[rows, 2^cols_log2]` tensor by flat address.
 fn index_flat2(b: &mut IRBuilder, t: NodeId, addr: NodeId, cols_log2: usize) -> NodeId {
-    let cols = 1u32 << cols_log2;
+    let cols = 1usize << cols_log2;
     kernel!(b, t[addr / #cols, addr % #cols])
 }
 
@@ -720,6 +725,7 @@ pub fn ntt_reg_module(log_n: usize) -> Module {
 /// src_bit_lo: pi[k], n_bits: bits[k], pre_bit_lo: starts[k] }`. The
 /// stage appends its own `(j, 0, t - 1, start)` slot before building
 /// each window digit.
+#[cfg(any())]
 fn stage_sources(
     p_fields: &[TwiddleSource],
     j: NodeId,
@@ -749,6 +755,7 @@ fn stage_sources(
 /// multiplies, saving the memory bandwidth of the flat `[n/2]` table
 /// (32 MB at `log_n = 24`) and letting the tiny `n_windows * W` table
 /// stay warm in cache — matching supra's twiddle strategy.
+#[cfg(any())]
 #[allow(clippy::too_many_arguments)]
 fn ntt_group_stages_supra(
     b: &mut IRBuilder,
@@ -812,6 +819,7 @@ fn ntt_group_stages_supra(
 /// Shared-memory leftover stages for [`ntt_supra_module`] — same
 /// structure as [`ntt_group_stages`] but reads its twiddle through the
 /// windowed table so supra's module only needs one twiddle input.
+#[cfg(any())]
 #[allow(clippy::too_many_arguments)]
 fn ntt_group_stages_supra_shared(
     b: &mut IRBuilder,
@@ -913,6 +921,7 @@ fn ntt_group_stages_supra_shared(
 ///   so consecutive lanes already read consecutive addresses — supra's `coalesced_load` +
 ///   `transpose<z_count>` is the same net effect that layout-conversion (Slot/Shuffle
 ///   classification) achieves automatically here.
+#[cfg(any())]
 pub fn ntt_supra_module(log_n: usize, nthreads: usize, z_count: usize, coalesced: bool) -> Module {
     assert!(log_n >= 1, "NTT size must be at least 2");
     assert!(

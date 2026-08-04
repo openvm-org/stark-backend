@@ -32,9 +32,52 @@ use std::collections::{BTreeMap, BTreeSet};
 use smallvec::SmallVec;
 
 use crate::{
-    ir::{BinOp, ScalarType, VarId},
-    quast::Quast,
+    ir::{BinOp, ScalarType, SizeExpr, VarId},
+    quast::{Quast, SymConst},
 };
+
+/// A kernel-level extent: either concrete or an expression over the
+/// program's runtime parameters ([`KernelProgram::params`]). Only grid
+/// bounds and grid-spanning par bounds may be symbolic; everything inner
+/// (loops, tile shapes, `ParAttr::seq_size`) is concrete by construction
+/// (guaranteed by monomorphization).
+#[derive(Clone, Debug)]
+pub enum KBound {
+    Const(usize),
+    Expr(SizeExpr),
+}
+
+impl KBound {
+    pub fn as_const(&self) -> Option<usize> {
+        match self {
+            KBound::Const(c) => Some(*c),
+            KBound::Expr(e) => e.as_const().map(|c| c as usize),
+        }
+    }
+
+    /// The bound as a size expression (a literal when concrete).
+    pub fn to_expr(&self) -> SizeExpr {
+        match self {
+            KBound::Const(c) => (*c).into(),
+            KBound::Expr(e) => e.clone(),
+        }
+    }
+}
+
+impl From<usize> for KBound {
+    fn from(c: usize) -> Self {
+        KBound::Const(c)
+    }
+}
+
+impl std::fmt::Display for KBound {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            KBound::Const(c) => write!(f, "{c}"),
+            KBound::Expr(e) => write!(f, "{e}"),
+        }
+    }
+}
 
 /// SSA value inside one kernel (a single kernel-wide id space).
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -234,8 +277,10 @@ pub enum BufferKind {
 pub struct BufferDecl {
     pub name: String,
     pub elem: ScalarType,
-    /// Logical row-major shape.
-    pub shape: Vec<usize>,
+    /// Logical row-major shape. Only the outermost dim of a global buffer
+    /// may be symbolic (row-major strides never involve it); kernel-local
+    /// buffers are fully concrete.
+    pub shape: Vec<SizeExpr>,
     pub kind: BufferKind,
     pub space: AddressSpace,
     /// The alloc attribute, filled in by `layout_infer`. For shared (and
@@ -250,8 +295,34 @@ pub struct BufferDecl {
 }
 
 impl BufferDecl {
+    /// Concrete logical element count. Panics on a symbolic shape; callers
+    /// that may see symbolic global buffers use [`Self::len_expr`].
     pub fn len(&self) -> usize {
-        self.shape.iter().product()
+        self.shape
+            .iter()
+            .map(|d| {
+                d.as_const()
+                    .unwrap_or_else(|| panic!("buffer `{}` has a symbolic shape", self.name))
+                    as usize
+            })
+            .product()
+    }
+
+    /// Logical element count as an expression over the program params.
+    /// Inner dims must be concrete (only the outermost may be symbolic).
+    pub fn len_expr(&self) -> SizeExpr {
+        let Some(first) = self.shape.first() else {
+            return 1usize.into();
+        };
+        let inner: i64 = self.shape[1..]
+            .iter()
+            .map(|d| {
+                d.as_const().unwrap_or_else(|| {
+                    panic!("buffer `{}`: inner dims must be concrete", self.name)
+                })
+            })
+            .product();
+        first.mul_c(SymConst::Lit(inner)).fold_lits()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -301,7 +372,9 @@ pub enum SSAOpCode {
     /// per write, in order. `attr` (from `layout_infer`) factors the domain
     /// onto sequential steps x threads.
     Par {
-        bound: usize,
+        /// Symbolic only for grid-spanning pars (the guard bound); per-block
+        /// pars are concrete.
+        bound: KBound,
         /// Grid-spanning par: the logical index is
         /// `blockIdx.x * blockDim.x + threadIdx.x` and the grid covers the
         /// whole domain. Otherwise the par iterates its domain per block.
@@ -331,6 +404,10 @@ pub enum SSAOpCode {
     },
     /// No operands; one result.
     ConstU32(u32),
+    /// A symbolic constant over module parameters (`SymConst::Sym`
+    /// positions), read from the kernel's device parameters at runtime.
+    /// No operands; one result (`U32`).
+    ConstSym(SizeExpr),
     /// BabyBear constant (canonical representation); one result.
     ConstField(u32),
     /// FpExt constant `a0 + a1 x + a2 x^2 + a3 x^3` (each a canonical
@@ -376,7 +453,7 @@ pub struct SSABlock {
 }
 
 /// How an access maps a par's logical index to a buffer's logical index.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum IndexMap {
     /// `index = layout(par index)`.
     Linear(LinearLayout),
@@ -388,6 +465,17 @@ pub enum IndexMap {
         /// Bounds of the symbols appearing in `expr`.
         bounds: BTreeMap<VarId, u64>,
     },
+    /// A symbolic index expression: `Expr::Sym` positions are kernel values
+    /// (the `VarId(i) <-> SSARes(i)` convention, as in [`IndexMap::Affine`])
+    /// and `SymConst::Sym` positions are module parameters. Not analyzable
+    /// by layout inference: a write pins the buffer to shared memory, a
+    /// read gets a shared-memory mirror.
+    SExpr(SizeExpr),
+    /// Like [`IndexMap::SExpr`], but the expression may also reference
+    /// loaded SSA values (data-dependent indexing, e.g. a gather through an
+    /// index buffer). Codegen must emit the index-producing loads before
+    /// the dependent access.
+    Blackbox(SizeExpr),
 }
 
 /// One declared memory access of a par.
@@ -399,13 +487,17 @@ pub struct Access {
 
 impl Access {
     /// Kernel values used as symbols by the index expression (by the
-    /// `VarId(i) <-> SSARes(i)` convention).
+    /// `VarId(i) <-> SSARes(i)` convention). Module parameters live in
+    /// `SymConst::Sym` positions and are not kernel values, so they are
+    /// never reported here.
     pub fn index_syms(&self, out: &mut BTreeSet<SSARes>) {
-        if let IndexMap::Affine { expr, .. } = &self.index {
-            let mut syms = BTreeSet::new();
-            expr.syms(&mut syms);
-            out.extend(syms.into_iter().map(|v| SSARes(v.0)));
+        let mut syms = BTreeSet::new();
+        match &self.index {
+            IndexMap::Linear(_) => return,
+            IndexMap::Affine { expr, .. } => expr.syms(&mut syms),
+            IndexMap::SExpr(e) | IndexMap::Blackbox(e) => e.syms(&mut syms),
         }
+        out.extend(syms.into_iter().map(|v| SSARes(v.0)));
     }
 }
 
@@ -413,7 +505,7 @@ impl Access {
 /// operand bound to `blockIdx.x` as a kernel-level SSA value.
 #[derive(Clone, Debug)]
 pub struct Grid {
-    pub bound: usize,
+    pub bound: KBound,
     pub block: SSABlock,
 }
 
@@ -431,11 +523,11 @@ pub struct Kernel {
 
 impl Kernel {
     /// A new kernel with the grid index bound to the first fresh value.
-    pub fn new(name: String, grid_bound: usize, block: usize) -> Self {
+    pub fn new(name: String, grid_bound: impl Into<KBound>, block: usize) -> Self {
         let mut k = Kernel {
             name,
             grid: Grid {
-                bound: grid_bound,
+                bound: grid_bound.into(),
                 block: SSABlock::default(),
             },
             block,
@@ -488,6 +580,11 @@ pub struct KernelProgram {
     pub input_bufs: Vec<BufId>,
     /// Buffer id per module output index.
     pub output_bufs: Vec<BufId>,
+    /// Surviving symbolic module parameters, in declaration order. This
+    /// order defines the runtime ABI: device kernels take one trailing
+    /// `const uint32_t` per entry and the host `Prog` stores them as
+    /// `int64_t params[]`, bound via `set_param(i, v)`.
+    pub params: Vec<(VarId, String)>,
 }
 
 impl KernelProgram {

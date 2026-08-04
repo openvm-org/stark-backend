@@ -157,7 +157,7 @@ enum Stage {
     InternalSbox(u32),
     /// The four butterfly-sum stages, each with a different XOR partner
     /// stride (1, 2, 4, 8). Emitted as one Stage per stride.
-    ButterflySum(u32),
+    ButterflySum(usize),
     /// The internal round's stage 3: `sum + diag[j] * after_sbox[j]`. Reads
     /// both the sum tile and the after-sbox tile from previous stages.
     InternalCombine([u32; 16]),
@@ -228,7 +228,7 @@ fn internal_sbox_stage(b: &mut IRBuilder, prev: NodeId, rc: u32) -> NodeId {
 /// stride within `< 16` stays within one warp) or Shuffle (XOR crosses
 /// lane bits). Every stage folds pairs at distance `stride`, so after
 /// strides `1, 2, 4, 8` every lane holds the total.
-fn butterfly_stage(b: &mut IRBuilder, prev: NodeId, stride: u32) -> NodeId {
+fn butterfly_stage(b: &mut IRBuilder, prev: NodeId, stride: usize) -> NodeId {
     let par = lane_par(b);
     let m = 2 * stride;
     b.compute_with(WIDTH, None, Some(par), None, |b, j| {
@@ -273,7 +273,7 @@ fn build_stages(c: &Poseidon2Constants) -> Vec<Stage> {
     // Internal rounds.
     for &rc in &c.internal {
         stages.push(Stage::InternalSbox(rc));
-        for stride in [1u32, 2, 4, 8] {
+        for stride in [1usize, 2, 4, 8] {
             stages.push(Stage::ButterflySum(stride));
         }
         stages.push(Stage::InternalCombine(c.diag));
@@ -582,7 +582,7 @@ mod tests {
                     kernel!(b,
                         let orig = state[0, j];
                         let v = value[0];
-                        if j == #(ABSORB_IDX as u32) then v else orig
+                        if j == #ABSORB_IDX then v else orig
                     )
                 });
                 b.bind(gather, move |b, s| {

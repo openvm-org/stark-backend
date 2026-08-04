@@ -314,3 +314,464 @@ fn caller_supplied_pool_arena() {
         assert_eq!(got[i] as u64, want[i], "mismatch at index {i}");
     }
 }
+
+/// A graph kernel module must not lower to multiple internal kernels with
+/// intermediate buffers: module-level scratch has a fixed compile-time size,
+/// which is undefined once shapes are symbolic, so graph compilation rejects
+/// it outright.
+///
+/// The one rewrite that can currently break the single-kernel invariant of
+/// `insert_kernel` is the parallel-reduce lowering: a bare top-level
+/// `reduce [K]` (outer parallelism M = 1) with `K >= 512` becomes a
+/// two-stage chain `let stage0 = compute[G] ...; compute[1] ...` whose
+/// `stage0` tensor lands in module scratch.
+#[test]
+fn module_with_intermediate_buffers_is_rejected() {
+    const K: usize = 1 << 12;
+    let mut b = IRBuilder::new();
+    let x = b.input("x", ScalarType::BabyBear, vec![K]);
+    let body = b.reduce_add(K, |b, i| b.index(x, &[i]));
+    let m = b.finish("graph_two_stage_reduce", body);
+
+    let mut g = GraphBuilder::new();
+    let x = add_buf(&mut g, "x", K * 4);
+    let out = add_buf(&mut g, "out", 4);
+    g.register_input(x);
+    g.register_output(out);
+    g.insert_kernel(m, [x], [out]);
+
+    let err = match GraphCompiler::new().compile(g) {
+        Ok(_) => panic!("expected graph compilation to reject module-level scratch"),
+        Err(e) => e,
+    };
+    let msg = err.to_string();
+    assert!(
+        msg.contains("unimplemented") && msg.contains("module-level scratch"),
+        "unexpected error: {msg}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Symbolic-shape refactor north-star test (see refactor-plan.md). Pins the
+// graph-side API: param bindings are INFERRED at `insert_kernel` from the
+// concrete buffer shapes (no explicit params arg), and
+// `GraphExe::num_unique_modules()` exposes how many distinct compiled
+// variants back the graph's kernel nodes.
+mod symbolic {
+    use super::*;
+
+    fn sym_scale(shift: usize) -> Module {
+        let mut b = IRBuilder::new();
+        for _ in 0..shift {
+            let z = b.const_u32(0);
+            b.bind(z, |_, v| v);
+        }
+        let n = b.symbol("n");
+        let x = b.input("x", ScalarType::BabyBear, vec![n]);
+        let c = b.const_field(3);
+        let body = b.compute(n, |b, i| {
+            let xi = b.index(x, &[i]);
+            b.mul(xi, c)
+        });
+        b.finish("sym_scale", body)
+    }
+
+    /// `a = x*2; out = a*3` over a symbolic bound `n` — `insert_kernel`
+    /// splits the bind into a producer and a consumer kernel around a
+    /// staging buffer.
+    fn sym_chain(shift: usize) -> Module {
+        let mut b = IRBuilder::new();
+        for _ in 0..shift {
+            let z = b.const_u32(0);
+            b.bind(z, |_, v| v);
+        }
+        let n = b.symbol("n");
+        let x = b.input("x", ScalarType::BabyBear, vec![n]);
+        let two = b.const_field(2);
+        let a = b.compute(n, |b, i| {
+            let xi = b.index(x, &[i]);
+            b.mul(xi, two)
+        });
+        let body = b.bind(a, |b, av| {
+            let three = b.const_field(3);
+            b.compute(n, |b, i| {
+                let ai = b.index(av, &[i]);
+                b.mul(ai, three)
+            })
+        });
+        b.finish("sym_chain", body)
+    }
+
+    /// Two α-variant symbolic producer→consumer chains at DIFFERENT sizes:
+    /// fusion merges each chain across the staging seam by unifying the
+    /// producer's bare param with the consumer's, so the merged modules stay
+    /// fully symbolic and collapse onto ONE compiled variant across sizes.
+    #[test]
+    fn symbolic_chain_fuses_and_dedupes_across_sizes() {
+        const P: u64 = 2013265921;
+        let ctx = GpuDeviceCtx::for_current_device().expect("GPU ctx");
+        let (n0, n1) = (1usize << 10, 1usize << 12);
+        let mut g = GraphBuilder::new();
+        let x0 = add_buf(&mut g, "x0", n0 * 4);
+        let x1 = add_buf(&mut g, "x1", n1 * 4);
+        let out0 = add_buf(&mut g, "out0", n0 * 4);
+        let out1 = add_buf(&mut g, "out1", n1 * 4);
+        g.register_input(x0);
+        g.register_input(x1);
+        g.register_output(out0);
+        g.register_output(out1);
+        g.insert_kernel(sym_chain(0), [x0], [out0]);
+        g.insert_kernel(sym_chain(3), [x1], [out1]);
+
+        let mut exe = GraphCompiler::new().compile(g).unwrap();
+        let report = exe.fusion_report().unwrap();
+        assert_eq!(report.nodes_before, 4);
+        assert_eq!(report.nodes_after, 2);
+        assert_eq!(report.fused.len(), 2);
+        assert_eq!(exe.num_unique_modules(), 1);
+        assert_eq!(exe.templates().len(), 1);
+        assert_eq!(exe.templates()[0].variants.len(), 1);
+
+        let in0 = pseudo_field_elems(n0, 5);
+        let in1 = pseudo_field_elems(n1, 6);
+        let (d0, d1) = (to_dev(&ctx, &in0), to_dev(&ctx, &in1));
+        exe.set_input(&ctx, 0, &d0).unwrap();
+        exe.set_input(&ctx, 1, &d1).unwrap();
+        exe.run(&ctx).unwrap();
+        for (idx, input) in [(0usize, &in0), (1, &in1)] {
+            let got = read_output(&exe, &ctx, idx);
+            assert_eq!(got.len(), input.len());
+            for j in 0..input.len() {
+                let want = (input[j] as u64) * 6 % P;
+                assert_eq!(got[j] as u64, want, "output {idx}: mismatch at {j}");
+            }
+        }
+    }
+
+    /// Two α-variant instances of the same symbolic module at DIFFERENT
+    /// sizes: bindings come from the buffer shapes, and both nodes collapse
+    /// onto one compiled variant — the core dedup goal of the refactor.
+    /// (With concrete shapes these would be two distinct modules/compiles.)
+    #[test]
+    fn symbolic_module_dedupes_across_sizes() {
+        const P: u64 = 2013265921;
+        let ctx = GpuDeviceCtx::for_current_device().expect("GPU ctx");
+        let (n0, n1) = (1usize << 10, 1usize << 12);
+        let mut g = GraphBuilder::new();
+        let x0 = add_buf(&mut g, "x0", n0 * 4);
+        let x1 = add_buf(&mut g, "x1", n1 * 4);
+        let out0 = add_buf(&mut g, "out0", n0 * 4);
+        let out1 = add_buf(&mut g, "out1", n1 * 4);
+        g.register_input(x0);
+        g.register_input(x1);
+        g.register_output(out0);
+        g.register_output(out1);
+        g.insert_kernel(sym_scale(0), [x0], [out0]);
+        g.insert_kernel(sym_scale(3), [x1], [out1]);
+
+        let mut exe = GraphCompiler::new().compile(g).unwrap();
+        assert_eq!(exe.num_unique_modules(), 1);
+
+        let in0 = pseudo_field_elems(n0, 7);
+        let in1 = pseudo_field_elems(n1, 8);
+        let (d0, d1) = (to_dev(&ctx, &in0), to_dev(&ctx, &in1));
+        exe.set_input(&ctx, 0, &d0).unwrap();
+        exe.set_input(&ctx, 1, &d1).unwrap();
+        exe.run(&ctx).unwrap();
+        for (idx, input) in [(0usize, &in0), (1, &in1)] {
+            let got = read_output(&exe, &ctx, idx);
+            assert_eq!(got.len(), input.len());
+            for j in 0..input.len() {
+                let want = (input[j] as u64) * 3 % P;
+                assert_eq!(got[j] as u64, want, "output {idx}: mismatch at {j}");
+            }
+        }
+    }
+
+    /// A parameter used ONLY as a `const_sym` index splice: not inferable
+    /// from any input shape, so each insert's `add_shape_hint` supplies it.
+    /// Two inserts of the same HIR with different hint values must keep
+    /// their own bindings (regression: the subgraph cache used to key on
+    /// the hint-excluding module hash and replayed the first hint) while
+    /// still collapsing onto ONE compiled kernel — the splice survives
+    /// monomorphization as a runtime parameter.
+    #[test]
+    fn symbolic_index_splice_dedupes_across_hints() {
+        fn sym_pick(hint: i64) -> Module {
+            let mut b = IRBuilder::new();
+            let k = b.symbol("k");
+            let x = b.input("x", ScalarType::BabyBear, vec![8]);
+            let body = b.compute(1usize, move |b, _i| {
+                let idx = b.const_sym(k);
+                b.index(x, &[idx])
+            });
+            b.add_shape_hint(&[hint]);
+            b.finish("sym_pick", body)
+        }
+
+        let ctx = GpuDeviceCtx::for_current_device().expect("GPU ctx");
+        let mut g = GraphBuilder::new();
+        let x = add_buf(&mut g, "x", 8 * 4);
+        let out0 = add_buf(&mut g, "out0", 4);
+        let out1 = add_buf(&mut g, "out1", 4);
+        g.register_input(x);
+        g.register_output(out0);
+        g.register_output(out1);
+        g.insert_kernel(sym_pick(2), [x], [out0]);
+        g.insert_kernel(sym_pick(5), [x], [out1]);
+
+        let mut exe = GraphCompiler::new().compile(g).unwrap();
+        assert_eq!(exe.num_unique_modules(), 1);
+
+        let input = pseudo_field_elems(8, 11);
+        let d = to_dev(&ctx, &input);
+        exe.set_input(&ctx, 0, &d).unwrap();
+        exe.run(&ctx).unwrap();
+        assert_eq!(read_output(&exe, &ctx, 0), vec![input[2]]);
+        assert_eq!(read_output(&exe, &ctx, 1), vec![input[5]]);
+    }
+
+    /// Fold-style symbolic gather: `out[i] = x[i + (i/q)*q] + x[i + (i/q)*q
+    /// + q]` with `q` inferred from the input shape `[q*4]` and a symbolic
+    /// compute bound `q*2`. The index expression floor-divides and
+    /// multiplies by the surviving parameter, so it lowers to
+    /// `IndexMap::SExpr`; two sizes collapse onto one compiled kernel.
+    #[test]
+    fn symbolic_div_mul_index_dedupes_across_sizes() {
+        fn sym_fold_gather() -> Module {
+            let mut b = IRBuilder::new();
+            let q = b.symbol("q");
+            let x = b.input("x", ScalarType::BabyBear, vec![q * 4]);
+            let body = b.compute(q * 2, move |b, i| {
+                let qc = b.const_sym(q);
+                let grp = b.div(i, qc);
+                let off = b.mul(grp, qc);
+                let a_idx = b.add(i, off);
+                let b_idx = b.add(a_idx, qc);
+                let av = b.index(x, &[a_idx]);
+                let bv = b.index(x, &[b_idx]);
+                b.add(av, bv)
+            });
+            b.finish("sym_fold_gather", body)
+        }
+
+        const P: u64 = 2013265921;
+        let ctx = GpuDeviceCtx::for_current_device().expect("GPU ctx");
+        let (q0, q1) = (4usize, 1usize << 8);
+        let mut g = GraphBuilder::new();
+        let x0 = add_buf(&mut g, "x0", q0 * 4 * 4);
+        let x1 = add_buf(&mut g, "x1", q1 * 4 * 4);
+        let out0 = add_buf(&mut g, "out0", q0 * 2 * 4);
+        let out1 = add_buf(&mut g, "out1", q1 * 2 * 4);
+        g.register_input(x0);
+        g.register_input(x1);
+        g.register_output(out0);
+        g.register_output(out1);
+        g.insert_kernel(sym_fold_gather(), [x0], [out0]);
+        g.insert_kernel(sym_fold_gather(), [x1], [out1]);
+
+        let mut exe = GraphCompiler::new().compile(g).unwrap();
+        assert_eq!(exe.num_unique_modules(), 1);
+
+        let in0 = pseudo_field_elems(q0 * 4, 12);
+        let in1 = pseudo_field_elems(q1 * 4, 13);
+        let (d0, d1) = (to_dev(&ctx, &in0), to_dev(&ctx, &in1));
+        exe.set_input(&ctx, 0, &d0).unwrap();
+        exe.set_input(&ctx, 1, &d1).unwrap();
+        exe.run(&ctx).unwrap();
+        for (idx, input, q) in [(0usize, &in0, q0), (1, &in1, q1)] {
+            let got = read_output(&exe, &ctx, idx);
+            assert_eq!(got.len(), q * 2);
+            for (i, &got_i) in got.iter().enumerate() {
+                let a = i + (i / q) * q;
+                let want = ((input[a] as u64) + (input[a + q] as u64)) % P;
+                assert_eq!(got_i as u64, want, "output {idx}: mismatch at {i}");
+            }
+        }
+    }
+
+    /// Per-template block selection: two instances whose node-local block
+    /// policies differ (32 → block 32, 4096 → block 256) still collapse
+    /// onto ONE compiled variant, because the block hint comes from the
+    /// template group's max concrete size, not from each node's own.
+    #[test]
+    fn block_policy_uses_template_group_max() {
+        const P: u64 = 2013265921;
+        let ctx = GpuDeviceCtx::for_current_device().expect("GPU ctx");
+        let (n0, n1) = (32usize, 1usize << 12);
+        let mut g = GraphBuilder::new();
+        let x0 = add_buf(&mut g, "x0", n0 * 4);
+        let x1 = add_buf(&mut g, "x1", n1 * 4);
+        let out0 = add_buf(&mut g, "out0", n0 * 4);
+        let out1 = add_buf(&mut g, "out1", n1 * 4);
+        g.register_input(x0);
+        g.register_input(x1);
+        g.register_output(out0);
+        g.register_output(out1);
+        g.insert_kernel(sym_scale(0), [x0], [out0]);
+        g.insert_kernel(sym_scale(3), [x1], [out1]);
+
+        let mut exe = GraphCompiler::new().compile(g).unwrap();
+        assert_eq!(exe.num_unique_modules(), 1);
+        let templates = exe.templates();
+        assert_eq!(templates.len(), 1);
+        assert_eq!(templates[0].variants.len(), 1);
+        assert_eq!(templates[0].variants[0].block, Some(256));
+        assert!(templates[0].variants[0].baked.is_empty());
+
+        let in0 = pseudo_field_elems(n0, 11);
+        let in1 = pseudo_field_elems(n1, 12);
+        let (d0, d1) = (to_dev(&ctx, &in0), to_dev(&ctx, &in1));
+        exe.set_input(&ctx, 0, &d0).unwrap();
+        exe.set_input(&ctx, 1, &d1).unwrap();
+        exe.run(&ctx).unwrap();
+        for (idx, input) in [(0usize, &in0), (1, &in1)] {
+            let got = read_output(&exe, &ctx, idx);
+            assert_eq!(got.len(), input.len());
+            for j in 0..input.len() {
+                let want = (input[j] as u64) * 3 % P;
+                assert_eq!(got[j] as u64, want, "output {idx}: mismatch at {j}");
+            }
+        }
+    }
+
+    /// Partial monomorphization: producer
+    /// `y = compute [n] |i| { compute [t] |j| { x[i+a] * x[i+j] } }` feeds
+    /// consumer `out = compute [k] |i| { y[i] + 3 }` through an
+    /// unregistered staging buffer, with all of `n`, `t`, `a`, `k`
+    /// symbolic.
+    ///
+    /// Unfused, only `t` is baked into the producer (it is an inner
+    /// compute bound, so it must be concrete); `n` stays the symbolic
+    /// grid bound, `a` a runtime device param, and the input's `n + t + a`
+    /// extent is runtime-sized. The consumer bakes nothing (`k` is
+    /// inferred from the staging buffer and stays the symbolic grid
+    /// bound).
+    ///
+    /// Fused, the producer's row-major write map is inverted at the seam
+    /// with a concrete `DivMod { tile }`, hardcoding `v / t`, `v % t`
+    /// into the merged body — so `t` is specialized by fusion itself and
+    /// `baked` is empty, while `k`, `n`, `a` all survive symbolically.
+    ///
+    /// `x`'s single shape dim `n + t + a` has three unknowns, which
+    /// `insert_kernel`'s binding inference cannot solve from the buffer
+    /// size alone — the producer's shape hint supplies the bindings and
+    /// the concrete buffer size is verified against them. The consumer
+    /// needs no hint: bare `k` is solved from the staging buffer.
+    #[test]
+    fn partial_monomorphization_and_fusion() {
+        const P: u64 = 2013265921;
+        // Distinct values so `baked == [t0]` is unambiguous.
+        let (n0, t0, a0) = (64usize, 8usize, 3usize);
+        let k0 = n0 * t0;
+        let ctx = GpuDeviceCtx::for_current_device().expect("GPU ctx");
+
+        let producer = || -> Module {
+            let mut b = IRBuilder::new();
+            let n = b.symbol("n");
+            let t = b.symbol("t");
+            let a = b.symbol("a");
+            b.add_shape_hint(&[n0 as i64, t0 as i64, a0 as i64]);
+            let x = b.input("x", ScalarType::BabyBear, [n + t + a]);
+            let body = b.compute(n, |b, i| {
+                b.compute(t, |b, j| {
+                    let ca = b.const_sym(a);
+                    let ia = b.add(i, ca);
+                    let xia = b.index(x, &[ia]);
+                    let ij = b.add(i, j);
+                    let xij = b.index(x, &[ij]);
+                    b.mul(xia, xij)
+                })
+            });
+            b.finish("partial_mono_producer", body)
+        };
+        let consumer = || -> Module {
+            let mut b = IRBuilder::new();
+            let k = b.symbol("k");
+            let y = b.input("y", ScalarType::BabyBear, vec![k]);
+            let three = b.const_field(3);
+            let body = b.compute(k, |b, i| {
+                let yi = b.index(y, &[i]);
+                b.add(yi, three)
+            });
+            b.finish("partial_mono_consumer", body)
+        };
+        let build = || {
+            let mut g = GraphBuilder::new();
+            let x = add_buf(&mut g, "x", (n0 + t0 + a0) * 4);
+            let staging = add_buf(&mut g, "y", k0 * 4);
+            let out = add_buf(&mut g, "out", k0 * 4);
+            g.register_input(x);
+            g.register_output(out);
+            g.insert_kernel(producer(), [x], [staging]);
+            g.insert_kernel(consumer(), [staging], [out]);
+            g
+        };
+
+        let mut unfused = GraphCompiler::new()
+            .without_fusion()
+            .compile(build())
+            .unwrap();
+        assert_eq!(unfused.num_unique_modules(), 2);
+        let mut baked: Vec<Vec<i64>> = unfused
+            .templates()
+            .iter()
+            .map(|tpl| {
+                assert_eq!(tpl.variants.len(), 1);
+                tpl.variants[0].baked.clone()
+            })
+            .collect();
+        baked.sort();
+        assert_eq!(baked, vec![vec![], vec![t0 as i64]]);
+
+        let mut fused = GraphCompiler::new().compile(build()).unwrap();
+        let report = fused.fusion_report().unwrap();
+        assert_eq!(report.nodes_before, 2);
+        assert_eq!(report.nodes_after, 1);
+        assert_eq!(report.fused.len(), 1);
+        assert_eq!(fused.num_unique_modules(), 1);
+        let templates = fused.templates();
+        assert_eq!(templates.len(), 1);
+        assert_eq!(templates[0].variants.len(), 1);
+        // `t` was already hardcoded by the seam inversion; the merged
+        // module's outer bound (`k`) stays symbolic, so nothing is left
+        // for monomorphization to bake.
+        assert_eq!(templates[0].variants[0].baked, Vec::<i64>::new());
+        assert_eq!(templates[0].variants[0].block, Some(256));
+
+        // `x[i+a] * x[i+j]` is a genuine var*var multiply — a Montgomery
+        // mul on raw bits — so (unlike the linear chains above, which are
+        // representation-transparent) inputs must be Montgomery-encoded
+        // and outputs decoded.
+        fn to_mont(x: u32) -> u32 {
+            (((x as u64) << 32) % P) as u32
+        }
+        fn from_mont(x: u32) -> u32 {
+            const M0: u32 = 0x77ff_ffff; // -P^{-1} mod 2^32
+            let red = x.wrapping_mul(M0);
+            let t = ((x as u64 + red as u64 * P) >> 32) as u32;
+            if t >= P as u32 {
+                t - P as u32
+            } else {
+                t
+            }
+        }
+        let input = pseudo_field_elems(n0 + t0 + a0, 17);
+        let encoded: Vec<u32> = input.iter().map(|&v| to_mont(v)).collect();
+        let got_fused: Vec<u32> = run(&mut fused, &ctx, &encoded)
+            .into_iter()
+            .map(from_mont)
+            .collect();
+        let got_unfused: Vec<u32> = run(&mut unfused, &ctx, &encoded)
+            .into_iter()
+            .map(from_mont)
+            .collect();
+        assert_eq!(got_fused, got_unfused);
+        assert_eq!(got_fused.len(), k0);
+        for (v, &got) in got_fused.iter().enumerate() {
+            let (i, j) = (v / t0, v % t0);
+            let want = ((input[i + a0] as u64 * input[i + j] as u64) % P + 3) % P;
+            assert_eq!(got as u64, want, "mismatch at {v} (i={i}, j={j})");
+        }
+    }
+}

@@ -86,7 +86,11 @@ use crate::{
     ir::{self, VarId},
     kernel_cache::KernelCache,
     module_hash::module_hash,
-    passes::fusion::{fuse_graph, FusionOptions, FusionReport},
+    passes::{
+        check_accesses::check_module_accesses,
+        fusion::{fuse_graph, renumber_module, FusionOptions, FusionReport},
+        monomorphize::{block_size_policy, monomorphize_for_graph},
+    },
     planner::{self, access_from_node, MemoryPlan, NodeAccess, PlanError, SchedulerMode},
     quast::Quast,
     runtime::{CompileOptions, KernelModule},
@@ -226,17 +230,14 @@ impl GraphCompiler {
     /// [`FusionReport`] is available on the returned exe via
     /// [`GraphExe::fusion_report`]. The pipeline then runs in three phases:
     ///
-    /// 1. **Compile-first**: drain the graph's nodes and JIT every `Kernel(Module)` up front so we
-    ///    know each module's own scratch requirement (`KernelModule::scratch_size()`).
-    /// 2. **Fold scratch into the plan**: for every kernel that needs scratch, register a synthetic
-    ///    device buffer of that size and mark it as both a read and a write of the kernel node —
-    ///    the CP-SAT model then packs it into the graph pool with a single-time-step lifetime, so
-    ///    scratches share memory with each other and with any graph buffer that's dead during that
-    ///    step.
-    /// 3. **Plan + assemble**: run [`planner::plan_raw`] on the augmented `(bufs, node accesses)`
-    ///    pair with the registered inputs/outputs pinned to whole-program lifetimes — every buffer
-    ///    (interface, intermediate, per-kernel scratch) gets a stable offset in one device pool —
-    ///    and package everything into a [`GraphExe`].
+    /// 1. **Compile-first**: drain the graph's nodes and JIT every `Kernel(Module)` up front. A
+    ///    module that reports non-zero scratch (`KernelModule::scratch_size()`) lowered to multiple
+    ///    internal kernels with intermediate buffers; that is unsupported in graphs (module scratch
+    ///    size is undefined once shapes are symbolic) and hard-errors here.
+    /// 2. **Plan + assemble**: run [`planner::plan_raw`] on the `(bufs, node accesses)` pair with
+    ///    the registered inputs/outputs pinned to whole-program lifetimes — every buffer (interface
+    ///    or intermediate) gets a stable offset in one device pool — and package everything into a
+    ///    [`GraphExe`].
     pub fn compile(self, mut graph: GraphBuilder) -> Result<GraphExe, CompileError> {
         validate_interface(&graph, self.device)?;
         let input_bufs = graph.input_bufs().to_vec();
@@ -250,11 +251,12 @@ impl GraphCompiler {
         // Phase 1: drain and compile every structured kernel.
         //
         // `compiled` mirrors the original node order. For structured kernels
-        // the compiled `KernelModule` is wrapped in `Rc<RefCell<_>>` and
-        // cached by the source `Arc<ir::Module>`'s pointer identity, so two
-        // `Kernel` nodes that carry the same module clone share one JIT
-        // build. `KernelModule::set_input`/`set_output`/`set_scratch` take
-        // `&mut self`, hence the `RefCell` for the shared handle.
+        // the compiled `KernelModule` is wrapped in `Arc<Mutex<_>>` and
+        // cached by (source `Arc<ir::Module>` pointer, parameter bindings),
+        // so two `Kernel` nodes that carry the same module clone and the
+        // same bindings share one JIT build.
+        // `KernelModule::set_param`/`set_input`/`set_output`/`set_scratch`
+        // take `&mut self`, hence the `Mutex` for the shared handle.
         enum PreExe {
             Kernel {
                 name: String,
@@ -262,6 +264,11 @@ impl GraphCompiler {
                 inputs: Vec<BufId>,
                 outputs: Vec<BufId>,
                 scratch: Option<BufId>,
+                /// Values for the residual module's runtime parameters,
+                /// bound before every size query and launch.
+                params: Vec<i64>,
+                /// Indices into [`GraphExe::templates`] and its variants.
+                template: (usize, usize),
             },
             Blackbox(KernelNode),
             Const(ConstNode),
@@ -282,31 +289,117 @@ impl GraphCompiler {
         let nodes: Vec<GraphNode> = graph.nodes.drain(..).collect();
 
         // Phase 1a: partition Kernel nodes from the rest and identify the
-        // unique modules to compile. Two `KernelModuleNode`s sharing an `Arc`
-        // pointer alias the same source module, so they share a compiled
-        // artifact. `unique_keys` holds those pointers in first-seen order so
-        // parallel compilation can index into it.
-        let mut unique_keys: Vec<*const ir::Module> = Vec::new();
-        let mut unique_modules: Vec<Arc<ir::Module>> = Vec::new();
-        let mut key_index: HashMap<*const ir::Module, usize> = HashMap::new();
+        // unique (module, bindings) pairs to compile. Two `KernelModuleNode`s
+        // sharing an `Arc` pointer and identical parameter bindings alias the
+        // same compiled artifact. A parameterized module is monomorphized
+        // against its bindings here: the *residual* (with its surviving
+        // params) is what gets hashed, cached and compiled, so nodes whose
+        // residuals agree share one JIT build even across different concrete
+        // sizes. The α-normalized hash of the PRE-monomorphization module is
+        // kept as the template grouping key for block selection below.
+        enum ResidualSlot {
+            Shared(Arc<ir::Module>),
+            Owned(ir::Module),
+        }
+        struct PreUnique {
+            residual: ResidualSlot,
+            /// Binding values for the residual's surviving params (empty for
+            /// concrete modules).
+            vals: Vec<i64>,
+            /// Values baked into the residual by monomorphization.
+            baked: Vec<i64>,
+            /// Max concrete outer compute size — `Some` iff the residual
+            /// keeps a symbolic outer bound and needs a block hint.
+            max_outer: Option<i64>,
+            template_hash: [u8; 32],
+        }
+        let mut unique: Vec<PreUnique> = Vec::new();
+        let mut key_index: HashMap<(*const ir::Module, Vec<i64>), usize> = HashMap::new();
         // Per-node kernel slot: `Some(kernel_idx)` if this graph node is a
-        // Kernel, referring to `unique_modules[kernel_idx]`.
+        // Kernel, referring to `unique[kernel_idx]`.
         let mut node_module_idx: Vec<Option<usize>> = Vec::with_capacity(nodes.len());
         for node in &nodes {
             match node {
                 GraphNode::Kernel(k) => {
-                    let key = Arc::as_ptr(&k.module);
-                    let idx = *key_index.entry(key).or_insert_with(|| {
-                        unique_keys.push(key);
-                        unique_modules.push(k.module.clone());
-                        unique_modules.len() - 1
-                    });
+                    let key = (Arc::as_ptr(&k.module), k.param_bindings.clone());
+                    let idx = match key_index.get(&key) {
+                        Some(&idx) => idx,
+                        None => {
+                            if self.options.check_accesses {
+                                check_module_accesses(&k.module, &k.param_bindings)?;
+                            }
+                            let template_hash = module_hash(&renumber_module(&k.module));
+                            let pu = if k.param_bindings.is_empty() {
+                                PreUnique {
+                                    residual: ResidualSlot::Shared(k.module.clone()),
+                                    vals: Vec::new(),
+                                    baked: Vec::new(),
+                                    max_outer: None,
+                                    template_hash,
+                                }
+                            } else {
+                                let gm = monomorphize_for_graph(&k.module, &k.param_bindings)?;
+                                PreUnique {
+                                    residual: ResidualSlot::Owned(gm.residual),
+                                    vals: gm.residual_bindings,
+                                    baked: gm.baked,
+                                    max_outer: gm.max_outer,
+                                    template_hash,
+                                }
+                            };
+                            unique.push(pu);
+                            let idx = unique.len() - 1;
+                            key_index.insert(key, idx);
+                            idx
+                        }
+                    };
                     node_module_idx.push(Some(idx));
                 }
                 _ => node_module_idx.push(None),
             }
         }
         drop(key_index);
+
+        // Phase 1a': per-template block selection (refactor-plan.md, Phase
+        // 5). Variants of one template must not fragment into different
+        // launch geometries, so a residual that keeps a symbolic outer bound
+        // gets its block hint from the max concrete compute size over ALL of
+        // the template's instantiations, not just its own node's. An
+        // author-set block hint wins.
+        let mut group_max: HashMap<[u8; 32], i64> = HashMap::new();
+        for pu in &unique {
+            if let Some(m) = pu.max_outer {
+                group_max
+                    .entry(pu.template_hash)
+                    .and_modify(|g| *g = (*g).max(m))
+                    .or_insert(m);
+            }
+        }
+        for pu in &mut unique {
+            if pu.max_outer.is_none() {
+                continue;
+            }
+            let ResidualSlot::Owned(m) = &mut pu.residual else {
+                continue;
+            };
+            if m.builder.block_hint().is_none() {
+                let group_m = group_max[&pu.template_hash];
+                m.builder
+                    .set_block_hint(block_size_policy(group_m as usize));
+            }
+        }
+        drop(group_max);
+        let unique_param_vals: Vec<Vec<i64>> = unique.iter().map(|pu| pu.vals.clone()).collect();
+        let unique_baked: Vec<Vec<i64>> = unique.iter().map(|pu| pu.baked.clone()).collect();
+        let unique_template_hash: Vec<[u8; 32]> =
+            unique.iter().map(|pu| pu.template_hash).collect();
+        let unique_modules: Vec<Arc<ir::Module>> = unique
+            .into_iter()
+            .map(|pu| match pu.residual {
+                ResidualSlot::Shared(a) => a,
+                ResidualSlot::Owned(m) => Arc::new(m),
+            })
+            .collect();
 
         // Phase 1b: content-based dedup. `Arc::as_ptr` identity picks up
         // callers who deliberately share a single module handle across
@@ -333,9 +426,44 @@ impl GraphCompiler {
         drop(representative_of_hash);
         let num_unique_content = representatives.len();
 
+        // Template metadata: one entry per α-normalized source HIR, its
+        // variants deduped by residual (variant) hash — the autotuning
+        // surface behind [`GraphExe::templates`].
+        let mut templates: Vec<KernelTemplate> = Vec::new();
+        let mut template_index: HashMap<[u8; 32], usize> = HashMap::new();
+        // Per unique module: (template idx, variant idx).
+        let mut unique_tv: Vec<(usize, usize)> = Vec::with_capacity(unique_modules.len());
+        for i in 0..unique_modules.len() {
+            let th = unique_template_hash[i];
+            let t = *template_index.entry(th).or_insert_with(|| {
+                templates.push(KernelTemplate {
+                    hir_hash: th,
+                    variants: Vec::new(),
+                });
+                templates.len() - 1
+            });
+            let vh = hashes[i];
+            let variants = &mut templates[t].variants;
+            let v = match variants.iter().position(|v| v.variant_hash == vh) {
+                Some(v) => v,
+                None => {
+                    variants.push(KernelVariant {
+                        variant_hash: vh,
+                        block: unique_modules[i].builder.block_hint(),
+                        baked: unique_baked[i].clone(),
+                    });
+                    variants.len() - 1
+                }
+            };
+            unique_tv.push((t, v));
+        }
+        drop(template_index);
+
         // Phase 1c: probe the on-disk cache, but only for representatives.
         // Cache hits are loaded on the main thread (cheap; just a dlopen).
-        let mut compiled_slots: Vec<Option<(Arc<Mutex<KernelModule>>, usize)>> =
+        // Scratch sizes are param-dependent, so they are queried per node
+        // during assembly (after `set_param`), not stored here.
+        let mut compiled_slots: Vec<Option<Arc<Mutex<KernelModule>>>> =
             (0..unique_modules.len()).map(|_| None).collect();
         let mut cache_misses: Vec<usize> = Vec::new();
         let mut num_cached_modules = 0usize;
@@ -347,8 +475,7 @@ impl GraphCompiler {
             };
             match hit {
                 Some(km) => {
-                    let scratch_size = km.scratch_size();
-                    compiled_slots[repr] = Some((Arc::new(Mutex::new(km)), scratch_size));
+                    compiled_slots[repr] = Some(Arc::new(Mutex::new(km)));
                     num_cached_modules += 1;
                 }
                 None => cache_misses.push(repr),
@@ -468,15 +595,13 @@ impl GraphCompiler {
         };
         for res in compile_results {
             let (idx, km) = res?;
-            let scratch_size = km.scratch_size();
-            compiled_slots[idx] = Some((Arc::new(Mutex::new(km)), scratch_size));
+            compiled_slots[idx] = Some(Arc::new(Mutex::new(km)));
         }
 
         // Phase 1e: fan the representative's compiled slot out to every
         // aliased unique-module index. Two `Kernel` nodes with distinct
         // `Arc`s but identical hashes now share the same `Arc<Mutex<
-        // KernelModule>>` — and each still gets its own scratch BufId
-        // downstream, since the planner needs disjoint scratch lifetimes.
+        // KernelModule>>`.
         for i in 0..unique_modules.len() {
             let repr = hash_repr[i];
             if repr != i {
@@ -484,35 +609,52 @@ impl GraphCompiler {
             }
         }
 
-        // Phase 1d: assemble `PreExe`s in original node order, allocating a
-        // per-node scratch BufId where the compiled module reports scratch.
+        // Phase 1d: assemble `PreExe`s in original node order, rejecting any
+        // module that reports scratch (i.e. intermediate buffers between
+        // internal kernels). Params are bound on the (possibly shared)
+        // handle before asking for the size.
         let mut compiled: Vec<PreExe> = Vec::with_capacity(nodes.len());
         for (node, mod_idx) in nodes.into_iter().zip(node_module_idx.into_iter()) {
             compiled.push(match node {
                 GraphNode::Kernel(k) => {
                     let idx = mod_idx.expect("Kernel node without module index");
-                    let (module_handle, scratch_size) = compiled_slots[idx]
+                    let module_handle = compiled_slots[idx]
                         .as_ref()
                         .expect("missing compiled slot")
                         .clone();
-                    let name = k.module.name.clone();
-                    let scratch = if scratch_size > 0 {
-                        let bid = graph.add_buf(BufInfo {
-                            name: Some(format!("scratch<{name}>")),
-                            device_type: self.device,
-                            size: Quast::cst(scratch_size as i64),
-                            elem_size: 1,
-                        });
-                        Some(bid)
-                    } else {
-                        None
+                    let params = unique_param_vals[idx].clone();
+                    let scratch_size = {
+                        let mut m = module_handle.lock().unwrap();
+                        for (i, &v) in params.iter().enumerate() {
+                            m.set_param(i, v);
+                        }
+                        m.scratch_size()
                     };
+                    let name = k.module.name.clone();
+                    // Module-level scratch holds intermediates between a
+                    // module's *internal* kernels (a top-level let chain,
+                    // e.g. the two-stage parallel-reduce rewrite). Graph
+                    // nodes are inserted as single-kernel modules and must
+                    // stay that way: with symbolic shapes a module's scratch
+                    // size is not a well-defined compile-time constant, so
+                    // intermediate buffers inside a graph kernel module are
+                    // unsupported.
+                    if scratch_size > 0 {
+                        return Err(CompileError::Runtime(format!(
+                            "unimplemented: graph kernel module `{name}` lowered to multiple \
+                             internal kernels and requires {scratch_size} bytes of module-level \
+                             scratch for intermediate buffers; graph kernel modules must remain \
+                             single-kernel"
+                        )));
+                    }
                     PreExe::Kernel {
                         name,
                         module: module_handle,
                         inputs: k.inputs,
                         outputs: k.outputs,
-                        scratch,
+                        scratch: None,
+                        params,
+                        template: unique_tv[idx],
                     }
                 }
                 GraphNode::BlackboxKernel(k) => PreExe::Blackbox(k),
@@ -610,9 +752,17 @@ impl GraphCompiler {
                     inputs,
                     outputs,
                     scratch,
+                    params,
+                    template,
                 } => {
                     {
-                        let m = module.lock().unwrap();
+                        // Sizes on a shared handle are functions of the
+                        // currently-bound params; bind this node's before
+                        // querying.
+                        let mut m = module.lock().unwrap();
+                        for (i, &v) in params.iter().enumerate() {
+                            m.set_param(i, v);
+                        }
                         check_kernel_sizes(&m, &inputs, &outputs, &sizes)?;
                         if let Some(sc) = scratch {
                             // Scratch was sized from `module.scratch_size()`
@@ -634,6 +784,8 @@ impl GraphCompiler {
                         inputs,
                         outputs,
                         scratch,
+                        params,
+                        template,
                     })
                 }
                 PreExe::Blackbox(k) => ExeNode::Blackbox(k),
@@ -718,6 +870,7 @@ impl GraphCompiler {
             bufs,
             num_unique_modules,
             num_cached_modules,
+            templates,
             fusion_report,
             captured: None,
         })
@@ -880,6 +1033,36 @@ struct ExeKernel {
     /// the compiled kernel needs no scratch. Its offset in the graph pool
     /// is bound via [`KernelModule::set_scratch`] at run time.
     scratch: Option<BufId>,
+    /// This node's values for the module's runtime parameters, bound before
+    /// every launch — nodes sharing a `KernelModule` handle can carry
+    /// different values.
+    params: Vec<i64>,
+    /// Indices into [`GraphExe::templates`] and its variants.
+    template: (usize, usize),
+}
+
+/// One kernel family: every graph node whose source module α-normalizes to
+/// the same HIR shares a template; concrete differences (block size, baked
+/// parameter values) surface as [`KernelVariant`]s — the future autotuning
+/// surface (refactor-plan.md, Phase 5).
+#[derive(Debug, Clone)]
+pub struct KernelTemplate {
+    /// α-normalized hash of the pre-monomorphization source module.
+    pub hir_hash: [u8; 32],
+    pub variants: Vec<KernelVariant>,
+}
+
+/// One compiled variant of a [`KernelTemplate`]; its hash is the JIT dedup
+/// key and the on-disk cache key.
+#[derive(Debug, Clone)]
+pub struct KernelVariant {
+    /// Hash of the residual module (baked values and block hint included).
+    pub variant_hash: [u8; 32],
+    /// Block hint stamped from the template's max concrete compute size,
+    /// `None` when every outer bound is concrete.
+    pub block: Option<usize>,
+    /// Parameter values baked in by monomorphization, declaration order.
+    pub baked: Vec<i64>,
 }
 
 enum ExeNode {
@@ -928,14 +1111,20 @@ pub struct GraphExe {
     /// device_type per BufId.
     bufs: Vec<BufInfo>,
     /// Number of distinct `KernelModule`s that were compiled or loaded from
-    /// cache. Kernels are deduplicated first by `Arc<ir::Module>` identity
-    /// and then by [`crate::module_hash::module_hash`], so two `Kernel`
-    /// nodes with structurally identical modules count once even when they
-    /// carry distinct `Arc` handles.
+    /// cache. Kernels are deduplicated first by (`Arc<ir::Module>` identity,
+    /// parameter bindings) — monomorphizing parameterized modules to their
+    /// residuals — and then by [`crate::module_hash::module_hash`] of the
+    /// residual, so two `Kernel` nodes with structurally identical residuals
+    /// count once even when they carry distinct `Arc` handles or concrete
+    /// sizes.
     num_unique_modules: usize,
     /// Subset of `num_unique_modules` served from the on-disk kernel cache
     /// (i.e. reused a persisted `.so` instead of running nvcc).
     num_cached_modules: usize,
+    /// One entry per kernel family (α-normalized source HIR), holding the
+    /// compiled variants; kernel nodes index into this via their
+    /// `(template, variant)` pointer.
+    templates: Vec<KernelTemplate>,
     /// What the kernel-fusion pass did, `None` when it was disabled.
     fusion_report: Option<FusionReport>,
     /// Instantiated CUDA graph produced by [`Self::capture_graph`]. Reused
@@ -995,6 +1184,14 @@ impl GraphExe {
     /// cold cache would trigger.
     pub fn num_unique_modules(&self) -> usize {
         self.num_unique_modules
+    }
+
+    /// Kernel families and their compiled variants: nodes whose source
+    /// modules α-normalize to the same HIR share one [`KernelTemplate`];
+    /// each distinct residual (baked values + block hint) is one
+    /// [`KernelVariant`].
+    pub fn templates(&self) -> &[KernelTemplate] {
+        &self.templates
     }
 
     /// How many of [`Self::num_unique_modules`] were served from the on-disk
@@ -1082,7 +1279,10 @@ impl GraphExe {
     fn format_exe_node_line(&self, node: &ExeNode) -> String {
         match node {
             ExeNode::Kernel(k) => {
-                let mut attrs = format!("name=\"{}\"", k.name);
+                let mut attrs = format!(
+                    "name=\"{}\", template=t{}v{}",
+                    k.name, k.template.0, k.template.1
+                );
                 if let Some(sc) = k.scratch {
                     attrs.push_str(&format!(", scratch={}", self.buf_decl(sc)));
                 }
@@ -1273,10 +1473,16 @@ impl GraphExe {
         for &node_idx in &plan.order {
             match &mut self.nodes[node_idx] {
                 ExeNode::Kernel(k) => {
-                    // Re-binding inputs / outputs / scratch just before the
-                    // launch is safe even when this handle is shared with
-                    // another `ExeKernel`, because execution is sequential.
+                    // Re-binding params / inputs / outputs / scratch just
+                    // before the launch is safe even when this handle is
+                    // shared with another `ExeKernel`, because execution is
+                    // sequential. Params first: the sizes queried below are
+                    // functions of the currently-bound params, which the
+                    // previous node may have overwritten.
                     let mut m = k.module.lock().unwrap();
+                    for (i, &v) in k.params.iter().enumerate() {
+                        m.set_param(i, v);
+                    }
                     for (i, &bid) in k.inputs.iter().enumerate() {
                         let ptr = bufid_ptr(bid)?;
                         let expected = m.input_size(i);

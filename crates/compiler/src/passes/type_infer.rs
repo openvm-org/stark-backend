@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use crate::{
-    ir::{BinOp, IRBuilder, Module, Node, NodeId, ScalarType, Type, VarId},
+    ir::{BinOp, IRBuilder, IntoShape, Module, Node, NodeId, ScalarType, SizeExpr, Type, VarId},
     quast::Scatter,
     CompileError,
 };
@@ -101,6 +101,7 @@ impl TypeCx<'_> {
                 .cloned()
                 .ok_or_else(|| CompileError::Type(format!("unbound variable {v:?}"))),
             Node::ConstU32(_) => Ok(Type::Scalar(ScalarType::U32)),
+            Node::ConstSym(_) => Ok(Type::Scalar(ScalarType::U32)),
             Node::ConstField(_) => Ok(Type::Scalar(ScalarType::BabyBear)),
             Node::ConstFpExt(_) => Ok(Type::Scalar(ScalarType::FpExt)),
             Node::LiftFpExt(x) => {
@@ -200,7 +201,7 @@ impl TypeCx<'_> {
             } => {
                 self.var_types.insert(var, Type::Scalar(ScalarType::U32));
                 let tb = self.infer(body)?;
-                let ty = lift_compute_type(bound, &tb)?;
+                let ty = lift_compute_type(&bound, &tb)?;
                 match scatter {
                     None => Ok(ty),
                     Some(sc) => scatter_result_type(&sc, &ty),
@@ -260,7 +261,7 @@ impl TypeCx<'_> {
                         )));
                     }
                 }
-                Ok(Type::Tensor(t0, vec![elems.len()]))
+                Ok(Type::Tensor(t0, vec![elems.len().into()]))
             }
         }
     }
@@ -268,12 +269,19 @@ impl TypeCx<'_> {
 
 /// Type of a compute with a `#[scatter(...)]` attribute, given its logical
 /// (pre-scatter) type: the physical shape replaces the logical one.
+/// Concrete-authored scatters require a fully concrete logical shape.
 fn scatter_result_type(sc: &Scatter, logical_ty: &Type) -> Result<Type, CompileError> {
-    let Type::Tensor(elem, logical) = logical_ty else {
+    let Type::Tensor(elem, _) = logical_ty else {
         return Err(CompileError::Type(format!(
             "scatter requires a tensor-valued compute, got {logical_ty:?}"
         )));
     };
+    let logical = logical_ty.concrete_shape().ok_or_else(|| {
+        CompileError::Type(format!(
+            "scatter on a symbolic-shaped compute ({:?}) is not supported",
+            logical_ty.shape()
+        ))
+    })?;
     if sc.params.len() != logical.len() {
         return Err(CompileError::Type(format!(
             "scatter has {} parameters but the compute output has rank {}",
@@ -281,7 +289,7 @@ fn scatter_result_type(sc: &Scatter, logical_ty: &Type) -> Result<Type, CompileE
             logical.len()
         )));
     }
-    let out = sc.out_shape_for(logical).map_err(|e| match e {
+    let out = sc.out_shape_for(&logical).map_err(|e| match e {
         CompileError::Quast(m) => CompileError::Type(m),
         other => other,
     })?;
@@ -293,17 +301,18 @@ fn scatter_result_type(sc: &Scatter, logical_ty: &Type) -> Result<Type, CompileE
              shape {logical:?} has {n_log}"
         )));
     }
-    Ok(Type::Tensor(*elem, out))
+    Ok(Type::Tensor(*elem, out.into_shape()))
 }
 
 /// Type of `compute [bound] |i| { body }` given the body type: prepends the
-/// iteration bound to tensor shapes, distributing over tuples.
-fn lift_compute_type(bound: usize, body_ty: &Type) -> Result<Type, CompileError> {
+/// (possibly symbolic) iteration bound to tensor shapes, distributing over
+/// tuples.
+fn lift_compute_type(bound: &SizeExpr, body_ty: &Type) -> Result<Type, CompileError> {
     match body_ty {
-        Type::Scalar(s) => Ok(Type::Tensor(*s, vec![bound])),
+        Type::Scalar(s) => Ok(Type::Tensor(*s, vec![bound.clone()])),
         Type::Tensor(s, shape) => {
             let mut new_shape = Vec::with_capacity(shape.len() + 1);
-            new_shape.push(bound);
+            new_shape.push(bound.clone());
             new_shape.extend_from_slice(shape);
             Ok(Type::Tensor(*s, new_shape))
         }

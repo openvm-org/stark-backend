@@ -136,12 +136,13 @@ mod tests {
             scratch_bytes: 0,
             input_bufs: vec![],
             output_bufs: vec![],
+            params: vec![],
         }
     }
 
     fn empty_par(bound: usize) -> SSAOpCode {
         SSAOpCode::Par {
-            bound,
+            bound: bound.into(),
             spans_grid: false,
             attr: None,
             reads: vec![],

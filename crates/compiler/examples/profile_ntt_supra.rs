@@ -19,18 +19,26 @@
 //!         -f -o ntt_supra_report \
 //!         target/release/examples/profile_ntt_supra
 
+// Parked pending scatter-inverse migration: `ntt_supra_module` is
+// `#[cfg(any())]`-gated in kernels.rs (refactor-plan.md).
+#[cfg(any())]
 use std::time::Instant;
 
+#[cfg(any())]
 use crypto_compiler::{
     kernels::{ntt_partial_twiddles, ntt_supra_module},
     runner::ModuleRunner,
     runtime::CompileOptions,
 };
+#[cfg(any())]
 use openvm_cuda_backend::{ntt::batch_ntt, prelude::F};
+#[cfg(any())]
 use openvm_cuda_common::{copy::MemCopyH2D, stream::GpuDeviceCtx};
 
+#[cfg(any())]
 const P: u64 = 2013265921;
 
+#[cfg(any())]
 fn pseudo_field_elems(n: usize, seed: u64) -> Vec<u32> {
     let mut x = seed;
     (0..n)
@@ -45,6 +53,7 @@ fn pseudo_field_elems(n: usize, seed: u64) -> Vec<u32> {
         .collect()
 }
 
+#[cfg(any())]
 #[derive(Clone, Copy)]
 struct Stats {
     median: f64,
@@ -52,6 +61,7 @@ struct Stats {
     q75: f64,
 }
 
+#[cfg(any())]
 fn quantiles(mut samples: Vec<f64>) -> Stats {
     samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let n = samples.len();
@@ -64,6 +74,11 @@ fn quantiles(mut samples: Vec<f64>) -> Stats {
 }
 
 fn main() {
+    eprintln!("profile_ntt_supra is disabled: ntt_supra_module is parked pending scatter-inverse migration");
+}
+
+#[cfg(any())]
+fn main_disabled() {
     let log_n: usize = 24;
     let n = 1usize << log_n;
     let ctx = GpuDeviceCtx::for_current_device().expect("CUDA context");

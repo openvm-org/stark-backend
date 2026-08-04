@@ -29,53 +29,374 @@ fn err(msg: impl Into<String>) -> CompileError {
     CompileError::Quast(msg.into())
 }
 
-/// A quasi-affine expression.
+/// A quasi-affine expression over constants of type `T`.
+///
+/// `T = i64` is the classic quasi-affine [`Quast`]; `T = SymConst` is
+/// [`SExpr`], whose "constants" may be symbolic module parameters that only
+/// resolve to numbers at kernel-instantiation time.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub enum Quast {
+pub enum Expr<T> {
     Sym(VarId),
-    Const(i64),
-    Add(Arc<Quast>, Arc<Quast>),
-    /// Multiplication by an integer constant.
-    Mul(Arc<Quast>, i64),
-    /// Floor division by a positive integer constant.
-    FloorDiv(Arc<Quast>, i64),
-    Neg(Arc<Quast>),
+    Const(T),
+    Add(Arc<Expr<T>>, Arc<Expr<T>>),
+    /// Multiplication by a constant.
+    Mul(Arc<Expr<T>>, T),
+    /// Floor division by a positive constant.
+    FloorDiv(Arc<Expr<T>>, T),
+    Neg(Arc<Expr<T>>),
 }
 
-impl Quast {
-    pub fn sym(v: VarId) -> Quast {
-        Quast::Sym(v)
+/// A quasi-affine expression with literal integer constants.
+pub type Quast = Expr<i64>;
+
+/// A constant term of an [`SExpr`]: a literal or a symbolic module
+/// parameter.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum SymConst {
+    Lit(i64),
+    Sym(VarId),
+}
+
+impl SymConst {
+    pub fn as_lit(&self) -> Option<i64> {
+        match self {
+            SymConst::Lit(c) => Some(*c),
+            SymConst::Sym(_) => None,
+        }
+    }
+}
+
+impl From<i64> for SymConst {
+    fn from(c: i64) -> Self {
+        SymConst::Lit(c)
+    }
+}
+
+/// A quasi-affine-shaped expression whose constants may be symbolic module
+/// parameters. Unlike [`Quast`] it cannot be normalized, range-analyzed or
+/// converted to a `LinearLayout`; it supports only literal folding,
+/// substitution and concretization back to `Quast`.
+pub type SExpr = Expr<SymConst>;
+
+// The only integer `From` for `SExpr`: a unique impl lets bare integer
+// literals at `impl Into<SizeExpr>` call sites infer `usize`.
+impl From<usize> for SExpr {
+    fn from(c: usize) -> Self {
+        SExpr::Const(SymConst::Lit(c as i64))
+    }
+}
+
+impl std::fmt::Display for SymConst {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SymConst::Lit(c) => write!(f, "{c}"),
+            SymConst::Sym(v) => write!(f, "s{}", v.0),
+        }
+    }
+}
+
+impl<T: std::fmt::Display> std::fmt::Display for Expr<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Expr::Sym(v) => write!(f, "v{}", v.0),
+            Expr::Const(c) => write!(f, "{c}"),
+            Expr::Add(a, b) => write!(f, "({a} + {b})"),
+            Expr::Mul(a, c) => write!(f, "({a} * {c})"),
+            Expr::FloorDiv(a, c) => write!(f, "({a} / {c})"),
+            Expr::Neg(a) => write!(f, "(-{a})"),
+        }
+    }
+}
+
+impl<T: Clone> Expr<T> {
+    pub fn sym(v: VarId) -> Self {
+        Expr::Sym(v)
     }
 
-    pub fn cst(c: i64) -> Quast {
-        Quast::Const(c)
+    pub fn cst(c: T) -> Self {
+        Expr::Const(c)
     }
 
-    pub fn add(&self, other: &Quast) -> Quast {
-        Quast::Add(Arc::new(self.clone()), Arc::new(other.clone()))
+    pub fn add(&self, other: &Self) -> Self {
+        Expr::Add(Arc::new(self.clone()), Arc::new(other.clone()))
     }
 
-    pub fn sub(&self, other: &Quast) -> Quast {
-        Quast::Add(Arc::new(self.clone()), Arc::new(other.neg()))
+    pub fn sub(&self, other: &Self) -> Self {
+        Expr::Add(Arc::new(self.clone()), Arc::new(other.neg()))
     }
 
-    pub fn neg(&self) -> Quast {
-        Quast::Neg(Arc::new(self.clone()))
+    pub fn neg(&self) -> Self {
+        Expr::Neg(Arc::new(self.clone()))
     }
 
-    pub fn mul_c(&self, c: i64) -> Quast {
-        Quast::Mul(Arc::new(self.clone()), c)
+    pub fn mul_c(&self, c: T) -> Self {
+        Expr::Mul(Arc::new(self.clone()), c)
     }
 
-    pub fn floordiv(&self, c: i64) -> Quast {
-        Quast::FloorDiv(Arc::new(self.clone()), c)
+    pub fn floordiv(&self, c: T) -> Self {
+        Expr::FloorDiv(Arc::new(self.clone()), c)
     }
 
     /// `self % c` as `self - c * floor(self / c)`.
-    pub fn rem_c(&self, c: i64) -> Quast {
-        self.sub(&self.floordiv(c).mul_c(c))
+    pub fn rem_c(&self, c: T) -> Self {
+        self.sub(&self.floordiv(c.clone()).mul_c(c))
     }
 
+    /// Inserts every symbol appearing in a `Sym` position into `out`.
+    /// (For [`SExpr`], parameters in constant positions are collected by
+    /// [`SExpr::param_syms`] instead.)
+    pub fn syms(&self, out: &mut BTreeSet<VarId>) {
+        match self {
+            Expr::Sym(v) => {
+                out.insert(*v);
+            }
+            Expr::Const(_) => {}
+            Expr::Add(a, b) => {
+                a.syms(out);
+                b.syms(out);
+            }
+            Expr::Mul(a, _) | Expr::FloorDiv(a, _) | Expr::Neg(a) => a.syms(out),
+        }
+    }
+
+    /// Replaces symbols per `map` (symbols absent from the map are kept).
+    pub fn substitute(&self, map: &BTreeMap<VarId, Expr<T>>) -> Expr<T> {
+        match self {
+            Expr::Sym(v) => map.get(v).cloned().unwrap_or_else(|| self.clone()),
+            Expr::Const(_) => self.clone(),
+            Expr::Add(a, b) => Expr::Add(Arc::new(a.substitute(map)), Arc::new(b.substitute(map))),
+            Expr::Mul(a, c) => Expr::Mul(Arc::new(a.substitute(map)), c.clone()),
+            Expr::FloorDiv(a, c) => Expr::FloorDiv(Arc::new(a.substitute(map)), c.clone()),
+            Expr::Neg(a) => Expr::Neg(Arc::new(a.substitute(map))),
+        }
+    }
+}
+
+impl From<&Quast> for SExpr {
+    fn from(q: &Quast) -> SExpr {
+        match q {
+            Quast::Sym(v) => SExpr::Sym(*v),
+            Quast::Const(c) => SExpr::Const(SymConst::Lit(*c)),
+            Quast::Add(a, b) => SExpr::Add(Arc::new((&**a).into()), Arc::new((&**b).into())),
+            Quast::Mul(a, c) => SExpr::Mul(Arc::new((&**a).into()), SymConst::Lit(*c)),
+            Quast::FloorDiv(a, c) => SExpr::FloorDiv(Arc::new((&**a).into()), SymConst::Lit(*c)),
+            Quast::Neg(a) => SExpr::Neg(Arc::new((&**a).into())),
+        }
+    }
+}
+
+impl From<Quast> for SExpr {
+    fn from(q: Quast) -> SExpr {
+        SExpr::from(&q)
+    }
+}
+
+impl SExpr {
+    /// Evaluates with every loop symbol *and* parameter bound in `env`.
+    /// Panics on unbound symbols or non-positive divisors (programmer
+    /// error). Loop vars and params share the `VarId` namespace, so a single
+    /// environment serves both.
+    pub fn eval(&self, env: &BTreeMap<VarId, i64>) -> i64 {
+        let c_of = |c: &SymConst| match c {
+            SymConst::Lit(l) => *l,
+            SymConst::Sym(v) => *env
+                .get(v)
+                .unwrap_or_else(|| panic!("unbound parameter {v:?} in SExpr::eval")),
+        };
+        match self {
+            SExpr::Sym(v) => *env
+                .get(v)
+                .unwrap_or_else(|| panic!("unbound symbol {v:?} in SExpr::eval")),
+            SExpr::Const(c) => c_of(c),
+            SExpr::Add(a, b) => a.eval(env) + b.eval(env),
+            SExpr::Mul(a, c) => a.eval(env) * c_of(c),
+            SExpr::FloorDiv(a, c) => {
+                let c = c_of(c);
+                assert!(c > 0, "FloorDiv divisor must be positive");
+                a.eval(env).div_euclid(c)
+            }
+            SExpr::Neg(a) => -a.eval(env),
+        }
+    }
+
+    /// Inserts every parameter appearing in a constant position into `out`
+    /// (the counterpart of [`Expr::syms`], which collects loop-var `Sym`s).
+    pub fn param_syms(&self, out: &mut BTreeSet<VarId>) {
+        match self {
+            SExpr::Sym(_) => {}
+            SExpr::Const(c) => {
+                if let SymConst::Sym(v) = c {
+                    out.insert(*v);
+                }
+            }
+            SExpr::Add(a, b) => {
+                a.param_syms(out);
+                b.param_syms(out);
+            }
+            SExpr::Mul(a, c) | SExpr::FloorDiv(a, c) => {
+                if let SymConst::Sym(v) = c {
+                    out.insert(*v);
+                }
+                a.param_syms(out);
+            }
+            SExpr::Neg(a) => a.param_syms(out),
+        }
+    }
+
+    /// Substitutes parameters bound in `env` with literals; unbound
+    /// parameters and loop-var `Sym`s are untouched (loop vars substitute
+    /// via [`Expr::substitute`]).
+    pub fn concretize(&self, env: &BTreeMap<VarId, i64>) -> SExpr {
+        let c_of = |c: &SymConst| match c {
+            SymConst::Sym(v) => env.get(v).copied().map(SymConst::Lit).unwrap_or(*c),
+            lit => *lit,
+        };
+        match self {
+            SExpr::Sym(_) => self.clone(),
+            SExpr::Const(c) => SExpr::Const(c_of(c)),
+            SExpr::Add(a, b) => {
+                SExpr::Add(Arc::new(a.concretize(env)), Arc::new(b.concretize(env)))
+            }
+            SExpr::Mul(a, c) => SExpr::Mul(Arc::new(a.concretize(env)), c_of(c)),
+            SExpr::FloorDiv(a, c) => SExpr::FloorDiv(Arc::new(a.concretize(env)), c_of(c)),
+            SExpr::Neg(a) => SExpr::Neg(Arc::new(a.concretize(env))),
+        }
+    }
+
+    /// Substitutes parameters bound in `map` with expressions: the
+    /// param-side counterpart of [`Expr::substitute`], which replaces
+    /// loop-var `Sym` positions. A param in a `Mul`/`FloorDiv` coefficient
+    /// position can only take an image that folds to a single [`SymConst`];
+    /// `None` when a mapped image is not representable there.
+    pub fn subst_params(&self, map: &BTreeMap<VarId, SExpr>) -> Option<SExpr> {
+        let c_of = |c: &SymConst| match c {
+            SymConst::Sym(v) => match map.get(v) {
+                None => Some(*c),
+                Some(e) => match e.fold_lits() {
+                    SExpr::Const(c) => Some(c),
+                    _ => None,
+                },
+            },
+            lit => Some(*lit),
+        };
+        Some(match self {
+            SExpr::Sym(_) => self.clone(),
+            SExpr::Const(SymConst::Sym(v)) if map.contains_key(v) => map[v].clone(),
+            SExpr::Const(_) => self.clone(),
+            SExpr::Add(a, b) => SExpr::Add(
+                Arc::new(a.subst_params(map)?),
+                Arc::new(b.subst_params(map)?),
+            ),
+            SExpr::Mul(a, c) => SExpr::Mul(Arc::new(a.subst_params(map)?), c_of(c)?),
+            SExpr::FloorDiv(a, c) => SExpr::FloorDiv(Arc::new(a.subst_params(map)?), c_of(c)?),
+            SExpr::Neg(a) => SExpr::Neg(Arc::new(a.subst_params(map)?)),
+        })
+    }
+
+    /// Converts to a [`Quast`] if no symbolic parameters remain.
+    pub fn try_to_quast(&self) -> Option<Quast> {
+        Some(match self {
+            SExpr::Sym(v) => Quast::Sym(*v),
+            SExpr::Const(c) => Quast::Const(c.as_lit()?),
+            SExpr::Add(a, b) => {
+                Quast::Add(Arc::new(a.try_to_quast()?), Arc::new(b.try_to_quast()?))
+            }
+            SExpr::Mul(a, c) => Quast::Mul(Arc::new(a.try_to_quast()?), c.as_lit()?),
+            SExpr::FloorDiv(a, c) => Quast::FloorDiv(Arc::new(a.try_to_quast()?), c.as_lit()?),
+            SExpr::Neg(a) => Quast::Neg(Arc::new(a.try_to_quast()?)),
+        })
+    }
+
+    /// The monomorphization primitive: [`SExpr::concretize`] with `env`,
+    /// then [`SExpr::try_to_quast`]. `None` iff a parameter is unbound.
+    pub fn try_concretize(&self, env: &BTreeMap<VarId, i64>) -> Option<Quast> {
+        self.concretize(env).try_to_quast()
+    }
+
+    /// Literal value if the expression contains no loop vars or parameters.
+    pub fn as_const(&self) -> Option<i64> {
+        match self {
+            SExpr::Sym(_) => None,
+            SExpr::Const(c) => c.as_lit(),
+            SExpr::Add(a, b) => Some(a.as_const()? + b.as_const()?),
+            SExpr::Mul(a, c) => Some(a.as_const()? * c.as_lit()?),
+            SExpr::FloorDiv(a, c) => {
+                let c = c.as_lit()?;
+                if c <= 0 {
+                    return None;
+                }
+                Some(a.as_const()?.div_euclid(c))
+            }
+            SExpr::Neg(a) => Some(-a.as_const()?),
+        }
+    }
+
+    /// Best-effort literal folding. `SymConst` is not closed under
+    /// arithmetic, so like terms with symbolic coefficients are not
+    /// combined; only all-literal subterms fold and arithmetic identities
+    /// (`+0`, `*1`, `*0`, `/1`, double negation) are erased.
+    pub fn fold_lits(&self) -> SExpr {
+        use SymConst::Lit;
+        match self {
+            SExpr::Sym(_) | SExpr::Const(_) => self.clone(),
+            SExpr::Add(a, b) => {
+                let (a, b) = (a.fold_lits(), b.fold_lits());
+                match (&a, &b) {
+                    (SExpr::Const(Lit(x)), SExpr::Const(Lit(y))) => SExpr::Const(Lit(x + y)),
+                    (SExpr::Const(Lit(0)), _) => b,
+                    (_, SExpr::Const(Lit(0))) => a,
+                    _ => SExpr::Add(Arc::new(a), Arc::new(b)),
+                }
+            }
+            SExpr::Mul(a, c) => {
+                let a = a.fold_lits();
+                match (&a, c) {
+                    (_, Lit(0)) => SExpr::Const(Lit(0)),
+                    (_, Lit(1)) => a,
+                    (SExpr::Const(Lit(x)), Lit(y)) => SExpr::Const(Lit(x * y)),
+                    _ => SExpr::Mul(Arc::new(a), *c),
+                }
+            }
+            SExpr::FloorDiv(a, c) => {
+                let a = a.fold_lits();
+                match (&a, c) {
+                    (_, Lit(1)) => a,
+                    (SExpr::Const(Lit(x)), Lit(y)) if *y > 0 => SExpr::Const(Lit(x.div_euclid(*y))),
+                    _ => SExpr::FloorDiv(Arc::new(a), *c),
+                }
+            }
+            SExpr::Neg(a) => {
+                let a = a.fold_lits();
+                match &a {
+                    SExpr::Const(Lit(x)) => SExpr::Const(Lit(-x)),
+                    SExpr::Neg(inner) => (**inner).clone(),
+                    _ => SExpr::Neg(Arc::new(a)),
+                }
+            }
+        }
+    }
+
+    /// Product of `dims` as a single expression. `Mul` only carries a
+    /// [`SymConst`] coefficient, so the product is representable as long as
+    /// at most one factor is a *compound* expression (literals and bare
+    /// parameters always fold in); otherwise `None`.
+    pub fn product(dims: &[SExpr]) -> Option<SExpr> {
+        let mut acc = SExpr::Const(SymConst::Lit(1));
+        for d in dims {
+            let d = d.fold_lits();
+            acc = if let SExpr::Const(c) = d {
+                acc.mul_c(c)
+            } else if let SExpr::Const(c) = acc {
+                d.mul_c(c)
+            } else {
+                return None;
+            };
+        }
+        Some(acc.fold_lits())
+    }
+}
+
+impl Quast {
     /// Evaluates with every symbol bound in `env`. Panics on unbound symbols
     /// or non-positive divisors (programmer error).
     pub fn eval(&self, env: &BTreeMap<VarId, i64>) -> i64 {
@@ -94,43 +415,44 @@ impl Quast {
         }
     }
 
-    /// Inserts every symbol appearing in the expression into `out`.
-    pub fn syms(&self, out: &mut BTreeSet<VarId>) {
-        match self {
-            Quast::Sym(v) => {
-                out.insert(*v);
-            }
-            Quast::Const(_) => {}
-            Quast::Add(a, b) => {
-                a.syms(out);
-                b.syms(out);
-            }
-            Quast::Mul(a, _) | Quast::FloorDiv(a, _) | Quast::Neg(a) => a.syms(out),
-        }
-    }
-
-    /// Replaces symbols per `map` (symbols absent from the map are kept).
-    pub fn substitute(&self, map: &BTreeMap<VarId, Quast>) -> Quast {
-        match self {
-            Quast::Sym(v) => map.get(v).cloned().unwrap_or_else(|| self.clone()),
-            Quast::Const(_) => self.clone(),
-            Quast::Add(a, b) => {
-                Quast::Add(Arc::new(a.substitute(map)), Arc::new(b.substitute(map)))
-            }
-            Quast::Mul(a, c) => Quast::Mul(Arc::new(a.substitute(map)), *c),
-            Quast::FloorDiv(a, c) => Quast::FloorDiv(Arc::new(a.substitute(map)), *c),
-            Quast::Neg(a) => Quast::Neg(Arc::new(a.substitute(map))),
-        }
-    }
-
     /// Inclusive value range, when derivable from the symbol bounds.
-    /// Computed on the rem-folded normal form, so `x - c*floor(x/c)`
-    /// patterns get the tight `[0, c)` interval instead of the (correlated)
-    /// naive interval difference.
+    ///
+    /// `floor(x/c)` terms sharing a root symbol whose divisors form a
+    /// divisibility chain are a mixed-radix digit decomposition of `x`; the
+    /// digits vary independently, so those groups get an exact digit-wise
+    /// interval (bit-reversal and row-major (de)linearization expressions
+    /// all have this shape). Everything else is computed on the rem-folded
+    /// normal form, so `x - c*floor(x/c)` patterns still get the tight
+    /// `[0, c)` interval instead of the (correlated) naive difference.
     pub fn range(&self, bounds: &BTreeMap<VarId, u64>) -> Option<(i64, i64)> {
-        let mut lc = LinComb::normalize(self, bounds).ok()?;
-        let rems = lc.fold_rems();
-        let (mut lo, mut hi) = (lc.cst, lc.cst);
+        let lc = LinComb::normalize(self, bounds).ok()?;
+        let mut groups: BTreeMap<VarId, Vec<(i64, i64)>> = BTreeMap::new();
+        let mut rest = LinComb::new();
+        rest.cst = lc.cst;
+        for (atom, &k) in &lc.terms {
+            match simple_root(atom) {
+                Some((v, c)) => groups.entry(v).or_default().push((c, k)),
+                None => rest.add_term(atom.clone(), k),
+            }
+        }
+        let (mut lo, mut hi) = (rest.cst, rest.cst);
+        for (v, terms) in groups {
+            let n = *bounds.get(&v)? as i64;
+            if let Some((l, h)) = digit_range(&terms, n) {
+                lo += l;
+                hi += h;
+            } else {
+                for (c, k) in terms {
+                    let atom = if c == 1 {
+                        Quast::Sym(v)
+                    } else {
+                        Quast::FloorDiv(Arc::new(Quast::Sym(v)), c)
+                    };
+                    rest.add_term(atom, k);
+                }
+            }
+        }
+        let rems = rest.fold_rems();
         let mut add = |l: i64, h: i64, k: i64| {
             if k >= 0 {
                 lo += l * k;
@@ -140,7 +462,7 @@ impl Quast {
                 hi += l * k;
             }
         };
-        for (atom, &k) in &lc.terms {
+        for (atom, &k) in &rest.terms {
             let (l, h) = match atom {
                 Quast::Sym(v) => (0, *bounds.get(v)? as i64 - 1),
                 Quast::FloorDiv(inner, c) => {
@@ -449,6 +771,60 @@ impl LinComb {
     }
 }
 
+/// `x` or an arbitrarily nested `floor(x / c)`: the root symbol and the
+/// combined divisor (`floor(floor(x/a)/b) = floor(x/(a·b))` for positive
+/// divisors).
+fn simple_root(atom: &Quast) -> Option<(VarId, i64)> {
+    match atom {
+        Quast::Sym(v) => Some((*v, 1)),
+        Quast::FloorDiv(inner, c) => {
+            let (v, c2) = simple_root(inner)?;
+            Some((v, c2.checked_mul(*c)?))
+        }
+        _ => None,
+    }
+}
+
+/// Interval of `Σⱼ kⱼ · floor(x / dⱼ)` over `x ∈ [0, n)` when the divisors
+/// form a divisibility chain: `x` then decomposes into independent
+/// mixed-radix digits (`digitᵢ = floor(x/dᵢ) % (dᵢ₊₁/dᵢ)`, the top digit is
+/// `floor(x/d_top)` itself) and each `floor(x/dⱼ)` is the digit combination
+/// `Σ_{i≥j} digitᵢ · dᵢ/dⱼ`, so the extremes are the digit-wise extremes.
+/// `None` when the divisors do not chain — the caller falls back to
+/// per-term interval arithmetic.
+fn digit_range(terms: &[(i64, i64)], n: i64) -> Option<(i64, i64)> {
+    if n <= 0 {
+        return None;
+    }
+    let mut merged: BTreeMap<i64, i128> = BTreeMap::new();
+    for &(d, k) in terms {
+        debug_assert!(d > 0, "normal form has positive divisors");
+        *merged.entry(d).or_insert(0) += k as i128;
+    }
+    let ds: Vec<(i64, i128)> = merged.into_iter().collect();
+    if ds.windows(2).any(|w| w[1].0 % w[0].0 != 0) {
+        return None;
+    }
+    let (mut lo, mut hi) = (0i128, 0i128);
+    for (i, &(d_i, _)) in ds.iter().enumerate() {
+        let max_digit = match ds.get(i + 1) {
+            Some(&(d_next, _)) => (d_next / d_i - 1).min((n - 1) / d_i),
+            None => (n - 1) / d_i,
+        } as i128;
+        let w: i128 = ds[..=i]
+            .iter()
+            .map(|&(d_j, k_j)| k_j * (d_i / d_j) as i128)
+            .sum();
+        let ext = w * max_digit;
+        if ext >= 0 {
+            hi += ext;
+        } else {
+            lo += ext;
+        }
+    }
+    Some((i64::try_from(lo).ok()?, i64::try_from(hi).ok()?))
+}
+
 /// `floor((sum coeff*atom + cst) / c)`: hoists the part with coefficients
 /// divisible by `c`; the rest stays under the division (dropped entirely if
 /// its range provably lies in `[0, c)`).
@@ -585,16 +961,21 @@ impl Quast {
 
 /// Exhaustive map checking (scatter bijectivity, [`Quast::to_linear_layout`]
 /// verification) is limited to this many points.
-const EXHAUSTIVE_LIMIT: usize = 1 << 16;
+pub(crate) const EXHAUSTIVE_LIMIT: usize = 1 << 16;
 
 /// The `#[scatter(...)]` attribute of a compute: a bijective quasi-affine map
-/// from the logical output coordinates to physical coordinates.
+/// from the logical output coordinates to physical coordinates, together
+/// with its author-supplied inverse (physical back to logical).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Scatter {
     /// One symbol per logical dimension, outermost first.
     pub params: Vec<VarId>,
     /// Physical coordinate expressions, one per physical dimension.
     pub exprs: Vec<Quast>,
+    /// Inverse map: one symbol per physical dimension, outermost first.
+    pub inv_params: Vec<VarId>,
+    /// Logical coordinate expressions, one per logical dimension.
+    pub inv_exprs: Vec<Quast>,
     /// Physical shape; `None` means identical to the logical shape (only
     /// allowed when the map preserves the number of dimensions).
     pub out_shape: Option<Vec<usize>>,
@@ -617,7 +998,8 @@ impl Scatter {
     }
 
     /// Fills the symbol bounds from the logical shape and checks the map is
-    /// a bijection onto the physical shape. Returns the physical shape.
+    /// a bijection onto the physical shape whose declared inverse actually
+    /// inverts it. Returns the physical shape.
     pub fn bind_and_validate(&mut self, logical: &[usize]) -> Result<Vec<usize>, CompileError> {
         if self.params.len() != logical.len() {
             return Err(err(format!(
@@ -640,6 +1022,20 @@ impl Scatter {
                 out.len()
             )));
         }
+        if self.inv_params.len() != out.len() {
+            return Err(err(format!(
+                "scatter inverse has {} parameters but the physical shape has rank {}",
+                self.inv_params.len(),
+                out.len()
+            )));
+        }
+        if self.inv_exprs.len() != logical.len() {
+            return Err(err(format!(
+                "scatter inverse has {} expressions but the logical shape has rank {}",
+                self.inv_exprs.len(),
+                logical.len()
+            )));
+        }
         let total: usize = logical.iter().product();
         if out.iter().product::<usize>() != total {
             return Err(err(format!(
@@ -659,17 +1055,42 @@ impl Scatter {
                 )));
             }
         }
+        let inv_bounds: BTreeMap<VarId, u64> = self
+            .inv_params
+            .iter()
+            .zip(&out)
+            .map(|(&p, &b)| (p, b as u64))
+            .collect();
+        for (e, &dim) in self.inv_exprs.iter().zip(logical) {
+            let (lo, hi) = e.range(&inv_bounds).ok_or_else(|| {
+                err(format!(
+                    "scatter inverse expression uses an unbounded symbol: {e:?}"
+                ))
+            })?;
+            if lo < 0 || hi >= dim as i64 {
+                return Err(err(format!(
+                    "scatter inverse expression range [{lo}, {hi}] exceeds logical bound {dim}"
+                )));
+            }
+        }
         if total <= EXHAUSTIVE_LIMIT {
-            self.check_bijective(logical, &out)?;
+            self.check_bijective_with_inverse(logical, &out)?;
         }
         Ok(out)
     }
 
-    fn check_bijective(&self, logical: &[usize], out: &[usize]) -> Result<(), CompileError> {
+    /// Exhaustive check: the forward map hits every physical index exactly
+    /// once, and the declared inverse maps each image back to its preimage.
+    fn check_bijective_with_inverse(
+        &self,
+        logical: &[usize],
+        out: &[usize],
+    ) -> Result<(), CompileError> {
         let total: usize = logical.iter().product();
         let out_strides = strides(out);
         let mut seen = vec![false; total];
         let mut coords = vec![0i64; logical.len()];
+        let mut phys_coords = vec![0i64; out.len()];
         for flat in 0..total {
             let mut r = flat;
             for (d, &dim) in logical.iter().enumerate().rev() {
@@ -682,11 +1103,13 @@ impl Scatter {
                 .copied()
                 .zip(coords.iter().copied())
                 .collect();
-            let phys: usize = self
-                .exprs
+            for (d, e) in self.exprs.iter().enumerate() {
+                phys_coords[d] = e.eval(&env);
+            }
+            let phys: usize = phys_coords
                 .iter()
                 .zip(&out_strides)
-                .map(|(e, &s)| e.eval(&env) as usize * s)
+                .map(|(&c, &s)| c as usize * s)
                 .sum();
             if seen[phys] {
                 return Err(err(format!(
@@ -694,6 +1117,22 @@ impl Scatter {
                 )));
             }
             seen[phys] = true;
+            let inv_env: BTreeMap<VarId, i64> = self
+                .inv_params
+                .iter()
+                .copied()
+                .zip(phys_coords.iter().copied())
+                .collect();
+            for (d, e) in self.inv_exprs.iter().enumerate() {
+                let back = e.eval(&inv_env);
+                if back != coords[d] {
+                    return Err(err(format!(
+                        "scatter inverse does not invert the map: logical {coords:?} \
+                         maps to physical {phys_coords:?}, whose inverse coordinate \
+                         {d} is {back}"
+                    )));
+                }
+            }
         }
         Ok(())
     }
@@ -841,6 +1280,39 @@ mod tests {
     }
 
     #[test]
+    fn subst_params_replaces_and_vetoes_coefficients() {
+        let (p, q, i) = (v(0), v(1), v(2));
+        let psym = SExpr::cst(SymConst::Sym(p));
+        let compound = SExpr::sym(q).add(&SExpr::cst(SymConst::Lit(1)));
+
+        // Bare-constant position: any image is representable.
+        let m = BTreeMap::from([(p, compound.clone())]);
+        assert_eq!(psym.subst_params(&m), Some(compound.clone()));
+        // Unmapped params and loop syms are untouched.
+        assert_eq!(psym.subst_params(&BTreeMap::new()), Some(psym.clone()));
+        assert_eq!(SExpr::sym(i).subst_params(&m), Some(SExpr::sym(i)));
+
+        // Coefficient position: a constant image folds in, a compound one
+        // is unrepresentable.
+        let mul = SExpr::sym(i).mul_c(SymConst::Sym(p));
+        let lit = BTreeMap::from([(p, SExpr::cst(SymConst::Lit(4)))]);
+        assert_eq!(
+            mul.subst_params(&lit),
+            Some(SExpr::sym(i).mul_c(SymConst::Lit(4)))
+        );
+        assert_eq!(mul.subst_params(&m), None);
+        let div = SExpr::sym(i).floordiv(SymConst::Sym(p));
+        assert_eq!(div.subst_params(&m), None);
+
+        // Param-to-param renaming works in every position.
+        let rename = BTreeMap::from([(p, SExpr::cst(SymConst::Sym(q)))]);
+        assert_eq!(
+            mul.subst_params(&rename),
+            Some(SExpr::sym(i).mul_c(SymConst::Sym(q)))
+        );
+    }
+
+    #[test]
     fn identity_reshape_simplifies_to_sym() {
         // linearize(delinearize(f, [3, 4]), [3, 4]) == f
         let f = Quast::sym(v(0));
@@ -848,6 +1320,45 @@ mod tests {
         let q = linearize(&coords, &[3, 4]);
         let bounds = BTreeMap::from([(v(0), 12u64)]);
         assert_eq!(q.simplify(&bounds).unwrap(), f);
+    }
+
+    /// Bit-reversal `Σⱼ 2^(3-j) · bitⱼ(x)` permutes `[0, 16)`; the digit
+    /// decomposition sees each bit independently even through the nested
+    /// `(x/2)/2` atoms the `%`-expansions produce.
+    #[test]
+    fn range_bit_reversal_tight() {
+        let x = Quast::sym(v(1));
+        let mut e = Quast::cst(0);
+        for j in 0..4 {
+            let bit = x.floordiv(1 << j).rem_c(2);
+            e = e.add(&bit.mul_c(1 << (3 - j)));
+        }
+        let bounds = BTreeMap::from([(v(1), 16u64)]);
+        assert_eq!(e.range(&bounds), Some((0, 15)));
+    }
+
+    /// A mixed-radix transpose-style permutation of `[0, 540)` gets the
+    /// exact interval (naive per-term arithmetic would overshoot both ends).
+    #[test]
+    fn range_mixed_radix_tight() {
+        let x = Quast::sym(v(1));
+        let e = x
+            .rem_c(9)
+            .mul_c(12)
+            .add(&x.floordiv(9).rem_c(12))
+            .add(&x.floordiv(108).mul_c(108));
+        let bounds = BTreeMap::from([(v(1), 540u64)]);
+        assert_eq!(e.range(&bounds), Some((0, 539)));
+    }
+
+    /// Divisors that do not chain (2 and 3) fall back to per-term interval
+    /// arithmetic.
+    #[test]
+    fn range_non_chain_falls_back() {
+        let x = Quast::sym(v(1));
+        let e = x.floordiv(2).add(&x.floordiv(3));
+        let bounds = BTreeMap::from([(v(1), 12u64)]);
+        assert_eq!(e.range(&bounds), Some((0, 8)));
     }
 
     #[test]
@@ -886,10 +1397,12 @@ mod tests {
     #[test]
     fn scatter_validation() {
         // Transpose [3, 4] -> [4, 3] is bijective.
-        let (i, j) = (v(0), v(1));
+        let (i, j, a, b) = (v(0), v(1), v(2), v(3));
         let mut sc = Scatter {
             params: vec![i, j],
             exprs: vec![Quast::sym(j), Quast::sym(i)],
+            inv_params: vec![a, b],
+            inv_exprs: vec![Quast::sym(b), Quast::sym(a)],
             out_shape: Some(vec![4, 3]),
             bounds: BTreeMap::new(),
         };
@@ -899,15 +1412,30 @@ mod tests {
         let mut sc = Scatter {
             params: vec![i],
             exprs: vec![Quast::sym(i).floordiv(2)],
+            inv_params: vec![a],
+            inv_exprs: vec![Quast::sym(a)],
             out_shape: None,
             bounds: BTreeMap::new(),
         };
         assert!(sc.bind_and_validate(&[4]).is_err());
 
+        // A wrong inverse is rejected even when the map is bijective.
+        let mut sc = Scatter {
+            params: vec![i, j],
+            exprs: vec![Quast::sym(j), Quast::sym(i)],
+            inv_params: vec![a, b],
+            inv_exprs: vec![Quast::sym(a), Quast::sym(b)],
+            out_shape: Some(vec![4, 3]),
+            bounds: BTreeMap::new(),
+        };
+        assert!(sc.bind_and_validate(&[3, 4]).is_err());
+
         // Size mismatch is rejected.
         let mut sc = Scatter {
             params: vec![i],
             exprs: vec![Quast::sym(i).rem_c(4), Quast::sym(i).floordiv(4)],
+            inv_params: vec![a, b],
+            inv_exprs: vec![Quast::sym(b).mul_c(4).add(&Quast::sym(a))],
             out_shape: Some(vec![4, 4]),
             bounds: BTreeMap::new(),
         };
@@ -918,10 +1446,12 @@ mod tests {
     fn store_map_composition() {
         // Nested transpose: logical [10, 7], scatter (i, j) -> (j, i) into
         // [7, 10]; store(f) = (f % 7) * 10 + f / 7.
-        let (i, j, f) = (v(0), v(1), v(2));
+        let (i, j, f, a, b) = (v(0), v(1), v(2), v(3), v(4));
         let mut sc = Scatter {
             params: vec![i, j],
             exprs: vec![Quast::sym(j), Quast::sym(i)],
+            inv_params: vec![a, b],
+            inv_exprs: vec![Quast::sym(b), Quast::sym(a)],
             out_shape: Some(vec![7, 10]),
             bounds: BTreeMap::new(),
         };
@@ -994,5 +1524,75 @@ mod tests {
         let f = Quast::sym(v(0));
         let bounds = BTreeMap::from([(v(0), 1u64 << 20)]);
         assert_eq!(f.to_linear_layout(&bounds), None);
+    }
+
+    #[test]
+    fn sexpr_from_quast_roundtrips() {
+        let q = Quast::sym(v(0)).mul_c(3).add(&Quast::cst(7)).floordiv(2);
+        let s: SExpr = (&q).into();
+        assert_eq!(s.try_to_quast(), Some(q));
+    }
+
+    #[test]
+    fn sexpr_eval_with_params() {
+        // (n - 1) - i with n = 8, i = 2.
+        let n = SymConst::Sym(v(9));
+        let e = SExpr::cst(n)
+            .sub(&SExpr::cst(1.into()))
+            .sub(&SExpr::sym(v(0)));
+        let env = BTreeMap::from([(v(9), 8), (v(0), 2)]);
+        assert_eq!(e.eval(&env), 5);
+    }
+
+    #[test]
+    fn sexpr_concretize_binds_params_only() {
+        // n*i + (n - 1) with param n = v(9) and loop var i = v(0).
+        let n = SymConst::Sym(v(9));
+        let e = SExpr::sym(v(0))
+            .mul_c(n)
+            .add(&SExpr::cst(n).sub(&SExpr::cst(1.into())));
+
+        let mut params = BTreeSet::new();
+        e.param_syms(&mut params);
+        assert_eq!(params, BTreeSet::from([v(9)]));
+        let mut loops = BTreeSet::new();
+        e.syms(&mut loops);
+        assert_eq!(loops, BTreeSet::from([v(0)]));
+
+        // Unbound param: no Quast yet.
+        assert_eq!(e.try_to_quast(), None);
+        assert_eq!(e.try_concretize(&BTreeMap::new()), None);
+
+        // A binding for the loop var must not leak into param positions.
+        let env = BTreeMap::from([(v(0), 100), (v(9), 4)]);
+        let q = e.try_concretize(&env).unwrap();
+        let mut syms = BTreeSet::new();
+        q.syms(&mut syms);
+        assert_eq!(syms, BTreeSet::from([v(0)]));
+        // i = 5: 4*5 + 3 = 23.
+        assert_eq!(q.eval(&BTreeMap::from([(v(0), 5)])), 23);
+    }
+
+    #[test]
+    fn sexpr_fold_lits() {
+        use SymConst::Lit;
+        let n = SymConst::Sym(v(9));
+        // (2 + 3) folds; n-scaled terms survive untouched.
+        let e = SExpr::cst(Lit(2)).add(&SExpr::cst(Lit(3)));
+        assert_eq!(e.fold_lits(), SExpr::Const(Lit(5)));
+        // x * 1 and x + 0 erase; x * 0 collapses.
+        let x = SExpr::sym(v(0));
+        assert_eq!(x.mul_c(Lit(1)).fold_lits(), x);
+        assert_eq!(x.add(&SExpr::cst(Lit(0))).fold_lits(), x);
+        assert_eq!(x.mul_c(Lit(0)).fold_lits(), SExpr::Const(Lit(0)));
+        assert_eq!(x.floordiv(Lit(1)).fold_lits(), x);
+        assert_eq!(x.neg().neg().fold_lits(), x);
+        // Symbolic coefficients block folding but literal subterms inside
+        // still fold: (4 + 4) * n -> 8 * n.
+        let e = SExpr::cst(Lit(4)).add(&SExpr::cst(Lit(4))).mul_c(n);
+        assert_eq!(e.fold_lits(), SExpr::Const(Lit(8)).mul_c(n));
+        // Literal floordiv folds euclidean.
+        let e = SExpr::cst(Lit(-7)).floordiv(Lit(2));
+        assert_eq!(e.fold_lits(), SExpr::Const(Lit(-4)));
     }
 }

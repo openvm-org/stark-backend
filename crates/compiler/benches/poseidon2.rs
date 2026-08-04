@@ -97,7 +97,7 @@ fn observe_perm_at_7_parallel(c: &Poseidon2Constants) -> Module {
             kernel!(b,
                 let orig = state[0, j];
                 let v = value[0];
-                if j == #(ABSORB_IDX_7 as u32) then v else orig
+                if j == #ABSORB_IDX_7 then v else orig
             )
         });
         b.bind(gather, move |b, s| {
