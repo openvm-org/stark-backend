@@ -88,7 +88,32 @@ pub fn compile_and_load(
     module: &ir::Module,
     options: &runtime::CompileOptions,
 ) -> Result<runtime::KernelModule, CompileError> {
+    compile_and_load_with_hint(module, &[], options)
+}
+
+/// [`compile_and_load`] with a shape hint: a canonical concrete
+/// instantiation of the module's symbolic parameters, in declaration order
+/// (the standalone counterpart of
+/// [`graph_ir::GraphBuilder::insert_kernel`]'s `shape_hint` argument).
+/// Used for access checking and as the monomorphization values for
+/// parameters that must be concrete before lowering. Pass `&[]` for no
+/// hint; otherwise its length must equal the module's parameter count.
+pub fn compile_and_load_with_hint(
+    module: &ir::Module,
+    shape_hint: &[i64],
+    options: &runtime::CompileOptions,
+) -> Result<runtime::KernelModule, CompileError> {
     use runtime::Verbosity;
+
+    let hinted;
+    let module = if shape_hint.is_empty() {
+        module
+    } else {
+        let mut m = module.clone();
+        m.builder.add_shape_hint(shape_hint);
+        hinted = m;
+        &hinted
+    };
 
     let dump_dir: Option<&std::path::Path> = if options.verbosity == Verbosity::None {
         None

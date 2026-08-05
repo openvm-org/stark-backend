@@ -339,8 +339,9 @@ pub fn monomorphize_from_hint(m: &Module) -> Result<Module, CompileError> {
     }
     let Some(hint) = m.builder.shape_hint() else {
         return Err(CompileError::Monomorphize(format!(
-            "module `{}` has symbolic parameters but no shape hint; add one with \
-             `IRBuilder::add_shape_hint` to compile it standalone",
+            "module `{}` has symbolic parameters but no shape hint; supply one via \
+             `compile_and_load_with_hint` (or `GraphBuilder::insert_kernel`) to compile it \
+             standalone",
             m.name
         )));
     };

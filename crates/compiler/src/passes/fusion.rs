@@ -2548,7 +2548,7 @@ mod tests {
         for &b in &outs {
             g.register_output(b);
         }
-        g.insert_kernel(module, ins.clone(), outs);
+        g.insert_kernel(module, ins.clone(), outs, &[]);
         (g, ins)
     }
 
@@ -3148,7 +3148,7 @@ mod tests {
         let out = sized_buf(&mut g, "out", 32);
         g.register_input(xin);
         g.register_output(out);
-        g.insert_kernel(module, vec![xin], vec![out]);
+        g.insert_kernel(module, vec![xin], vec![out], &[]);
 
         let cands = candidates(&g, &FusionOptions::default());
         assert_eq!(cands.len(), 1);
@@ -3195,8 +3195,8 @@ mod tests {
         let out = sized_buf(&mut g, "out", 32);
         g.register_input(xin);
         g.register_output(out);
-        g.insert_kernel(prod, vec![xin], vec![mid]);
-        g.insert_kernel(cons, vec![mid], vec![out]);
+        g.insert_kernel(prod, vec![xin], vec![mid], &[]);
+        g.insert_kernel(cons, vec![mid], vec![out], &[]);
 
         let cands = candidates(&g, &FusionOptions::default());
         assert_eq!(cands.len(), 1);
@@ -3534,7 +3534,7 @@ mod tests {
             let ai = b.index(a, &[i]);
             b.mul(ai, three)
         });
-        g.insert_kernel(b.finish("dead_reader", body), [mid], [dead]);
+        g.insert_kernel(b.finish("dead_reader", body), [mid], [dead], &[]);
         // Sanity: with the dead reader present, `mid` has two readers, so
         // enumeration emits a candidate per reader — including one whose
         // dst is itself unreachable. `fuse_graph`'s initial DCE avoids all
@@ -3667,8 +3667,8 @@ mod tests {
         g.register_input(i1);
         g.register_output(o0);
         g.register_output(o1);
-        g.insert_kernel(scale_module_shifted(0), [i0], [o0]);
-        g.insert_kernel(scale_module_shifted(5), [i1], [o1]);
+        g.insert_kernel(scale_module_shifted(0), [i0], [o0], &[]);
+        g.insert_kernel(scale_module_shifted(5), [i1], [o1], &[]);
         // α-variants hash differently, so insertion-time dedup missed.
         assert!(!Arc::ptr_eq(
             &kernel_at(&g, 0).module,
@@ -3695,8 +3695,8 @@ mod tests {
         g.register_input(i1);
         g.register_output(o0);
         g.register_output(o1);
-        g.insert_kernel(chain_module(), [i0], [o0]);
-        g.insert_kernel(chain_module_shifted(9), [i1], [o1]);
+        g.insert_kernel(chain_module(), [i0], [o0], &[]);
+        g.insert_kernel(chain_module_shifted(9), [i1], [o1], &[]);
         let report = fuse_graph(&mut g, &FusionOptions::default());
         assert_eq!(report.nodes_before, 4);
         assert_eq!(report.fused.len(), 2);

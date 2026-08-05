@@ -153,6 +153,7 @@ pub fn bit_rev_and_alpha_ir_dsl(
         build_bit_rev_and_alpha_module(n),
         [leaves, alpha],
         [layer_out],
+        &[],
     );
 }
 
@@ -219,6 +220,7 @@ pub fn frac_tree_layer_forward_ir_dsl(
         build_frac_tree_layer_forward_module(),
         [layer_in],
         [layer_out],
+        &[],
     );
 }
 
@@ -930,6 +932,7 @@ mod tests {
     /// Sizes controlled by `FRAC_V2_BENCH_LOG_N` (comma-separated `log2`
     /// leaf counts; default `16,20,22,24`). Byte-equality on `fractional_sum`
     /// is asserted per size — the bench doubles as a correctness check.
+    /// Set `FRAC_V2_BENCH_NO_FUSION=1` to benchmark the raw (unfused) graph.
     ///
     /// Three workloads are timed per size:
     /// - `eager`: reference `fractional_sumcheck_gpu`.
@@ -1079,7 +1082,7 @@ mod tests {
                     .storage_size(200 * 1024 * 1024 * 1024),
             );
             let t0 = Instant::now();
-            let mut exe = GraphCompiler::new()
+            let mut compiler = GraphCompiler::new()
                 .device(device)
                 .scheduler(SchedulerMode::Heuristic)
                 .kernel_cache(kernel_cache)
@@ -1087,9 +1090,14 @@ mod tests {
                     verbose: true,
                     max_iterations: 20,
                     ..FusionOptions::default()
-                })
+                });
+            // `FRAC_V2_BENCH_NO_FUSION=1` benchmarks the raw (unfused) graph.
+            if std::env::var_os("FRAC_V2_BENCH_NO_FUSION").is_some() {
+                compiler = compiler.without_fusion();
+            }
+            let mut exe = compiler
                 .compile_options(CompileOptions {
-                    nvcc_timeout: Some(Duration::from_secs(300)),
+                    nvcc_timeout: Some(Duration::from_secs(900)),
                     dump_ir: Some(
                         std::env::var_os("FRAC_V2_BENCH_DUMP_IR")
                             .map(std::path::PathBuf::from)

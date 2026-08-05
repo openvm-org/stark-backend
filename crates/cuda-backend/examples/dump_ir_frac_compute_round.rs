@@ -28,7 +28,6 @@ fn parse_usize(name: &str, default: usize) -> usize {
 
 fn main() {
     let num_x = parse_usize("NUM_X", 1 << 14);
-    let eq_low_cap = parse_usize("EQ_LOW_CAP", 1 << 7);
     let dump_dir: PathBuf = std::env::var_os("DUMP_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
@@ -39,12 +38,12 @@ fn main() {
         });
 
     println!(
-        "dumping frac_compute_round DSL module: num_x={num_x} (K={}), eq_low_cap={eq_low_cap}",
+        "dumping frac_compute_round DSL module: num_x={num_x} (K={}), eq caps symbolic",
         num_x / 2
     );
     println!("dump dir: {}", dump_dir.display());
 
-    let module = build_frac_compute_round_module(num_x, eq_low_cap);
+    let module = build_frac_compute_round_module(num_x);
 
     let options = CompileOptions {
         dump_ir: Some(dump_dir.clone()),

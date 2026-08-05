@@ -27,17 +27,18 @@
 //! sponge, so subsequent `observe` / `sample` calls just hand a *clone* of
 //! the relevant `Arc` to [`GraphBuilder::insert_kernel`].
 //!
-//! Per-position modules are *symbolic over the transcript position*: the
-//! absorb / sample index enters the kernel body through
+//! Position-dependent modules are *symbolic over the transcript position*:
+//! the absorb / sample index enters the kernel body through
 //! [`crypto_compiler::ir::IRBuilder::const_sym`] splices and is bound
-//! per-node from the module's shape hint (`add_shape_hint(&[pos])` — the
-//! position is not derivable from the buffer shapes, which are all
-//! `[1, WIDTH]`). The spliced parameter survives monomorphization as a
-//! runtime kernel argument, so every position of one op kind lowers to the
-//! *same* residual and [`crypto_compiler::graph_exe::GraphCompiler`]'s
-//! content-hash dedup collapses them into a single JIT compilation — e.g. a
-//! transcript with 100 non-permuting observes across 7 absorb positions ends
-//! up with 1 compiled kernel instead of 7.
+//! per-node from the shape hint each operation passes to
+//! [`GraphBuilder::insert_kernel`] (`&[pos]` — the position is not derivable
+//! from the buffer shapes, which are all `[1, WIDTH]`). The spliced
+//! parameter survives monomorphization as a runtime kernel argument, so
+//! every position of one op kind lowers to the *same* residual and
+//! [`crypto_compiler::graph_exe::GraphCompiler`]'s content-hash dedup
+//! collapses them into a single JIT compilation — e.g. a transcript with
+//! 100 non-permuting observes across 7 absorb positions ends up with 1
+//! compiled kernel instead of 7.
 
 use std::sync::Arc;
 
@@ -51,11 +52,6 @@ use crypto_compiler::{
 };
 
 use crate::types::{CHUNK, D_EF, WIDTH};
-
-/// Number of `sample_ext` no-perm modules: one per starting `sample_idx` in
-/// `D_EF..=CHUNK` (indices `0..N_SAMPLE_EXT_NO_PERM` map to
-/// `sample_idx = D_EF..=CHUNK`).
-const N_SAMPLE_EXT_NO_PERM: usize = CHUNK + 1 - D_EF;
 
 /// Fiat-Shamir transcript expressed as nodes on a [`GraphBuilder`].
 ///
@@ -89,59 +85,50 @@ pub trait FiatShamirTranscriptGraphIR {
 }
 
 /// Every kernel module a `DuplexSpongeGpuIR` may need over its lifetime,
-/// stored as `Arc<Module>` clones so multiple `insert_kernel` calls at the
-/// same transcript position all point at the same JIT compilation unit.
+/// stored as `Arc<Module>` clones so multiple `insert_kernel` calls of one
+/// op kind all point at the same module instance.
 ///
-/// Entries of one array differ only in their shape hint (the transcript
-/// position the symbolic module binds at that slot), so all of them collapse
-/// to one JIT'd kernel per op kind — see the module-level docs.
+/// Position-dependent modules are symbolic over the transcript position;
+/// each operation supplies the concrete position as the `shape_hint`
+/// argument of its `insert_kernel` call, so one module per op kind serves
+/// every position — see the module-level docs.
 struct SpongeModules {
-    /// One per absorb position: `observe[i]` inserts a single value at slot
-    /// `i` and (when `i == CHUNK - 1`) permutes the state. Positions
-    /// `0..CHUNK-1` share one symbolic module; the permuting position is its
-    /// own (concrete) module.
-    observe: [Arc<Module>; CHUNK],
-    /// One per read index in `0..CHUNK` (one symbolic module, hint = read
-    /// index). State is unchanged (no state output).
-    sample_no_perm: [Arc<Module>; CHUNK],
-    /// Permute the state and read `state'[CHUNK - 1]`. Two outputs
-    /// (new_state, sample).
-    sample_perm: Arc<Module>,
-    /// One per starting absorb index; statically unrolls `D_EF` observes.
-    /// Starts in `0..CHUNK-D_EF` share one symbolic non-permuting module;
-    /// starts in `CHUNK-D_EF..CHUNK` share one symbolic permuting module.
-    observe_ext: [Arc<Module>; CHUNK],
-    /// One per starting `sample_idx` in `D_EF..=CHUNK` (indexed by
-    /// `sample_idx - D_EF`; one symbolic module, hint = starting index).
-    /// Reads `D_EF` slots; state unchanged.
-    sample_ext_no_perm: [Arc<Module>; N_SAMPLE_EXT_NO_PERM],
-    /// One per "pre-permutation reads" count in `0..D_EF` (one symbolic
-    /// module, hint = count). `k` reads from pre-perm state, then one
-    /// permutation, then `D_EF - k` reads from post-perm state. Two outputs
-    /// (new_state, samples).
-    sample_ext_perm: [Arc<Module>; D_EF],
+    /// Insert a single value at absorb slot `hint[0]` (positions
+    /// `0..CHUNK-1` — the permuting position uses [`Self::observe_perm`]).
+    observe: Arc<Module>,
+    /// Insert a value at slot `CHUNK - 1`, then permute the state.
+    observe_perm: Arc<Module>,
+    /// Read slot `hint[0]` (any index in `0..CHUNK`). State is unchanged
+    /// (no state output).
+    sample_no_perm: Arc<Module>,
+    /// Standalone Poseidon2 permutation `state -> new_state`, shared by
+    /// every permuting sample path (`sample` and `sample_ext`).
+    permute: Arc<Module>,
+    /// Statically unrolled `D_EF` observes starting at absorb slot
+    /// `hint[0]` in `0..CHUNK-D_EF` (no permutation crossing).
+    observe_ext: Arc<Module>,
+    /// Statically unrolled `D_EF` observes starting at absorb slot
+    /// `hint[0]` in `CHUNK-D_EF..CHUNK`, with the permutation in the
+    /// middle.
+    observe_ext_perm: Arc<Module>,
+    /// Pack `D_EF` sample reads from a (pre, post) state pair: `hint[0]`
+    /// reads walk down from `pre[hint[0] - 1]`, the rest walk down from
+    /// `post[CHUNK - 1]`. The no-perm path passes the same state twice
+    /// with `hint[0] = sample_idx >= D_EF`, so every read hits `pre`.
+    sample_ext_pack: Arc<Module>,
 }
 
 impl SpongeModules {
     fn new() -> Self {
         let consts = Poseidon2Constants::p3_default();
         Self {
-            observe: std::array::from_fn(|abs| {
-                Arc::new(build_observe_module(abs, abs + 1 == CHUNK, &consts))
-            }),
-            sample_no_perm: std::array::from_fn(|read_idx| {
-                Arc::new(build_sample_no_perm_module(read_idx))
-            }),
-            sample_perm: Arc::new(build_sample_perm_module(&consts)),
-            observe_ext: std::array::from_fn(|start_abs| {
-                Arc::new(build_observe_ext_module(start_abs, &consts))
-            }),
-            sample_ext_no_perm: std::array::from_fn(|i| {
-                Arc::new(build_sample_ext_no_perm_module(i + D_EF))
-            }),
-            sample_ext_perm: std::array::from_fn(|pre_reads| {
-                Arc::new(build_sample_ext_perm_module(pre_reads, &consts))
-            }),
+            observe: Arc::new(build_observe_module()),
+            observe_perm: Arc::new(build_observe_module_par(CHUNK - 1, &consts)),
+            sample_no_perm: Arc::new(build_sample_no_perm_module()),
+            permute: Arc::new(build_permute_module(&consts)),
+            observe_ext: Arc::new(build_observe_ext_module_serial()),
+            observe_ext_perm: Arc::new(build_observe_ext_module_par(&consts)),
+            sample_ext_pack: Arc::new(build_sample_ext_pack_module()),
         }
     }
 }
@@ -202,8 +189,8 @@ impl DuplexSpongeGpuIR {
         self.absorb_idx != 0 || self.sample_idx == 0
     }
 
-    /// Index into [`SpongeModules::sample_ext_perm`] for the current state:
-    /// how many samples happen before the (unique) permutation fires.
+    /// Pack hint for the permuting `sample_ext` path: how many samples
+    /// happen before the (unique) permutation fires.
     fn pre_perm_reads(&self) -> usize {
         if self.absorb_idx != 0 || self.sample_idx == 0 {
             // The very first sample already permutes.
@@ -219,13 +206,23 @@ impl DuplexSpongeGpuIR {
 impl FiatShamirTranscriptGraphIR for DuplexSpongeGpuIR {
     fn observe(&mut self, g: &mut GraphBuilder, value_buf: BufId) {
         let permute = self.observe_triggers_perm();
-        let module = self.modules.observe[self.absorb_idx].clone();
         let new_state_buf = alloc_state_buf(
             g,
             self.device,
             &format!("sponge_state_after_observe_{}", self.n_ops),
         );
-        g.insert_kernel(module, [self.state_buf, value_buf], [new_state_buf]);
+        if permute {
+            let module = self.modules.observe_perm.clone();
+            g.insert_kernel(module, [self.state_buf, value_buf], [new_state_buf], &[]);
+        } else {
+            let module = self.modules.observe.clone();
+            g.insert_kernel(
+                module,
+                [self.state_buf, value_buf],
+                [new_state_buf],
+                &[self.absorb_idx as i64],
+            );
+        }
         self.state_buf = new_state_buf;
         if permute {
             self.absorb_idx = 0;
@@ -238,7 +235,8 @@ impl FiatShamirTranscriptGraphIR for DuplexSpongeGpuIR {
 
     fn sample(&mut self, g: &mut GraphBuilder) -> BufId {
         if self.sample_triggers_perm() {
-            // Emit a kernel that permutes the state and reads the top slot.
+            // Permute the state, then read the top slot of the new state
+            // with the shared single-slot reader.
             let new_state_buf = alloc_state_buf(
                 g,
                 self.device,
@@ -246,8 +244,10 @@ impl FiatShamirTranscriptGraphIR for DuplexSpongeGpuIR {
             );
             let sample_buf =
                 alloc_single_f_buf(g, self.device, &format!("sponge_sample_{}", self.n_ops));
-            let module = self.modules.sample_perm.clone();
-            g.insert_kernel(module, [self.state_buf], [new_state_buf, sample_buf]);
+            let permute = self.modules.permute.clone();
+            g.insert_kernel(permute, [self.state_buf], [new_state_buf], &[]);
+            let reader = self.modules.sample_no_perm.clone();
+            g.insert_kernel(reader, [new_state_buf], [sample_buf], &[(CHUNK - 1) as i64]);
             self.state_buf = new_state_buf;
             self.absorb_idx = 0;
             // The permutation resets `sample_idx = CHUNK`, then the read
@@ -261,8 +261,8 @@ impl FiatShamirTranscriptGraphIR for DuplexSpongeGpuIR {
             let read_idx = self.sample_idx - 1;
             let sample_buf =
                 alloc_single_f_buf(g, self.device, &format!("sponge_sample_{}", self.n_ops));
-            let module = self.modules.sample_no_perm[read_idx].clone();
-            g.insert_kernel(module, [self.state_buf], [sample_buf]);
+            let module = self.modules.sample_no_perm.clone();
+            g.insert_kernel(module, [self.state_buf], [sample_buf], &[read_idx as i64]);
             self.sample_idx = read_idx;
             self.n_ops += 1;
             sample_buf
@@ -270,13 +270,22 @@ impl FiatShamirTranscriptGraphIR for DuplexSpongeGpuIR {
     }
 
     fn observe_ext(&mut self, g: &mut GraphBuilder, value_buf: BufId) {
-        let module = self.modules.observe_ext[self.absorb_idx].clone();
+        let module = if self.absorb_idx >= CHUNK - D_EF {
+            self.modules.observe_ext_perm.clone()
+        } else {
+            self.modules.observe_ext.clone()
+        };
         let new_state_buf = alloc_state_buf(
             g,
             self.device,
             &format!("sponge_state_after_observe_ext_{}", self.n_ops),
         );
-        g.insert_kernel(module, [self.state_buf, value_buf], [new_state_buf]);
+        g.insert_kernel(
+            module,
+            [self.state_buf, value_buf],
+            [new_state_buf],
+            &[self.absorb_idx as i64],
+        );
         self.state_buf = new_state_buf;
         // Simulate the four host-side observes to update the transcript state.
         let (abs, sam) = simulate_ext_observes(self.absorb_idx, self.sample_idx);
@@ -296,13 +305,30 @@ impl FiatShamirTranscriptGraphIR for DuplexSpongeGpuIR {
                 self.device,
                 &format!("sponge_state_after_sample_ext_{}", self.n_ops),
             );
-            let module = self.modules.sample_ext_perm[self.pre_perm_reads()].clone();
-            g.insert_kernel(module, [self.state_buf], [new_state_buf, ext_buf]);
+            let pre_reads = self.pre_perm_reads();
+            debug_assert!(pre_reads < D_EF);
+            let permute = self.modules.permute.clone();
+            g.insert_kernel(permute, [self.state_buf], [new_state_buf], &[]);
+            let pack = self.modules.sample_ext_pack.clone();
+            g.insert_kernel(
+                pack,
+                [self.state_buf, new_state_buf],
+                [ext_buf],
+                &[pre_reads as i64],
+            );
             self.state_buf = new_state_buf;
         } else {
-            // No perm ⇒ absorb_idx == 0 and sample_idx ∈ D_EF..=CHUNK.
-            let module = self.modules.sample_ext_no_perm[self.sample_idx - D_EF].clone();
-            g.insert_kernel(module, [self.state_buf], [ext_buf]);
+            // No perm ⇒ absorb_idx == 0 and sample_idx ∈ D_EF..=CHUNK, so
+            // `k < sample_idx` holds for every read and the pack's `post`
+            // input is never touched — pass the same state twice.
+            debug_assert!(self.sample_idx >= D_EF);
+            let pack = self.modules.sample_ext_pack.clone();
+            g.insert_kernel(
+                pack,
+                [self.state_buf, self.state_buf],
+                [ext_buf],
+                &[self.sample_idx as i64],
+            );
         }
         self.absorb_idx = abs;
         self.sample_idx = sam;
@@ -392,18 +418,14 @@ fn simulate_ext_samples(mut abs: usize, mut sam: usize) -> (usize, usize, bool) 
 
 /// `observe(state[1, WIDTH], value[1]) -> new_state[1, WIDTH]`
 ///
-/// - Non-permuting variant (`permute == false`): a single-thread compute that rewrites slot
-///   `absorb_idx` and passes every other slot through — the work is a one-slot store, so
-///   single-thread launch is the right shape. Symbolic over the absorb position (`const_sym` splice
-///   bound from the shape hint), so all `CHUNK - 1` non-permuting positions share one JIT'd kernel.
-/// - Permuting variant (`permute == true`): warp-parallel — 16 lanes gather the state, one lane
-///   replaces slot `absorb_idx` with the observed value, [`poseidon2_permute_par`] runs the round
-///   schedule with cross-lane shuffles, and lanes store their slots. Only position `CHUNK - 1`
-///   permutes, so this variant stays concrete.
-fn build_observe_module(absorb_idx: usize, permute: bool, consts: &Poseidon2Constants) -> Module {
-    if permute {
-        return build_observe_module_par(absorb_idx, consts);
-    }
+/// Non-permuting variant: a single-thread compute that rewrites slot
+/// `hint[0]` and passes every other slot through — the work is a one-slot
+/// store, so single-thread launch is the right shape. Symbolic over the
+/// absorb position (`const_sym` splice bound from the insert-site shape
+/// hint), so all `CHUNK - 1` non-permuting positions share one JIT'd
+/// kernel. The permuting position `CHUNK - 1` uses
+/// [`build_observe_module_par`] instead.
+fn build_observe_module() -> Module {
     let mut b = IRBuilder::new();
     let pos = b.symbol("i");
     let state = b.input("state", ScalarType::BabyBear, vec![1, WIDTH]);
@@ -422,7 +444,6 @@ fn build_observe_module(absorb_idx: usize, permute: bool, consts: &Poseidon2Cons
         }
         b.pack(&s)
     });
-    b.add_shape_hint(&[absorb_idx as i64]);
     b.finish("sponge_observe", body)
 }
 
@@ -452,9 +473,9 @@ fn build_observe_module_par(absorb_idx: usize, consts: &Poseidon2Constants) -> M
 }
 
 /// `sample_no_perm(state[1, WIDTH]) -> sample[1]`. State is unchanged, so no
-/// state output. Symbolic over the read index, so all `CHUNK` read positions
-/// share one JIT'd kernel.
-fn build_sample_no_perm_module(read_idx: usize) -> Module {
+/// state output. Symbolic over the read index (insert-site hint), so all
+/// `CHUNK` read positions share one JIT'd kernel.
+fn build_sample_no_perm_module() -> Module {
     let mut b = IRBuilder::new();
     let pos = b.symbol("i");
     let state = b.input("state", ScalarType::BabyBear, vec![1, WIDTH]);
@@ -463,21 +484,20 @@ fn build_sample_no_perm_module(read_idx: usize) -> Module {
         let pos_c = b.const_sym(pos);
         b.index(state, &[zero, pos_c])
     });
-    b.add_shape_hint(&[read_idx as i64]);
     b.finish("sponge_sample", body)
 }
 
-/// `sample_perm(state[1, WIDTH]) -> (new_state[1, WIDTH], sample[1])`.
-///
-/// Permutes the state and reads the top slot. Emitted whenever
-/// `absorb_idx != 0` or `sample_idx == 0`. Warp-parallel Poseidon2 via
-/// [`poseidon2_permute_par`]; a single-thread reader picks the top slot
-/// out of the resulting permuted-state tensor.
-fn build_sample_perm_module(consts: &Poseidon2Constants) -> Module {
+/// `permute(state[1, WIDTH]) -> new_state[1, WIDTH]` — standalone
+/// warp-parallel Poseidon2 permutation (gather → [`poseidon2_permute_par`]
+/// → store), shared by every permuting sample path. The permuting sample
+/// reads happen in separate follow-up kernels
+/// ([`build_sample_no_perm_module`] / [`build_sample_ext_pack_module`]),
+/// so one JIT'd permutation serves them all.
+fn build_permute_module(consts: &Poseidon2Constants) -> Module {
     let mut b = IRBuilder::new();
     let state_in = b.input("state", ScalarType::BabyBear, vec![1, WIDTH]);
-    let consts_perm = consts.clone();
-    let permuted = b.compute_with(1, None, None, Some(WIDTH), move |b, _outer| {
+    let consts = consts.clone();
+    let body = b.compute_with(1, None, None, Some(WIDTH), move |b, _outer| {
         let par = b.par_map(|th, _s, _c| th.clone());
         let gathered = b.compute_with(
             WIDTH,
@@ -487,19 +507,13 @@ fn build_sample_perm_module(consts: &Poseidon2Constants) -> Module {
             |b, j| kernel!(b, state_in[0, j]),
         );
         b.bind(gathered, move |b, tile| {
-            poseidon2_permute_par(b, tile, &consts_perm, |b, v| {
+            poseidon2_permute_par(b, tile, &consts, |b, v| {
                 let par = b.par_map(|th, _s, _c| th.clone());
                 b.compute_with(WIDTH, None, Some(par), None, |b, j| kernel!(b, v[j]))
             })
         })
     });
-    let permuted = b.let_bound(permuted);
-    // The permutation sets sample_idx = CHUNK, then the read decrements to
-    // CHUNK - 1.
-    let read_idx = CHUNK - 1;
-    let sample = b.compute(1, |b, _i| kernel!(b, permuted[0, #read_idx]));
-    let out = b.tuple(&[permuted, sample]);
-    b.finish("sponge_sample_perm".to_string(), out)
+    b.finish("sponge_permute", body)
 }
 
 /// `observe_ext(state[1, WIDTH], value[D_EF]) -> new_state[1, WIDTH]`.
@@ -509,25 +523,21 @@ fn build_sample_perm_module(consts: &Poseidon2Constants) -> Module {
 /// the pre- and post-perm inserts.
 ///
 /// Both variants are symbolic over the starting absorb position (`const_sym`
-/// splices bound from the shape hint), so each variant is one JIT'd kernel:
+/// splices bound from the insert-site shape hint), so each variant is one
+/// JIT'd kernel:
 ///
-/// - Non-permuting variant (`start_abs < CHUNK - D_EF`): single-thread compute that writes `D_EF`
-///   slots and passes the rest through.
-/// - Permuting variant (`start_abs >= CHUNK - D_EF`): warp-parallel — one `compute_with(WIDTH,
-///   par)` fuses the gather with the pre-perm inserts, [`poseidon2_permute_par`] runs the round
-///   schedule, and the final `compute_with(WIDTH, par)` fuses the store with any post-perm inserts.
-fn build_observe_ext_module(start_abs: usize, consts: &Poseidon2Constants) -> Module {
-    let perm_happens = start_abs >= CHUNK - D_EF;
-    if !perm_happens {
-        return build_observe_ext_module_serial(start_abs);
-    }
-    build_observe_ext_module_par(start_abs, consts)
-}
-
+/// - Non-permuting variant ([`build_observe_ext_module_serial`], starts `< CHUNK - D_EF`):
+///   single-thread compute that writes `D_EF` slots and passes the rest through.
+/// - Permuting variant ([`build_observe_ext_module_par`], starts `>= CHUNK - D_EF`): warp-parallel
+///   — one `compute_with(WIDTH, par)` fuses the gather with the pre-perm inserts,
+///   [`poseidon2_permute_par`] runs the round schedule, and the final `compute_with(WIDTH, par)`
+///   fuses the store with any post-perm inserts.
+///
 /// Serial `observe_ext` (no permutation crossing): slots
-/// `start_abs..start_abs + D_EF` receive `value[0..D_EF]`. With
-/// `start_abs <= CHUNK - D_EF` every write lands in slots `0..CHUNK`.
-fn build_observe_ext_module_serial(start_abs: usize) -> Module {
+/// `p..p + D_EF` receive `value[0..D_EF]`. The insert site only uses this
+/// variant for starts `<= CHUNK - D_EF`, so every write lands in slots
+/// `0..CHUNK`.
+fn build_observe_ext_module_serial() -> Module {
     let mut b = IRBuilder::new();
     let pos = b.symbol("p");
     let state = b.input("state", ScalarType::BabyBear, vec![1, WIDTH]);
@@ -550,7 +560,6 @@ fn build_observe_ext_module_serial(start_abs: usize) -> Module {
         }
         b.pack(&s)
     });
-    b.add_shape_hint(&[start_abs as i64]);
     b.finish("sponge_observe_ext", body)
 }
 
@@ -558,7 +567,7 @@ fn build_observe_ext_module_serial(start_abs: usize) -> Module {
 /// stage fuses the pre-perm inserts (`value[j - p]` into slots
 /// `p <= j < CHUNK`); the final store fuses the post-perm inserts
 /// (`value[j + CHUNK - p]` into slots `j < p + D_EF - CHUNK`).
-fn build_observe_ext_module_par(start_abs: usize, consts: &Poseidon2Constants) -> Module {
+fn build_observe_ext_module_par(consts: &Poseidon2Constants) -> Module {
     let mut b = IRBuilder::new();
     let pos = b.symbol("p");
     let state_in = b.input("state", ScalarType::BabyBear, vec![1, WIDTH]);
@@ -603,87 +612,36 @@ fn build_observe_ext_module_par(start_abs: usize, consts: &Poseidon2Constants) -
             })
         })
     });
-    b.add_shape_hint(&[start_abs as i64]);
     b.finish("sponge_observe_ext_perm", body)
 }
 
-/// `sample_ext_no_perm(state[1, WIDTH]) -> samples[1, D_EF]`. State is
-/// unchanged, so no state output. Called when all `D_EF` samples read from
-/// the current state without triggering a permutation (`start_sam >= D_EF`
-/// with `absorb_idx == 0`). Symbolic over the starting sample index, so all
-/// `N_SAMPLE_EXT_NO_PERM` starts share one JIT'd kernel.
-fn build_sample_ext_no_perm_module(start_sam: usize) -> Module {
-    let mut b = IRBuilder::new();
-    let pos = b.symbol("s");
-    let state = b.input("state", ScalarType::BabyBear, vec![1, WIDTH]);
-    let body = b.compute(1, move |b, _i| {
-        let zero = b.const_u32(0);
-        let pos_c = b.const_sym(pos);
-        let mut samples = Vec::with_capacity(D_EF);
-        for k in 0..D_EF {
-            // `s - 1 - k`; in-bounds since `s >= D_EF`.
-            let off = b.const_u32((k + 1) as u32);
-            let idx = b.sub(pos_c, off);
-            samples.push(b.index(state, &[zero, idx]));
-        }
-        b.pack(&samples)
-    });
-    b.add_shape_hint(&[start_sam as i64]);
-    b.finish("sponge_sample_ext_no_perm", body)
-}
-
-/// `sample_ext_perm(state[1, WIDTH]) -> (new_state[1, WIDTH], samples[1, D_EF])`.
+/// `sample_ext_pack(pre[1, WIDTH], post[1, WIDTH]) -> samples[1, D_EF]` —
+/// the unified sample-read pack behind every `sample_ext`:
 ///
-/// Statically unrolls `D_EF` samples with exactly one permutation. `pre_reads`
-/// counts how many samples happen from the pre-perm state before the
-/// permutation fires (`0` when the very first sample permutes). The
-/// permuted-state output is produced warp-parallel via
-/// [`poseidon2_permute_par`]; the `samples[1, D_EF]` output is a single-thread
-/// pack that reads `pre_reads` slots from the original state and
-/// `D_EF - pre_reads` slots from the freshly permuted state.
+///   samples[k]  =  pre[0, p - 1 - k]             if k < p
+///   samples[k]  =  post[0, CHUNK - 1 - (k - p)]  otherwise
 ///
-/// Symbolic over `pre_reads`, so all `D_EF` counts share one JIT'd kernel
-/// (pair — the tuple output splits into a permute kernel and a pack kernel
-/// at insertion).
-fn build_sample_ext_perm_module(pre_reads: usize, consts: &Poseidon2Constants) -> Module {
-    assert!(pre_reads < D_EF);
+/// (The same read pattern as the host `DuplexSpongeGpu`: pre-perm reads
+/// walk down from `sample_idx - 1`, then the permutation kicks
+/// `sample_idx` to CHUNK and post-perm reads walk down from `CHUNK - 1`.)
+///
+/// The permuting path binds `pre` to the old state, `post` to the freshly
+/// permuted state (see [`build_permute_module`]) and `p = pre_reads <
+/// D_EF`. The no-perm path binds the *same* state to both inputs with
+/// `p = sample_idx >= D_EF`, making `k < p` true for every read — one
+/// JIT'd kernel serves both paths at every position.
+///
+/// With `p` symbolic, sample `k` branches on `k < p`. The pre-perm index
+/// `p - 1 - k` wraps for `k >= p`, but that branch is untaken and
+/// `select` is short-circuit, so the load never executes. The post index
+/// `CHUNK - 1 - k + p` stays within `WIDTH` even when its branch is
+/// untaken (`p <= CHUNK`, so it is at most `CHUNK - 1 + CHUNK = 15`).
+fn build_sample_ext_pack_module() -> Module {
     let mut b = IRBuilder::new();
     let pos = b.symbol("p");
-    let state_in = b.input("state", ScalarType::BabyBear, vec![1, WIDTH]);
-    let consts_perm = consts.clone();
-    // Warp-parallel permutation: gather → permute → store.
-    let new_state = b.compute_with(1, None, None, Some(WIDTH), move |b, _outer| {
-        let par = b.par_map(|th, _s, _c| th.clone());
-        let gathered = b.compute_with(
-            WIDTH,
-            None,
-            Some(par),
-            None,
-            |b, j| kernel!(b, state_in[0, j]),
-        );
-        b.bind(gathered, move |b, tile| {
-            poseidon2_permute_par(b, tile, &consts_perm, |b, v| {
-                let par = b.par_map(|th, _s, _c| th.clone());
-                b.compute_with(WIDTH, None, Some(par), None, |b, j| kernel!(b, v[j]))
-            })
-        })
-    });
-    let new_state = b.let_bound(new_state);
-    // Samples are cheap indexes; do them single-threaded.
-    //
-    //   samples[k]  =  state_in[0, pre_reads - 1 - k]        if k < pre_reads
-    //   samples[k]  =  new_state[0, CHUNK - 1 - (k - pre_reads)] otherwise
-    //
-    // (This is the same read pattern as the host `DuplexSpongeGpu`: pre-perm
-    // reads walk down from `sample_idx - 1` to 0, then the permutation kicks
-    // `sample_idx` to CHUNK and post-perm reads walk down from CHUNK - 1.)
-    //
-    // With `p = pre_reads` symbolic, sample `k` branches on `k < p`. The
-    // pre-perm index `p - 1 - k` wraps for `k >= p`, but that branch is
-    // untaken and `select` is short-circuit, so the load never executes.
-    // The post-perm index `CHUNK - 1 - k + p` stays within `WIDTH` even
-    // when its branch is untaken.
-    let sample_out = b.compute(1, move |b, _i| {
+    let pre = b.input("pre", ScalarType::BabyBear, vec![1, WIDTH]);
+    let post = b.input("post", ScalarType::BabyBear, vec![1, WIDTH]);
+    let body = b.compute(1, move |b, _i| {
         let zero = b.const_u32(0);
         let pos_c = b.const_sym(pos);
         let mut samples = Vec::with_capacity(D_EF);
@@ -692,17 +650,15 @@ fn build_sample_ext_perm_module(pre_reads: usize, consts: &Poseidon2Constants) -
             let cond = b.lt(k_c, pos_c);
             let k1_c = b.const_u32((k + 1) as u32);
             let pre_idx = b.sub(pos_c, k1_c);
-            let pre_val = b.index(state_in, &[zero, pre_idx]);
+            let pre_val = b.index(pre, &[zero, pre_idx]);
             let base_c = b.const_u32((CHUNK - 1 - k) as u32);
             let post_idx = b.add(base_c, pos_c);
-            let post_val = b.index(new_state, &[zero, post_idx]);
+            let post_val = b.index(post, &[zero, post_idx]);
             samples.push(b.select(cond, pre_val, post_val));
         }
         b.pack(&samples)
     });
-    let out = b.tuple(&[new_state, sample_out]);
-    b.add_shape_hint(&[pre_reads as i64]);
-    b.finish("sponge_sample_ext_perm", out)
+    b.finish("sponge_sample_ext_pack", body)
 }
 
 /// Loads the 16-element sponge state from a `state[1, WIDTH]` input into an
@@ -1002,13 +958,13 @@ mod tests {
         // concrete permuting variant (1 unique).
         //
         // Then 15 samples from state (4, 8) walk:
-        //   perm (sample_perm) → sample_no_perm[6..=0] → perm → sample_no_perm[6..=1]
-        // — the `sample_perm` module is split at insertion into two kernels
-        // (`__k0` permute + `__k1` extract; see `passes::split_module`), and
+        //   perm → sample_no_perm[6..=0] → perm → sample_no_perm[6..=1]
+        // — permuting samples emit the standalone `permute` module (1
+        // unique) followed by a `sample_no_perm` read of the new state, and
         // every `sample_no_perm` read index binds the one symbolic module
         // (1 unique).
         //
-        // Expected total unique kernel modules: 2 + 3 = 5, vs. the
+        // Expected total unique kernel modules: 2 + 2 = 4, vs. the
         // 20 + 15 = 35 emitted sponge operations.
         let mut g = GraphBuilder::new();
         let mut sponge = DuplexSpongeGpuIR::new(&mut g, DeviceType::Cuda(0));
@@ -1032,9 +988,9 @@ mod tests {
             .expect("graph compile");
         assert_eq!(
             exe.num_unique_modules(),
-            5,
-            "expected exactly 5 unique kernel modules (2 observe + 3 sample) \
-             for the emitted 20 observes + 15 samples"
+            4,
+            "expected exactly 4 unique kernel modules (2 observe + permute + \
+             sample read) for the emitted 20 observes + 15 samples"
         );
     }
 }

@@ -1876,8 +1876,8 @@ mod tests {
         g.register_input(in1);
         g.register_output(out0);
         g.register_output(out1);
-        g.insert_kernel(module.clone(), [in0], [out0]);
-        g.insert_kernel(module.clone(), [in1], [out1]);
+        g.insert_kernel(module.clone(), [in0], [out0], &[]);
+        g.insert_kernel(module.clone(), [in1], [out1], &[]);
 
         let mut exe = GraphCompiler::new()
             .device(DeviceType::Cuda(0))
@@ -1977,7 +1977,7 @@ mod tests {
         let out_buf = mk(&mut g, "out");
         g.register_input(a_buf);
         g.register_output(out_buf);
-        g.insert_kernel(module, [a_buf], [out_buf]);
+        g.insert_kernel(module, [a_buf], [out_buf], &[]);
 
         // Split on insertion: one graph node per top-level kernel.
         assert_eq!(g.nodes.len(), 2);
@@ -2061,7 +2061,7 @@ mod tests {
         let out = mk(&mut g, "out");
         g.register_output(out);
         // Kernel first — reader of `data`.
-        g.insert_kernel(module.clone(), [data], [out]);
+        g.insert_kernel(module.clone(), [data], [out], &[]);
         // Then the const + memcpy that would fill `data`.
         g.insert_const(init, ConstBuf::HostBuf(vec![0u8; N * 4]));
         g.insert_memcpy(init, data);
@@ -2083,7 +2083,7 @@ mod tests {
         g.register_output(out);
         g.insert_const(init, ConstBuf::HostBuf(vec![0u8; N * 4]));
         g.insert_memcpy(init, data);
-        g.insert_kernel(module, [data], [out]);
+        g.insert_kernel(module, [data], [out], &[]);
         validate_interface(&g, DeviceType::Cuda(0))
             .expect("write-before-read insertion order must validate");
     }

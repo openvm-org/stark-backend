@@ -58,10 +58,10 @@ fn main() {
     g.insert_const(w_buf, ConstBuf::HostBuf(u32_to_le_bytes(&twiddles)));
 
     let ntt = kernels::ntt_module(log_n);
-    g.insert_kernel(ntt, [a_buf, w_buf], [ntt_out]);
+    g.insert_kernel(ntt, [a_buf, w_buf], [ntt_out], &[]);
 
     let scale = build_scale_by_two_module(n);
-    g.insert_kernel(scale, [ntt_out], [scaled_out]);
+    g.insert_kernel(scale, [ntt_out], [scaled_out], &[]);
 
     // ---- Dump builder IR ---------------------------------------------------
     println!("\n----- GraphBuilder.print() -----");

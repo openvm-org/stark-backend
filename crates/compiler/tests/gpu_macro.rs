@@ -86,6 +86,16 @@ fn bb(x: u32) -> BabyBear {
 /// `target/ir-dumps/gpu_macro/`. If the `BENCH_KERNEL` env var is set, also
 /// benchmarks the kernel.
 fn run_module(module: crypto_compiler::ir::Module, inputs: &[Vec<u32>]) -> Vec<Vec<u32>> {
+    run_module_with_hint(module, &[], inputs)
+}
+
+/// [`run_module`] with a shape hint for the module's symbolic parameters
+/// (forwarded to [`ModuleRunner::new_with_hint`]).
+fn run_module_with_hint(
+    module: crypto_compiler::ir::Module,
+    shape_hint: &[i64],
+    inputs: &[Vec<u32>],
+) -> Vec<Vec<u32>> {
     let options = CompileOptions {
         dump_ir: Some(
             concat!(
@@ -96,7 +106,7 @@ fn run_module(module: crypto_compiler::ir::Module, inputs: &[Vec<u32>]) -> Vec<V
         ),
         ..Default::default()
     };
-    let mut runner = ModuleRunner::new(&module, &options).unwrap();
+    let mut runner = ModuleRunner::new_with_hint(&module, shape_hint, &options).unwrap();
     assert_eq!(runner.num_inputs(), inputs.len());
     runner.set_inputs(inputs);
     runner.run();
@@ -2336,13 +2346,12 @@ fn symbolic_module_monomorphizes_via_shape_hint() {
     let mv = 16usize;
     let mut ib = IRBuilder::new();
     let m = ib.symbol("m");
-    ib.add_shape_hint(&[mv as i64]);
     let x = ib.input("x", ScalarType::BabyBear, vec![m * 64]);
     let body = kernel!(ib, compute [64] |i| { reduce [m] |j| { x[i * #m + j] } });
     let module = ib.finish("sym_hint_rowsum", body);
 
     let input = pseudo_field_elems(mv * 64, 9);
-    let outs = run_module(module, std::slice::from_ref(&input));
+    let outs = run_module_with_hint(module, &[mv as i64], std::slice::from_ref(&input));
     assert_eq!(outs.len(), 1);
     assert_eq!(outs[0].len(), 64);
     for i in 0..64 {
@@ -2359,12 +2368,12 @@ fn symbolic_module_monomorphizes_via_shape_hint() {
 fn symbolic_flat_scale_two_sizes() {
     let mut ib = IRBuilder::new();
     let n = ib.symbol("n");
-    ib.add_shape_hint(&[1 << 10]);
     let x = ib.input("x", ScalarType::BabyBear, vec![n]);
     let scaled = kernel!(ib, compute[n] | i | { x[i] * 3bb });
     let module = ib.finish("sym_scale", scaled);
 
-    let mut runner = ModuleRunner::new(&module, &CompileOptions::default()).unwrap();
+    let mut runner =
+        ModuleRunner::new_with_hint(&module, &[1 << 10], &CompileOptions::default()).unwrap();
     for log_n in [10usize, 12] {
         let nv = 1usize << log_n;
         runner.set_symbol("n", nv as i64).unwrap();
@@ -2389,12 +2398,12 @@ fn symbolic_flat_scale_two_sizes() {
 fn symbolic_reversed_read() {
     let mut ib = IRBuilder::new();
     let n = ib.symbol("n");
-    ib.add_shape_hint(&[1 << 8]);
     let x = ib.input("x", ScalarType::BabyBear, vec![n]);
     let rev = kernel!(ib, compute [n] |i| { x[#(n - 1) - i] * 2bb });
     let module = ib.finish("sym_rev", rev);
 
-    let mut runner = ModuleRunner::new(&module, &CompileOptions::default()).unwrap();
+    let mut runner =
+        ModuleRunner::new_with_hint(&module, &[1 << 8], &CompileOptions::default()).unwrap();
     for log_n in [8usize, 10] {
         let nv = 1usize << log_n;
         runner.set_symbol("n", nv as i64).unwrap();
@@ -2415,12 +2424,12 @@ fn symbolic_reversed_read() {
 fn symbolic_value_splice() {
     let mut ib = IRBuilder::new();
     let n = ib.symbol("n");
-    ib.add_shape_hint(&[1 << 8]);
     let x = ib.input("x", ScalarType::U32, vec![n]);
     let body = kernel!(ib, compute [n] |i| { x[i] + #n });
     let module = ib.finish("sym_value_splice", body);
 
-    let mut runner = ModuleRunner::new(&module, &CompileOptions::default()).unwrap();
+    let mut runner =
+        ModuleRunner::new_with_hint(&module, &[1 << 8], &CompileOptions::default()).unwrap();
     for log_n in [8usize, 10] {
         let nv = 1usize << log_n;
         runner.set_symbol("n", nv as i64).unwrap();

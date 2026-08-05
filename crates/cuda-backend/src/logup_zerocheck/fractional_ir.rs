@@ -287,31 +287,47 @@ pub fn extract_root_pq_ir(
     root_q: BufId,
 ) {
     g.insert_kernel(
-        build_extract_root_module(real_len),
+        build_extract_pq_slot_module(),
         [layer],
-        [root_p, root_q],
+        [root_p],
+        &[0, 0, real_len as i64],
+    );
+    g.insert_kernel(
+        build_extract_pq_slot_module(),
+        [layer],
+        [root_q],
+        &[0, D_EF as i64, real_len as i64],
     );
 }
 
-/// Builds the `ir::Module` used by [`extract_root_pq_ir`]. The module has
-/// one input (`layer: [real_len, 8] BabyBear`) and a tuple of two
-/// `[D_EF] BabyBear` outputs, each written by a `compute(D_EF, ..)` loop
-/// that reads its element from a constant slot of `layer[0]`.
-fn build_extract_root_module(real_len: usize) -> Module {
+/// Builds the shared gather module behind [`extract_root_pq_ir`] and
+/// [`extract_claim_pair_ir`]: one `[n, 8]` BabyBear input (a `Frac<EF>`
+/// buffer viewed as eight `F`-slots per element) and one `[D_EF]` BabyBear
+/// output gathering `pq[row, off + i]` — the `p` (`off = 0`) or `q`
+/// (`off = D_EF`) half of row `row`.
+///
+/// All three quantities are symbolic: `n` binds from the buffer length at
+/// `insert_kernel`, `row` / `off` come from the insertion-time shape hint
+/// `&[row, off, alloc_len]` (they never appear in an input shape), so every
+/// extract site — any allocation length, row, or half — shares one JIT'd
+/// kernel launched with different runtime parameters.
+fn build_extract_pq_slot_module() -> Module {
     let mut b = IRBuilder::new();
-    let layer = b.input("layer", ScalarType::BabyBear, vec![real_len, 8]);
-    let root_p = b.compute(D_EF, |b, i| {
-        let zero = b.const_u32(0);
-        b.index(layer, &[zero, i])
+    let r = b.symbol("r");
+    let o = b.symbol("o");
+    let n = b.symbol("n");
+    let pq = b.input(
+        "pq",
+        ScalarType::BabyBear,
+        vec![SizeExpr::from(n), 8usize.into()],
+    );
+    let body = b.compute(D_EF, move |b, i| {
+        let row_c = b.const_sym(r);
+        let off_c = b.const_sym(o);
+        let j = b.add(i, off_c);
+        b.index(pq, &[row_c, j])
     });
-    let root_q = b.compute(D_EF, |b, i| {
-        let zero = b.const_u32(0);
-        let d_ef = b.const_u32(D_EF as u32);
-        let j = b.add(i, d_ef);
-        b.index(layer, &[zero, j])
-    });
-    let out = b.tuple(&[root_p, root_q]);
-    b.finish(format!("extract_root_pq_{real_len}"), out)
+    b.finish("extract_pq_slot", body)
 }
 
 /// Extract the claim pair `(pq[0], pq[idx1])` from a dense `Frac<EF>`
@@ -332,35 +348,20 @@ pub fn extract_claim_pair_ir(
 ) -> GkrLayerClaimIR {
     assert!(idx1 < pq_alloc_len, "claim index out of bounds");
     let claim = GkrLayerClaimIR::alloc(g, device, name_prefix);
-    g.insert_kernel(
-        build_extract_claim_pair_module(pq_alloc_len, idx1),
-        [pq],
-        claim.as_array(),
-    );
+    for (row, off, out) in [
+        (0, 0, claim.p_xi_0),
+        (0, D_EF, claim.q_xi_0),
+        (idx1, 0, claim.p_xi_1),
+        (idx1, D_EF, claim.q_xi_1),
+    ] {
+        g.insert_kernel(
+            build_extract_pq_slot_module(),
+            [pq],
+            [out],
+            &[row as i64, off as i64, pq_alloc_len as i64],
+        );
+    }
     claim
-}
-
-/// Builds the `ir::Module` used by [`extract_claim_pair_ir`]: one
-/// `[alloc_len, 8]` BabyBear input and four `[D_EF]` BabyBear outputs
-/// gathering the `(row, slot-offset)` pairs `(0, 0)`, `(0, D_EF)`,
-/// `(idx1, 0)`, `(idx1, D_EF)` — i.e. `p_xi_0, q_xi_0, p_xi_1, q_xi_1`.
-fn build_extract_claim_pair_module(alloc_len: usize, idx1: usize) -> Module {
-    let mut b = IRBuilder::new();
-    let pq = b.input("pq", ScalarType::BabyBear, vec![alloc_len, 8]);
-    let gather = |b: &mut IRBuilder, row: u32, offset: u32| {
-        b.compute(D_EF, move |b, i| {
-            let row_c = b.const_u32(row);
-            let off_c = b.const_u32(offset);
-            let j = b.add(i, off_c);
-            b.index(pq, &[row_c, j])
-        })
-    };
-    let p0 = gather(&mut b, 0, 0);
-    let q0 = gather(&mut b, 0, D_EF as u32);
-    let p1 = gather(&mut b, idx1 as u32, 0);
-    let q1 = gather(&mut b, idx1 as u32, D_EF as u32);
-    let out = b.tuple(&[p0, q0, p1, q1]);
-    b.finish(format!("extract_claim_pair_{alloc_len}_{idx1}"), out)
 }
 
 /// Insert a single-layer segment-tree build/revert kernel node.
@@ -898,7 +899,7 @@ pub fn eq_hypercube_nonoverlapping_stage_ext_ir(
     step: usize,
 ) {
     assert!(step >= 1, "eq stage needs at least one source element");
-    g.insert_kernel(build_eq_hypercube_stage_module(), [src, x_i], [dst]);
+    g.insert_kernel(build_eq_hypercube_stage_module(), [src, x_i], [dst], &[]);
 }
 
 /// The `ir::Module` behind [`eq_hypercube_nonoverlapping_stage_ext_ir`].
@@ -1155,9 +1156,9 @@ pub fn eq_mle_table_ir(g: &mut GraphBuilder, points: &[BufId], device: DeviceTyp
 
 /// Graph-IR port of `super::fractional::reduce_to_single_evaluation`.
 ///
-/// Emits one structured `insert_kernel` node whose module computes the
-/// interpolations `numer = interpolate_linear_at_01([p_xi_0, p_xi_1], mu)`
-/// and `denom = interpolate_linear_at_01([q_xi_0, q_xi_1], mu)` — i.e.
+/// Emits two `insert_kernel` nodes of the shared linear-interp module:
+/// `numer = interpolate_linear_at_01([p_xi_0, p_xi_1], mu)` and
+/// `denom = interpolate_linear_at_01([q_xi_0, q_xi_1], mu)` — i.e.
 /// `y0 + (y1 - y0) * mu` on `FpExt` values. All buffers are the 16-byte
 /// EF-scalar buffers of [`add_ext_scalar_buf`].
 pub fn reduce_to_single_evaluation_ir(
@@ -1168,50 +1169,47 @@ pub fn reduce_to_single_evaluation_ir(
 ) -> (BufId, BufId) {
     let numer = add_ext_scalar_buf(g, device, "numer");
     let denom = add_ext_scalar_buf(g, device, "denom");
+    let module = build_interpolate_linear_at_01_module();
     g.insert_kernel(
-        build_reduce_to_single_evaluation_module(),
-        [claim.p_xi_0, claim.p_xi_1, claim.q_xi_0, claim.q_xi_1, mu],
-        [numer, denom],
+        module.clone(),
+        [claim.p_xi_0, claim.p_xi_1, mu],
+        [numer],
+        &[],
     );
+    g.insert_kernel(module, [claim.q_xi_0, claim.q_xi_1, mu], [denom], &[]);
     (numer, denom)
 }
 
-/// The `ir::Module` behind [`reduce_to_single_evaluation_ir`].
+/// The `ir::Module` behind [`reduce_to_single_evaluation_ir`]:
+/// `out = y0 + (y1 - y0) * mu`.
 ///
-/// Layout: the four claim inputs are `[1]`-shaped `FpExt` tensors (16
-/// bytes each — byte-identical to the `[D_EF]` BabyBear view of the same
-/// buffers), `mu` is a `[D_EF]`-shaped `BabyBear` input (the shape
+/// Layout: `y0` / `y1` are `[1]`-shaped `FpExt` tensors (16 bytes each —
+/// byte-identical to the `[D_EF]` BabyBear view of the same buffers),
+/// `mu` is a `[D_EF]`-shaped `BabyBear` input (the shape
 /// [`FiatShamirTranscriptGraphIR::sample_ext`] produces) lifted to an
-/// `FpExt` scalar, and the output is a tuple of two `[1]`-shaped `FpExt`
-/// tensors. All arithmetic uses the DSL's native `FpExt` scalar type.
-fn build_reduce_to_single_evaluation_module() -> Module {
+/// `FpExt` scalar, and the output is a `[1]`-shaped `FpExt` tensor. One
+/// module serves both the numerator and denominator interpolations, so
+/// the two nodes dedup to a single JIT'd kernel.
+fn build_interpolate_linear_at_01_module() -> Module {
     let mut b = IRBuilder::new();
-    let p_xi_0 = b.input("p_xi_0", ScalarType::FpExt, vec![1]);
-    let p_xi_1 = b.input("p_xi_1", ScalarType::FpExt, vec![1]);
-    let q_xi_0 = b.input("q_xi_0", ScalarType::FpExt, vec![1]);
-    let q_xi_1 = b.input("q_xi_1", ScalarType::FpExt, vec![1]);
+    let y0 = b.input("y0", ScalarType::FpExt, vec![1]);
+    let y1 = b.input("y1", ScalarType::FpExt, vec![1]);
     let mu = b.input("mu", ScalarType::BabyBear, vec![D_EF]);
 
     let i0 = b.const_u32(0);
-    let [p0, p1, q0, q1] = [p_xi_0, p_xi_1, q_xi_0, q_xi_1].map(|t| b.index(t, &[i0]));
+    let [y0, y1] = [y0, y1].map(|t| b.index(t, &[i0]));
     let m = {
         let coeffs = load_ext_coeffs(&mut b, mu);
         fpext_from_coeffs(&mut b, coeffs)
     };
 
     // `interpolate_linear_at_01([y0, y1], mu) = y0 + (y1 - y0) * mu`.
-    let interp = |b: &mut IRBuilder, y0: NodeId, y1: NodeId| -> NodeId {
-        let d = b.sub(y1, y0);
-        let dm = b.mul(d, m);
-        b.add(y0, dm)
-    };
-    let n = interp(&mut b, p0, p1);
-    let d = interp(&mut b, q0, q1);
+    let d = b.sub(y1, y0);
+    let dm = b.mul(d, m);
+    let r = b.add(y0, dm);
 
-    let numer = b.compute(1, move |_b, _i| n);
-    let denom = b.compute(1, move |_b, _i| d);
-    let out = b.tuple(&[numer, denom]);
-    b.finish("reduce_to_single_evaluation".to_string(), out)
+    let out = b.compute(1, move |_b, _i| r);
+    b.finish("interpolate_linear_at_01".to_string(), out)
 }
 
 /// Emit `prev_s_eval = numer + lambda * denom` — the seed of each outer
@@ -1230,12 +1228,14 @@ pub fn claim_combine_ir(
     device: DeviceType,
 ) -> BufId {
     let out = add_ext_scalar_buf(g, device, "prev_s_eval_seed");
-    g.insert_kernel(claim_combine_module(), [numer, denom, lambda], [out]);
+    g.insert_kernel(claim_combine_module(), [numer, denom, lambda], [out], &[]);
     out
 }
 
-/// Cached `ir::Module` for [`claim_combine_ir`] (see
-/// [`reconstruct_s_evals_module`] for why the cache matters).
+/// Cached `ir::Module` for [`claim_combine_ir`]: sharing one instance lets
+/// the per-round calls in the sumcheck driver skip rebuilding the module
+/// (dedup itself is content-based, so the cache is a build-time saving
+/// only).
 fn claim_combine_module() -> Arc<Module> {
     thread_local! {
         static MODULE: OnceCell<Arc<Module>> = const { OnceCell::new() };
@@ -1339,63 +1339,92 @@ pub fn reconstruct_s_evals_ir(
         std::array::from_fn(|i| add_ext_scalar_buf(g, device, &format!("s_eval_{}", i + 1)));
     let sp_evals: [BufId; GKR_S_DEG] =
         std::array::from_fn(|i| add_ext_scalar_buf(g, device, &format!("sp_eval_{i}")));
+
+    // sp(1) / sp(2): scale the compute-round block by the running eq product.
     g.insert_kernel(
-        reconstruct_s_evals_module(),
-        [d_sum_evals, prev_s_eval, xi_j, eq_r_acc],
-        s_evals.into_iter().chain(sp_evals),
+        build_ef_mul_indexed_module(),
+        [d_sum_evals, eq_r_acc],
+        [sp_evals[1]],
+        &[0, (GKR_S_DEG - 1) as i64],
     );
+    g.insert_kernel(
+        build_ef_mul_indexed_module(),
+        [d_sum_evals, eq_r_acc],
+        [sp_evals[2]],
+        &[1, (GKR_S_DEG - 1) as i64],
+    );
+    // sp(0) = (prev_s_eval - xi_j * sp(1)) * (1 - xi_j)⁻¹.
+    g.insert_kernel(
+        build_sp0_reconstruct_module(),
+        [prev_s_eval, xi_j, sp_evals[1]],
+        [sp_evals[0]],
+        &[],
+    );
+    // sp(3) = interpolate_quadratic_at_012(sp, 3) = sp(0) + 3·(sp(2) - sp(1)).
+    let sp_at_3 = add_ext_scalar_buf(g, device, "sp_eval_3");
+    g.insert_kernel(
+        build_sp3_extrapolate_module(),
+        [sp_evals[0], sp_evals[1], sp_evals[2]],
+        [sp_at_3],
+        &[],
+    );
+    // eq(xi_j, {1, 2, 3}), then s(i) = eq(xi_j, i) * sp(i).
+    let eq_points = add_ef_buf(g, device, "eq_mle_points", GKR_S_DEG);
+    g.insert_kernel(build_eq_mle_points_module(), [xi_j], [eq_points], &[]);
+    for (k, sp) in [sp_evals[1], sp_evals[2], sp_at_3].into_iter().enumerate() {
+        g.insert_kernel(
+            build_ef_mul_indexed_module(),
+            [eq_points, sp],
+            [s_evals[k]],
+            &[k as i64, GKR_S_DEG as i64],
+        );
+    }
     (s_evals, sp_evals)
 }
 
-/// Cached `ir::Module` for [`reconstruct_s_evals_ir`]. The module is
-/// shape-static and `GraphCompiler` dedups JIT compilation by `Rc` pointer
-/// identity, so sharing one instance means the per-round calls in the
-/// sumcheck driver compile the kernel exactly once.
-fn reconstruct_s_evals_module() -> Arc<Module> {
-    thread_local! {
-        static MODULE: OnceCell<Arc<Module>> = const { OnceCell::new() };
-    }
-    MODULE.with(|m| Arc::clone(m.get_or_init(|| Arc::new(build_reconstruct_s_evals_module()))))
+/// Shared gather-multiply: `out[0] = a[k] * s[0]` on `FpExt` values, with
+/// both the gather index `k` and the array length `n` symbolic (`k` binds
+/// from the insertion-time shape hint `&[k, n]`, `n` from `a`'s buffer
+/// shape). One module serves every scale-by-scalar site in the reconstruct
+/// block — `sp(1)/sp(2)` (gathering from the compute-round `d_sum_evals`
+/// pair) and `s(1..3)` (gathering from the
+/// [`build_eq_mle_points_module`] triple) — so all five insertions per
+/// round dedup to a single JIT'd kernel.
+fn build_ef_mul_indexed_module() -> Module {
+    let mut b = IRBuilder::new();
+    let kk = b.symbol("k");
+    let nn = b.symbol("n");
+    let a = b.input("a", ScalarType::FpExt, vec![SizeExpr::from(nn)]);
+    let s = b.input("s", ScalarType::FpExt, vec![1]);
+    let body = b.compute(1, move |b, _i| {
+        let k_c = b.const_sym(kk);
+        let i0 = b.const_u32(0);
+        let av = b.index(a, &[k_c]);
+        let sv = b.index(s, &[i0]);
+        b.mul(av, sv)
+    });
+    b.finish("ef_mul_indexed", body)
 }
 
-/// Structured module for [`reconstruct_s_evals_ir`], following the
-/// derivation in `docs/cuda-backend/gkr-prover.md` § "Sumcheck round
-/// implementation":
-///
-/// ```text
-/// sp[1] = d_sum_evals[0] * eq_r_acc
-/// sp[2] = d_sum_evals[1] * eq_r_acc
-/// sp[0] = (prev_s_eval - xi_j * sp[1]) * (1 - xi_j)⁻¹
-/// s[i]  = eval_eq_mle(xi_j, i + 1) * sp(i + 1)      for i in 0..3
-/// ```
-///
-/// with `eval_eq_mle(x, y) = 1 - y - x + 2xy` (so `eq(xi, 1) = xi`,
-/// `eq(xi, 2) = 3·xi - 1`, `eq(xi, 3) = 5·xi - 2`) and
-/// `sp(3) = interpolate_quadratic_at_012(sp, 3) = sp[0] + 3·(sp[2] - sp[1])`.
+/// `sp(0) = (prev_s_eval - xi_j * sp(1)) * (1 - xi_j)⁻¹` — recovering the
+/// s'(0) evaluation from the sumcheck's running claim
+/// `prev = (1 - xi)·sp(0) + xi·sp(1)`.
 ///
 /// The `(1 - xi_j)⁻¹` step runs on the base-field coefficient view via
 /// [`ef_inverse_coeffs`] (norm-based inversion); everything else is native
-/// `FpExt` arithmetic. Outputs, in order: `s(1), s(2), s(3), sp(0), sp(1),
-/// sp(2)`, each a `[1]`-shaped `FpExt` tensor.
-fn build_reconstruct_s_evals_module() -> Module {
+/// `FpExt` arithmetic. `xi_j` is a transcript challenge bound as `[D_EF]`
+/// BabyBear; `prev_s_eval` / `sp1` / the output are `[1]`-shaped `FpExt`.
+fn build_sp0_reconstruct_module() -> Module {
     let mut b = IRBuilder::new();
-    let d_sum_evals = b.input("d_sum_evals", ScalarType::FpExt, vec![GKR_S_DEG - 1]);
     let prev_s_eval = b.input("prev_s_eval", ScalarType::FpExt, vec![1]);
     let xi_j = b.input("xi_j", ScalarType::BabyBear, vec![D_EF]);
-    let eq_r_acc = b.input("eq_r_acc", ScalarType::FpExt, vec![1]);
+    let sp1 = b.input("sp1", ScalarType::FpExt, vec![1]);
 
     let i0 = b.const_u32(0);
-    let i1 = b.const_u32(1);
-    let d0 = b.index(d_sum_evals, &[i0]);
-    let d1 = b.index(d_sum_evals, &[i1]);
     let prev = b.index(prev_s_eval, &[i0]);
-    let eqr = b.index(eq_r_acc, &[i0]);
+    let sp1 = b.index(sp1, &[i0]);
     let xi_coeffs = load_ext_coeffs(&mut b, xi_j);
     let xi = fpext_from_coeffs(&mut b, xi_coeffs);
-    let xi = b.let_bound(xi);
-
-    let sp1 = b.mul(d0, eqr);
-    let sp2 = b.mul(d1, eqr);
 
     // (1 - xi_j)⁻¹ on the coefficient view: negate all coefficients, add 1
     // to the constant term, invert.
@@ -1411,31 +1440,67 @@ fn build_reconstruct_s_evals_module() -> Module {
     let xi_sp1 = b.mul(xi, sp1);
     let claim_rem = b.sub(prev, xi_sp1);
     let sp0 = b.mul(claim_rem, inv_one_minus_xi);
+    let out = b.compute(1, move |_b, _i| sp0);
+    b.finish("sp0_reconstruct", out)
+}
 
-    // s(1) = xi * sp(1) — the same product as `xi_sp1` (hash-consed).
-    let s_at_1 = xi_sp1;
-    // s(2) = (3·xi - 1) * sp(2).
+/// `sp(3) = interpolate_quadratic_at_012([sp0, sp1, sp2], 3)
+///        = sp0 + 3·(sp2 - sp1)`, all `[1]`-shaped `FpExt`.
+fn build_sp3_extrapolate_module() -> Module {
+    let mut b = IRBuilder::new();
+    let sp0 = b.input("sp0", ScalarType::FpExt, vec![1]);
+    let sp1 = b.input("sp1", ScalarType::FpExt, vec![1]);
+    let sp2 = b.input("sp2", ScalarType::FpExt, vec![1]);
+
+    let i0 = b.const_u32(0);
+    let [sp0, sp1, sp2] = [sp0, sp1, sp2].map(|t| b.index(t, &[i0]));
+    let three_e = b.const_fpext([3, 0, 0, 0]);
+    let d21 = b.sub(sp2, sp1);
+    let three_d21 = b.mul(three_e, d21);
+    let sp_at_3 = b.add(sp0, three_d21);
+    let out = b.compute(1, move |_b, _i| sp_at_3);
+    b.finish("sp3_extrapolate", out)
+}
+
+/// `out[i] = eval_eq_mle(xi_j, i + 1)` for `i in 0..GKR_S_DEG`, with
+/// `eval_eq_mle(x, y) = 1 - y - x + 2xy`:
+///
+/// ```text
+/// eq(xi, 1) = xi
+/// eq(xi, 2) = 3·xi - 1
+/// eq(xi, 3) = 5·xi - 2
+/// ```
+///
+/// `xi_j` is a transcript challenge bound as `[D_EF]` BabyBear; the output
+/// is a `[GKR_S_DEG]`-shaped `FpExt` tensor. The point index is a select
+/// chain on the thread index (no u32 → field lift exists, so the three
+/// values are precomputed as `FpExt` expressions).
+fn build_eq_mle_points_module() -> Module {
+    let mut b = IRBuilder::new();
+    let xi_j = b.input("xi_j", ScalarType::BabyBear, vec![D_EF]);
+
+    let xi_coeffs = load_ext_coeffs(&mut b, xi_j);
+    let xi = fpext_from_coeffs(&mut b, xi_coeffs);
+    let xi = b.let_bound(xi);
+
     let one_e = b.const_fpext([1, 0, 0, 0]);
     let two_e = b.const_fpext([2, 0, 0, 0]);
     let three_e = b.const_fpext([3, 0, 0, 0]);
     let five_e = b.const_fpext([5, 0, 0, 0]);
     let three_xi = b.mul(three_e, xi);
     let eq_at_2 = b.sub(three_xi, one_e);
-    let s_at_2 = b.mul(eq_at_2, sp2);
-    // s(3) = (5·xi - 2) * (sp(0) + 3·(sp(2) - sp(1))).
     let five_xi = b.mul(five_e, xi);
     let eq_at_3 = b.sub(five_xi, two_e);
-    let d21 = b.sub(sp2, sp1);
-    let three_d21 = b.mul(three_e, d21);
-    let sp_at_3 = b.add(sp0, three_d21);
-    let s_at_3 = b.mul(eq_at_3, sp_at_3);
 
-    let outs: Vec<NodeId> = [s_at_1, s_at_2, s_at_3, sp0, sp1, sp2]
-        .into_iter()
-        .map(|v| b.compute(1, move |_b, _i| v))
-        .collect();
-    let out = b.tuple(&outs);
-    b.finish("reconstruct_s_evals".to_string(), out)
+    let out = b.compute(GKR_S_DEG, move |b, i| {
+        let c0 = b.const_u32(0);
+        let c1 = b.const_u32(1);
+        let is0 = b.eq(i, c0);
+        let is1 = b.eq(i, c1);
+        let tail = b.select(is1, eq_at_2, eq_at_3);
+        b.select(is0, xi, tail)
+    });
+    b.finish("eq_mle_points", out)
 }
 
 /// Number of s-poly evaluations returned per sumcheck round.
@@ -1517,59 +1582,51 @@ pub fn update_running_scalars_ir(
 ) -> (BufId, BufId) {
     let prev_s_eval_next = add_ext_scalar_buf(g, device, "prev_s_eval");
     let eq_r_acc_next = add_ext_scalar_buf(g, device, "eq_r_acc");
+
+    // eq_r = eval_eq_mle([xi_j], [r]).
+    let eq_r = add_ext_scalar_buf(g, device, "eq_r");
+    g.insert_kernel(build_eval_eq_mle_pair_module(), [xi_j, r], [eq_r], &[]);
+    // eq_r_acc' = eq_r * eq_r_acc.
     g.insert_kernel(
-        update_running_scalars_module(),
-        [sp_evals[0], sp_evals[1], sp_evals[2], xi_j, eq_r_acc, r],
-        [prev_s_eval_next, eq_r_acc_next],
+        build_ef_mul_indexed_module(),
+        [eq_r, eq_r_acc],
+        [eq_r_acc_next],
+        &[0, 1],
+    );
+    // prev_s_eval' = eq_r * interpolate_quadratic_at_012(sp_evals, r).
+    let interp = add_ext_scalar_buf(g, device, "sp_interp_at_r");
+    g.insert_kernel(
+        build_interp_quad_012_module(),
+        [sp_evals[0], sp_evals[1], sp_evals[2], r],
+        [interp],
+        &[],
+    );
+    g.insert_kernel(
+        build_ef_mul_indexed_module(),
+        [eq_r, interp],
+        [prev_s_eval_next],
+        &[0, 1],
     );
     (prev_s_eval_next, eq_r_acc_next)
 }
 
-/// Cached `ir::Module` for [`update_running_scalars_ir`] (see
-/// [`reconstruct_s_evals_module`] for why the cache matters).
-fn update_running_scalars_module() -> Arc<Module> {
-    thread_local! {
-        static MODULE: OnceCell<Arc<Module>> = const { OnceCell::new() };
-    }
-    MODULE.with(|m| Arc::clone(m.get_or_init(|| Arc::new(build_update_running_scalars_module()))))
-}
-
-/// Structured module for [`update_running_scalars_ir`]:
-///
-/// ```text
-/// eq_r         = eval_eq_mle([xi_j], [r]) = 1 - xi_j - r + 2·xi_j·r
-/// eq_r_acc'    = eq_r * eq_r_acc
-/// prev_s_eval' = eq_r * interpolate_quadratic_at_012(sp_evals, r)
-/// ```
-///
-/// where the quadratic interpolation follows
-/// `openvm_stark_backend::poly_common::interpolate_quadratic_at_012`:
-/// `s1 = sp[1] - sp[0]`, `s2 = sp[2] - sp[1]`, `p = (s2 - s1) / 2`,
-/// `q = s1 - p`, result `= (p·r + q)·r + sp[0]`. All arithmetic uses the
-/// DSL's native `FpExt` scalar type. Outputs, in order:
-/// `prev_s_eval'`, `eq_r_acc'`, each a `[1]`-shaped `FpExt` tensor.
-fn build_update_running_scalars_module() -> Module {
+/// `out[0] = eval_eq_mle([xi_j], [r]) = 1 - xi_j - r + 2·xi_j·r`, both
+/// inputs transcript challenges bound as `[D_EF]` BabyBear and lifted to
+/// `FpExt` scalars.
+fn build_eval_eq_mle_pair_module() -> Module {
     let mut b = IRBuilder::new();
-    let sp0_in = b.input("sp_eval_0", ScalarType::FpExt, vec![1]);
-    let sp1_in = b.input("sp_eval_1", ScalarType::FpExt, vec![1]);
-    let sp2_in = b.input("sp_eval_2", ScalarType::FpExt, vec![1]);
     let xi_j = b.input("xi_j", ScalarType::BabyBear, vec![D_EF]);
-    let eq_r_acc = b.input("eq_r_acc", ScalarType::FpExt, vec![1]);
     let r = b.input("r", ScalarType::BabyBear, vec![D_EF]);
 
-    let i0 = b.const_u32(0);
-    let [sp0, sp1, sp2, eqr] = [sp0_in, sp1_in, sp2_in, eq_r_acc].map(|t| b.index(t, &[i0]));
     let xi = {
         let coeffs = load_ext_coeffs(&mut b, xi_j);
         fpext_from_coeffs(&mut b, coeffs)
     };
     let rv = {
         let coeffs = load_ext_coeffs(&mut b, r);
-        let v = fpext_from_coeffs(&mut b, coeffs);
-        b.let_bound(v)
+        fpext_from_coeffs(&mut b, coeffs)
     };
 
-    // eq_r = 1 - xi - r + 2·xi·r.
     let one_e = b.const_fpext([1, 0, 0, 0]);
     let two_e = b.const_fpext([2, 0, 0, 0]);
     let xir = b.mul(xi, rv);
@@ -1577,11 +1634,30 @@ fn build_update_running_scalars_module() -> Module {
     let one_minus_xi = b.sub(one_e, xi);
     let lin = b.sub(one_minus_xi, rv);
     let eq_r = b.add(lin, two_xir);
-    let eq_r = b.let_bound(eq_r);
+    let out = b.compute(1, move |_b, _i| eq_r);
+    b.finish("eval_eq_mle_pair", out)
+}
 
-    let eq_r_acc_next = b.mul(eq_r, eqr);
+/// `out[0] = interpolate_quadratic_at_012([sp0, sp1, sp2], r)`, following
+/// `openvm_stark_backend::poly_common::interpolate_quadratic_at_012`:
+/// `s1 = sp1 - sp0`, `s2 = sp2 - sp1`, `p = (s2 - s1) / 2`, `q = s1 - p`,
+/// result `= (p·r + q)·r + sp0`. The `sp*` inputs are `[1]`-shaped
+/// `FpExt`; `r` is a transcript challenge bound as `[D_EF]` BabyBear.
+fn build_interp_quad_012_module() -> Module {
+    let mut b = IRBuilder::new();
+    let sp0_in = b.input("sp_eval_0", ScalarType::FpExt, vec![1]);
+    let sp1_in = b.input("sp_eval_1", ScalarType::FpExt, vec![1]);
+    let sp2_in = b.input("sp_eval_2", ScalarType::FpExt, vec![1]);
+    let r = b.input("r", ScalarType::BabyBear, vec![D_EF]);
 
-    // interpolate_quadratic_at_012(sp_evals, r).
+    let i0 = b.const_u32(0);
+    let [sp0, sp1, sp2] = [sp0_in, sp1_in, sp2_in].map(|t| b.index(t, &[i0]));
+    let rv = {
+        let coeffs = load_ext_coeffs(&mut b, r);
+        let v = fpext_from_coeffs(&mut b, coeffs);
+        b.let_bound(v)
+    };
+
     let s1d = b.sub(sp1, sp0);
     let s2d = b.sub(sp2, sp1);
     let dd = b.sub(s2d, s1d);
@@ -1592,12 +1668,8 @@ fn build_update_running_scalars_module() -> Module {
     let prq = b.add(pr, q);
     let prqr = b.mul(prq, rv);
     let interp = b.add(prqr, sp0);
-    let prev_s_eval_next = b.mul(eq_r, interp);
-
-    let prev_out = b.compute(1, move |_b, _i| prev_s_eval_next);
-    let eqacc_out = b.compute(1, move |_b, _i| eq_r_acc_next);
-    let out = b.tuple(&[prev_out, eqacc_out]);
-    b.finish("update_running_scalars".to_string(), out)
+    let out = b.compute(1, move |_b, _i| interp);
+    b.finish("interp_quad_012", out)
 }
 
 /// Graph-IR port of `super::fractional::do_sumcheck_round_and_revert`.

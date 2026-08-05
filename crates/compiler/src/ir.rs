@@ -517,7 +517,12 @@ impl IRBuilder {
     /// stand-alone kernels, as the monomorphization values when no
     /// graph-derived bindings exist. At most one hint per module; declare
     /// all symbols before adding it.
-    pub fn add_shape_hint(&mut self, values: &[i64]) {
+    ///
+    /// Not part of the module-author API: hints are insertion-time data,
+    /// supplied via [`crate::graph_ir::GraphBuilder::insert_kernel`]'s
+    /// `shape_hint` argument (or the `*_with_hint` standalone compile entry
+    /// points), which attach them here internally.
+    pub(crate) fn add_shape_hint(&mut self, values: &[i64]) {
         assert!(
             self.shape_hint.is_none(),
             "at most one shape hint per module"

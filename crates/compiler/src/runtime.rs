@@ -297,6 +297,33 @@ impl KernelModule {
             .spawn()
             .map_err(|e| CompileError::Nvcc(format!("failed to spawn {}: {e}", options.nvcc)))?;
         let child_pid = child.id() as i32;
+        // Drain stdout/stderr on background threads while polling. nvcc can
+        // emit tens of KB of warnings; if nobody reads the pipe it fills up
+        // and the child blocks on write forever, which then surfaces as a
+        // spurious "timeout" (pipes can be as small as one page when the
+        // user's pipe-buffer soft limit is exhausted, e.g. under heavily
+        // parallel compilation).
+        let drain = |s: Option<Box<dyn Read + Send>>| {
+            s.map(|mut s| {
+                std::thread::spawn(move || {
+                    let mut buf = String::new();
+                    let _ = s.read_to_string(&mut buf);
+                    buf
+                })
+            })
+        };
+        let stdout_thread = drain(
+            child
+                .stdout
+                .take()
+                .map(|s| Box::new(s) as Box<dyn Read + Send>),
+        );
+        let stderr_thread = drain(
+            child
+                .stderr
+                .take()
+                .map(|s| Box::new(s) as Box<dyn Read + Send>),
+        );
         let start = Instant::now();
         let poll_interval = Duration::from_millis(200);
         let status = loop {
@@ -329,14 +356,12 @@ impl KernelModule {
         .map_err(|e| CompileError::Nvcc(format!("wait failed: {e}")))?;
 
         if !status.success() {
-            let mut stdout = String::new();
-            let mut stderr = String::new();
-            if let Some(mut s) = child.stdout.take() {
-                let _ = s.read_to_string(&mut stdout);
-            }
-            if let Some(mut s) = child.stderr.take() {
-                let _ = s.read_to_string(&mut stderr);
-            }
+            let stdout = stdout_thread
+                .and_then(|t| t.join().ok())
+                .unwrap_or_default();
+            let stderr = stderr_thread
+                .and_then(|t| t.join().ok())
+                .unwrap_or_default();
             return Err(CompileError::Nvcc(format!(
                 "{:?} exited with {}\nstdout:\n{stdout}\nstderr:\n{stderr}",
                 cmd.get_program(),

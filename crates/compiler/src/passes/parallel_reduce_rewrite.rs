@@ -654,6 +654,15 @@ pub(crate) fn should_tree_lower(k: usize, outer_par: usize) -> bool {
     k.is_power_of_two() && k >= REDUCE_TREE_MIN && outer_par < OUTER_SATURATION_THRESHOLD
 }
 
+/// Whether this pass would lower `compute [outer_par] |_| reduce [k]` into
+/// TWO internal kernels (block partials + follow-up reduce), which requires
+/// module-level scratch. Graph kernel modules must stay single-kernel, so
+/// graph authors consult this to decide when to decompose a large reduce
+/// into explicit block-sums + final-reduce graph nodes instead.
+pub fn reduce_lowers_multi_stage(k: usize, outer_par: usize) -> bool {
+    should_tree_lower(k, outer_par) && pick_g(outer_par, k) > 1
+}
+
 /// Number of blocks per row for a stage with `elems_per_row` items,
 /// given `M` outer rows. Returns a power of two dividing `elems_per_row`.
 ///
@@ -697,4 +706,30 @@ fn pick_g(m: usize, elems_per_row: usize) -> usize {
     // (a single warp or two). Two-kernel launch is still faster than
     // running the reduction on `m` blocks (each on its own SM).
     max_g
+}
+
+#[cfg(test)]
+mod tests {
+    use super::reduce_lowers_multi_stage;
+
+    #[test]
+    fn multi_stage_predicate() {
+        // `compute [2] { reduce [k] }` (the frac_compute_round shape):
+        // single-stage up to k = 256, two-stage from k = 512.
+        assert!(!reduce_lowers_multi_stage(256, 2));
+        assert!(reduce_lowers_multi_stage(512, 2));
+        assert!(reduce_lowers_multi_stage(1 << 17, 2));
+
+        // Outer parallelism >= 4 saturates MIN_TOTAL_THREADS with G = 1.
+        assert!(!reduce_lowers_multi_stage(512, 4));
+        assert!(!reduce_lowers_multi_stage(1 << 17, 128));
+
+        // Outer parallelism >= OUTER_SATURATION_THRESHOLD: sequential
+        // lowering, never multi-stage.
+        assert!(!reduce_lowers_multi_stage(1 << 17, 256));
+
+        // Non-power-of-two or tiny k never tree-lowers.
+        assert!(!reduce_lowers_multi_stage(2, 2));
+        assert!(!reduce_lowers_multi_stage(511, 2));
+    }
 }

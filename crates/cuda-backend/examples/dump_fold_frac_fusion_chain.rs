@@ -72,11 +72,13 @@ fn main() {
     let fold_sizes = [2048usize, 1024, 512, 256, 128];
     // num_x=32 means frac_compute_round reads pq[64, 2] — same as fold_128's output.
     let cr_num_x: usize = 32;
+    // The eq caps are symbolic in the module; they bind from the eq buffer
+    // shapes below (eq_low_cap = 16, eq_high_cap = 1).
     let cr_eq_low_cap: usize = 16;
 
     // --- Stage 1: build every bare module and dump its HIR ---
     println!("=== bare module HIRs ===");
-    let cr_module = Arc::new(build_frac_compute_round_module(cr_num_x, cr_eq_low_cap));
+    let cr_module = Arc::new(build_frac_compute_round_module(cr_num_x));
     write_module(&dump_dir, 0, &cr_module);
     // The fold module is symbolic over its size: one module serves every
     // stage of the chain (the per-stage size binds from the buffer shapes).
@@ -99,12 +101,14 @@ fn main() {
         // `[D_EF]` BabyBear, so allocate one dedicated buf per stage.
         let r = add_buf(&mut g, &format!("r_{size_in}"), D_EF * BB_BYTES);
         g.register_input(r);
-        g.insert_kernel((*fold_module).clone(), [chain_buf, r], [out]);
+        g.insert_kernel((*fold_module).clone(), [chain_buf, r], [out], &[]);
         chain_buf = out;
     }
     // frac_compute_round: reads (eq_low[16], eq_high[1], pq[64,2], lambda[4]).
-    let eq_low = add_frac_ef_buf(&mut g, "eq_low", cr_eq_low_cap);
-    let eq_high = add_frac_ef_buf(&mut g, "eq_high", cr_num_x / cr_eq_low_cap);
+    // The eq inputs are FpExt arrays; their lengths bind the module's
+    // symbolic caps (c = 16, h = num_x/2/c = 1).
+    let eq_low = add_buf(&mut g, "eq_low", cr_eq_low_cap * EF_BYTES);
+    let eq_high = add_buf(&mut g, "eq_high", (cr_num_x / 2 / cr_eq_low_cap) * EF_BYTES);
     let lambda = add_buf(&mut g, "lambda", D_EF * BB_BYTES);
     g.register_input(eq_low);
     g.register_input(eq_high);
@@ -115,6 +119,7 @@ fn main() {
         (*cr_module).clone(),
         [eq_low, eq_high, chain_buf, lambda],
         [out],
+        &[],
     );
     println!(
         "  built graph: {} kernel nodes, {} buffers, chain {} -> frac_compute_round",

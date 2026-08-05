@@ -85,7 +85,7 @@ fn build_graph() -> GraphBuilder {
     let out = add_buf(&mut g, "out", N * 4);
     g.register_input(x);
     g.register_output(out);
-    g.insert_kernel(chain_module(0), [x], [out]);
+    g.insert_kernel(chain_module(0), [x], [out], &[]);
     g
 }
 
@@ -183,8 +183,8 @@ fn fusion_crosses_unregistered_staging_buf() {
         let out = add_buf(&mut g, "out", N * 4);
         g.register_input(x);
         g.register_output(out);
-        g.insert_kernel(scale("scale2", 2), [x], [staging]);
-        g.insert_kernel(scale("scale3", 3), [staging], [out]);
+        g.insert_kernel(scale("scale2", 2), [x], [staging], &[]);
+        g.insert_kernel(scale("scale3", 3), [staging], [out], &[]);
         g
     };
 
@@ -229,7 +229,7 @@ fn ntt_fused_matches_unfused() {
             let twiddles = kernels::ntt_twiddles(log_n);
             let tw_bytes: Vec<u8> = twiddles.iter().flat_map(|v| v.to_le_bytes()).collect();
             g.insert_const(w, ConstBuf::HostBuf(tw_bytes));
-            g.insert_kernel(kernels::ntt_module(log_n), [a, w], [out]);
+            g.insert_kernel(kernels::ntt_module(log_n), [a, w], [out], &[]);
             g
         };
         let input = pseudo_field_elems(n, 3);
@@ -266,8 +266,8 @@ fn alpha_variant_chains_dedup_and_match() {
     g.register_input(x1);
     g.register_output(out0);
     g.register_output(out1);
-    g.insert_kernel(chain_module(0), [x0], [out0]);
-    g.insert_kernel(chain_module(3), [x1], [out1]);
+    g.insert_kernel(chain_module(0), [x0], [out0], &[]);
+    g.insert_kernel(chain_module(3), [x1], [out1], &[]);
 
     let mut exe = GraphCompiler::new().compile(g).unwrap();
     let report = exe.fusion_report().unwrap();
@@ -338,7 +338,7 @@ fn module_with_intermediate_buffers_is_rejected() {
     let out = add_buf(&mut g, "out", 4);
     g.register_input(x);
     g.register_output(out);
-    g.insert_kernel(m, [x], [out]);
+    g.insert_kernel(m, [x], [out], &[]);
 
     let err = match GraphCompiler::new().compile(g) {
         Ok(_) => panic!("expected graph compilation to reject module-level scratch"),
@@ -420,8 +420,8 @@ mod symbolic {
         g.register_input(x1);
         g.register_output(out0);
         g.register_output(out1);
-        g.insert_kernel(sym_chain(0), [x0], [out0]);
-        g.insert_kernel(sym_chain(3), [x1], [out1]);
+        g.insert_kernel(sym_chain(0), [x0], [out0], &[]);
+        g.insert_kernel(sym_chain(3), [x1], [out1], &[]);
 
         let mut exe = GraphCompiler::new().compile(g).unwrap();
         let report = exe.fusion_report().unwrap();
@@ -466,8 +466,8 @@ mod symbolic {
         g.register_input(x1);
         g.register_output(out0);
         g.register_output(out1);
-        g.insert_kernel(sym_scale(0), [x0], [out0]);
-        g.insert_kernel(sym_scale(3), [x1], [out1]);
+        g.insert_kernel(sym_scale(0), [x0], [out0], &[]);
+        g.insert_kernel(sym_scale(3), [x1], [out1], &[]);
 
         let mut exe = GraphCompiler::new().compile(g).unwrap();
         assert_eq!(exe.num_unique_modules(), 1);
@@ -489,15 +489,15 @@ mod symbolic {
     }
 
     /// A parameter used ONLY as a `const_sym` index splice: not inferable
-    /// from any input shape, so each insert's `add_shape_hint` supplies it.
-    /// Two inserts of the same HIR with different hint values must keep
-    /// their own bindings (regression: the subgraph cache used to key on
-    /// the hint-excluding module hash and replayed the first hint) while
-    /// still collapsing onto ONE compiled kernel — the splice survives
-    /// monomorphization as a runtime parameter.
+    /// from any input shape, so each insert's `shape_hint` argument
+    /// supplies it. Two inserts of the same HIR with different hint values
+    /// must keep their own bindings (regression: the subgraph cache used to
+    /// key on the hint-excluding module hash and replayed the first hint)
+    /// while still collapsing onto ONE compiled kernel — the splice
+    /// survives monomorphization as a runtime parameter.
     #[test]
     fn symbolic_index_splice_dedupes_across_hints() {
-        fn sym_pick(hint: i64) -> Module {
+        fn sym_pick() -> Module {
             let mut b = IRBuilder::new();
             let k = b.symbol("k");
             let x = b.input("x", ScalarType::BabyBear, vec![8]);
@@ -505,7 +505,6 @@ mod symbolic {
                 let idx = b.const_sym(k);
                 b.index(x, &[idx])
             });
-            b.add_shape_hint(&[hint]);
             b.finish("sym_pick", body)
         }
 
@@ -517,8 +516,8 @@ mod symbolic {
         g.register_input(x);
         g.register_output(out0);
         g.register_output(out1);
-        g.insert_kernel(sym_pick(2), [x], [out0]);
-        g.insert_kernel(sym_pick(5), [x], [out1]);
+        g.insert_kernel(sym_pick(), [x], [out0], &[2]);
+        g.insert_kernel(sym_pick(), [x], [out1], &[5]);
 
         let mut exe = GraphCompiler::new().compile(g).unwrap();
         assert_eq!(exe.num_unique_modules(), 1);
@@ -567,8 +566,8 @@ mod symbolic {
         g.register_input(x1);
         g.register_output(out0);
         g.register_output(out1);
-        g.insert_kernel(sym_fold_gather(), [x0], [out0]);
-        g.insert_kernel(sym_fold_gather(), [x1], [out1]);
+        g.insert_kernel(sym_fold_gather(), [x0], [out0], &[]);
+        g.insert_kernel(sym_fold_gather(), [x1], [out1], &[]);
 
         let mut exe = GraphCompiler::new().compile(g).unwrap();
         assert_eq!(exe.num_unique_modules(), 1);
@@ -608,8 +607,8 @@ mod symbolic {
         g.register_input(x1);
         g.register_output(out0);
         g.register_output(out1);
-        g.insert_kernel(sym_scale(0), [x0], [out0]);
-        g.insert_kernel(sym_scale(3), [x1], [out1]);
+        g.insert_kernel(sym_scale(0), [x0], [out0], &[]);
+        g.insert_kernel(sym_scale(3), [x1], [out1], &[]);
 
         let mut exe = GraphCompiler::new().compile(g).unwrap();
         assert_eq!(exe.num_unique_modules(), 1);
@@ -671,7 +670,6 @@ mod symbolic {
             let n = b.symbol("n");
             let t = b.symbol("t");
             let a = b.symbol("a");
-            b.add_shape_hint(&[n0 as i64, t0 as i64, a0 as i64]);
             let x = b.input("x", ScalarType::BabyBear, [n + t + a]);
             let body = b.compute(n, |b, i| {
                 b.compute(t, |b, j| {
@@ -703,8 +701,13 @@ mod symbolic {
             let out = add_buf(&mut g, "out", k0 * 4);
             g.register_input(x);
             g.register_output(out);
-            g.insert_kernel(producer(), [x], [staging]);
-            g.insert_kernel(consumer(), [staging], [out]);
+            g.insert_kernel(
+                producer(),
+                [x],
+                [staging],
+                &[n0 as i64, t0 as i64, a0 as i64],
+            );
+            g.insert_kernel(consumer(), [staging], [out], &[]);
             g
         };
 

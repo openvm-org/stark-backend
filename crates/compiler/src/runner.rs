@@ -11,7 +11,7 @@ use openvm_cuda_common::{
 };
 
 use crate::{
-    compile_and_load,
+    compile_and_load_with_hint,
     ir::{Module, ScalarType},
     runtime::{CompileOptions, KernelModule},
     CompileError,
@@ -72,9 +72,19 @@ impl ModuleRunner {
     /// parameter is bound via [`Self::set_symbol`] (sizes are functions of
     /// the parameters).
     pub fn new(module: &Module, options: &CompileOptions) -> Result<Self, CompileError> {
+        Self::new_with_hint(module, &[], options)
+    }
+
+    /// [`Self::new`] with a shape hint for the module's symbolic parameters
+    /// (see [`crate::compile_and_load_with_hint`]). Pass `&[]` for no hint.
+    pub fn new_with_hint(
+        module: &Module,
+        shape_hint: &[i64],
+        options: &CompileOptions,
+    ) -> Result<Self, CompileError> {
         let ctx = GpuDeviceCtx::for_current_device()
             .map_err(|e| CompileError::Runtime(format!("GpuDeviceCtx: {e:?}")))?;
-        let km = compile_and_load(module, options)?;
+        let km = compile_and_load_with_hint(module, shape_hint, options)?;
 
         let mut runner = Self {
             module: km,

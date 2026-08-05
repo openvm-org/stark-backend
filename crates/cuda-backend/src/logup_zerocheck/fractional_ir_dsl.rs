@@ -44,9 +44,10 @@ use crypto_compiler::{
     field_ext::ef_inverse_coeffs,
     graph_ir::{BufId, GraphBuilder},
     ir::{IRBuilder, Module, NodeId, ScalarType, SizeExpr},
+    passes::parallel_reduce_rewrite::reduce_lowers_multi_stage,
 };
 
-use super::fractional_ir::{fpext_from_coeffs, load_ext_coeffs, FRAC_EF_BYTES};
+use super::fractional_ir::{add_ef_buf, fpext_from_coeffs, load_ext_coeffs, FRAC_EF_BYTES};
 use crate::{logup_zerocheck::fractional_ir::GKR_S_DEG, types::D_EF};
 
 // ---------------------------------------------------------------------------
@@ -156,7 +157,7 @@ pub fn fold_ef_frac_columns_ir_dsl(
         "fold: size must be a power of two >= 4, got {size}"
     );
     assert_frac_size(size);
-    g.insert_kernel(build_fold_ef_frac_columns_module(), [src, r], [dst]);
+    g.insert_kernel(build_fold_ef_frac_columns_module(), [src, r], [dst], &[]);
 }
 
 // ---------------------------------------------------------------------------
@@ -255,6 +256,7 @@ pub fn frac_multifold_ir_dsl(
         build_frac_multifold_module(tail_size, w),
         [src, eq_r_window],
         [dst],
+        &[],
     );
 }
 
@@ -413,6 +415,7 @@ pub fn frac_precompute_m_eval_round_ir_dsl(
         build_frac_precompute_m_eval_round_module(w, t),
         [m_total, eq_r_prefix, eq_suffix],
         [out],
+        &[],
     );
 }
 
@@ -469,67 +472,138 @@ fn with_rev_bits_dsl(
 /// Build the DSL module for `frac_compute_round` (dev-challenge, dense).
 ///
 /// Inputs:
-///   - `eq_low     : [eq_low_cap] FpExt`
-///   - `eq_high    : [num_x / 2 / eq_low_cap] FpExt`
+///   - `eq_low     : [c] FpExt` (symbolic `c` = eq_low_cap)
+///   - `eq_high    : [h] FpExt` (symbolic `h` = num_x / 2 / eq_low_cap)
 ///   - `pq_buffer  : [2*num_x, 2] FpExt`
 ///   - `lambda     : [D_EF] BabyBear`
 ///
 /// Output:
 ///   - `out : [2] FpExt` — the block-summed `(s'(1), s'(2))` pair.
 ///
-/// Dense-only (`real_len == logical_len == 2*num_x`).
-pub fn build_frac_compute_round_module(num_x: usize, eq_low_cap: usize) -> Module {
+/// Dense-only (`real_len == logical_len == 2*num_x`). The eq-buffer split
+/// point is symbolic (both caps bind from the eq input shapes at
+/// `insert_kernel`), so every `(eq_low_cap, eq_high_cap)` partition of a
+/// given `num_x` shares one JIT'd kernel. `num_x` itself must stay
+/// concrete: it is the inner `reduce_add` bound.
+pub fn build_frac_compute_round_module(num_x: usize) -> Module {
     assert!(num_x.is_power_of_two() && num_x >= 2);
-    assert!(eq_low_cap.is_power_of_two());
     let pq_size = 2 * num_x;
     let iter = num_x / 2;
-    let eq_high_cap = iter / eq_low_cap;
-    assert!(
-        eq_high_cap.is_power_of_two() && eq_high_cap * eq_low_cap == iter,
-        "eq_low_cap must partition num_x/2"
-    );
     let mut b = IRBuilder::new();
-    let eq_low = b.input("eq_low", ScalarType::FpExt, vec![eq_low_cap]);
-    let eq_high = b.input("eq_high", ScalarType::FpExt, vec![eq_high_cap]);
+    let c = b.symbol("c");
+    let h = b.symbol("h");
+    let eq_low = b.input("eq_low", ScalarType::FpExt, vec![SizeExpr::from(c)]);
+    let eq_high = b.input("eq_high", ScalarType::FpExt, vec![SizeExpr::from(h)]);
     let pq = b.input("pq", ScalarType::FpExt, vec![pq_size, 2]);
     let lambda = bind_challenge_as_fpext(&mut b, "lambda");
 
     let body = b.compute(GKR_S_DEG - 1, move |b, out_i| {
         b.reduce_add(iter, move |b, idx| {
-            // eq_val = eq_low[idx & (eq_low_cap-1)] * eq_high[idx >> log_eq_low_cap]
-            let low_c = b.const_u32(eq_low_cap as u32);
-            let lo_idx = b.rem(idx, low_c);
-            let hi_idx = b.div(idx, low_c);
-            let el = b.index(eq_low, &[lo_idx]);
-            let eh = b.index(eq_high, &[hi_idx]);
-            let eq_val = b.mul(el, eh);
+            compute_round_term(b, c, eq_low, eq_high, pq, lambda, pq_size, out_i, idx)
+        })
+    });
+    b.finish(format!("frac_compute_round_dsl_n{num_x}"), body)
+}
 
-            // Load the four pq slots for this idx.
-            let zero_c = b.const_u32(0);
-            let one_c = b.const_u32(1);
-            let read = |b: &mut IRBuilder, at: NodeId| -> (NodeId, NodeId) {
-                let p = b.index(pq, &[at, zero_c]);
-                let q = b.index(pq, &[at, one_c]);
-                (p, q)
-            };
-            let (p0_e, q0_e) = read(b, idx);
-            let idx_10 = with_rev_bits_dsl(b, idx, pq_size, 1, 0);
-            let (p1_e, q1_e) = read(b, idx_10);
-            let idx_01 = with_rev_bits_dsl(b, idx, pq_size, 0, 1);
-            let (p0_o, q0_o) = read(b, idx_01);
-            let idx_11 = with_rev_bits_dsl(b, idx, pq_size, 1, 1);
-            let (p1_o, q1_o) = read(b, idx_11);
+/// Per-`(out_i, idx)` term of the compute-round reduction: loads the eq
+/// pair (`c` = symbolic eq_low_cap) and the four pq slots for `idx` and
+/// returns `eq_val * contrib(out_i)`.
+#[allow(clippy::too_many_arguments)]
+fn compute_round_term(
+    b: &mut IRBuilder,
+    c: crypto_compiler::ir::Sym,
+    eq_low: NodeId,
+    eq_high: NodeId,
+    pq: NodeId,
+    lambda: NodeId,
+    pq_size: usize,
+    out_i: NodeId,
+    idx: NodeId,
+) -> NodeId {
+    // eq_val = eq_low[idx % eq_low_cap] * eq_high[idx / eq_low_cap]
+    let low_c = b.const_sym(c);
+    let lo_idx = b.rem(idx, low_c);
+    let hi_idx = b.div(idx, low_c);
+    let el = b.index(eq_low, &[lo_idx]);
+    let eh = b.index(eq_high, &[hi_idx]);
+    let eq_val = b.mul(el, eh);
 
-            let contrib = compute_round_contrib(
-                b, out_i, lambda, p0_e, q0_e, p0_o, q0_o, p1_e, q1_e, p1_o, q1_o,
-            );
-            b.mul(eq_val, contrib)
+    // Load the four pq slots for this idx.
+    let zero_c = b.const_u32(0);
+    let one_c = b.const_u32(1);
+    let read = |b: &mut IRBuilder, at: NodeId| -> (NodeId, NodeId) {
+        let p = b.index(pq, &[at, zero_c]);
+        let q = b.index(pq, &[at, one_c]);
+        (p, q)
+    };
+    let (p0_e, q0_e) = read(b, idx);
+    let idx_10 = with_rev_bits_dsl(b, idx, pq_size, 1, 0);
+    let (p1_e, q1_e) = read(b, idx_10);
+    let idx_01 = with_rev_bits_dsl(b, idx, pq_size, 0, 1);
+    let (p0_o, q0_o) = read(b, idx_01);
+    let idx_11 = with_rev_bits_dsl(b, idx, pq_size, 1, 1);
+    let (p1_o, q1_o) = read(b, idx_11);
+
+    let contrib = compute_round_contrib(
+        b, out_i, lambda, p0_e, q0_e, p0_o, q0_o, p1_e, q1_e, p1_o, q1_o,
+    );
+    b.mul(eq_val, contrib)
+}
+
+/// Stage-0 block-sums variant of [`build_frac_compute_round_module`] for
+/// large `num_x`: each output row's `num_x / 2` reduction is split into
+/// `g_blocks` contiguous chunks summed independently.
+///
+/// Output: `[(GKR_S_DEG - 1) * g_blocks] FpExt` partials, row-major
+/// (`out_i * g_blocks + blk`). A follow-up [`build_ef_rowsum_module`]
+/// collapses each row to the final `(s'(1), s'(2))` pair. Both stages stay
+/// single-kernel under the JIT parallel-reduce rewrite, which the
+/// single-module form would not (its full-length reduce lowers to two
+/// internal kernels with module-level scratch — unsupported in graphs).
+pub fn build_frac_compute_round_block_module(num_x: usize, g_blocks: usize) -> Module {
+    assert!(num_x.is_power_of_two() && num_x >= 2);
+    let pq_size = 2 * num_x;
+    let iter = num_x / 2;
+    assert!(
+        g_blocks.is_power_of_two() && g_blocks >= 2 && g_blocks <= iter,
+        "g_blocks must be a power of two in [2, num_x/2], got {g_blocks}"
+    );
+    let chunk = iter / g_blocks;
+    let rows = GKR_S_DEG - 1;
+    let mut b = IRBuilder::new();
+    let c = b.symbol("c");
+    let h = b.symbol("h");
+    let eq_low = b.input("eq_low", ScalarType::FpExt, vec![SizeExpr::from(c)]);
+    let eq_high = b.input("eq_high", ScalarType::FpExt, vec![SizeExpr::from(h)]);
+    let pq = b.input("pq", ScalarType::FpExt, vec![pq_size, 2]);
+    let lambda = bind_challenge_as_fpext(&mut b, "lambda");
+
+    let body = b.compute(rows * g_blocks, move |b, j| {
+        let g_c = b.const_u32(g_blocks as u32);
+        let out_i = b.div(j, g_c);
+        let blk = b.rem(j, g_c);
+        let chunk_c = b.const_u32(chunk as u32);
+        let base = b.mul(blk, chunk_c);
+        b.reduce_add(chunk, move |b, cc| {
+            let idx = b.add(base, cc);
+            compute_round_term(b, c, eq_low, eq_high, pq, lambda, pq_size, out_i, idx)
         })
     });
     b.finish(
-        format!("frac_compute_round_dsl_n{num_x}_c{eq_low_cap}"),
+        format!("frac_compute_round_block_dsl_n{num_x}_g{g_blocks}"),
         body,
     )
+}
+
+/// Row-sum module: `out[i] = Σ_k input[i, k]` over FpExt.
+pub fn build_ef_rowsum_module(rows: usize, k: usize) -> Module {
+    assert!(rows >= 1 && k >= 1);
+    let mut b = IRBuilder::new();
+    let input = b.input("rows_in", ScalarType::FpExt, vec![rows, k]);
+    let body = b.compute(rows, move |b, i| {
+        b.reduce_add(k, move |b, kk| b.index(input, &[i, kk]))
+    });
+    b.finish(format!("ef_rowsum_dsl_r{rows}_k{k}"), body)
 }
 
 /// Emit the per-idx contribution used by the compute-round module,
@@ -615,10 +689,50 @@ pub fn frac_compute_round_ir_dsl(
     num_x: usize,
     eq_low_cap: usize,
 ) {
+    let iter = num_x / 2;
+    assert!(eq_low_cap.is_power_of_two());
+    assert!(
+        (iter / eq_low_cap).is_power_of_two() && (iter / eq_low_cap) * eq_low_cap == iter,
+        "eq_low_cap must partition num_x/2"
+    );
+    let rows = GKR_S_DEG - 1;
+    if !reduce_lowers_multi_stage(iter, rows) {
+        g.insert_kernel(
+            build_frac_compute_round_module(num_x),
+            [eq_low, eq_high, pq_buffer, lambda],
+            [out],
+            &[],
+        );
+        return;
+    }
+    // Large reduce: the single-module form would JIT-lower to two internal
+    // kernels with module-level scratch (unsupported in graphs), so
+    // decompose at the graph level: block sums into a partials buffer,
+    // then a row-sum. `g_blocks` mirrors the block-reduce heuristics —
+    // ~256 items per block, capped at 64 so stage 0's `2 * g_blocks` outer
+    // parallelism stays under the rewrite's saturation threshold (above it
+    // the reduce would lower sequentially on too few threads).
+    let g_blocks = (iter / 256).min(64);
+    debug_assert!(!reduce_lowers_multi_stage(iter / g_blocks, rows * g_blocks));
+    debug_assert!(!reduce_lowers_multi_stage(g_blocks, rows));
+    let device = g.buf_info(out).device_type;
+    let partials = add_ef_buf(
+        g,
+        device,
+        &format!("frac_cr_partials_n{num_x}"),
+        rows * g_blocks,
+    );
     g.insert_kernel(
-        build_frac_compute_round_module(num_x, eq_low_cap),
+        build_frac_compute_round_block_module(num_x, g_blocks),
         [eq_low, eq_high, pq_buffer, lambda],
+        [partials],
+        &[],
+    );
+    g.insert_kernel(
+        build_ef_rowsum_module(rows, g_blocks),
+        [partials],
         [out],
+        &[],
     );
 }
 
@@ -796,6 +910,7 @@ pub fn frac_build_tree_two_layers_ir_dsl(
         build_frac_build_tree_two_layers_module(half_i1),
         [layer_in],
         [layer_out],
+        &[],
     );
 }
 
@@ -934,6 +1049,7 @@ pub fn frac_build_tree_layer_revert_ir_dsl(
         build_frac_build_tree_layer_revert_module(layer_size),
         [layer_in],
         [layer_out],
+        &[],
     );
 }
 
@@ -1242,7 +1358,11 @@ mod dsl_port_tests {
         let device = DeviceType::Cuda(0);
         let mut rng = StdRng::seed_from_u64(0xCC00_11FF);
 
-        for n in [3usize, 4, 5] {
+        // n >= 9 (num_x >= 1024) exercises the graph-level block-sums +
+        // row-sum decomposition (the single-module form would need a
+        // multi-stage reduce lowering, which graph modules don't support);
+        // n = 14 hits the g_blocks = 64 cap.
+        for n in [3usize, 4, 5, 9, 10, 14] {
             let num_x = 2usize << n;
             let pq_size = 2 * num_x;
             let xi: Vec<EF> = (0..n).map(|_| rng.random()).collect();

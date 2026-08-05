@@ -445,14 +445,31 @@ impl GraphBuilder {
     /// `outputs` must have one BufId per module output (a scalar body binds
     /// one output; a tuple body binds one per element).
     ///
+    /// `shape_hint` supplies a canonical concrete instantiation of the
+    /// module's symbolic parameters, in declaration order: used for access
+    /// checking and as the binding fallback for parameters that cannot be
+    /// inferred from the input buffer shapes. Pass `&[]` for no hint;
+    /// otherwise its length must equal the module's parameter count. The
+    /// hint is attached to the module here — module authors never record
+    /// hints themselves — and is part of the split cache key, so one module
+    /// inserted under different hints splits (and JITs) per hint while
+    /// structurally identical residuals still content-dedup downstream.
+    ///
     /// Panics if the module fails type checking or canonicalization.
     pub fn insert_kernel(
         &mut self,
         module: impl Into<Arc<ir::Module>>,
         inputs: impl IntoIterator<Item = BufId>,
         outputs: impl IntoIterator<Item = BufId>,
+        shape_hint: &[i64],
     ) {
-        let module: Arc<ir::Module> = module.into();
+        let mut module: Arc<ir::Module> = module.into();
+        if !shape_hint.is_empty() {
+            Arc::make_mut(&mut module)
+                .builder
+                .add_shape_hint(shape_hint);
+        }
+        let module = module;
         let inputs: Vec<BufId> = inputs.into_iter().collect();
         let outputs: Vec<BufId> = outputs.into_iter().collect();
         assert_eq!(
@@ -1663,7 +1680,7 @@ mod tests {
         let out_buf = buf(&mut b, "out", DeviceType::Cuda(0), Quast::cst(16));
         b.register_input(a_buf);
         b.register_output(out_buf);
-        b.insert_kernel(module, [a_buf], [out_buf]);
+        b.insert_kernel(module, [a_buf], [out_buf], &[]);
 
         assert_eq!(b.nodes.len(), 2);
         assert!(b.buf_is_interface(a_buf));
@@ -1693,7 +1710,7 @@ mod tests {
         let mut b = GraphBuilder::new();
         let a_buf = buf(&mut b, "a", DeviceType::Cuda(0), Quast::cst(16));
         let out_buf = buf(&mut b, "out", DeviceType::Cuda(0), Quast::cst(16));
-        b.insert_kernel(module, [a_buf], [out_buf]);
+        b.insert_kernel(module, [a_buf], [out_buf], &[]);
 
         assert_eq!(b.nodes.len(), 1);
         match &b.nodes[0] {
@@ -1715,7 +1732,7 @@ mod tests {
         let module = ib.finish("bad", body);
 
         let mut b = GraphBuilder::new();
-        b.insert_kernel(module, std::iter::empty(), std::iter::empty());
+        b.insert_kernel(module, std::iter::empty(), std::iter::empty(), &[]);
     }
 
     /// `let t = a * 2; out = t + a` as a two-kernel chain over one input.
@@ -1741,7 +1758,7 @@ mod tests {
         let mut b = GraphBuilder::new();
         let a_buf = buf(&mut b, "a", DeviceType::Cuda(0), Quast::cst(32));
         let out_buf = buf(&mut b, "out", DeviceType::Cuda(0), Quast::cst(32));
-        b.insert_kernel(two_kernel_chain("chain", 8), [a_buf], [out_buf]);
+        b.insert_kernel(two_kernel_chain("chain", 8), [a_buf], [out_buf], &[]);
 
         // One GraphNode::Kernel per split kernel, chained through an
         // auto-allocated intermediate buffer on the inputs' device.
@@ -1777,8 +1794,8 @@ mod tests {
         // Two structurally identical modules built independently: the
         // second insertion must hit the subgraph cache and reuse the same
         // canonical Arcs for the split kernels.
-        b.insert_kernel(two_kernel_chain("chain", 8), [a0], [o0]);
-        b.insert_kernel(two_kernel_chain("chain", 8), [a1], [o1]);
+        b.insert_kernel(two_kernel_chain("chain", 8), [a0], [o0], &[]);
+        b.insert_kernel(two_kernel_chain("chain", 8), [a1], [o1], &[]);
 
         assert_eq!(b.nodes.len(), 4);
         let kernels: Vec<_> = b
@@ -1851,7 +1868,7 @@ mod tests {
         let mut b = GraphBuilder::new();
         let a_buf = buf(&mut b, "a", DeviceType::Cuda(0), Quast::cst(32));
         let out_buf = buf(&mut b, "out", DeviceType::Cuda(0), Quast::cst(32));
-        b.insert_kernel(symbolic_two_kernel_chain("chain"), [a_buf], [out_buf]);
+        b.insert_kernel(symbolic_two_kernel_chain("chain"), [a_buf], [out_buf], &[]);
 
         // Both split kernels bind `n = 8` from the 32-byte (8-element)
         // input buffer, and the intermediate is sized through the binding.
@@ -1883,7 +1900,7 @@ mod tests {
         // 4 bytes * 64 columns * 32 rows: `n` must come out as 32.
         let a_buf = buf(&mut b, "a", DeviceType::Cuda(0), Quast::cst(4 * 64 * 32));
         let out_buf = buf(&mut b, "out", DeviceType::Cuda(0), Quast::cst(4 * 32));
-        b.insert_kernel(module, [a_buf], [out_buf]);
+        b.insert_kernel(module, [a_buf], [out_buf], &[]);
 
         assert_eq!(kernel_nodes(&b)[0].param_bindings, vec![32]);
     }
@@ -1898,7 +1915,6 @@ mod tests {
             let av = ib.index(a, &[i]);
             ib.add(av, av)
         });
-        ib.add_shape_hint(&[8, 16]);
         let module = ib.finish("prod", body);
 
         let mut b = GraphBuilder::new();
@@ -1906,7 +1922,7 @@ mod tests {
         // both come from the hint; the buffer still checks out (128 elems).
         let a_buf = buf(&mut b, "a", DeviceType::Cuda(0), Quast::cst(4 * 128));
         let out_buf = buf(&mut b, "out", DeviceType::Cuda(0), Quast::cst(4 * 128));
-        b.insert_kernel(module, [a_buf], [out_buf]);
+        b.insert_kernel(module, [a_buf], [out_buf], &[8, 16]);
 
         assert_eq!(kernel_nodes(&b)[0].param_bindings, vec![8, 16]);
     }
@@ -1916,7 +1932,7 @@ mod tests {
         // Same HIR (hence same `module_hash`, which excludes the hint), but
         // different hint values. The subgraph cache must not replay the
         // first module's hint for the second insert.
-        let build = |hint: &[i64]| {
+        let build = || {
             let mut ib = IRBuilder::new();
             let n = ib.symbol("n");
             let m = ib.symbol("m");
@@ -1925,7 +1941,6 @@ mod tests {
                 let av = ib.index(a, &[i]);
                 ib.add(av, av)
             });
-            ib.add_shape_hint(hint);
             ib.finish("prod", body)
         };
 
@@ -1933,8 +1948,8 @@ mod tests {
         let a_buf = buf(&mut b, "a", DeviceType::Cuda(0), Quast::cst(4 * 128));
         let out1 = buf(&mut b, "out1", DeviceType::Cuda(0), Quast::cst(4 * 128));
         let out2 = buf(&mut b, "out2", DeviceType::Cuda(0), Quast::cst(4 * 128));
-        b.insert_kernel(build(&[8, 16]), [a_buf], [out1]);
-        b.insert_kernel(build(&[4, 32]), [a_buf], [out2]);
+        b.insert_kernel(build(), [a_buf], [out1], &[8, 16]);
+        b.insert_kernel(build(), [a_buf], [out2], &[4, 32]);
 
         let kernels = kernel_nodes(&b);
         assert_eq!(kernels[0].param_bindings, vec![8, 16]);
@@ -1957,7 +1972,7 @@ mod tests {
         let mut b = GraphBuilder::new();
         let a_buf = buf(&mut b, "a", DeviceType::Cuda(0), Quast::cst(4 * 128));
         let out_buf = buf(&mut b, "out", DeviceType::Cuda(0), Quast::cst(4 * 128));
-        b.insert_kernel(module, [a_buf], [out_buf]);
+        b.insert_kernel(module, [a_buf], [out_buf], &[]);
     }
 
     #[test]
@@ -1979,7 +1994,7 @@ mod tests {
         let a_buf = buf(&mut b, "a", DeviceType::Cuda(0), Quast::cst(32));
         let c_buf = buf(&mut b, "c", DeviceType::Cuda(0), Quast::cst(64));
         let out_buf = buf(&mut b, "out", DeviceType::Cuda(0), Quast::cst(32));
-        b.insert_kernel(module, [a_buf, c_buf], [out_buf]);
+        b.insert_kernel(module, [a_buf, c_buf], [out_buf], &[]);
     }
 
     #[test]
@@ -2177,8 +2192,8 @@ mod tests {
             ib.finish("shared_mod", body)
         };
         let m = make_mod();
-        b.insert_kernel(m.clone(), [inp], [out_a]);
-        b.insert_kernel(m, [inp], [out_b]);
+        b.insert_kernel(m.clone(), [inp], [out_a], &[]);
+        b.insert_kernel(m, [inp], [out_b], &[]);
 
         let json = b.to_cytoscape_json();
         // Both kernel nodes reference the same module key.
