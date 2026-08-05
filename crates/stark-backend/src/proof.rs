@@ -58,6 +58,22 @@ pub struct TraceVData<SC: StarkProtocolConfig> {
     pub cached_commitments: Vec<SC::Digest>,
 }
 
+impl<SC: StarkProtocolConfig> TraceVData<SC> {
+    /// The base 2 logarithm of the trace height.
+    ///
+    /// Panics unless the height is a power of two. Temporary shim for verifier circuits
+    /// (recursion, static verifier) that do not yet support chunked (non-power-of-two) trace
+    /// heights.
+    pub fn log_height(&self) -> usize {
+        assert!(
+            self.height.is_power_of_two(),
+            "verifier circuit does not support non-power-of-two trace height {}",
+            self.height
+        );
+        self.height.ilog2() as usize
+    }
+}
+
 #[derive(Derivative, Serialize, Deserialize)]
 #[derivative(
     Clone(bound = ""),
