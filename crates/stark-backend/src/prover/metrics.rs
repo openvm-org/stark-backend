@@ -80,7 +80,7 @@ pub fn trace_metrics<SC: StarkProtocolConfig, PB: ProverBackend>(
 ) -> TraceMetrics {
     let heights = trace_vdata
         .iter()
-        .map(|vdata| vdata.as_ref().map(|v| 1 << v.log_height).unwrap_or(0))
+        .map(|vdata| vdata.as_ref().map(|v| v.height).unwrap_or(0))
         .collect::<Vec<_>>();
     let trace_height_inequalities = mpk
         .trace_height_constraints

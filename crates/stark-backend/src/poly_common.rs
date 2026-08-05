@@ -112,6 +112,26 @@ pub fn eval_eq_prism<F: Field>(l_skip: usize, x: &[F], y: &[F]) -> F {
     eval_eq_uni(l_skip, x[0], y[0]) * eval_eq_mle(&x[1..], &y[1..])
 }
 
+/// Evaluates the prism eq kernel `eq_prism(encode(m), r)` where `encode(m)` is the point of
+/// `D × H_n` corresponding to row `m` of a trace of height `2^{l_skip + n}`:
+/// `(omega^{m mod 2^{l_skip}}, bits of m >> l_skip)`.
+///
+/// `r` must have length `1 + n` where `r[0]` is the univariate coordinate.
+pub fn eval_eq_prism_at_row<F, EF>(l_skip: usize, m: usize, r: &[EF]) -> EF
+where
+    F: TwoAdicField,
+    EF: ExtensionField<F>,
+{
+    let n = r.len() - 1;
+    debug_assert!(m < 1 << (l_skip + n));
+    let omega = F::two_adic_generator(l_skip);
+    let z = omega.exp_u64((m & ((1 << l_skip) - 1)) as u64);
+    let bits = (0..n)
+        .map(|i| F::from_bool((m >> (l_skip + i)) & 1 == 1))
+        .collect_vec();
+    eval_eq_uni(l_skip, EF::from(z), r[0]) * eval_eq_mle(&r[1..], &bits)
+}
+
 pub fn evals_eq_hypercube_serial<F: Field>(x: &[F]) -> Vec<F> {
     let n = x.len();
     let mut out = F::zero_vec(1 << n);

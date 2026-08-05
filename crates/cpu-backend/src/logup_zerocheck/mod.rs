@@ -31,8 +31,8 @@ use openvm_stark_backend::{
         poly::{eq_sharp_uni_poly, evals_eq_hypercubes},
         stacked_pcs::StackedLayout,
         sumcheck::sumcheck_round0_deg,
-        AirProvingContext, DeviceMultiStarkProvingKey, MatrixDimensions, ProverBackend,
-        ProvingContext,
+        AirProvingContext, CommittedTraceData, DeviceMultiStarkProvingKey, MatrixDimensions,
+        ProverBackend, ProvingContext,
     },
     FiatShamirTranscript, StarkProtocolConfig,
 };
@@ -47,6 +47,59 @@ use p3_util::log2_strict_usize;
 use tracing::{debug, info_span, instrument};
 
 use crate::backend::CpuBackend;
+
+/// Zero-extends a row-major matrix to the next power-of-two height. Returns a clone if the
+/// height is already a power of two.
+fn zero_pad_row_major<F: Field>(mat: &RowMajorMatrix<F>) -> RowMajorMatrix<F> {
+    let height = MatrixDimensions::height(mat);
+    if height.is_power_of_two() {
+        return mat.clone();
+    }
+    let width = MatrixDimensions::width(mat);
+    let mut values = mat.values.clone();
+    values.resize(height.next_power_of_two() * width, F::ZERO);
+    RowMajorMatrix::new(values, width)
+}
+
+/// Returns a clone of `ctx` with each non-power-of-two-height trace (common main and cached main
+/// views) zero-extended to the next power of two, or `None` if all heights are already powers of
+/// two. See `zero_pad_common_main` in the reference backend.
+fn zero_pad_ctx_row_major<SC: StarkProtocolConfig>(
+    ctx: &ProvingContext<CpuBackend<SC>>,
+) -> Option<ProvingContext<CpuBackend<SC>>>
+where
+    CpuBackend<SC>: ProverBackend<Val = SC::F, Matrix = RowMajorMatrix<SC::F>>,
+{
+    if ctx.per_trace.iter().all(|(_, t)| {
+        MatrixDimensions::height(&t.common_main).is_power_of_two()
+            && t.cached_mains
+                .iter()
+                .all(|cd| MatrixDimensions::height(&cd.trace).is_power_of_two())
+    }) {
+        return None;
+    }
+    Some(ProvingContext::new(
+        ctx.per_trace
+            .iter()
+            .map(|(air_idx, t)| {
+                let common_main = zero_pad_row_major(&t.common_main);
+                let cached_mains = t
+                    .cached_mains
+                    .iter()
+                    .map(|cd| CommittedTraceData {
+                        commitment: cd.commitment.clone(),
+                        trace: zero_pad_row_major(&cd.trace),
+                        data: cd.data.clone(),
+                    })
+                    .collect();
+                (
+                    *air_idx,
+                    AirProvingContext::new(cached_mains, common_main, t.public_values.clone()),
+                )
+            })
+            .collect(),
+    ))
+}
 
 // ============================================================================
 // Batch DFT helpers for row-major sumcheck
@@ -1357,6 +1410,12 @@ where
     SC::EF: TwoAdicField + ExtensionField<SC::F>,
     CpuBackend<SC>: ProverBackend<Val = SC::F, Matrix = RowMajorMatrix<SC::F>>,
 {
+    // Zerocheck, LogUp, and the batch constraint sumcheck all operate on the virtually
+    // zero-padded power-of-two cube of each trace. Materialize the zero padding here (only
+    // padding rows are added; committed data is unaffected) so the rest of this function is
+    // identical to the power-of-two case.
+    let padded_ctx = zero_pad_ctx_row_major(ctx);
+    let ctx = padded_ctx.as_ref().unwrap_or(ctx);
     let l_skip = mpk.params.l_skip;
     let constraint_degree = mpk.max_constraint_degree;
     let num_traces = ctx.per_trace.len();
@@ -1374,7 +1433,7 @@ where
             let log_height = log2_strict_usize(height);
             let log_lifted_height = log_height.max(l_skip);
             total_interactions += (num_interactions as u64) << log_lifted_height;
-            (num_interactions, log_lifted_height)
+            (num_interactions, 1usize << log_lifted_height)
         })
         .collect();
     let n_logup = calculate_n_logup(l_skip, total_interactions);

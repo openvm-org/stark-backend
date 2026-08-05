@@ -149,6 +149,19 @@ pub fn check_logup<F: Field>(
     }
 }
 
+/// Zero-extends a row-major matrix to the next power-of-two height. Returns the input unchanged
+/// (no copy) if the height is already a power of two.
+fn zero_pad_row_major<F: Field>(mat: Arc<RowMajorMatrix<F>>) -> Arc<RowMajorMatrix<F>> {
+    let height = mat.height();
+    if height == 0 || height.is_power_of_two() {
+        return mat;
+    }
+    let width = mat.width();
+    let mut values = mat.values.clone();
+    values.resize(height.next_power_of_two() * width, F::ZERO);
+    Arc::new(RowMajorMatrix::new(values, width))
+}
+
 /// The debugging will check the main AIR constraints and then separately check LogUp constraints by
 /// checking the actual multiset equalities. Currently it will not debug check any after challenge
 /// phase constraints for implementation simplicity.
@@ -160,6 +173,21 @@ pub fn debug_constraints_and_interactions<SC: StarkProtocolConfig>(
 ) {
     USE_DEBUG_BUILDER.with(|debug| {
         if *debug.lock().unwrap() {
+            // The proof system's polynomial model for a trace of `h` used rows is its virtual
+            // zero-extension to the next power-of-two cube: constraints (including the last-row
+            // wraparound) are checked on the padded cube. Mirror that here.
+            let inputs = inputs
+                .iter()
+                .map(|input| AirProofRawInput {
+                    cached_mains: input
+                        .cached_mains
+                        .iter()
+                        .map(|t| zero_pad_row_major(t.clone()))
+                        .collect(),
+                    common_main: input.common_main.clone().map(zero_pad_row_major),
+                    public_values: input.public_values.clone(),
+                })
+                .collect_vec();
             let (main_parts_per_air, pvs_per_air): (Vec<_>, Vec<_>) = inputs
                 .iter()
                 .map(|input| {

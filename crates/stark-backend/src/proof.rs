@@ -46,12 +46,12 @@ pub struct Proof<SC: StarkProtocolConfig> {
 )]
 #[serde(bound = "")]
 pub struct TraceVData<SC: StarkProtocolConfig> {
-    /// The base 2 logarithm of the trace height. This should be a nonnegative integer and is
-    /// allowed to be `< l_skip`.
+    /// The trace height (number of used rows, not padded to a power of two). Must be nonzero and
+    /// either a power of two below `2^l_skip`, or a multiple of `2^l_skip`.
     ///
     /// If the corresponding AIR has a preprocessed trace, this must match the
     /// value in the vkey.
-    pub log_height: usize,
+    pub height: usize,
     /// The cached commitments used.
     ///
     /// The length must match the value in the vkey.
@@ -203,7 +203,7 @@ pub struct WhirProof<SC: StarkProtocolConfig> {
 
 impl<SC: EncodableConfig> Encode for TraceVData<SC> {
     fn encode<W: Write>(&self, writer: &mut W) -> Result<()> {
-        self.log_height.encode(writer)?;
+        self.height.encode(writer)?;
         SC::encode_digest_slice(&self.cached_commitments, writer)
     }
 }
@@ -424,7 +424,7 @@ impl<SC: EncodableConfig> Encode for WhirProof<SC> {
 impl<SC: DecodableConfig> Decode for TraceVData<SC> {
     fn decode<R: Read>(reader: &mut R) -> Result<Self> {
         Ok(Self {
-            log_height: usize::decode(reader)?,
+            height: usize::decode(reader)?,
             cached_commitments: SC::decode_digest_vec(reader)?,
         })
     }

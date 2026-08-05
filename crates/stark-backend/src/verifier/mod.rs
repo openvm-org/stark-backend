@@ -102,7 +102,7 @@ where
             trace_vdata[air_id].is_none(),
             trace_vdata[air_id]
                 .as_ref()
-                .map(|vdata| Reverse(vdata.log_height)),
+                .map(|vdata| Reverse(vdata.height)),
             air_id,
         )
     });
@@ -112,9 +112,12 @@ where
         let sum = trace_id_to_air_id
             .iter()
             .map(|&air_id| {
-                let log_height = trace_vdata[air_id].as_ref().unwrap().log_height;
-                // Proof shape will check n <= n_stack is in bounds
-                (1 << log_height.max(l_skip)) as u64 * constraint.coefficients[air_id] as u64
+                let height = trace_vdata[air_id].as_ref().unwrap().height;
+                // Constraints bound the lifted padded height: the size of the virtual
+                // power-of-two cube each trace's polynomial model lives on. Proof shape will
+                // check n <= n_stack is in bounds.
+                height.next_power_of_two().max(1 << l_skip) as u64
+                    * constraint.coefficients[air_id] as u64
             })
             .sum::<u64>();
         if sum >= constraint.threshold as u64 {
@@ -139,12 +142,16 @@ where
         }
         if let Some(trace_vdata) = trace_vdata {
             if let Some(pdata) = avk.preprocessed_data.as_ref() {
-                if (pdata.hypercube_dim + l_skip as isize) as usize != trace_vdata.log_height {
+                // Preprocessed heights are fixed at keygen and must be powers of two.
+                if !trace_vdata.height.is_power_of_two()
+                    || (pdata.hypercube_dim + l_skip as isize) as usize
+                        != trace_vdata.height.ilog2() as usize
+                {
                     return Err(VerifierError::PreprocessedTraceHeightMismatch);
                 }
                 transcript.observe_commit(pdata.commit);
             } else {
-                transcript.observe(SC::F::from_usize(trace_vdata.log_height));
+                transcript.observe(SC::F::from_usize(trace_vdata.height));
             }
             debug_assert_eq!(
                 avk.params.width.cached_mains.len(),
@@ -160,10 +167,14 @@ where
         }
     }
 
-    // n_per_trace.len() = num_traces
+    // n_per_trace.len() = num_traces. The hypercube dimension is that of the virtual
+    // zero-padded power-of-two cube of each trace.
     let n_per_trace: Vec<isize> = trace_id_to_air_id
         .iter()
-        .map(|&air_id| trace_vdata[air_id].as_ref().unwrap().log_height as isize - l_skip as isize)
+        .map(|&air_id| {
+            let height = trace_vdata[air_id].as_ref().unwrap().height;
+            height.next_power_of_two().ilog2() as isize - l_skip as isize
+        })
         .collect();
     let r = verify_zerocheck_and_logup::<SC, TS>(
         transcript,

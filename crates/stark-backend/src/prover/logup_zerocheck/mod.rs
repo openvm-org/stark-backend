@@ -35,6 +35,68 @@ mod single;
 pub use cpu::LogupZerocheckCpu;
 pub use single::*;
 
+use crate::prover::{AirProvingContext, CommittedTraceData};
+
+/// Zero-extends a column-major matrix to the next power-of-two height. Returns a clone if the
+/// height is already a power of two.
+pub fn zero_pad_col_major<F: Field>(mat: &ColMajorMatrix<F>) -> ColMajorMatrix<F> {
+    let height = mat.height();
+    if height.is_power_of_two() {
+        return mat.clone();
+    }
+    let padded_height = height.next_power_of_two();
+    let width = mat.width();
+    let mut values = F::zero_vec(padded_height * width);
+    for (dst, src) in values.chunks_exact_mut(padded_height).zip(mat.columns()) {
+        dst[..height].copy_from_slice(src);
+    }
+    ColMajorMatrix::new(values, width)
+}
+
+/// Returns a clone of `ctx` with each non-power-of-two-height trace (common main and cached main
+/// views) zero-extended to the next power of two, or `None` if all heights are already powers of
+/// two.
+///
+/// The proof system's polynomial model for a trace of `h` used rows is its virtual zero-extension
+/// to the `2^{ceil(log2 h)}` cube; only the `h` used rows are committed. Constraint and LogUp
+/// proving operate on the padded cube, so they consume the materialized padded view.
+pub fn zero_pad_common_main<SC: StarkProtocolConfig>(
+    ctx: &ProvingContext<CpuColMajorBackend<SC>>,
+) -> Option<ProvingContext<CpuColMajorBackend<SC>>>
+where
+    CpuColMajorBackend<SC>: ProverBackend<Val = SC::F, Matrix = ColMajorMatrix<SC::F>>,
+{
+    if ctx.per_trace.iter().all(|(_, t)| {
+        t.common_main.height().is_power_of_two()
+            && t.cached_mains
+                .iter()
+                .all(|cd| cd.trace.height().is_power_of_two())
+    }) {
+        return None;
+    }
+    Some(ProvingContext::new(
+        ctx.per_trace
+            .iter()
+            .map(|(air_idx, t)| {
+                let common_main = zero_pad_col_major(&t.common_main);
+                let cached_mains = t
+                    .cached_mains
+                    .iter()
+                    .map(|cd| CommittedTraceData {
+                        commitment: cd.commitment.clone(),
+                        trace: zero_pad_col_major(&cd.trace),
+                        data: cd.data.clone(),
+                    })
+                    .collect();
+                (
+                    *air_idx,
+                    AirProvingContext::new(cached_mains, common_main, t.public_values.clone()),
+                )
+            })
+            .collect(),
+    ))
+}
+
 #[instrument(level = "info", skip_all)]
 #[allow(clippy::type_complexity)]
 pub fn prove_zerocheck_and_logup<SC: StarkProtocolConfig, TS>(
@@ -48,6 +110,12 @@ where
     SC::EF: TwoAdicField + ExtensionField<SC::F>,
     CpuColMajorBackend<SC>: ProverBackend<Val = SC::F, Matrix = ColMajorMatrix<SC::F>>,
 {
+    // Zerocheck, LogUp, and the batch constraint sumcheck all operate on the virtually
+    // zero-padded power-of-two cube of each trace. Materialize the zero padding here (only
+    // padding rows are added; committed data is unaffected) so the rest of this function is
+    // identical to the power-of-two case.
+    let padded_ctx = zero_pad_common_main(ctx);
+    let ctx = padded_ctx.as_ref().unwrap_or(ctx);
     let l_skip = mpk.params.l_skip;
     let constraint_degree = mpk.max_constraint_degree;
     let num_traces = ctx.per_trace.len();
@@ -68,7 +136,7 @@ where
             let log_height = log2_strict_usize(height);
             let log_lifted_height = log_height.max(l_skip);
             total_interactions += (num_interactions as u64) << log_lifted_height;
-            (num_interactions, log_lifted_height)
+            (num_interactions, 1usize << log_lifted_height)
         })
         .collect();
     // Implicitly, the width of this stacking should be 1

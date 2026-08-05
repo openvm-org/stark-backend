@@ -353,7 +353,7 @@ where
 struct PresentTrace<'a, SC: StarkProtocolConfig> {
     air_id: usize,
     vk: &'a StarkVerifyingKey<SC::F, SC::Digest>,
-    log_height: usize,
+    height: usize,
 }
 
 struct ExtractionShape<'a, SC: StarkProtocolConfig> {
@@ -378,11 +378,11 @@ impl<'a, SC: StarkProtocolConfig> ExtractionShape<'a, SC> {
                 vdata.as_ref().map(|vdata| PresentTrace {
                     air_id,
                     vk,
-                    log_height: vdata.log_height,
+                    height: vdata.height,
                 })
             })
             .collect_vec();
-        present_traces.sort_by_key(|trace| (Reverse(trace.log_height), trace.air_id));
+        present_traces.sort_by_key(|trace| (Reverse(trace.height), trace.air_id));
 
         if present_traces.is_empty() {
             return Err(TranscriptExtractionError::EmptyTraceSet);
@@ -390,7 +390,8 @@ impl<'a, SC: StarkProtocolConfig> ExtractionShape<'a, SC> {
 
         let l_skip = mvk.params.l_skip;
         let total_interactions = present_traces.iter().fold(0u64, |acc, trace| {
-            acc + ((trace.vk.num_interactions() as u64) << trace.log_height.max(l_skip))
+            let padded_log = trace.height.next_power_of_two().ilog2() as usize;
+            acc + ((trace.vk.num_interactions() as u64) << padded_log.max(l_skip))
         });
         let n_logup = calculate_n_logup(l_skip, total_interactions);
         let num_gkr_rounds = if total_interactions == 0 {
@@ -398,7 +399,8 @@ impl<'a, SC: StarkProtocolConfig> ExtractionShape<'a, SC> {
         } else {
             l_skip + n_logup
         };
-        let n_max = present_traces[0].log_height.saturating_sub(l_skip);
+        let n_max =
+            (present_traces[0].height.next_power_of_two().ilog2() as usize).saturating_sub(l_skip);
         let layouts = build_layouts(mvk, &present_traces)?;
 
         Ok(Self {
@@ -430,9 +432,10 @@ where
         };
 
         if is_present {
-            let log_height = if let Some(preprocessed) = &avk.preprocessed_data {
+            let height = if let Some(preprocessed) = &avk.preprocessed_data {
                 cursor.expect_observe_digest::<RATE>(preprocessed.commit)?;
-                mvk.params
+                let log_height = mvk
+                    .params
                     .l_skip
                     .checked_add_signed(preprocessed.hypercube_dim)
                     .ok_or_else(|| TranscriptExtractionError::InvalidDerivedValue {
@@ -440,7 +443,8 @@ where
                             "preprocessed AIR {air_id} has invalid derived log height: l_skip={}, hypercube_dim={}",
                             mvk.params.l_skip, preprocessed.hypercube_dim
                         ),
-                    })?
+                    })?;
+                1usize << log_height
             } else {
                 cursor.observe_usize()?
             };
@@ -450,7 +454,7 @@ where
                 cached_commitments.push(cursor.observe_digest::<RATE>()?);
             }
             trace_vdata[air_id] = Some(TraceVData {
-                log_height,
+                height,
                 cached_commitments,
             });
 
@@ -477,7 +481,7 @@ fn build_layouts<SC: StarkProtocolConfig>(
         log_stacked_height,
         present_traces
             .iter()
-            .map(|trace| (trace.vk.params.width.common_main, trace.log_height))
+            .map(|trace| (trace.vk.params.width.common_main, trace.height))
             .collect_vec(),
     )?;
 
@@ -492,7 +496,7 @@ fn build_layouts<SC: StarkProtocolConfig>(
                 .iter()
                 .chain(&trace.vk.params.width.cached_mains)
                 .copied()
-                .map(|width| (width, trace.log_height))
+                .map(|width| (width, trace.height))
                 .collect_vec()
         })
         .map(|sorted| StackedLayout::new(l_skip, log_stacked_height, vec![sorted]))

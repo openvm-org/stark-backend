@@ -11,7 +11,7 @@ use openvm_stark_backend::{
     prover::{
         poly::evals_eq_hypercube,
         stacked_pcs::StackedSlice,
-        stacked_reduction::StackedReductionProver,
+        stacked_reduction::{chunk_weight_gamma, StackedReductionProver},
         sumcheck::{batch_fold_mle_evals, sumcheck_round0_deg, sumcheck_round_poly_evals},
         ColMajorMatrix, ColMajorMatrixView, MatrixDimensions, ProverBackend,
     },
@@ -95,22 +95,30 @@ pub struct StackedReductionCpuNew<'a, SC: StarkProtocolConfig> {
     eq_const: SC::EF,
 
     stacked_per_commit: Vec<&'a CpuStackedPcsData<SC::F, SC::Digest>>,
-    trace_views: Vec<TraceViewMeta>,
+    trace_views: Vec<TraceViewMeta<SC::EF>>,
     ht_diff_idxs: Vec<usize>,
 
     eq_r_per_lht: HashMap<usize, Vec<SC::EF>>,
 
     // After round 0:
     k_rot_r_per_lht: HashMap<usize, Vec<SC::EF>>,
+    /// Folded evaluations of the chunk-corner kernel `eq_prism(-, (1, 0, ..., 0))`, used for the
+    /// rotation borrow correction of chunked (non-power-of-two height) traces.
+    corner_per_lht: HashMap<usize, Vec<SC::EF>>,
     q_evals: Vec<ColMajorMatrix<SC::EF>>,
     eq_ub_per_trace: Vec<SC::EF>,
 }
 
-struct TraceViewMeta {
+struct TraceViewMeta<EF> {
     com_idx: usize,
     slice: StackedSlice,
     lambda_eq_idx: usize,
     lambda_rot_idx: Option<usize>,
+    /// Chunk weight (see the reference backend's `TraceViewMeta`); `ONE` for single-chunk traces.
+    weight: EF,
+    /// Rotation borrow correction; `ZERO` for single-chunk traces or when no rotation claim is
+    /// needed.
+    gamma: EF,
 }
 
 /// `x_int` is the integer representation of point on H_n.
@@ -167,29 +175,37 @@ where
         let l_skip = device.params().l_skip;
         let omega_skip = SC::F::two_adic_generator(l_skip);
 
+        // Lambda powers are assigned per opening claim (per unstacked column); chunked traces
+        // contribute multiple slices per claim, sharing the claim's lambda powers.
         let mut trace_views = Vec::new();
-        let mut lambda_idx = 0usize;
+        let mut claim_base = 0usize;
         for (com_idx, d) in stacked_per_commit.iter().enumerate() {
             let need_rot_for_commit = &need_rot_per_commit[com_idx];
-            debug_assert_eq!(need_rot_for_commit.len(), d.layout.mat_starts.len());
-            for &(mat_idx, _col_idx, slice) in &d.layout.sorted_cols {
-                let lambda_eq_idx = lambda_idx;
-                lambda_idx += 1;
-                let lambda_rot_idx = if need_rot_for_commit[mat_idx] {
-                    Some(lambda_idx)
-                } else {
-                    None
-                };
-                lambda_idx += 1;
+            debug_assert_eq!(need_rot_for_commit.len(), d.layout.num_mats());
+            for &(mat_idx, col_idx, slice) in &d.layout.sorted_cols {
+                let claim_idx = claim_base + d.layout.claim_idx(mat_idx, col_idx);
+                let need_rot = need_rot_for_commit[mat_idx];
+                let lambda_eq_idx = 2 * claim_idx;
+                let lambda_rot_idx = need_rot.then_some(2 * claim_idx + 1);
+                let (weight, gamma) = chunk_weight_gamma::<SC::F, SC::EF>(
+                    l_skip,
+                    &slice,
+                    d.layout.height_of(mat_idx),
+                    need_rot,
+                    r,
+                );
                 trace_views.push(TraceViewMeta {
                     com_idx,
                     slice,
                     lambda_eq_idx,
                     lambda_rot_idx,
+                    weight,
+                    gamma,
                 });
             }
+            claim_base += d.layout.num_claims();
         }
-        let lambda_pows = lambda.powers().take(lambda_idx).collect_vec();
+        let lambda_pows = lambda.powers().take(2 * claim_base).collect_vec();
 
         let mut ht_diff_idxs = Vec::new();
         let mut eq_r_per_lht: HashMap<usize, Vec<SC::EF>> = HashMap::new();
@@ -221,6 +237,7 @@ where
             eq_r_per_lht,
             q_evals: vec![],
             k_rot_r_per_lht: HashMap::new(),
+            corner_per_lht: HashMap::new(),
             eq_ub_per_trace,
         }
     }
@@ -287,25 +304,35 @@ where
                         let eq_r0: SC::EF = eval_eq_uni(l, z_val.into(), r_uni);
                         let eq_r0_rot: SC::EF = eval_eq_uni(l, z_val.into(), r_uni * omega_l);
                         let eq_1: SC::F = eval_eq_uni_at_one(l_skip, z_val);
-                        pre_z.push((eq_r0 * ind, eq_r0_rot * ind, eq_const * eq_1 * ind));
+                        pre_z.push((
+                            eq_r0 * ind,
+                            eq_r0_rot * ind,
+                            eq_const * eq_1 * ind,
+                            eq_1 * ind,
+                        ));
                     }
                 }
 
-                // Pre-extract lambda weights per trace
+                // Pre-extract lambda weights per trace. Chunk weights multiply the lambda
+                // coefficients; gamma weights feed the corner kernel (see reference backend).
                 let lambda_eqs: Vec<SC::EF> = t_window
                     .iter()
-                    .map(|tv| lambda_pows[tv.lambda_eq_idx])
+                    .map(|tv| lambda_pows[tv.lambda_eq_idx] * tv.weight)
                     .collect();
                 let lambda_rots: Vec<Option<SC::EF>> = t_window
                     .iter()
-                    .map(|tv| tv.lambda_rot_idx.map(|idx| lambda_pows[idx]))
+                    .map(|tv| tv.lambda_rot_idx.map(|idx| lambda_pows[idx] * tv.weight))
+                    .collect();
+                let gamma_rots: Vec<Option<SC::EF>> = t_window
+                    .iter()
+                    .map(|tv| tv.lambda_rot_idx.map(|idx| lambda_pows[idx] * tv.gamma))
                     .collect();
                 let num_traces = q_cols.len();
 
                 // Parallel fold-reduce over x-points in H_{n_lift}.
                 // Each thread reuses its own DFT and weighted-sum buffers.
-                type Acc<F, EF> = (Vec<[EF; 2]>, Vec<F>, Vec<F>, Vec<EF>, Vec<EF>);
-                let (evals, _, _, _, _): Acc<SC::F, SC::EF> =
+                type Acc<F, EF> = (Vec<[EF; 2]>, Vec<F>, Vec<F>, Vec<EF>, Vec<EF>, Vec<EF>);
+                let (evals, ..): Acc<SC::F, SC::EF> =
                     (0..1usize << n_lift).into_par_iter().par_fold_reduce(
                         || -> Acc<SC::F, SC::EF> {
                             (
@@ -314,14 +341,18 @@ where
                                 vec![SC::F::ZERO; n_skip],
                                 vec![SC::EF::ZERO; d_n],
                                 vec![SC::EF::ZERO; d_n],
+                                vec![SC::EF::ZERO; d_n],
                             )
                         },
-                        |(mut result, mut coeffs, mut coset, mut w_eq, mut w_rot), x| {
+                        |(mut result, mut coeffs, mut coset, mut w_eq, mut w_rot, mut w_cor), x| {
                             // Zero out per-x weighted sums
                             for v in w_eq.iter_mut() {
                                 *v = SC::EF::ZERO;
                             }
                             for v in w_rot.iter_mut() {
+                                *v = SC::EF::ZERO;
+                            }
+                            for v in w_cor.iter_mut() {
                                 *v = SC::EF::ZERO;
                             }
 
@@ -338,6 +369,7 @@ where
 
                                 let le = lambda_eqs[t];
                                 let lr = lambda_rots[t];
+                                let gr = gamma_rots[t];
                                 for (c_idx, &shift) in coset_shifts.iter().enumerate() {
                                     coset.copy_from_slice(&coeffs);
                                     twiddles.coset_dft_inplace(&mut coset, shift);
@@ -348,6 +380,11 @@ where
                                         w_eq[rm_idx] += le * q;
                                         if let Some(lr) = lr {
                                             w_rot[rm_idx] += lr * q;
+                                        }
+                                        if x == 0 {
+                                            if let Some(gr) = gr {
+                                                w_cor[rm_idx] += gr * q;
+                                            }
                                         }
                                     }
                                 }
@@ -360,18 +397,23 @@ where
                             let delta = k_rot_cube - eq_cube;
 
                             for rm_idx in 0..d_n {
-                                let (pe, pr, p1) = pre_z[rm_idx];
+                                let (pe, pr, p1, pc) = pre_z[rm_idx];
                                 result[rm_idx][0] += (pe * eq_cube) * w_eq[rm_idx];
                                 result[rm_idx][1] += (pr * eq_cube + p1 * delta) * w_rot[rm_idx];
+                                if x == 0 {
+                                    // Corner kernel eq_prism(-, (1, 0, ..., 0)): nonzero only at
+                                    // the cube origin.
+                                    result[rm_idx][1] += w_cor[rm_idx] * pc;
+                                }
                             }
-                            (result, coeffs, coset, w_eq, w_rot)
+                            (result, coeffs, coset, w_eq, w_rot, w_cor)
                         },
-                        |(mut a_result, a1, a2, a3, a4), (b_result, _, _, _, _)| {
+                        |(mut a_result, a1, a2, a3, a4, a5), (b_result, ..)| {
                             for (ai, bi) in a_result.iter_mut().zip(b_result.iter()) {
                                 ai[0] += bi[0];
                                 ai[1] += bi[1];
                             }
-                            (a_result, a1, a2, a3, a4)
+                            (a_result, a1, a2, a3, a4, a5)
                         },
                     );
 
@@ -412,6 +454,17 @@ where
         let eq_uni_u0r0 = eval_eq_uni(l_skip, u_0, r_0);
         let eq_uni_u0r0_rot = eval_eq_uni(l_skip, u_0, r_0 * omega_skip);
         let eq_uni_u01 = eval_eq_uni_at_one(l_skip, u_0);
+        // Fold the corner kernel eq_prism(-, (1, 0, ..., 0)): univariate factor eq_D(u_0, 1),
+        // cube factor eq(x, 0) with hypercube evals (1, 0, ..., 0).
+        self.corner_per_lht = self
+            .eq_r_per_lht
+            .iter()
+            .map(|(&log_height, eq_vec)| {
+                let mut evals = SC::EF::zero_vec(eq_vec.len());
+                evals[0] = eq_uni_u01;
+                (log_height, evals)
+            })
+            .collect();
         self.k_rot_r_per_lht = self
             .eq_r_per_lht
             .par_iter_mut()
@@ -459,8 +512,10 @@ where
                 let hypercube_dim = n_lift.saturating_sub(round);
                 let eq_rs = self.eq_r_per_lht.get(&log_height).unwrap().as_slice();
                 let k_rot_rs = self.k_rot_r_per_lht.get(&log_height).unwrap().as_slice();
+                let corner_rs = self.corner_per_lht.get(&log_height).unwrap().as_slice();
                 debug_assert_eq!(eq_rs.len(), 1 << n_lift.saturating_sub(round - 1));
                 debug_assert_eq!(k_rot_rs.len(), 1 << n_lift.saturating_sub(round - 1));
+                debug_assert_eq!(corner_rs.len(), 1 << n_lift.saturating_sub(round - 1));
                 let t_cols = t_views
                     .iter()
                     .map(|tv| {
@@ -486,21 +541,25 @@ where
                             let tv = &self.trace_views[t_idx];
                             let q = eval[0];
                             let mut eq_ub = self.eq_ub_per_trace[t_idx];
-                            let (eq, k_rot) = if round > n_lift {
+                            let (eq, k_rot, corner) = if round > n_lift {
                                 let b = (tv.slice.row_idx >> (l_skip + round - 1)) & 1;
                                 eq_ub *= eval_eq_mle(&[x], &[SC::F::from_bool(b == 1)]);
                                 debug_assert_eq!(y, 0);
-                                (eq_rs[0] * eq_ub, k_rot_rs[0] * eq_ub)
+                                (eq_rs[0] * eq_ub, k_rot_rs[0] * eq_ub, corner_rs[0] * eq_ub)
                             } else {
                                 let eq_r =
                                     eq_rs[y << 1] * (SC::EF::ONE - x) + eq_rs[(y << 1) + 1] * x;
                                 let k_rot_r = k_rot_rs[y << 1] * (SC::EF::ONE - x)
                                     + k_rot_rs[(y << 1) + 1] * x;
-                                (eq_r * eq_ub, k_rot_r * eq_ub)
+                                let corner_r = corner_rs[y << 1] * (SC::EF::ONE - x)
+                                    + corner_rs[(y << 1) + 1] * x;
+                                (eq_r * eq_ub, k_rot_r * eq_ub, corner_r * eq_ub)
                             };
-                            acc[0] += self.lambda_pows[tv.lambda_eq_idx] * q * eq;
+                            acc[0] += self.lambda_pows[tv.lambda_eq_idx] * q * tv.weight * eq;
                             if let Some(rot_idx) = tv.lambda_rot_idx {
-                                acc[1] += self.lambda_pows[rot_idx] * q * k_rot;
+                                acc[1] += self.lambda_pows[rot_idx]
+                                    * q
+                                    * (tv.weight * k_rot + tv.gamma * corner);
                             }
                             acc
                         })
@@ -517,6 +576,7 @@ where
         let one_minus_r = SC::EF::ONE - u_round;
         self.eq_r_per_lht = fold_eval_map(take(&mut self.eq_r_per_lht), one_minus_r, u_round);
         self.k_rot_r_per_lht = fold_eval_map(take(&mut self.k_rot_r_per_lht), one_minus_r, u_round);
+        self.corner_per_lht = fold_eval_map(take(&mut self.corner_per_lht), one_minus_r, u_round);
         for (tv, eq_ub) in zip(&self.trace_views, &mut self.eq_ub_per_trace) {
             let s = tv.slice;
             let n_lift = s.log_height().saturating_sub(l_skip);

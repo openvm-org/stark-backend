@@ -1,3 +1,5 @@
+use std::cmp::Reverse;
+
 use getset::{CopyGetters, Getters};
 use itertools::Itertools;
 use p3_dft::{Radix2DitParallel, TwoAdicSubgroupDft};
@@ -27,31 +29,42 @@ pub struct StackedLayout {
     /// Stacked width
     #[getset(get_copy = "pub")]
     width: usize,
-    /// The columns of the unstacked matrices in sorted order. Each entry `(matrix index, column
-    /// index, coordinate)` contains the pointer `(matrix index, column index)` to a column of the
-    /// unstacked collection of matrices as well as `coordinate` which is a pointer to where the
-    /// column starts in the stacked matrix.
+    /// The chunked columns of the unstacked matrices in stacking order (descending slice size).
+    /// Each entry `(matrix index, column index, slice)` points to a power-of-two *chunk* of a
+    /// column of the unstacked collection of matrices, as well as where the chunk lives in the
+    /// stacked matrix.
+    ///
+    /// A matrix whose height is a power of two contributes exactly one slice per column. A matrix
+    /// with non-power-of-two height `h` (which must be a multiple of `2^l_skip`) contributes one
+    /// slice per column per set bit of `h` (its binary-ruler chunk decomposition), so a `(matrix
+    /// index, column index)` pair may appear multiple times.
     pub sorted_cols: Vec<(
         usize, /* unstacked matrix index */
         usize, /* unstacked column index */
         StackedSlice,
     )>,
-    /// `mat_starts[mat_idx]` is the index in `sorted_cols` where the matrix with index `mat_idx`
-    /// starts.
-    pub mat_starts: Vec<usize>,
+    /// Width of each unstacked matrix.
+    pub mat_widths: Vec<usize>,
+    /// Height (number of *used* rows, not padded to a power of two) of each unstacked matrix.
+    pub mat_heights: Vec<usize>,
 }
 
-/// Pointer to the location of a sub-column within the stacked matrix.
+/// Pointer to the location of a sub-column chunk within the stacked matrix.
 /// This struct contains length information, but information from [StackedLayout] (namely `l_skip`)
 /// is needed to determine if this is a strided slice or not.
 #[derive(Copy, Clone, Debug, Serialize, Deserialize, CopyGetters, derive_new::new)]
 pub struct StackedSlice {
+    /// Column within the stacked matrix.
     pub col_idx: usize,
+    /// Starting row within the stacked matrix. Always a multiple of `2^max(log_height, l_skip)`.
     pub row_idx: usize,
-    /// The true log height. If `>= l_skip`, no striding. Otherwise striding by `2^{l_skip -
-    /// log_height}`.
+    /// The true log height of this chunk. If `>= l_skip`, no striding. Otherwise striding by
+    /// `2^{l_skip - log_height}`.
     #[getset(get_copy = "pub")]
     log_height: usize,
+    /// Row offset of this chunk within its unstacked column. Always a multiple of
+    /// `2^log_height`; zero for power-of-two-height matrices (single chunk).
+    pub row_offset: usize,
 }
 
 impl StackedSlice {
@@ -73,6 +86,39 @@ impl StackedSlice {
             1 << l_skip
         }
     }
+}
+
+/// Decomposes a matrix height into its binary-ruler chunk decomposition `(row_offset,
+/// log_height)`, in descending chunk size order.
+///
+/// - `height == 0` is rejected.
+/// - `height < 2^l_skip` must be a power of two (a single strided chunk).
+/// - `height >= 2^l_skip` must be a multiple of `2^l_skip`; each set bit of `height` becomes one
+///   chunk. Because chunk sizes strictly decrease, each `row_offset` is automatically a multiple of
+///   the chunk size.
+pub fn chunk_decompose(
+    l_skip: usize,
+    height: usize,
+) -> Result<impl Iterator<Item = (usize, usize)>, StackedPcsError> {
+    if height == 0 {
+        return Err(StackedPcsError::LayoutInvalidHeight { height, l_skip });
+    }
+    if height < (1 << l_skip) {
+        if !height.is_power_of_two() {
+            return Err(StackedPcsError::LayoutInvalidHeight { height, l_skip });
+        }
+    } else if height % (1 << l_skip) != 0 {
+        return Err(StackedPcsError::LayoutInvalidHeight { height, l_skip });
+    }
+    let mut row_offset = 0usize;
+    Ok((0..usize::BITS as usize)
+        .rev()
+        .filter(move |&a| height & (1 << a) != 0)
+        .map(move |a| {
+            let off = row_offset;
+            row_offset += 1 << a;
+            (off, a)
+        }))
 }
 
 #[derive(Clone, Debug, Getters, CopyGetters, Serialize, Deserialize)]
@@ -139,31 +185,44 @@ impl StackedLayout {
     /// - `l_skip` is a threshold log2 height: if a column has height less than `2^l_skip`, it is
     ///   stacked as a column of height `2^l_skip` with stride `2^{l_skip - log_height}`.
     /// - `log_stacked_height` is the log2 height of the stacked matrix.
-    /// - `sorted` is Vec of `(width, log_height)` that must already be **sorted** in descending
-    ///   order of `log_height`.
+    /// - `sorted` is Vec of `(width, height)` that must already be **sorted** in descending order
+    ///   of `height`. Heights need not be powers of two: a height `>= 2^l_skip` that is a multiple
+    ///   of `2^l_skip` is decomposed into binary-ruler chunks, each stacked as its own slice.
     pub fn new(
         l_skip: usize,
         log_stacked_height: usize,
-        sorted: Vec<(usize /* width */, usize /* log_height */)>,
+        sorted: Vec<(usize /* width */, usize /* height */)>,
     ) -> Result<Self, StackedPcsError> {
         debug_assert!(l_skip <= log_stacked_height);
         debug_assert!(sorted.is_sorted_by(|a, b| a.1 >= b.1));
-        let mut sorted_cols = Vec::with_capacity(sorted.len());
-        let mut mat_starts = Vec::new();
-        let mut col_idx = 0;
-        let mut row_idx = 0;
-        for (mat_idx, (width, log_ht)) in sorted.into_iter().enumerate() {
-            mat_starts.push(sorted_cols.len());
+        let mat_widths = sorted.iter().map(|&(w, _)| w).collect_vec();
+        let mat_heights = sorted.iter().map(|&(_, h)| h).collect_vec();
+
+        // Chunk units `(mat_idx, row_offset, chunk_log_height)` in stacking order: stable sort by
+        // descending chunk size. Stability keeps chunks deterministic: ties broken by (matrix,
+        // then descending chunk order within a matrix).
+        let mut chunks: Vec<(usize, usize, usize)> = Vec::new();
+        for (mat_idx, &(width, height)) in sorted.iter().enumerate() {
             if width == 0 {
                 continue;
             }
-            if log_ht > log_stacked_height {
-                return Err(StackedPcsError::LayoutHeightExceeded {
-                    log_height: log_ht,
-                    log_stacked_height,
-                });
+            for (row_offset, log_ht) in chunk_decompose(l_skip, height)? {
+                if log_ht > log_stacked_height {
+                    return Err(StackedPcsError::LayoutHeightExceeded {
+                        log_height: log_ht,
+                        log_stacked_height,
+                    });
+                }
+                chunks.push((mat_idx, row_offset, log_ht));
             }
-            for j in 0..width {
+        }
+        chunks.sort_by_key(|&(_, _, log_ht)| Reverse(log_ht));
+
+        let mut sorted_cols = Vec::new();
+        let mut col_idx = 0;
+        let mut row_idx = 0;
+        for (mat_idx, row_offset, log_ht) in chunks {
+            for j in 0..mat_widths[mat_idx] {
                 let slice_len = StackedSlice::_len(log_ht, l_skip);
                 if row_idx + slice_len > (1 << log_stacked_height) {
                     if row_idx != 1 << log_stacked_height {
@@ -179,6 +238,7 @@ impl StackedLayout {
                     col_idx,
                     row_idx,
                     log_height: log_ht,
+                    row_offset,
                 };
                 sorted_cols.push((mat_idx, j, slice));
                 row_idx += slice_len;
@@ -198,15 +258,19 @@ impl StackedLayout {
             height: 1 << log_stacked_height,
             width: stacked_width,
             sorted_cols,
-            mat_starts,
+            mat_widths,
+            mat_heights,
         })
     }
 
-    /// Raw unsafe constructor
+    /// Raw unsafe constructor. The caller must guarantee that `sorted_cols` is consistent with
+    /// `mat_widths`/`mat_heights` (see [StackedLayout::new]).
     pub fn from_raw_parts(
         l_skip: usize,
         log_stacked_height: usize,
         sorted_cols: Vec<(usize, usize, StackedSlice)>,
+        mat_widths: Vec<usize>,
+        mat_heights: Vec<usize>,
     ) -> Result<Self, StackedPcsError> {
         let height = 1 << log_stacked_height;
         let width = sorted_cols
@@ -214,16 +278,12 @@ impl StackedLayout {
             .map(|(_, _, slice)| slice.col_idx + 1)
             .max()
             .unwrap_or(0);
-        let mut mat_starts = Vec::new();
-        for (idx, (mat_idx, _, _)) in sorted_cols.iter().enumerate() {
-            if idx == 0 || *mat_idx + 1 != mat_starts.len() {
-                if *mat_idx != mat_starts.len() {
-                    return Err(StackedPcsError::LayoutRawPartsMatIdx {
-                        mat_idx: *mat_idx,
-                        mat_starts_len: mat_starts.len(),
-                    });
-                }
-                mat_starts.push(idx);
+        for (mat_idx, _, _) in &sorted_cols {
+            if *mat_idx >= mat_widths.len() {
+                return Err(StackedPcsError::LayoutRawPartsMatIdx {
+                    mat_idx: *mat_idx,
+                    mat_starts_len: mat_widths.len(),
+                });
             }
         }
         Ok(Self {
@@ -231,8 +291,27 @@ impl StackedLayout {
             height,
             width,
             sorted_cols,
-            mat_starts,
+            mat_widths,
+            mat_heights,
         })
+    }
+
+    /// Number of unstacked matrices in this layout.
+    pub fn num_mats(&self) -> usize {
+        self.mat_widths.len()
+    }
+
+    /// Index in `sorted_cols` where the slices of matrix `mat_idx` start.
+    ///
+    /// Only valid for layouts where every matrix has a single chunk per column (all power-of-two
+    /// heights): there, slices are grouped per matrix in matrix order.
+    pub fn mat_start(&self, mat_idx: usize) -> usize {
+        debug_assert_eq!(
+            self.sorted_cols.len(),
+            self.num_claims(),
+            "mat_start requires a single chunk per column"
+        );
+        self.claim_idx(mat_idx, 0)
     }
 
     pub fn unstacked_slices_iter(&self) -> impl Iterator<Item = &StackedSlice> {
@@ -240,32 +319,41 @@ impl StackedLayout {
     }
 
     /// `(mat_idx, col_idx)` should be indexing into the unstacked collection of matrices.
+    /// For a chunked column (non-power-of-two height matrix), returns the first (largest) chunk,
+    /// which starts at `row_offset == 0`.
     pub fn get(&self, mat_idx: usize, col_idx: usize) -> Option<&StackedSlice> {
-        let idx = self.mat_starts[mat_idx];
-        if idx + col_idx >= self.sorted_cols.len() {
-            return None;
-        }
-        let (mat_idx1, col_idx1, s) = &self.sorted_cols[idx + col_idx];
-        debug_assert_eq!(*mat_idx1, mat_idx);
-        debug_assert_eq!(*col_idx1, col_idx);
-        Some(s)
+        self.sorted_cols
+            .iter()
+            .find(|(m, c, _)| *m == mat_idx && *c == col_idx)
+            .map(|(_, _, s)| s)
     }
 
     pub fn width_of(&self, mat_idx: usize) -> usize {
-        let start_idx = self.mat_starts[mat_idx];
-        debug_assert_eq!(self.sorted_cols[start_idx].0, mat_idx);
-        debug_assert_eq!(self.sorted_cols[start_idx].1, 0);
-        let next_idx = *self
-            .mat_starts
-            .get(mat_idx + 1)
-            .unwrap_or(&self.sorted_cols.len());
-        debug_assert_ne!(next_idx, usize::MAX);
-        next_idx - start_idx
+        self.mat_widths[mat_idx]
+    }
+
+    /// The number of used (unpadded) rows of the unstacked matrix.
+    pub fn height_of(&self, mat_idx: usize) -> usize {
+        self.mat_heights[mat_idx]
+    }
+
+    /// Index of the opening claim for unstacked column `(mat_idx, col_idx)` when claims are
+    /// ordered per matrix, then per column. Chunked slices of the same column share one claim.
+    pub fn claim_idx(&self, mat_idx: usize, col_idx: usize) -> usize {
+        self.mat_widths[..mat_idx].iter().sum::<usize>() + col_idx
+    }
+
+    /// Total number of opening claims (= total number of unstacked columns).
+    pub fn num_claims(&self) -> usize {
+        self.mat_widths.iter().sum()
     }
 
     /// Due to the definition of stacking, in a column major matrix the lifted columns of the
     /// unstacked matrix will always be contiguous in memory within the stacked matrix, so we
     /// can return the sub-view.
+    ///
+    /// Only valid for matrices with a single chunk per column (power-of-two height or height below
+    /// `2^l_skip`), such as preprocessed and cached matrices.
     pub fn mat_view<'a, F>(
         &self,
         unstacked_mat_idx: usize,
@@ -277,6 +365,10 @@ impl StackedLayout {
             .filter(|(m, _, _)| *m == unstacked_mat_idx)
             .collect_vec();
         let width = col_slices.len();
+        assert_eq!(
+            width, self.mat_widths[unstacked_mat_idx],
+            "mat_view requires a single chunk per column"
+        );
         let s = &col_slices[0].2;
         let lifted_height = s.len(self.l_skip);
         let stride = s.stride(self.l_skip);
@@ -289,7 +381,9 @@ impl StackedLayout {
     }
 }
 
-/// The `traces` **must** already be in height-sorted order.
+/// The `traces` **must** already be in height-sorted (descending) order. Trace heights need not be
+/// powers of two: any height `>= 2^l_skip` that is a multiple of `2^l_skip` is supported by
+/// stacking its binary-ruler chunk decomposition; heights `< 2^l_skip` must be powers of two.
 #[instrument(skip_all)]
 pub fn stacked_matrix<F: Field>(
     l_skip: usize,
@@ -298,11 +392,7 @@ pub fn stacked_matrix<F: Field>(
 ) -> Result<(ColMajorMatrix<F>, StackedLayout), StackedPcsError> {
     let sorted_meta = traces
         .iter()
-        .map(|trace| {
-            // height cannot be zero:
-            let log_height = log2_strict_usize(trace.height());
-            (trace.width(), log_height)
-        })
+        .map(|trace| (trace.width(), trace.height()))
         .collect_vec();
     let mut layout = StackedLayout::new(l_skip, l_skip + n_stack, sorted_meta)?;
     let total_cells: usize = traces
@@ -320,11 +410,13 @@ pub fn stacked_matrix<F: Field>(
     for (mat_idx, j, s) in &mut layout.sorted_cols {
         let start = s.col_idx * height + s.row_idx;
         let t_col = traces[*mat_idx].column(*j);
-        debug_assert_eq!(t_col.len(), 1 << s.log_height);
         if s.log_height >= l_skip {
-            q_mat[start..start + t_col.len()].copy_from_slice(t_col);
+            let chunk = &t_col[s.row_offset..s.row_offset + (1 << s.log_height)];
+            q_mat[start..start + chunk.len()].copy_from_slice(chunk);
         } else {
             // t_col height is smaller than 2^l_skip, so we stride
+            debug_assert_eq!(s.row_offset, 0);
+            debug_assert_eq!(t_col.len(), 1 << s.log_height);
             let stride = s.stride(l_skip);
             for (i, val) in t_col.iter().enumerate() {
                 q_mat[start + i * stride] = *val;
@@ -569,7 +661,7 @@ mod tests {
             stacked_mat.values,
             [1, 2, 3, 4, 5, 6, 7, 0].map(F::from_u32).to_vec()
         );
-        assert_eq!(layout.mat_starts, vec![0, 1, 2]);
+        assert_eq!(layout.mat_widths, vec![1, 1, 1]);
     }
 
     #[test]
@@ -616,5 +708,53 @@ mod tests {
             .map(F::from_u32)
             .collect_vec()
         );
+    }
+
+    #[test]
+    fn test_chunk_decompose() {
+        // 12 = 8 + 4 with l_skip = 2
+        let chunks = chunk_decompose(2, 12).unwrap().collect_vec();
+        assert_eq!(chunks, vec![(0, 3), (8, 2)]);
+        // power of two: single chunk
+        let chunks = chunk_decompose(2, 16).unwrap().collect_vec();
+        assert_eq!(chunks, vec![(0, 4)]);
+        // below 2^l_skip: single strided chunk, must be a power of two
+        let chunks = chunk_decompose(3, 2).unwrap().collect_vec();
+        assert_eq!(chunks, vec![(0, 1)]);
+        assert!(chunk_decompose(3, 3).is_err());
+        assert!(chunk_decompose(2, 6).is_err());
+        assert!(chunk_decompose(2, 0).is_err());
+    }
+
+    #[test]
+    fn test_stacked_matrix_chunked() {
+        // Trace 0: height 12 = 8 + 4, width 1; trace 1: height 4, width 1; l_skip = 2.
+        let columns = [(1..=12).collect_vec(), vec![101, 102, 103, 104]]
+            .map(|v| v.into_iter().map(F::from_u32).collect_vec());
+        let mats = columns
+            .into_iter()
+            .map(|c| ColMajorMatrix::new(c, 1))
+            .collect_vec();
+        let mat_refs = mats.iter().collect_vec();
+        // stacked height 8: chunks sizes [8, 4, 4] -> columns: [rows 1..8], [rows 9..12, 101..104]
+        let (stacked_mat, layout) = stacked_matrix(2, 1, &mat_refs).unwrap();
+        assert_eq!(stacked_mat.height(), 8);
+        assert_eq!(stacked_mat.width(), 2);
+        assert_eq!(
+            stacked_mat.values,
+            [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 101, 102, 103, 104]
+                .map(F::from_u32)
+                .to_vec()
+        );
+        // slice bookkeeping: trace 0 has two chunks with row offsets 0 and 8
+        let slices_mat0 = layout
+            .sorted_cols
+            .iter()
+            .filter(|(m, _, _)| *m == 0)
+            .map(|(_, _, s)| (s.row_offset, s.log_height(), s.col_idx, s.row_idx))
+            .collect_vec();
+        assert_eq!(slices_mat0, vec![(0, 3, 0, 0), (8, 2, 1, 0)]);
+        assert_eq!(layout.claim_idx(1, 0), 1);
+        assert_eq!(layout.height_of(0), 12);
     }
 }

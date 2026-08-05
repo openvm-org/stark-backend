@@ -106,7 +106,9 @@ where
         let mut total_stacked_width = 0u32;
         for stacked in &stacked_per_commit {
             let layout = stacked.layout();
-            for (trace, &idx) in zip(&stacked.traces, &layout.mat_starts) {
+            for (mat_idx, trace) in stacked.traces.iter().enumerate() {
+                // GPU backend supports power-of-two trace heights only (single chunk per column).
+                let idx = layout.mat_start(mat_idx);
                 let (_, _, s) = layout.sorted_cols[idx];
                 let packet = BatchingTracePacket {
                     ptr: trace.buffer().as_ptr(),

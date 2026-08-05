@@ -1,6 +1,5 @@
 use itertools::{izip, Itertools};
 use p3_field::PrimeCharacteristicRing;
-use p3_util::log2_strict_usize;
 use tracing::{info, info_span, instrument};
 
 #[cfg(feature = "metrics")]
@@ -127,13 +126,12 @@ where
         let mut trace_vdata: Vec<Option<TraceVData<SC>>> = vec![None; mpk.per_air.len()];
         let mut public_values: Vec<Vec<SC::F>> = vec![Vec::new(); mpk.per_air.len()];
 
-        // Hypercube dimension per trace (present AIR)
+        // Trace height per trace (present AIR)
         for (air_id, trace_ctx) in &ctx.per_trace {
             let trace_height = trace_ctx.common_main.height();
-            let log_height = log2_strict_usize(trace_height);
 
             trace_vdata[*air_id] = Some(TraceVData::<SC> {
-                log_height,
+                height: trace_height,
                 cached_commitments: trace_ctx
                     .cached_mains
                     .iter()
@@ -163,7 +161,7 @@ where
                 if let Some(cd) = &pk.preprocessed_data {
                     transcript.observe_commit(cd.commitment);
                 } else {
-                    transcript.observe(SC::F::from_usize(trace_vdata.log_height));
+                    transcript.observe(SC::F::from_usize(trace_vdata.height));
                 }
                 for commit in &trace_vdata.cached_commitments {
                     transcript.observe_commit(*commit);

@@ -62,11 +62,17 @@ pub enum ProofShapeVDataError {
         expected: usize,
         actual: usize,
     },
-    #[error("AIR {air_idx} should have log_height <= {}, but has {actual} (l_skip = {l_skip}, n_stack = {n_stack}", l_skip + n_stack)]
+    #[error("AIR {air_idx} should have padded log height <= {}, but has height {actual} (l_skip = {l_skip}, n_stack = {n_stack}", l_skip + n_stack)]
     LogHeightOutOfBounds {
         air_idx: usize,
         l_skip: usize,
         n_stack: usize,
+        actual: usize,
+    },
+    #[error("AIR {air_idx} has invalid trace height {actual}: must be nonzero, a power of two if below 2^{l_skip}, and a multiple of 2^{l_skip} otherwise")]
+    InvalidTraceHeight {
+        air_idx: usize,
+        l_skip: usize,
         actual: usize,
     },
     #[error("AIR {air_idx} should have {expected} public values, but has {actual}")]
@@ -348,13 +354,24 @@ pub fn verify_proof_shape<SC: StarkProtocolConfig>(
                         actual: vdata.cached_commitments.len(),
                     },
                 );
-            } else if vdata.log_height > l_skip + mvk.params.n_stack {
+            } else if vdata.height == 0
+                || (vdata.height < (1 << l_skip) && !vdata.height.is_power_of_two())
+                || (vdata.height >= (1 << l_skip) && vdata.height % (1 << l_skip) != 0)
+            {
+                return ProofShapeError::invalid_vdata(ProofShapeVDataError::InvalidTraceHeight {
+                    air_idx,
+                    l_skip,
+                    actual: vdata.height,
+                });
+            } else if vdata.height.next_power_of_two().ilog2() as usize
+                > l_skip + mvk.params.n_stack
+            {
                 return ProofShapeError::invalid_vdata(
                     ProofShapeVDataError::LogHeightOutOfBounds {
                         air_idx,
                         l_skip,
                         n_stack: mvk.params.n_stack,
-                        actual: vdata.log_height,
+                        actual: vdata.height,
                     },
                 );
             } else if vk.params.num_public_values != pvs.len() {
@@ -373,13 +390,15 @@ pub fn verify_proof_shape<SC: StarkProtocolConfig>(
         .zip(&proof.trace_vdata)
         .enumerate()
         .filter_map(|(air_idx, (vk, vdata))| vdata.as_ref().map(|vdata| (air_idx, vk, vdata)))
-        .sorted_by_key(|(_, _, vdata)| Reverse(vdata.log_height))
+        .sorted_by_key(|(_, _, vdata)| Reverse(vdata.height))
         .collect_vec();
     let num_airs_present = per_trace.len();
 
-    // GKR PROOF SHAPE
+    // GKR PROOF SHAPE. LogUp operates on the virtual zero-padded power-of-two cube of each trace,
+    // so the interaction counts use the padded log height.
     let total_interactions = per_trace.iter().fold(0u64, |acc, (_, vk, vdata)| {
-        acc + ((vk.num_interactions() as u64) << max(vdata.log_height, l_skip))
+        let padded_log = vdata.height.next_power_of_two().ilog2() as usize;
+        acc + ((vk.num_interactions() as u64) << max(padded_log, l_skip))
     });
     let n_logup = calculate_n_logup(l_skip, total_interactions);
     let num_gkr_rounds = if total_interactions == 0 {
@@ -413,7 +432,7 @@ pub fn verify_proof_shape<SC: StarkProtocolConfig>(
     // BATCH CONSTRAINTS PROOF SHAPE
     let batch_proof = &proof.batch_constraint_proof;
 
-    let n_max = per_trace[0].2.log_height.saturating_sub(l_skip);
+    let n_max = (per_trace[0].2.height.next_power_of_two().ilog2() as usize).saturating_sub(l_skip);
 
     let s_0_deg = (mvk.max_constraint_degree() + 1) * ((1 << l_skip) - 1);
     if batch_proof.numerator_term_per_air.len() != num_airs_present {
@@ -540,7 +559,7 @@ pub fn verify_proof_shape<SC: StarkProtocolConfig>(
         mvk.params.n_stack + l_skip,
         per_trace
             .iter()
-            .map(|(_, vk, vdata)| (vk.params.width.common_main, vdata.log_height))
+            .map(|(_, vk, vdata)| (vk.params.width.common_main, vdata.height))
             .collect_vec(),
     )
     .unwrap();
@@ -554,7 +573,7 @@ pub fn verify_proof_shape<SC: StarkProtocolConfig>(
                 .iter()
                 .chain(&vk.params.width.cached_mains)
                 .copied()
-                .map(|width| (width, vdata.log_height))
+                .map(|width| (width, vdata.height))
                 .collect_vec()
         })
         .map(|sorted| {

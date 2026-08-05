@@ -7,8 +7,8 @@ use tracing::{debug, instrument};
 
 use crate::{
     poly_common::{
-        eval_eq_mle, eval_eq_prism, eval_in_uni, eval_rot_kernel_prism, horner_eval,
-        interpolate_quadratic_at_012,
+        eval_eq_mle, eval_eq_prism, eval_eq_prism_at_row, eval_in_uni, eval_rot_kernel_prism,
+        horner_eval, interpolate_quadratic_at_012,
     },
     proof::{column_openings_by_rot, StackingProof},
     prover::stacked_pcs::StackedLayout,
@@ -58,26 +58,23 @@ where
 
     // layouts and need_rot_per_commit both have length equal to the number of commitments
     debug_assert_eq!(layouts.len(), need_rot_per_commit.len());
-    let mut lambda_idx = 0usize;
-    let lambda_indices_per_layout: Vec<Vec<(usize, bool)>> = layouts
+    // Opening claims are per unstacked column `(mat, col)`. Chunked (non-power-of-two height)
+    // traces contribute multiple slices per claim; slices of the same column share the claim's
+    // lambda powers. Claim indices are ordered per commit, per matrix, per column.
+    let claim_base_per_layout: Vec<usize> = layouts
         .iter()
-        .enumerate()
-        .map(|(commit_idx, layout)| {
-            let need_rot_for_commit = &need_rot_per_commit[commit_idx];
-            // This is true by construction of need_rot_for_commit:
-            debug_assert_eq!(need_rot_for_commit.len(), layout.mat_starts.len());
-            layout
-                .sorted_cols
-                .iter()
-                .map(|&(mat_idx, _col_idx, _slice)| {
-                    lambda_idx += 1;
-                    (lambda_idx - 1, need_rot_for_commit[mat_idx])
-                })
-                .collect_vec()
+        .scan(0usize, |base, layout| {
+            let cur = *base;
+            *base += layout.num_claims();
+            Some(cur)
         })
         .collect_vec();
+    for (commit_idx, layout) in layouts.iter().enumerate() {
+        // This is true by construction of need_rot_for_commit:
+        debug_assert_eq!(need_rot_per_commit[commit_idx].len(), layout.num_mats());
+    }
     // t_claims_len = w_{\Scr T, stack} from the paper
-    let t_claims_len = lambda_idx;
+    let t_claims_len = layouts.iter().map(|l| l.num_claims()).sum::<usize>();
     let mut t_claims = Vec::with_capacity(t_claims_len);
 
     // Proof shape asserts that column_openings.len() == num_traces and each parts.len() ==
@@ -186,13 +183,14 @@ where
         .enumerate()
         .zip(q_coeffs.iter_mut())
         .for_each(|((commit_idx, layout), coeffs)| {
-            let lambda_indices = &lambda_indices_per_layout[commit_idx];
+            let need_rot_for_commit = &need_rot_per_commit[commit_idx];
+            let claim_base = claim_base_per_layout[commit_idx];
             layout
                 .sorted_cols
                 .iter()
-                .enumerate()
-                .for_each(|(col_idx, &(_, _, s))| {
-                    let (lambda_idx, need_rot) = lambda_indices[col_idx];
+                .for_each(|&(mat_idx, col_idx, s)| {
+                    let lambda_idx = claim_base + layout.claim_idx(mat_idx, col_idx);
+                    let need_rot = need_rot_for_commit[mat_idx];
                     let n = s.log_height() as isize - l_skip as isize;
                     let n_lift = n.max(0) as usize;
                     let b = (l_skip + n_lift..l_skip + n_stack)
@@ -208,11 +206,24 @@ where
                     } else {
                         (l_skip, &r[..=n_lift])
                     };
+                    // Chunk weight and rotation borrow correction for chunked (non-power-of-two
+                    // height) traces; (ONE, ZERO) for single-chunk traces.
+                    let (weight, gamma) = crate::prover::stacked_reduction::chunk_weight_gamma::<
+                        SC::F,
+                        SC::EF,
+                    >(
+                        l_skip, &s, layout.height_of(mat_idx), need_rot, r
+                    );
                     let eq_prism = eval_eq_prism(l, &u[..=n_lift], rs_n);
-                    let mut batched = lambda_sqr_powers[lambda_idx] * eq_prism;
+                    let mut batched = lambda_sqr_powers[lambda_idx] * weight * eq_prism;
                     if need_rot {
                         let rot_kernel_prism = eval_rot_kernel_prism(l, &u[..=n_lift], rs_n);
-                        batched += lambda_sqr_powers[lambda_idx] * lambda * rot_kernel_prism;
+                        // Corner kernel eq_prism(-, (1, 0, ..., 0)) evaluated at u[..=n_lift].
+                        let corner_prism =
+                            eval_eq_prism_at_row::<SC::F, SC::EF>(l_skip, 0, &u[..=n_lift]);
+                        batched += lambda_sqr_powers[lambda_idx]
+                            * lambda
+                            * (weight * rot_kernel_prism + gamma * corner_prism);
                     }
                     coeffs[s.col_idx] += eq_mle * batched * ind;
                 });

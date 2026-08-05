@@ -50,7 +50,8 @@ use openvm_stark_backend::{
         },
         prove_up_to_batch_constraints, test_system_params_small, test_whir_config_small,
         CachedFixture11, FibFixture, InteractionsFixture11, MixtureFixture,
-        PreprocessedAndCachedFixture, PreprocessedFibFixture, SelfInteractionFixture, TestFixture,
+        PreprocessedAndCachedFixture, PreprocessedFibFixture, RotCounterFixture,
+        SelfInteractionFixture, TestFixture,
     },
     transcript::duplex_sponge::DuplexSpongeValidator,
     utils::disable_debug_builder,
@@ -303,6 +304,33 @@ pub fn dummy_interactions_roundtrip<E: StarkEngine<SC = SC>>(
 
     let mut prover_transcript = engine.initial_transcript();
     let proof = fx.prove_from_transcript(&engine, &pk, &mut prover_transcript);
+
+    let mut verifier_sponge = default_duplex_sponge();
+    verify(engine.config(), &vk, &proof, &mut verifier_sponge)?;
+    Ok(())
+}
+
+/// Full prove+verify roundtrip with non-power-of-two trace heights (chunked stacking), including
+/// next-row (rotation) claims across chunk boundaries.
+///
+/// NOT part of `backend_test_suite!`: the GPU backend only supports power-of-two heights.
+pub fn non_pow2_heights_roundtrip<E: StarkEngine<SC = SC>>(
+    l_skip: usize,
+    n_stack: usize,
+    sender_height: usize,
+    receiver_height: usize,
+) -> eyre::Result<()> {
+    let params = test_system_params_small(l_skip, n_stack, 4);
+    let engine = E::new(params);
+    let fx = RotCounterFixture::new(sender_height, receiver_height);
+    let (pk, vk) = fx.keygen(&engine);
+
+    let mut prover_transcript = engine.initial_transcript();
+    let proof = fx.prove_from_transcript(&engine, &pk, &mut prover_transcript);
+    for (air_idx, vdata) in proof.trace_vdata.iter().enumerate() {
+        let expected = [sender_height, receiver_height][air_idx];
+        assert_eq!(vdata.as_ref().unwrap().height, expected);
+    }
 
     let mut verifier_sponge = default_duplex_sponge();
     verify(engine.config(), &vk, &proof, &mut verifier_sponge)?;

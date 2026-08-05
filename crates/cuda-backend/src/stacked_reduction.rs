@@ -1,6 +1,6 @@
 use std::{array::from_fn, cmp::max, ffi::c_void, iter::zip, mem, sync::Arc};
 
-use itertools::{zip_eq, Itertools};
+use itertools::Itertools;
 use openvm_cuda_common::{
     copy::{cuda_memcpy_on, MemCopyD2H, MemCopyH2D},
     d_buffer::DeviceBuffer,
@@ -358,9 +358,11 @@ impl<D: Copy + Clone + Send + Sync + 'static> StackedReductionGpu<D> {
         for (commit_idx, stacked) in stacked_per_commit.iter().enumerate() {
             let layout = stacked.layout();
             let need_rot_for_commit = &need_rot_per_commit[commit_idx];
-            debug_assert_eq!(need_rot_for_commit.len(), layout.mat_starts.len());
-            for (mat_idx, (trace, &idx)) in zip_eq(&stacked.traces, &layout.mat_starts).enumerate()
-            {
+            debug_assert_eq!(need_rot_for_commit.len(), layout.num_mats());
+            debug_assert_eq!(stacked.traces.len(), layout.num_mats());
+            for (mat_idx, trace) in stacked.traces.iter().enumerate() {
+                // GPU backend supports power-of-two trace heights only (single chunk per column).
+                let idx = layout.mat_start(mat_idx);
                 debug_assert_ne!(trace.width(), 0);
                 debug_assert_ne!(trace.height(), 0);
                 ht_diff_idxs.push(unstacked_cols.len());

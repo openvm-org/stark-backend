@@ -69,7 +69,6 @@ impl<F> ColMajorMatrix<F> {
     pub fn new(values: Vec<F>, width: usize) -> Self {
         assert_eq!(values.len() % width, 0);
         let height = values.len() / width;
-        assert!(height.is_power_of_two());
         Self {
             values,
             width,
@@ -143,7 +142,6 @@ impl<'a, F> ColMajorMatrixView<'a, F> {
     pub fn new(values: &'a [F], width: usize) -> Self {
         assert_eq!(values.len() % width, 0);
         let height = values.len() / width;
-        debug_assert!(height == 0 || height.is_power_of_two());
         Self {
             values,
             width,
@@ -184,7 +182,6 @@ impl<'a, F> StridedColMajorMatrixView<'a, F> {
     pub fn new(values: &'a [F], width: usize, stride: usize) -> Self {
         assert_eq!(values.len() % (width * stride), 0);
         let height = values.len() / (width * stride);
-        debug_assert!(height == 0 || height.is_power_of_two());
         Self {
             values,
             width,

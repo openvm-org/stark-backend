@@ -8,7 +8,10 @@ use p3_maybe_rayon::prelude::*;
 use tracing::{debug, instrument};
 
 use crate::{
-    poly_common::{eval_eq_mle, eval_eq_uni, eval_eq_uni_at_one, eval_in_uni, UnivariatePoly},
+    poly_common::{
+        eval_eq_mle, eval_eq_prism_at_row, eval_eq_uni, eval_eq_uni_at_one, eval_in_uni,
+        UnivariatePoly,
+    },
     proof::StackingProof,
     prover::{
         poly::evals_eq_hypercube,
@@ -134,23 +137,71 @@ pub struct StackedReductionCpu<'a, SC: StarkProtocolConfig> {
     eq_const: SC::EF,
 
     stacked_per_commit: Vec<&'a StackedPcsData<SC::F, SC::Digest>>,
-    trace_views: Vec<TraceViewMeta>,
+    trace_views: Vec<TraceViewMeta<SC::EF>>,
     ht_diff_idxs: Vec<usize>,
 
     eq_r_per_lht: HashMap<usize, ColMajorMatrix<SC::EF>>,
 
     // After round 0:
     k_rot_r_per_lht: HashMap<usize, ColMajorMatrix<SC::EF>>,
+    /// Folded evaluations of the chunk-corner kernel `eq_prism(-, (1, 0, ..., 0))`, used for the
+    /// rotation borrow correction of chunked (non-power-of-two height) traces.
+    corner_per_lht: HashMap<usize, ColMajorMatrix<SC::EF>>,
     q_evals: Vec<ColMajorMatrix<SC::EF>>,
     /// Stores eq(u[1+n_T..round-1], b_{T,j}[..round-n_T-1])
     eq_ub_per_trace: Vec<SC::EF>,
 }
 
-struct TraceViewMeta {
+struct TraceViewMeta<EF> {
     com_idx: usize,
     slice: StackedSlice,
     lambda_eq_idx: usize,
     lambda_rot_idx: Option<usize>,
+    /// Chunk weight `w = eq(r[1+n_k..1+n̂_T], pattern)` where `pattern` is the binary encoding of
+    /// `row_offset >> log_height` and `n̂_T` is the trace's padded hypercube dimension. `ONE` for
+    /// single-chunk (power-of-two height) traces.
+    weight: EF,
+    /// Rotation borrow correction `γ = K(o-1 mod ĥ) - K(o + 2^a - 1)` where `K(m)` is the padded
+    /// trace's prism eq kernel at row `m` against the claim point `r[..=n̂_T]`. `ZERO` for
+    /// single-chunk traces or when no rotation claim is needed.
+    gamma: EF,
+}
+
+/// Computes the chunk `weight` and rotation `gamma` (see [TraceViewMeta]) for a chunk slice of a
+/// trace with `height` used rows, given the batch-constraint opening point `r`.
+pub fn chunk_weight_gamma<F, EF>(
+    l_skip: usize,
+    slice: &StackedSlice,
+    height: usize,
+    need_rot: bool,
+    r: &[EF],
+) -> (EF, EF)
+where
+    F: TwoAdicField,
+    EF: ExtensionField<F>,
+{
+    let padded_log = usize::BITS as usize - (height - 1).leading_zeros() as usize;
+    if padded_log <= l_skip {
+        // Single sub-l_skip chunk: claim dims equal chunk dims.
+        return (EF::ONE, EF::ZERO);
+    }
+    let n_pad = padded_log - l_skip;
+    let n_k = slice.log_height() - l_skip;
+    let pattern = (0..n_pad - n_k)
+        .map(|t| F::from_bool((slice.row_offset >> (slice.log_height() + t)) & 1 == 1))
+        .collect_vec();
+    let weight = eval_eq_mle(&r[1 + n_k..1 + n_pad], &pattern);
+    let gamma = if need_rot && height != 1 << padded_log {
+        let padded_height = 1usize << padded_log;
+        let r_pad = &r[..=n_pad];
+        let m_prev = (slice.row_offset + padded_height - 1) & (padded_height - 1);
+        let m_last = slice.row_offset + (1 << slice.log_height()) - 1;
+        eval_eq_prism_at_row::<F, EF>(l_skip, m_prev, r_pad)
+            - eval_eq_prism_at_row::<F, EF>(l_skip, m_last, r_pad)
+    } else {
+        EF::ZERO
+    };
+    (weight, gamma)
 }
 
 impl<'a, SC: StarkProtocolConfig>
@@ -176,29 +227,39 @@ where
         let l_skip = device.params().l_skip;
         let omega_skip = SC::F::two_adic_generator(l_skip);
 
+        // Lambda powers are assigned per opening claim, i.e. per unstacked column `(mat, col)`:
+        // claim `i` uses `lambda^{2i}` for the plain opening and `lambda^{2i+1}` for the rotation.
+        // A chunked (non-power-of-two height) trace contributes multiple slices per claim; all
+        // share the claim's lambda powers, weighted by the chunk weight.
         let mut trace_views = Vec::new();
-        let mut lambda_idx = 0usize;
+        let mut claim_base = 0usize;
         for (com_idx, d) in stacked_per_commit.iter().enumerate() {
             let need_rot_for_commit = &need_rot_per_commit[com_idx];
-            debug_assert_eq!(need_rot_for_commit.len(), d.layout.mat_starts.len());
-            for &(mat_idx, _col_idx, slice) in &d.layout.sorted_cols {
-                let lambda_eq_idx = lambda_idx;
-                lambda_idx += 1;
-                let lambda_rot_idx = if need_rot_for_commit[mat_idx] {
-                    Some(lambda_idx)
-                } else {
-                    None
-                };
-                lambda_idx += 1;
+            debug_assert_eq!(need_rot_for_commit.len(), d.layout.num_mats());
+            for &(mat_idx, col_idx, slice) in &d.layout.sorted_cols {
+                let claim_idx = claim_base + d.layout.claim_idx(mat_idx, col_idx);
+                let need_rot = need_rot_for_commit[mat_idx];
+                let lambda_eq_idx = 2 * claim_idx;
+                let lambda_rot_idx = need_rot.then_some(2 * claim_idx + 1);
+                let (weight, gamma) = chunk_weight_gamma::<SC::F, SC::EF>(
+                    l_skip,
+                    &slice,
+                    d.layout.height_of(mat_idx),
+                    need_rot,
+                    r,
+                );
                 trace_views.push(TraceViewMeta {
                     com_idx,
                     slice,
                     lambda_eq_idx,
                     lambda_rot_idx,
+                    weight,
+                    gamma,
                 });
             }
+            claim_base += d.layout.num_claims();
         }
-        let lambda_pows = lambda.powers().take(lambda_idx).collect_vec();
+        let lambda_pows = lambda.powers().take(2 * claim_base).collect_vec();
 
         let mut ht_diff_idxs = Vec::new();
         let mut eq_r_per_lht: HashMap<usize, ColMajorMatrix<SC::EF>> = HashMap::new();
@@ -230,6 +291,7 @@ where
             eq_r_per_lht,
             q_evals: vec![],
             k_rot_r_per_lht: HashMap::new(),
+            corner_per_lht: HashMap::new(),
             eq_ub_per_trace,
         }
     }
@@ -306,11 +368,14 @@ where
                     let eq = eq_uni_r0 * eq_cube;
                     let k_rot =
                         eq_uni_r0_rot * eq_cube + self.eq_const * eq_uni_1 * (k_rot_cube - eq_cube);
+                    // Corner kernel eq_prism(-, (1, 0, ..., 0)): nonzero only at the cube origin.
+                    let corner = if x == 0 { eq_uni_1 } else { SC::F::ZERO };
                     zip(t_window, evals).fold([SC::EF::ZERO; 2], |mut acc, (tv, eval)| {
                         let q = eval[0];
-                        acc[0] += self.lambda_pows[tv.lambda_eq_idx] * eq * q * ind;
+                        acc[0] += self.lambda_pows[tv.lambda_eq_idx] * tv.weight * eq * q * ind;
                         if let Some(rot_idx) = tv.lambda_rot_idx {
-                            acc[1] += self.lambda_pows[rot_idx] * k_rot * q * ind;
+                            let rot_kernel = tv.weight * k_rot + tv.gamma * corner;
+                            acc[1] += self.lambda_pows[rot_idx] * rot_kernel * q * ind;
                         }
                         acc
                     })
@@ -341,6 +406,17 @@ where
         let eq_uni_u0r0 = eval_eq_uni(l_skip, u_0, r_0);
         let eq_uni_u0r0_rot = eval_eq_uni(l_skip, u_0, r_0 * omega_skip);
         let eq_uni_u01 = eval_eq_uni_at_one(l_skip, u_0);
+        // Fold the corner kernel eq_prism(-, (1, 0, ..., 0)): univariate factor eq_D(u_0, 1),
+        // cube factor eq(x, 0) with hypercube evals (1, 0, ..., 0).
+        self.corner_per_lht = self
+            .eq_r_per_lht
+            .iter()
+            .map(|(&log_height, mat)| {
+                let mut evals = SC::EF::zero_vec(mat.values.len());
+                evals[0] = eq_uni_u01;
+                (log_height, ColMajorMatrix::new(evals, 1))
+            })
+            .collect();
         // \kappa_\rot(x, r) = eq(rot^{-1}(x), r)
         self.k_rot_r_per_lht = self
             .eq_r_per_lht
@@ -403,8 +479,10 @@ where
                 let hypercube_dim = n_lift.saturating_sub(round);
                 let eq_rs = self.eq_r_per_lht.get(&log_height).unwrap().column(0);
                 let k_rot_rs = self.k_rot_r_per_lht.get(&log_height).unwrap().column(0);
+                let corner_rs = self.corner_per_lht.get(&log_height).unwrap().column(0);
                 debug_assert_eq!(eq_rs.len(), 1 << n_lift.saturating_sub(round - 1));
                 debug_assert_eq!(k_rot_rs.len(), 1 << n_lift.saturating_sub(round - 1));
+                debug_assert_eq!(corner_rs.len(), 1 << n_lift.saturating_sub(round - 1));
                 // Prepare the q subslice eval views
                 let t_cols = t_views
                     .iter()
@@ -434,24 +512,28 @@ where
                             let tv = &self.trace_views[t_idx];
                             let q = eval[0];
                             let mut eq_ub = self.eq_ub_per_trace[t_idx];
-                            let (eq, k_rot) = if round > n_lift {
+                            let (eq, k_rot, corner) = if round > n_lift {
                                 // Extra contribution of eq(X, b_{T,j}[round-n_T-1])
                                 let b = (tv.slice.row_idx >> (l_skip + round - 1)) & 1;
                                 eq_ub *= eval_eq_mle(&[x], &[SC::F::from_bool(b == 1)]);
                                 debug_assert_eq!(y, 0);
-                                (eq_rs[0] * eq_ub, k_rot_rs[0] * eq_ub)
+                                (eq_rs[0] * eq_ub, k_rot_rs[0] * eq_ub, corner_rs[0] * eq_ub)
                             } else {
                                 // linearly interpolate eq(-, r[..1+n_T]), \kappa_\rot(-,
-                                // r[..1+n_T])
+                                // r[..1+n_T]), and the corner kernel
                                 let eq_r =
                                     eq_rs[y << 1] * (SC::EF::ONE - x) + eq_rs[(y << 1) + 1] * x;
                                 let k_rot_r = k_rot_rs[y << 1] * (SC::EF::ONE - x)
                                     + k_rot_rs[(y << 1) + 1] * x;
-                                (eq_r * eq_ub, k_rot_r * eq_ub)
+                                let corner_r = corner_rs[y << 1] * (SC::EF::ONE - x)
+                                    + corner_rs[(y << 1) + 1] * x;
+                                (eq_r * eq_ub, k_rot_r * eq_ub, corner_r * eq_ub)
                             };
-                            acc[0] += self.lambda_pows[tv.lambda_eq_idx] * q * eq;
+                            acc[0] += self.lambda_pows[tv.lambda_eq_idx] * q * tv.weight * eq;
                             if let Some(rot_idx) = tv.lambda_rot_idx {
-                                acc[1] += self.lambda_pows[rot_idx] * q * k_rot;
+                                acc[1] += self.lambda_pows[rot_idx]
+                                    * q
+                                    * (tv.weight * k_rot + tv.gamma * corner);
                             }
                             acc
                         })
@@ -469,6 +551,10 @@ where
             .map(|(lht, mat)| (lht, fold_mle_evals(mat, u_round)))
             .collect();
         self.k_rot_r_per_lht = take(&mut self.k_rot_r_per_lht)
+            .into_par_iter()
+            .map(|(lht, mat)| (lht, fold_mle_evals(mat, u_round)))
+            .collect();
+        self.corner_per_lht = take(&mut self.corner_per_lht)
             .into_par_iter()
             .map(|(lht, mat)| (lht, fold_mle_evals(mat, u_round)))
             .collect();

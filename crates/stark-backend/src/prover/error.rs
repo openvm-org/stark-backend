@@ -33,6 +33,8 @@ pub enum StackedPcsError {
         mat_idx: usize,
         mat_starts_len: usize,
     },
+    #[error("StackedLayout: invalid trace height {height} for l_skip={l_skip}: height must be nonzero, a power of two below 2^l_skip, or a multiple of 2^l_skip")]
+    LayoutInvalidHeight { height: usize, l_skip: usize },
     #[error("MerkleTree::new: matrix height must be > 0")]
     MerkleTreeEmptyMatrix,
     #[error("MerkleTree::new: rows_per_query ({rows_per_query}) is not a power of two")]

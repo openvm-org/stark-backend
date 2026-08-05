@@ -9,6 +9,7 @@ use self::dummy_airs::{
     fib_selector_air::air::FibonacciSelectorAir,
     interaction::{
         dummy_interaction_air::DummyInteractionAir,
+        rot_counter_air::RotCounterAir,
         self_interaction_air::{SelfInteractionAir, SelfInteractionChip},
     },
     preprocessed_cached_air::air::PreprocessedCachedAir,
@@ -241,6 +242,64 @@ impl<SC: StarkProtocolConfig> TestFixture<SC> for InteractionsFixture11 {
             2,
         );
 
+        ProvingContext::new(
+            [sender_trace, receiver_trace]
+                .into_iter()
+                .enumerate()
+                .map(|(air_idx, trace)| {
+                    (
+                        air_idx,
+                        AirProvingContext::simple_no_pis(ColMajorMatrix::from_row_major(&trace)),
+                    )
+                })
+                .collect(),
+        )
+    }
+}
+
+/// A padding-tolerant sender with next-row constraints ([RotCounterAir]) plus a
+/// [DummyInteractionAir] receiver, at arbitrary (in particular non-power-of-two) trace heights.
+/// The sender's `sender_height` rows are `(1, i)`; the receiver receives each `i` exactly once and
+/// zero-pads the rest of its `receiver_height` rows.
+///
+/// `receiver_height >= sender_height`. Heights must be valid committed heights for the system
+/// `l_skip` (a power of two below `2^l_skip`, or a multiple of `2^l_skip`).
+#[derive(derive_new::new)]
+pub struct RotCounterFixture {
+    pub sender_height: usize,
+    pub receiver_height: usize,
+}
+
+impl<SC: StarkProtocolConfig> TestFixture<SC> for RotCounterFixture {
+    fn airs(&self) -> Vec<AirRef<SC>> {
+        let sender_air = RotCounterAir { bus_index: 0 };
+        let receiver_air = DummyInteractionAir::new(1, false, 0);
+        any_air_arc_vec!(sender_air, receiver_air)
+    }
+
+    fn generate_proving_ctx(&self) -> ProvingContext<CpuColMajorBackend<SC>> {
+        assert!(self.receiver_height >= self.sender_height);
+        let sender_trace = RowMajorMatrix::new(
+            (0..self.sender_height)
+                .flat_map(|i| [1, i])
+                .map(SC::F::from_usize)
+                .collect(),
+            2,
+        );
+        // Receiver rows are (count, field): each sender row (1, i) is received once.
+        let receiver_trace = RowMajorMatrix::new(
+            (0..self.receiver_height)
+                .flat_map(|i| {
+                    if i < self.sender_height {
+                        [1, i]
+                    } else {
+                        [0, 0]
+                    }
+                })
+                .map(SC::F::from_usize)
+                .collect(),
+            2,
+        );
         ProvingContext::new(
             [sender_trace, receiver_trace]
                 .into_iter()
