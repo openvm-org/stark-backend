@@ -1,4 +1,4 @@
-//! Layout inference over [`KernelProgram`]s.
+//! Layout inference over [`KirProgram`]s.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -6,7 +6,7 @@ use crate::{
     ir::{SizeExpr, VarId},
     kernel_ir::{
         classify_convert, AddressSpace, BufId, BufferDecl, BufferKind, ConvertKind, IndexMap,
-        Kernel, KernelProgram, LinearLayout, ParAttr, SSABlock, SSANode, SSAOp, SSAOpCode,
+        Kernel, KirProgram, LinearLayout, ParAttr, SSABlock, SSANode, SSAOp, SSAOpCode,
     },
     passes::utils::ceil_log2,
 };
@@ -32,7 +32,7 @@ use crate::{
 ///    identity layout, and every per-block `par [N]` without a lowering-provided attr (`#[par]`)
 ///    gets the identity (strided) factorization `i = s * blockDim + t` with `seq_size = ceil(N /
 ///    block)` (grid-spanning pars have one point per thread, `seq_size = 1`).
-pub fn layout_infer(p: &mut KernelProgram) {
+pub fn layout_infer(p: &mut KirProgram) {
     for ki in 0..p.kernels.len() {
         linearize_accesses(&p.buffers, &mut p.kernels[ki]);
         promote_tiles(p, ki);
@@ -165,7 +165,7 @@ struct TileUse {
 }
 
 /// Design steps 2–3: register promotion of single-writer shared tiles.
-fn promote_tiles(p: &mut KernelProgram, ki: usize) {
+fn promote_tiles(p: &mut KirProgram, ki: usize) {
     let k = &p.kernels[ki];
     let mut tiles: BTreeMap<BufId, TileUse> = BTreeMap::new();
     walk_stmts(k, &p.buffers, None, &k.grid.block.body, &mut 0, &mut tiles);

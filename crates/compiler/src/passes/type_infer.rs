@@ -12,6 +12,7 @@ use crate::{
 ///
 /// Canonicalization rewrites (which preserve types) extend this map for the
 /// nodes they create, so it stays total over all live nodes.
+#[derive(Clone)]
 pub struct TypeMap {
     types: HashMap<NodeId, Type>,
 }

@@ -15,13 +15,13 @@
 use std::time::Instant;
 
 use crypto_compiler::{
-    compile_and_load,
+    graph_exe::{GraphCompiler, GraphExe},
+    graph_ir::GraphModule,
     ir::{IRBuilder, Module, ScalarType},
     kernel,
     kernels::{poseidon2_permutation, Poseidon2Constants},
     poseidon2_parallel::{poseidon2_permute_par, WIDTH},
-    runner::to_monty,
-    runtime::{CompileOptions, KernelModule},
+    test_utils::to_monty,
 };
 use openvm_cuda_common::{
     copy::{MemCopyD2H, MemCopyH2D},
@@ -162,8 +162,12 @@ fn setup_jit(
     ctx: &GpuDeviceCtx,
     module: Module,
     input_bufs: &[&DeviceBuffer<u32>],
-) -> (KernelModule, Vec<DeviceBuffer<u32>>) {
-    let mut km = compile_and_load(&module, &CompileOptions::default()).expect("JIT compile");
+) -> (GraphExe, Vec<DeviceBuffer<u32>>) {
+    let gm = GraphModule::from_ir(module, &[]).unwrap();
+    let mut exe = GraphCompiler::new()
+        .compile(gm.into_builder())
+        .expect("JIT compile");
+    let km = exe.kernel_program(0);
     for (i, buf) in input_bufs.iter().enumerate() {
         km.set_input(i, *buf).unwrap();
     }
@@ -173,8 +177,7 @@ fn setup_jit(
     for (i, buf) in outs.iter().enumerate() {
         km.set_output(i, buf).unwrap();
     }
-    km.ensure_scratch(ctx);
-    (km, outs)
+    (exe, outs)
 }
 
 fn bench_shape(
@@ -186,12 +189,12 @@ fn bench_shape(
     warmup: usize,
     iters: usize,
 ) {
-    let (km_s, out_s) = setup_jit(ctx, serial, inputs);
-    let (km_p, out_p) = setup_jit(ctx, parallel, inputs);
+    let (mut exe_s, out_s) = setup_jit(ctx, serial, inputs);
+    let (mut exe_p, out_p) = setup_jit(ctx, parallel, inputs);
 
     // Correctness check: single run of each, compare each output vector.
-    km_s.run(&ctx.stream).unwrap();
-    km_p.run(&ctx.stream).unwrap();
+    exe_s.kernel_program(0).run(&ctx.stream).unwrap();
+    exe_p.kernel_program(0).run(&ctx.stream).unwrap();
     for (idx, (s, p)) in out_s.iter().zip(&out_p).enumerate() {
         let sv: Vec<u32> = s.to_host_on(ctx).unwrap();
         let pv: Vec<u32> = p.to_host_on(ctx).unwrap();
@@ -202,10 +205,16 @@ fn bench_shape(
     }
 
     let serial_us = measure_us(ctx, warmup, iters, || {
-        km_s.run(&ctx.stream).expect("serial run");
+        exe_s
+            .kernel_program(0)
+            .run(&ctx.stream)
+            .expect("serial run");
     });
     let parallel_us = measure_us(ctx, warmup, iters, || {
-        km_p.run(&ctx.stream).expect("parallel run");
+        exe_p
+            .kernel_program(0)
+            .run(&ctx.stream)
+            .expect("parallel run");
     });
     let speedup = serial_us / parallel_us;
     println!("| {label:<40} | {serial_us:>10.3} | {parallel_us:>12.3} | {speedup:>7.2}x |");
@@ -216,7 +225,7 @@ fn main() {
     let consts = Poseidon2Constants::p3_default();
 
     // Representative inputs. DSL kernels expect Montgomery-encoded BabyBear
-    // on device; this bench uses the raw `KernelModule` (bypassing
+    // on device; this bench uses the raw `KernelProgram` (bypassing
     // `ModuleRunner`), so we Mont-encode here. The bench only checks
     // serial-vs-parallel *equivalence*, so the exact input value doesn't
     // matter; encoding preserves that equivalence.

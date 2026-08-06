@@ -2,11 +2,12 @@
 //! Requires a CUDA GPU.
 
 use crypto_compiler::{
+    graph_exe::GraphCompiler,
+    graph_ir::GraphModule,
     ir::{IRBuilder, NodeId, ScalarType},
     kernel,
     kernels::{ntt_twiddles, poseidon2_permutation, Poseidon2Constants},
-    runner::{maybe_bench, ModuleRunner},
-    runtime::CompileOptions,
+    test_utils::{maybe_bench, TestModuleRunner},
 };
 use p3_baby_bear::{default_babybear_poseidon2_16, BabyBear};
 use p3_dft::{Radix2Dit, TwoAdicSubgroupDft};
@@ -89,29 +90,40 @@ fn run_module(module: crypto_compiler::ir::Module, inputs: &[Vec<u32>]) -> Vec<V
     run_module_with_hint(module, &[], inputs)
 }
 
-/// [`run_module`] with a shape hint for the module's symbolic parameters
-/// (forwarded to [`ModuleRunner::new_with_hint`]).
+/// [`run_module`] with positional shape hint values for the module's
+/// declared symbolic parameters (paired with the parameter names on the
+/// way to [`GraphModule::from_ir`]).
 fn run_module_with_hint(
     module: crypto_compiler::ir::Module,
     shape_hint: &[i64],
     inputs: &[Vec<u32>],
 ) -> Vec<Vec<u32>> {
-    let options = CompileOptions {
-        dump_ir: Some(
-            concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../../target/ir-dumps/gpu_macro"
-            )
-            .into(),
-        ),
-        ..Default::default()
-    };
-    let mut runner = ModuleRunner::new_with_hint(&module, shape_hint, &options).unwrap();
+    let dump_dir = std::path::PathBuf::from(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../target/ir-dumps/gpu_macro"
+    ));
+    let name = module.name.clone();
+    // Positional hint → named hint by pairing with the module's declared
+    // param names in declaration order.
+    let param_names: Vec<String> = module
+        .builder
+        .params()
+        .iter()
+        .map(|(_, n)| n.clone())
+        .collect();
+    let named_hint: Vec<(&str, i64)> = param_names
+        .iter()
+        .zip(shape_hint.iter())
+        .map(|(n, &v)| (n.as_str(), v))
+        .collect();
+    let gm = GraphModule::from_ir(module, &named_hint).unwrap();
+    let compiler = GraphCompiler::new().dump_dir(dump_dir);
+    let mut runner = TestModuleRunner::with_compiler(compiler, gm).unwrap();
     assert_eq!(runner.num_inputs(), inputs.len());
     runner.set_inputs(inputs);
     runner.run();
     let outs = runner.read_outputs();
-    maybe_bench(&mut runner);
+    maybe_bench(&mut runner, &name);
     outs
 }
 
@@ -2209,8 +2221,7 @@ fn select_short_circuits_out_of_bounds_loads() {
 #[test]
 fn select_emits_if_else_block_not_ternary() {
     use crypto_compiler::passes::{
-        canonicalize, codegen, insert_sync, layout_infer, lower_to_kir, plan_global_scratch,
-        type_infer,
+        canonicalize, codegen, insert_sync, layout_infer, lower_to_kir, type_infer,
     };
     let n = 32usize;
 
@@ -2225,8 +2236,7 @@ fn select_emits_if_else_block_not_ternary() {
 
     let types = type_infer(&module).unwrap();
     let program = canonicalize(module, types).unwrap();
-    let scratch = plan_global_scratch(&program).unwrap();
-    let mut kprog = lower_to_kir(&program, &scratch).unwrap();
+    let mut kprog = lower_to_kir(&program).unwrap();
     layout_infer(&mut kprog);
     insert_sync(&mut kprog);
     let source = codegen(&kprog).unwrap();
@@ -2362,8 +2372,8 @@ fn symbolic_module_monomorphizes_via_shape_hint() {
 
 /// One compiled artifact serves multiple sizes: `n` stays a runtime kernel
 /// parameter (only `required_params` are monomorphized away), is bound via
-/// `ModuleRunner::set_symbol`, and the same runner is re-run at 2^10 and
-/// 2^12.
+/// `TestModuleRunner::set_symbol` (direct-drive), and the same runner is
+/// re-run at 2^10 and 2^12.
 #[test]
 fn symbolic_flat_scale_two_sizes() {
     let mut ib = IRBuilder::new();
@@ -2372,11 +2382,11 @@ fn symbolic_flat_scale_two_sizes() {
     let scaled = kernel!(ib, compute[n] | i | { x[i] * 3bb });
     let module = ib.finish("sym_scale", scaled);
 
-    let mut runner =
-        ModuleRunner::new_with_hint(&module, &[1 << 10], &CompileOptions::default()).unwrap();
+    let gm = GraphModule::from_ir(module, &[("n", 1 << 10)]).unwrap();
+    let mut runner = TestModuleRunner::new(gm).unwrap();
     for log_n in [10usize, 12] {
         let nv = 1usize << log_n;
-        runner.set_symbol("n", nv as i64).unwrap();
+        runner.set_symbol("n", nv as i64);
         let input = pseudo_field_elems(nv, 5);
         runner.set_inputs(std::slice::from_ref(&input));
         runner.run();
@@ -2402,11 +2412,11 @@ fn symbolic_reversed_read() {
     let rev = kernel!(ib, compute [n] |i| { x[#(n - 1) - i] * 2bb });
     let module = ib.finish("sym_rev", rev);
 
-    let mut runner =
-        ModuleRunner::new_with_hint(&module, &[1 << 8], &CompileOptions::default()).unwrap();
+    let gm = GraphModule::from_ir(module, &[("n", 1 << 8)]).unwrap();
+    let mut runner = TestModuleRunner::new(gm).unwrap();
     for log_n in [8usize, 10] {
         let nv = 1usize << log_n;
-        runner.set_symbol("n", nv as i64).unwrap();
+        runner.set_symbol("n", nv as i64);
         let input = pseudo_field_elems(nv, 9);
         runner.set_inputs(std::slice::from_ref(&input));
         runner.run();
@@ -2428,11 +2438,11 @@ fn symbolic_value_splice() {
     let body = kernel!(ib, compute [n] |i| { x[i] + #n });
     let module = ib.finish("sym_value_splice", body);
 
-    let mut runner =
-        ModuleRunner::new_with_hint(&module, &[1 << 8], &CompileOptions::default()).unwrap();
+    let gm = GraphModule::from_ir(module, &[("n", 1 << 8)]).unwrap();
+    let mut runner = TestModuleRunner::new(gm).unwrap();
     for log_n in [8usize, 10] {
         let nv = 1usize << log_n;
-        runner.set_symbol("n", nv as i64).unwrap();
+        runner.set_symbol("n", nv as i64);
         let input: Vec<u32> = (0..nv as u32).map(|i| i.wrapping_mul(2654435761)).collect();
         runner.set_inputs(std::slice::from_ref(&input));
         runner.run();

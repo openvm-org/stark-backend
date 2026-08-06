@@ -9,12 +9,17 @@
 //! digest doubles as the cache directory name.
 //!
 //! The hash covers everything the compiler pipeline can observe on the
-//! module: the module name, every input declaration (name, scalar type,
-//! shape), and every reachable [`ir::Node`] reached from `body`, including
-//! `Compute`'s optional `scatter` / `par` attributes and `threads` hint.
-//! `NodeId` operands are rewritten into a canonical DAG order so two
-//! structurally identical modules with different arena layouts produce the
-//! same digest.
+//! module: the module name, every symbolic parameter declaration (name and
+//! declaration order — VarIds stay α-normalized), every input declaration
+//! (name, scalar type, shape), and every reachable [`ir::Node`] reached from
+//! `body`, including `Compute`'s optional `scatter` / `par` attributes and
+//! `threads` hint. `NodeId` operands are rewritten into a canonical DAG
+//! order so two structurally identical modules with different arena layouts
+//! produce the same digest.
+//!
+//! Param *names* are hashed on purpose: name-keyed `param_bindings`
+//! promote names to interface, so hash-equal ⇒ identical param
+//! registries and downstream dedup needs no binding-key remapping.
 
 use sha3::{Digest, Sha3_256};
 
@@ -27,16 +32,17 @@ use crate::{
 pub fn module_hash(module: &Module) -> [u8; 32] {
     let mut h = Hasher::new();
     h.str(&module.name);
-    // Param declarations: count and VarIds (α-relevant identity), NOT names
-    // or shape-hint bindings — those are metadata, not semantics.
+    // Param declarations: count, VarIds (α-relevant identity), and names.
+    // Names are interface (bindings are keyed by param name).
     let params = module.builder.params();
     h.u64(params.len() as u64);
-    for (v, _name) in params {
+    for (v, name) in params {
         h.u64(v.0 as u64);
+        h.str(name);
     }
-    // The block hint is semantic (it fixes the launch geometry of
-    // symbolic-bound kernels), unlike the shape hint: two residuals that
-    // differ only in block size are distinct compiled variants.
+    // The block hint fixes the launch geometry of symbolic-bound
+    // kernels: two residuals that differ only in block size are
+    // distinct compiled variants.
     match module.builder.block_hint() {
         None => h.tag(0),
         Some(block) => {
@@ -494,6 +500,24 @@ mod tests {
             b.finish("scale_by_two", body)
         };
         assert_ne!(module_hash(&a), module_hash(&three_module));
+    }
+
+    #[test]
+    fn different_param_name_different_hash() {
+        // Decision 10: param names are part of the hash. Two otherwise
+        // identical modules with different param names must not dedup.
+        let build = |sym: &str| {
+            let mut b = IRBuilder::new();
+            let n = b.symbol(sym);
+            let a = b.input("a", ScalarType::BabyBear, vec![n]);
+            let body = b.compute(n, |b, i| {
+                let ai = b.index(a, &[i]);
+                let two = b.const_field(2);
+                b.mul(ai, two)
+            });
+            b.finish("scale_by_two", body)
+        };
+        assert_ne!(module_hash(&build("n")), module_hash(&build("len")));
     }
 
     #[test]

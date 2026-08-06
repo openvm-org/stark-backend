@@ -3,11 +3,21 @@
 //! with nvcc and exposes the resulting module through a C ABI loaded via
 //! `dlopen`. See `design.md` for the overall architecture.
 //!
-//! Pipeline: [`ir::Module`] --type_infer/canonicalize-->
-//! [`passes::canonicalize::Program`] --plan_global_scratch/lower_to_kir-->
-//! [`kernel_ir::KernelProgram`] --layout_infer--> --insert_sync-->
+//! Two compile surfaces:
+//!
+//! - [`module_compiler::ModuleCompiler`] is the per-kernel backend. It expects an
+//!   already-canonical, monomorphized single-kernel [`ir::Module`] and exposes `lower(ir::Module)
+//!   -> KirProgram` + `codegen(KirProgram) -> KernelProgram` (or `compile` for both).
+//! - [`graph_exe::GraphCompiler`] wraps a `ModuleCompiler` and drives a full
+//!   [`graph_ir::GraphBuilder`] through the pass pipeline (`lower_reduce` → `monomorphize` →
+//!   `canonicalize` → optional `fuse` → `dce` → `plan_memory`), then JITs every unique residual in
+//!   parallel and packages everything into a [`graph_exe::GraphExe`].
+//!
+//! Per-kernel pipeline: [`ir::Module`] --type_infer/canonicalize-->
+//! [`passes::canonicalize::Program`] --lower_to_kir-->
+//! [`kernel_ir::KirProgram`] --layout_infer--> --insert_sync-->
 //! --plan_shared_mem--> --codegen--> CUDA C++ --nvcc/dlopen-->
-//! [`runtime::KernelModule`].
+//! [`runtime::KernelProgram`].
 
 // `kernel!`-generated code names crate items by their external path
 // (`::crypto_compiler::...`); this alias makes that path resolve when the
@@ -26,14 +36,15 @@ pub mod ir;
 pub mod kernel_cache;
 pub mod kernel_ir;
 pub mod kernels;
+pub mod module_compiler;
 pub mod module_hash;
 pub mod passes;
 #[cfg(feature = "planner")]
 pub mod planner;
 pub mod poseidon2_parallel;
 pub mod quast;
-pub mod runner;
 pub mod runtime;
+pub mod test_utils;
 
 use thiserror::Error;
 
@@ -69,178 +80,4 @@ pub enum CompileError {
     Runtime(String),
     #[error(transparent)]
     Io(#[from] std::io::Error),
-}
-
-/// Compiles a module end-to-end: run the [`passes`] pipeline down to CUDA
-/// C++, build with nvcc and dlopen the result.
-///
-/// With [`runtime::CompileOptions::dump_ir`] set, writes IR dumps to that
-/// directory. The level of detail is controlled by
-/// [`runtime::CompileOptions::verbosity`]:
-///
-/// - [`runtime::Verbosity::None`]: no files are written even when `dump_ir` is set.
-/// - [`runtime::Verbosity::Basic`] (default): writes `{name}.hir`, `{name}.kir` and `{name}.cu`. IR
-///   dumps are written before codegen so they survive a codegen failure.
-/// - [`runtime::Verbosity::Verbose`]: writes `{name}.NN.<tag>.<ext>` per major pass — HIR, type
-///   map, canonical program, global scratch plan, KIR after `lower_to_kir` / `layout_infer` /
-///   `insert_sync`, the shared-memory plan and the final CUDA source.
-pub fn compile_and_load(
-    module: &ir::Module,
-    options: &runtime::CompileOptions,
-) -> Result<runtime::KernelModule, CompileError> {
-    compile_and_load_with_hint(module, &[], options)
-}
-
-/// [`compile_and_load`] with a shape hint: a canonical concrete
-/// instantiation of the module's symbolic parameters, in declaration order
-/// (the standalone counterpart of
-/// [`graph_ir::GraphBuilder::insert_kernel`]'s `shape_hint` argument).
-/// Used for access checking and as the monomorphization values for
-/// parameters that must be concrete before lowering. Pass `&[]` for no
-/// hint; otherwise its length must equal the module's parameter count.
-pub fn compile_and_load_with_hint(
-    module: &ir::Module,
-    shape_hint: &[i64],
-    options: &runtime::CompileOptions,
-) -> Result<runtime::KernelModule, CompileError> {
-    use runtime::Verbosity;
-
-    let hinted;
-    let module = if shape_hint.is_empty() {
-        module
-    } else {
-        let mut m = module.clone();
-        m.builder.add_shape_hint(shape_hint);
-        hinted = m;
-        &hinted
-    };
-
-    let dump_dir: Option<&std::path::Path> = if options.verbosity == Verbosity::None {
-        None
-    } else {
-        options.dump_ir.as_deref()
-    };
-    let verbose = matches!(options.verbosity, Verbosity::Verbose);
-
-    let name = module.name.clone();
-    let hir = dump_dir.map(|_| dump::dump_hir(module));
-    if let (Some(dir), Some(hir), true) = (dump_dir, hir.as_deref(), verbose) {
-        dump::write_step_dump(dir, &name, 0, "hir", "hir", hir)?;
-    }
-
-    if options.check_accesses {
-        passes::check_accesses_from_hint(module)?;
-    }
-
-    // Partial monomorphization: parameters that must be concrete before
-    // lowering (inner bounds, inner shape dims) are substituted from the
-    // shape hint; the rest survive into the runtime parameter ABI, so one
-    // compiled artifact serves many sizes.
-    let module = passes::monomorphize_from_hint(module)?;
-
-    let types = passes::type_infer(&module)?;
-    if let (Some(dir), true) = (dump_dir, verbose) {
-        dump::write_step_dump(dir, &name, 1, "types", "txt", &dump::dump_types(&types))?;
-    }
-
-    // Rewrite `reduce` nodes with insufficient outer parallelism into a
-    // chain of top-level compute kernels implementing a halving parallel
-    // reduction. This runs before canonicalize so the emitted chain flows
-    // through the same lowering as any other user-written compute chain.
-    let module = passes::rewrite_parallel_reduce(module.clone())?;
-    let types = passes::type_infer(&module)?;
-
-    // `canonicalize` mutates the module's builder in-place; clone so multiple
-    // callers (e.g. graph deduplication) can share the same source `Module`
-    // without conflict. `IRBuilder` and `Module` derive `Clone` for this.
-    let program = passes::canonicalize(module.clone(), types)?;
-    if let (Some(dir), true) = (dump_dir, verbose) {
-        dump::write_step_dump(
-            dir,
-            &name,
-            2,
-            "canonical",
-            "txt",
-            &dump::dump_program(&program),
-        )?;
-    }
-
-    let scratch = passes::plan_global_scratch(&program)?;
-    if let (Some(dir), true) = (dump_dir, verbose) {
-        dump::write_step_dump(
-            dir,
-            &name,
-            3,
-            "global_scratch",
-            "txt",
-            &dump::dump_global_scratch(&scratch),
-        )?;
-    }
-
-    let mut kprog = passes::lower_to_kir(&program, &scratch)?;
-    if let (Some(dir), true) = (dump_dir, verbose) {
-        let empty_shared = passes::SharedMemPlan {
-            offsets: std::collections::HashMap::new(),
-            per_kernel: vec![0; kprog.kernels.len()],
-        };
-        dump::write_step_dump(
-            dir,
-            &name,
-            4,
-            "kir.lowered",
-            "kir",
-            &dump::dump_kernel_ir(&kprog, &empty_shared),
-        )?;
-    }
-
-    passes::layout_infer(&mut kprog);
-    if let (Some(dir), true) = (dump_dir, verbose) {
-        let empty_shared = passes::SharedMemPlan {
-            offsets: std::collections::HashMap::new(),
-            per_kernel: vec![0; kprog.kernels.len()],
-        };
-        dump::write_step_dump(
-            dir,
-            &name,
-            5,
-            "kir.layout",
-            "kir",
-            &dump::dump_kernel_ir(&kprog, &empty_shared),
-        )?;
-    }
-
-    passes::insert_sync(&mut kprog);
-    let shared = passes::plan_shared_mem(&kprog);
-    if let (Some(dir), true) = (dump_dir, verbose) {
-        dump::write_step_dump(
-            dir,
-            &name,
-            6,
-            "kir.synced",
-            "kir",
-            &dump::dump_kernel_ir(&kprog, &shared),
-        )?;
-        dump::write_step_dump(
-            dir,
-            &name,
-            7,
-            "shared_mem",
-            "txt",
-            &dump::dump_shared_mem(&kprog, &shared),
-        )?;
-    }
-
-    if let Some(dir) = dump_dir {
-        let kir = dump::dump_kernel_ir(&kprog, &shared);
-        dump::write_ir_dumps(dir, &kprog.name, hir.as_deref().unwrap(), &kir)?;
-    }
-    let source = passes::codegen(&kprog)?;
-    if let Some(dir) = dump_dir {
-        dump::write_cuda_dump(dir, &kprog.name, &source)?;
-        if verbose {
-            dump::write_step_dump(dir, &name, 8, "codegen", "cu", &source)?;
-        }
-    }
-    passes::verify(&kprog)?;
-    runtime::KernelModule::load(&kprog, &source, options, &name)
 }

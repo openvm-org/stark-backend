@@ -26,7 +26,7 @@
 //! This is an HIR-level statement; JIT-time rewrites such as
 //! [`rewrite_parallel_reduce`](crate::passes::parallel_reduce_rewrite) may
 //! still expand one HIR kernel into several CUDA kernels inside its compiled
-//! [`crate::runtime::KernelModule`].
+//! [`crate::runtime::KernelProgram`].
 
 use std::{
     collections::{BTreeSet, HashMap},
@@ -103,7 +103,14 @@ pub struct ModuleSubgraph {
 pub fn split_module(module: &Module) -> Result<ModuleSubgraph, CompileError> {
     let types = type_infer(module)?;
     let program = canonicalize(module.clone(), types)?;
+    split_program(&program)
+}
 
+/// The split half of [`split_module`], operating on an already-canonical
+/// [`Program`]. Reused by the `canonicalize` graph pass so it doesn't
+/// re-run type_infer + canonicalize when it has just produced a
+/// [`Program`] itself.
+pub fn split_program(program: &Program) -> Result<ModuleSubgraph, CompileError> {
     let name = program.module.name.clone();
     let num_inputs = program.module.builder.inputs().len();
     let single = program.kernels.len() == 1;
@@ -118,7 +125,7 @@ pub fn split_module(module: &Module) -> Result<ModuleSubgraph, CompileError> {
         } else {
             format!("{name}__k{i}")
         };
-        let (module, inputs) = extract_kernel(&program, ck.source, split_name)?;
+        let (module, inputs) = extract_kernel(program, ck.source, split_name)?;
         let outputs = ck
             .member_types
             .iter()
@@ -190,19 +197,12 @@ fn extract_kernel(
 
     // Inherit the parent's parameter declarations referenced by the copied
     // subtree (bounds and input shapes), in parent declaration order so
-    // splitting stays deterministic; slice the shape hint to match.
+    // splitting stays deterministic.
     let src = &program.module.builder;
-    let mut hint = Vec::new();
-    for (idx, (v, pname)) in src.params().iter().enumerate() {
+    for (v, pname) in src.params().iter() {
         if used_params.contains(v) {
             dst.inherit_param(*v, pname.clone());
-            if let Some(h) = src.shape_hint() {
-                hint.push(h[idx]);
-            }
         }
-    }
-    if src.shape_hint().is_some() && !dst.params().is_empty() {
-        dst.add_shape_hint(&hint);
     }
 
     dst.raise_var_watermark(src.var_watermark());
@@ -601,7 +601,6 @@ mod tests {
         let mut b = IRBuilder::new();
         let n = b.symbol("n");
         let m = b.symbol("m");
-        b.add_shape_hint(&[8, 16]);
         let a = b.input("a", ScalarType::BabyBear, vec![n]);
         let t = b.compute(4, |b, _i| b.reduce_add(n, |b, j| b.index(a, &[j])));
         let t = b.let_bound(t);
@@ -618,13 +617,11 @@ mod tests {
         let src_params = module.builder.params();
         let b0 = &sg.kernels[0].module.builder;
         assert_eq!(b0.params(), &src_params[..1]);
-        assert_eq!(b0.shape_hint(), Some(&[8i64][..]));
         // k0's input `a` keeps its symbolic shape.
         assert!(b0.inputs()[0].shape[0].as_const().is_none());
 
         let b1 = &sg.kernels[1].module.builder;
         assert_eq!(b1.params(), &src_params[1..]);
-        assert_eq!(b1.shape_hint(), Some(&[16i64][..]));
     }
 
     #[test]

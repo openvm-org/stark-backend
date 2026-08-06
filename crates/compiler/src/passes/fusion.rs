@@ -53,7 +53,6 @@ use crate::{
     module_hash::{children_of, module_hash},
     passes::{
         canonicalize::{canonicalize, CanonValue, Program, ResultExpr, TensorRef},
-        parallel_reduce_rewrite::should_tree_lower,
         type_infer::{type_infer, TypeMap},
         utils::{hir_to_quast, hir_to_sexpr, replace_nodes, resolve_tensor_ref},
     },
@@ -97,9 +96,6 @@ pub enum KernelClass {
     /// small sequential reduce, ...). Consumer in case A; producer in
     /// case B only via `write_inverse`.
     General,
-    /// Expands to several CUDA kernels at JIT time (tree-lowered reduce).
-    /// Only usable as a case-A consumer.
-    MultiKernel,
 }
 
 /// Inverse of a kernel's write map: recovers the iteration point that wrote
@@ -157,7 +153,7 @@ pub struct KernelCost {
 /// rounds. The same symbolic module yields a different *concrete* relation
 /// per binding vector, hence the compound key. `None` caches an extraction
 /// failure so it is not retried every round.
-pub type RelationCache = HashMap<([u8; 32], Vec<i64>), Option<Arc<AccessRelation>>>;
+pub type RelationCache = HashMap<([u8; 32], BTreeMap<String, i64>), Option<Arc<AccessRelation>>>;
 
 /// The node's parameter environment: module param `VarId` -> bound value.
 fn binding_env(kn: &KernelModuleNode) -> BTreeMap<VarId, i64> {
@@ -165,8 +161,7 @@ fn binding_env(kn: &KernelModuleNode) -> BTreeMap<VarId, i64> {
         .builder
         .params()
         .iter()
-        .zip(&kn.param_bindings)
-        .map(|((v, _), &val)| (*v, val))
+        .filter_map(|(v, name)| kn.param_bindings.get(name).map(|&val| (*v, val)))
         .collect()
 }
 
@@ -201,11 +196,6 @@ pub fn extract_one(
     module: &Module,
     params: &BTreeMap<VarId, i64>,
 ) -> Result<AccessRelation, CompileError> {
-    // `rewrite_parallel_reduce` runs on the raw module at JIT time (before
-    // canonicalize), so multi-kernel detection must mirror its walk on the
-    // raw body.
-    let multi = has_tree_lowered_reduce(module, params);
-
     let types = type_infer(module)?;
     let program = canonicalize(module.clone(), types)?;
     if program.kernels.len() != 1 {
@@ -301,9 +291,7 @@ pub fn extract_one(
         && k.inner_par.is_none()
         && !w.saw_reduce
         && !w.saw_compute;
-    let class = if multi {
-        KernelClass::MultiKernel
-    } else if scalar_body && k.inner.is_none() && k.scatter_store.is_none() {
+    let class = if scalar_body && k.inner.is_none() && k.scatter_store.is_none() {
         KernelClass::Simple
     } else {
         KernelClass::General
@@ -325,50 +313,6 @@ pub fn extract_one(
         inner_var: inner.map(|(_, v)| v),
         scalar_body,
     })
-}
-
-/// Whether `rewrite_parallel_reduce` would expand this module into several
-/// CUDA kernels. Mirrors its top-level walk: bare reduces and
-/// attribute-free `compute { reduce }` values trigger tree lowering per
-/// [`should_tree_lower`]. Bounds resolve through `params`.
-fn has_tree_lowered_reduce(module: &Module, params: &BTreeMap<VarId, i64>) -> bool {
-    let b = &module.builder;
-    let mut cur = module.body;
-    loop {
-        match b.node(cur) {
-            Node::Let { value, body, .. } => {
-                if top_value_tree_lowers(b, *value, params) {
-                    return true;
-                }
-                cur = *body;
-            }
-            _ => return top_value_tree_lowers(b, cur, params),
-        }
-    }
-}
-
-fn top_value_tree_lowers(b: &IRBuilder, id: NodeId, params: &BTreeMap<VarId, i64>) -> bool {
-    let resolve = |e: &SizeExpr| e.concretize(params).as_const();
-    match b.node(id) {
-        Node::Reduce { bound, .. } => {
-            resolve(bound).is_some_and(|k| should_tree_lower(k as usize, 1))
-        }
-        Node::Compute {
-            bound,
-            body,
-            scatter: None,
-            par: None,
-            threads: None,
-            ..
-        } => match (b.node(*body), resolve(bound)) {
-            (Node::Reduce { bound: k, .. }, Some(m)) => {
-                resolve(k).is_some_and(|k| should_tree_lower(k as usize, m as usize))
-            }
-            _ => false,
-        },
-        Node::Tuple(elems) => elems.iter().any(|&e| top_value_tree_lowers(b, e, params)),
-        _ => false,
-    }
 }
 
 fn scalar_op_weight(is_mul: bool, st: Option<ScalarType>) -> f64 {
@@ -1301,13 +1245,11 @@ pub fn apply_fusion(g: &mut GraphBuilder, cand: &FusionCandidate) -> Result<(), 
         grafts.insert(rw.index_node, grafted);
     }
     let appended = cx.appended;
-    // Merged bindings: consumer params keep their positions (mb is the
-    // consumer's builder), producer params appended by the graft follow in
-    // declaration order.
-    let merged_bindings: Vec<i64> = dst_param_bindings
-        .into_iter()
-        .chain(cx.appended_params)
-        .collect();
+    // Merged bindings: consumer bindings, extended with the producer
+    // params appended by the graft (fresh names by construction, so a
+    // straight name-keyed union is well-defined).
+    let mut merged_bindings: BTreeMap<String, i64> = dst_param_bindings;
+    merged_bindings.extend(cx.appended_params);
 
     // Phase 2: rebuild the consumer body from the canonical view with the
     // grafts applied and every peeled scalar let inlined back.
@@ -1443,7 +1385,8 @@ pub fn apply_fusion(g: &mut GraphBuilder, cand: &FusionCandidate) -> Result<(), 
         }
     }
 
-    let module = g.dedup_module(Arc::new(merged));
+    // `kernel_dedup` handles Arc-content dedup graph-wide.
+    let module = Arc::new(merged);
     // Snapshot the intermediate merged kernel for the fusion-history
     // tree entry. Shape strings must be computed now (before further
     // fusion rewrites the buffer table). The snapshot's inner node has
@@ -1463,6 +1406,11 @@ pub fn apply_fusion(g: &mut GraphBuilder, cand: &FusionCandidate) -> Result<(), 
             param_bindings: merged_bindings.clone(),
             inputs: inputs.clone(),
             outputs: dst_outputs.clone(),
+            // The snapshot is metadata for the visualizer, not a node the
+            // graph passes will touch — derived state stays uncomputed.
+            types: None,
+            hash: None,
+            canonical: false,
             fusion_history: None,
         }),
         input_shapes,
@@ -1478,6 +1426,11 @@ pub fn apply_fusion(g: &mut GraphBuilder, cand: &FusionCandidate) -> Result<(), 
         param_bindings: merged_bindings,
         inputs,
         outputs: dst_outputs,
+        // apply_fusion produces a new module: kernel_dedup will
+        // recompute its hash and typecheck.
+        types: None,
+        hash: None,
+        canonical: false,
         fusion_history: Some(fusion_history),
     });
     Ok(())
@@ -1495,14 +1448,16 @@ struct GraftCx<'a> {
     src_inline_lets: &'a HashMap<VarId, NodeId>,
     src_bufs: &'a [BufId],
     dst_bufs: &'a [BufId],
-    /// Producer param bindings, parallel to `src_b.params()`.
-    src_param_bindings: &'a [i64],
+    /// Producer param bindings, keyed by param name.
+    src_param_bindings: &'a BTreeMap<String, i64>,
     /// Producer param -> merged-module size expression. Seeded with the
     /// seam-unified params; the rest are appended lazily on first use
     /// ([`Self::map_params`]).
     param_remap: BTreeMap<VarId, SizeExpr>,
-    /// Bound values of the lazily appended params, in append order.
-    appended_params: Vec<i64>,
+    /// Bound (name, value) pairs of the lazily appended params, in append
+    /// order. Names are the fresh (possibly renamed on collision) param
+    /// names that appear on the merged module's builder.
+    appended_params: Vec<(String, i64)>,
     /// src input position -> consumer-builder node, shared across sites.
     input_map: HashMap<usize, NodeId>,
     /// Buffers of the inputs appended to the consumer, in append order.
@@ -1535,12 +1490,16 @@ impl GraftCx<'_> {
                 k += 1;
                 name = format!("{base}__f{k}");
             }
-            let value = self.src_param_bindings[pos];
-            let fresh = mb.symbol(name);
-            mb.extend_shape_hint(value);
+            let value = *self.src_param_bindings.get(base).ok_or_else(|| {
+                ferr(format!(
+                    "producer param `{base}` has no binding value (keys {:?})",
+                    self.src_param_bindings.keys().collect::<Vec<_>>()
+                ))
+            })?;
+            let fresh = mb.symbol(name.clone());
             self.param_remap
                 .insert(v, SizeExpr::cst(SymConst::Sym(fresh.0)));
-            self.appended_params.push(value);
+            self.appended_params.push((name, value));
         }
         e.subst_params(&self.param_remap).ok_or_else(|| {
             ferr("a producer param in a coefficient position maps to a compound expression")
@@ -1930,8 +1889,29 @@ pub struct RoundStats {
     pub dce_removed: usize,
     /// Kernel nodes remaining after DCE.
     pub nodes_after: usize,
-    /// Distinct `Arc<ir::Module>`s across the surviving kernel nodes.
-    pub unique_modules_after: usize,
+    /// Estimated number of unique kernel modules that will be JIT-compiled:
+    /// distinct α-normalized [`module_hash`]es across the surviving kernel
+    /// nodes. Snapshot only — does not mutate the graph — computed via
+    /// [`renumber_module`] + [`module_hash`], the same fold
+    /// [`dedup_modules`] applies at the end of fusion. The compile
+    /// driver's post-monomorphize hash-distinct count is typically
+    /// smaller because monomorphization consolidates further (params
+    /// baked away collapse structurally α-equivalent residuals).
+    pub est_modules: usize,
+}
+
+/// Snapshot count of distinct α-normalized module hashes across the
+/// graph's kernel nodes. Matches what [`dedup_modules`] would fold to
+/// but does not mutate the graph, so it is safe to call every round.
+fn est_unique_modules(g: &GraphBuilder) -> usize {
+    g.nodes
+        .iter()
+        .filter_map(|n| match n {
+            GraphNode::Kernel(k) => Some(module_hash(&renumber_module(&k.module))),
+            _ => None,
+        })
+        .collect::<HashSet<_>>()
+        .len()
 }
 
 /// Count distinct `Arc<ir::Module>` pointers across the graph's kernel
@@ -1946,6 +1926,16 @@ fn distinct_kernel_modules(g: &GraphBuilder) -> usize {
         })
         .collect::<HashSet<_>>()
         .len()
+}
+
+/// Wraps [`crate::graph_ir::verify_graph`] into the fusion loop, folded
+/// into the error message so a broken round pinpoints the fusion step
+/// rather than surfacing deep in the compile driver.
+fn verify(g: &GraphBuilder, ctx: &str) -> Result<(), CompileError> {
+    crate::graph_ir::verify_graph(g).map_err(|e| match e {
+        CompileError::Verify(msg) => CompileError::Verify(format!("{ctx}: {msg}")),
+        other => other,
+    })
 }
 
 /// Runs the fusion pipeline to a fixpoint (plan section 10).
@@ -1963,18 +1953,22 @@ fn distinct_kernel_modules(g: &GraphBuilder) -> usize {
 /// nothing, or after `max_iterations`. A final [`dedup_modules`] sweep
 /// folds α-equivalent kernel modules onto shared `Arc`s so identical
 /// fused patterns JIT-compile once.
-pub fn fuse_graph(g: &mut GraphBuilder, opts: &FusionOptions) -> FusionReport {
+pub fn fuse_graph(
+    g: &mut GraphBuilder,
+    opts: &FusionOptions,
+) -> Result<FusionReport, CompileError> {
     let mut report = FusionReport {
         nodes_before: g.nodes.len(),
         ..FusionReport::default()
     };
     let initial_dce = dce(g);
+    verify(g, "after initial DCE")?;
     if opts.verbose {
         eprintln!(
             "[fusion] round 0 (initial DCE): removed={initial_dce}, nodes_after={}, \
-             unique_modules_after={}",
+             est_modules={}",
             g.nodes.len(),
-            distinct_kernel_modules(g),
+            est_unique_modules(g),
         );
     }
     let mut cache = RelationCache::new();
@@ -1999,22 +1993,19 @@ pub fn fuse_graph(g: &mut GraphBuilder, opts: &FusionOptions) -> FusionReport {
             }
         }
         let dce_removed = dce(g);
+        verify(g, &format!("after round {}", report.rounds))?;
         let stats = RoundStats {
             round: report.rounds,
             fused: fused_this_round,
             dce_removed,
             nodes_after: g.nodes.len(),
-            unique_modules_after: distinct_kernel_modules(g),
+            est_modules: est_unique_modules(g),
         };
         if opts.verbose {
             eprintln!(
                 "[fusion] round {}: fused={}, dce_removed={}, nodes_after={}, \
-                 unique_modules_after={}",
-                stats.round,
-                stats.fused,
-                stats.dce_removed,
-                stats.nodes_after,
-                stats.unique_modules_after,
+                 est_modules={}",
+                stats.round, stats.fused, stats.dce_removed, stats.nodes_after, stats.est_modules,
             );
         }
         report.rounds_detail.push(stats);
@@ -2024,9 +2015,10 @@ pub fn fuse_graph(g: &mut GraphBuilder, opts: &FusionOptions) -> FusionReport {
             break;
         }
     }
-    report.deduped = dedup_modules(g);
+    report.deduped += dedup_modules(g);
     report.nodes_after = g.nodes.len();
-    report
+    verify(g, "after fusion")?;
+    Ok(report)
 }
 
 // ---------------------------------------------------------------------
@@ -2051,16 +2043,26 @@ pub fn fuse_graph(g: &mut GraphBuilder, opts: &FusionOptions) -> FusionReport {
 /// Returns the drop in the number of distinct module `Arc`s.
 pub fn dedup_modules(g: &mut GraphBuilder) -> usize {
     let before = distinct_kernel_modules(g);
+    // First pass: renumber each module into canonical form.
     for i in 0..g.nodes.len() {
         let GraphNode::Kernel(k) = &g.nodes[i] else {
             continue;
         };
         let renumbered = Arc::new(renumber_module(&k.module));
-        let module = g.dedup_module(renumbered);
         let GraphNode::Kernel(k) = &mut g.nodes[i] else {
             unreachable!();
         };
-        k.module = module;
+        k.module = renumbered;
+    }
+    // Second pass: content-fold identical modules onto a single Arc so
+    // downstream `Arc::as_ptr` identity checks see the merged set. The
+    // graph builder holds no dedup map; we fold locally.
+    let mut seen: HashMap<[u8; 32], Arc<Module>> = HashMap::new();
+    for node in &mut g.nodes {
+        let GraphNode::Kernel(k) = node else { continue };
+        let hash = module_hash(&k.module);
+        let canonical = seen.entry(hash).or_insert_with(|| k.module.clone()).clone();
+        k.module = canonical;
     }
     before - distinct_kernel_modules(g)
 }
@@ -2161,9 +2163,6 @@ pub(crate) fn renumber_module(m: &Module) -> Module {
     let mut nb = IRBuilder::new();
     for (v, name) in b.params() {
         nb.inherit_param(vmap[v], name.clone());
-    }
-    if let Some(h) = b.shape_hint() {
-        nb.add_shape_hint(h);
     }
     if let Some(block) = b.block_hint() {
         nb.set_block_hint(block);
@@ -2438,22 +2437,6 @@ mod tests {
     }
 
     #[test]
-    fn tree_lowered_reduce_is_multikernel() {
-        let mut b = IRBuilder::new();
-        let x = b.input("x", ScalarType::BabyBear, vec![4096]);
-        let body = b.compute(4, |b, i| {
-            b.reduce(ReduceOp::Add, 1024, |b, r| {
-                let c = b.const_u32(1024);
-                let row = b.mul(i, c);
-                let ix = b.add(row, r);
-                b.index(x, &[ix])
-            })
-        });
-        let r = extract(b, body);
-        assert_eq!(r.class, KernelClass::MultiKernel);
-    }
-
-    #[test]
     fn scatter_store_is_general_without_inverse() {
         let mut b = IRBuilder::new();
         let x = b.input("x", ScalarType::BabyBear, vec![16]);
@@ -2531,17 +2514,61 @@ mod tests {
     use crate::graph_ir::{BufInfo, DeviceType};
 
     fn graph_of(module: Module, n_in: usize, n_out: usize) -> (GraphBuilder, Vec<BufId>) {
+        assert_eq!(module.builder.inputs().len(), n_in);
+        // Size input buffers from the module's declared shapes so the
+        // graph-level verifier's exact-size check passes.
+        let ins_bytes: Vec<i64> = module
+            .builder
+            .inputs()
+            .iter()
+            .map(|d| {
+                let elems: i64 = d
+                    .shape
+                    .iter()
+                    .map(|e| e.as_const().expect("test fixture: concrete input shape"))
+                    .product();
+                elems * d.elem.size_bytes() as i64
+            })
+            .collect();
+        // Output byte sizes come from `type_infer` on the module.
+        let types = crate::passes::type_infer(&module).expect("test fixture: type-infer");
+        let body_ty = types.get(module.body).clone();
+        let member_types: Vec<crate::ir::Type> = match body_ty {
+            crate::ir::Type::Tuple(ts) => ts,
+            other => vec![other],
+        };
+        assert_eq!(member_types.len(), n_out);
+        let outs_bytes: Vec<i64> = member_types
+            .iter()
+            .map(|t| {
+                let elem = t
+                    .scalar_type()
+                    .expect("test fixture: scalar output element type")
+                    .size_bytes() as i64;
+                let elems: i64 = t
+                    .shape()
+                    .iter()
+                    .map(|e| e.as_const().expect("test fixture: concrete output shape"))
+                    .product();
+                elems * elem
+            })
+            .collect();
+
         let mut g = GraphBuilder::new();
-        let buf = |g: &mut GraphBuilder, name: String| {
+        let buf = |g: &mut GraphBuilder, name: String, bytes: i64| {
             g.add_buf(BufInfo {
                 name: Some(name),
                 device_type: DeviceType::Cuda(0),
-                size: Quast::cst(1 << 20),
+                size: Quast::cst(bytes),
                 elem_size: 4,
             })
         };
-        let ins: Vec<BufId> = (0..n_in).map(|k| buf(&mut g, format!("in{k}"))).collect();
-        let outs: Vec<BufId> = (0..n_out).map(|k| buf(&mut g, format!("out{k}"))).collect();
+        let ins: Vec<BufId> = (0..n_in)
+            .map(|k| buf(&mut g, format!("in{k}"), ins_bytes[k]))
+            .collect();
+        let outs: Vec<BufId> = (0..n_out)
+            .map(|k| buf(&mut g, format!("out{k}"), outs_bytes[k]))
+            .collect();
         for &b in &ins {
             g.register_input(b);
         }
@@ -2549,6 +2576,11 @@ mod tests {
             g.register_output(b);
         }
         g.insert_kernel(module, ins.clone(), outs, &[]);
+        // `insert_kernel` doesn't split at insertion; fusion tests
+        // rely on the split shape, so canonicalize here.
+        crate::graph_exe::GraphCompiler::new()
+            .canonicalize(&mut g)
+            .expect("canonicalize");
         (g, ins)
     }
 
@@ -2764,7 +2796,7 @@ mod tests {
         assert_eq!(dsts, HashSet::from([1, 2]));
         let picked = select_candidates(cands);
         assert_eq!(picked.len(), 2, "dst-disjoint greedy takes both");
-        let report = fuse_graph(&mut g, &FusionOptions::default());
+        let report = fuse_graph(&mut g, &FusionOptions::default()).unwrap();
         assert_eq!(report.rounds, 1);
         assert_eq!(report.fused.len(), 2);
         assert_eq!(report.nodes_after, 2, "producer DCE'd; two fused consumers");
@@ -3149,6 +3181,10 @@ mod tests {
         g.register_input(xin);
         g.register_output(out);
         g.insert_kernel(module, vec![xin], vec![out], &[]);
+        // Canonicalize splits the multi-kernel module.
+        crate::graph_exe::GraphCompiler::new()
+            .canonicalize(&mut g)
+            .unwrap();
 
         let cands = candidates(&g, &FusionOptions::default());
         assert_eq!(cands.len(), 1);
@@ -3156,7 +3192,7 @@ mod tests {
         let kn = kernel_at(&g, cands[0].dst);
         assert_eq!(kn.inputs, vec![xin]);
         assert_eq!(kn.module.builder.params().len(), 1);
-        assert_eq!(kn.param_bindings, vec![32]);
+        assert_eq!(kn.param_bindings, [("n".to_string(), 32)].into());
         let r = extract_one(&kn.module, &binding_env(kn)).unwrap();
         assert_eq!(r.class, KernelClass::Simple);
         assert_eq!(r.outer_bound, 32);
@@ -3206,7 +3242,7 @@ mod tests {
         let params = kn.module.builder.params();
         assert_eq!(params.len(), 1);
         assert_eq!(params[0].1, "m");
-        assert_eq!(kn.param_bindings, vec![16]);
+        assert_eq!(kn.param_bindings, [("m".to_string(), 16)].into());
         // The appended input decl still states its shape through the param.
         assert_eq!(
             kn.module.builder.inputs()[0].shape,
@@ -3428,7 +3464,7 @@ mod tests {
     #[test]
     fn fuse_graph_fuses_chain() {
         let (mut g, ins) = graph_of(chain_module(), 1, 1);
-        let report = fuse_graph(&mut g, &FusionOptions::default());
+        let report = fuse_graph(&mut g, &FusionOptions::default()).unwrap();
         assert_eq!(report.rounds, 1);
         assert_eq!(report.fused.len(), 1);
         assert_eq!(report.nodes_before, 2);
@@ -3453,7 +3489,7 @@ mod tests {
     #[test]
     fn cytoscape_dump_includes_fusion_history_and_neighbors() {
         let (mut g, _) = graph_of(triple_chain_module(), 1, 1);
-        let report = fuse_graph(&mut g, &FusionOptions::default());
+        let report = fuse_graph(&mut g, &FusionOptions::default()).unwrap();
         assert_eq!(report.fused.len(), 2);
         assert_eq!(g.nodes.len(), 1);
         let json = g.to_cytoscape_json();
@@ -3494,7 +3530,7 @@ mod tests {
     fn fuse_graph_three_kernel_chain_two_rounds() {
         let (mut g, _) = graph_of(triple_chain_module(), 1, 1);
         assert_eq!(g.nodes.len(), 3);
-        let report = fuse_graph(&mut g, &FusionOptions::default());
+        let report = fuse_graph(&mut g, &FusionOptions::default()).unwrap();
         assert_eq!(report.rounds, 2);
         assert_eq!(report.fused.len(), 2);
         assert_eq!(report.nodes_after, 1);
@@ -3509,7 +3545,7 @@ mod tests {
             max_iterations: 1,
             ..FusionOptions::default()
         };
-        let report = fuse_graph(&mut g, &opts);
+        let report = fuse_graph(&mut g, &opts).unwrap();
         assert_eq!(report.rounds, 1);
         assert_eq!(report.fused.len(), 1);
         assert_eq!(g.nodes.len(), 2);
@@ -3540,7 +3576,7 @@ mod tests {
         // dst is itself unreachable. `fuse_graph`'s initial DCE avoids all
         // of that by dropping the dead reader before enumeration runs.
         assert_eq!(candidates(&g, &FusionOptions::default()).len(), 2);
-        let report = fuse_graph(&mut g, &FusionOptions::default());
+        let report = fuse_graph(&mut g, &FusionOptions::default()).unwrap();
         assert_eq!(report.nodes_before, 3);
         assert_eq!(report.fused.len(), 1);
         assert_eq!(g.nodes.len(), 1);
@@ -3697,7 +3733,11 @@ mod tests {
         g.register_output(o1);
         g.insert_kernel(chain_module(), [i0], [o0], &[]);
         g.insert_kernel(chain_module_shifted(9), [i1], [o1], &[]);
-        let report = fuse_graph(&mut g, &FusionOptions::default());
+        // Canonicalize splits each 2-kernel chain into 2 nodes.
+        crate::graph_exe::GraphCompiler::new()
+            .canonicalize(&mut g)
+            .unwrap();
+        let report = fuse_graph(&mut g, &FusionOptions::default()).unwrap();
         assert_eq!(report.nodes_before, 4);
         assert_eq!(report.fused.len(), 2);
         assert_eq!(report.nodes_after, 2);

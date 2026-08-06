@@ -1,4 +1,4 @@
-//! CUDA C++ code generation from [`KernelProgram`].
+//! CUDA C++ code generation from [`KirProgram`].
 //!
 //! The generated translation unit is self-contained and exports the C
 //! interface from `design.md`:
@@ -6,13 +6,11 @@
 //! ```c
 //! Prog* make_module();
 //! void destroy_module(Prog*);
-//! uint64_t scratch_size(Prog*);
 //! uint64_t num_outputs(Prog*);   uint64_t output_size(Prog*, uint64_t);
 //! uint64_t num_inputs(Prog*);    uint64_t input_size(Prog*, uint64_t);
 //! void set_input(Prog*, uint64_t, void*);
 //! void set_output(Prog*, uint64_t, void*);
-//! void set_scratch_buf(Prog*, void*);
-//! void set_param(Prog*, uint64_t, int64_t);
+//! void set_symbol(Prog*, uint64_t, int64_t);
 //! cudaError_t run(Prog*, cudaStream_t);
 //! ```
 //!
@@ -39,7 +37,7 @@ use crate::{
     ir::{BinOp, ScalarType, SizeExpr, VarId},
     kernel_ir::{
         classify_convert, Access, BufId, BufferKind, ConvertKind, IndexMap, KBound, Kernel,
-        KernelProgram, LinearLayout, ParAttr, SSABlock, SSANode, SSAOpCode, SSARes,
+        KirProgram, LinearLayout, ParAttr, SSABlock, SSANode, SSAOpCode, SSARes,
     },
     passes::plan_shared_mem::{plan_shared_mem, SharedMemPlan},
     quast::{CStrEmitter, Expr, Quast, SymConst},
@@ -60,7 +58,7 @@ fn param_ident(name: &str) -> String {
     format!("p_{ident}")
 }
 
-fn device_param(p: &KernelProgram, v: VarId) -> String {
+fn device_param(p: &KirProgram, v: VarId) -> String {
     let (_, name) = p
         .params
         .iter()
@@ -122,8 +120,8 @@ fn c_type(ty: ScalarType) -> &'static str {
 /// buffer's element type.
 type ValTypes = HashMap<SSARes, ScalarType>;
 
-fn compute_val_types(p: &KernelProgram, k: &Kernel) -> ValTypes {
-    fn walk(p: &KernelProgram, k: &Kernel, body: &[SSANode], types: &mut ValTypes) {
+fn compute_val_types(p: &KirProgram, k: &Kernel) -> ValTypes {
+    fn walk(p: &KirProgram, k: &Kernel, body: &[SSANode], types: &mut ValTypes) {
         for &nid in body {
             let op = k.op(nid);
             match &op.opcode {
@@ -322,8 +320,8 @@ static __device__ FpExt __shfl_sync(unsigned mask, FpExt val, int src_lane) {
 }
 "#;
 
-/// Generates the CUDA C++ translation unit for a [`KernelProgram`].
-pub fn codegen(p: &KernelProgram) -> Result<String, CompileError> {
+/// Generates the CUDA C++ translation unit for a [`KirProgram`].
+pub fn codegen(p: &KirProgram) -> Result<String, CompileError> {
     let plan = plan_shared_mem(p);
     let mut s = String::new();
     s.push_str(PRELUDE);
@@ -343,7 +341,7 @@ fn val(v: SSARes) -> String {
 
 fn gen_kernel(
     s: &mut String,
-    p: &KernelProgram,
+    p: &KirProgram,
     k: &Kernel,
     plan: &SharedMemPlan,
     ki: usize,
@@ -449,7 +447,7 @@ fn quast_uses(q: &Quast, v: VarId) -> bool {
 #[allow(clippy::too_many_arguments)]
 fn gen_stmts(
     s: &mut String,
-    p: &KernelProgram,
+    p: &KirProgram,
     k: &Kernel,
     plan: &SharedMemPlan,
     types: &ValTypes,
@@ -532,7 +530,7 @@ fn gen_stmts(
 /// (promoted tile or conversion view) spreads its power-of-two domain over
 /// the block; an accumulator (no layout) needs one slot per sequential step
 /// of the pars accessing it.
-fn register_slots(p: &KernelProgram, k: &Kernel, buf: BufId) -> usize {
+fn register_slots(p: &KirProgram, k: &Kernel, buf: BufId) -> usize {
     let decl = p.buffer(buf);
     if decl.layout.is_some() {
         return decl.len().div_ceil(k.block);
@@ -559,7 +557,7 @@ fn register_slots(p: &KernelProgram, k: &Kernel, buf: BufId) -> usize {
 #[allow(clippy::too_many_arguments)]
 fn gen_par(
     s: &mut String,
-    p: &KernelProgram,
+    p: &KirProgram,
     k: &Kernel,
     types: &ValTypes,
     bound: &KBound,
@@ -694,7 +692,7 @@ impl ReadSinks<'_> {
     fn emit(
         &self,
         s: &mut String,
-        p: &KernelProgram,
+        p: &KirProgram,
         nid: SSANode,
         is_else: bool,
         depth: usize,
@@ -833,7 +831,7 @@ pub(crate) fn compute_read_sinks(
 #[allow(clippy::too_many_arguments)]
 fn gen_par_body(
     s: &mut String,
-    p: &KernelProgram,
+    p: &KirProgram,
     k: &Kernel,
     types: &ValTypes,
     attr: &ParAttr,
@@ -870,7 +868,7 @@ fn gen_par_body(
     // load can itself unblock the gather).
     fn emit_ready(
         s: &mut String,
-        p: &KernelProgram,
+        p: &KirProgram,
         pad: &str,
         reads: &[Access],
         block: &SSABlock,
@@ -962,7 +960,7 @@ fn gen_par_body(
 /// register-to-shared stages the registers out through shared memory.
 fn gen_convert(
     s: &mut String,
-    p: &KernelProgram,
+    p: &KirProgram,
     k: &Kernel,
     dst: BufId,
     src: BufId,
@@ -1178,7 +1176,7 @@ fn gen_shuffle(
 
 fn gen_ops(
     s: &mut String,
-    p: &KernelProgram,
+    p: &KirProgram,
     k: &Kernel,
     types: &ValTypes,
     body: &[SSANode],
@@ -1361,7 +1359,7 @@ fn maps_agree(a: &LinearLayout, b: &LinearLayout) -> bool {
 /// C lvalue for one access: the buffer element at the access's index. The
 /// buffer's linear layout (logical -> physical) is applied when non-trivial.
 fn access_str(
-    p: &KernelProgram,
+    p: &KirProgram,
     access: &Access,
     attr: &ParAttr,
     vid: SSARes,
@@ -1455,22 +1453,19 @@ fn ll_apply_str(layout: &LinearLayout, x: &str) -> String {
 }
 
 /// C expression for a buffer pointer inside `run`, respecting constness.
-fn buf_arg(p: &KernelProgram, buf: BufId, writable: bool) -> String {
+fn buf_arg(p: &KirProgram, buf: BufId, writable: bool) -> String {
     let cq = if writable { "" } else { "const " };
     let ct = c_type(p.buffer(buf).elem);
     match p.buffer(buf).kind {
         BufferKind::Input(k) => format!("({cq}{ct}*)p->inputs[{k}]"),
         BufferKind::Output(k) => format!("({cq}{ct}*)p->outputs[{k}]"),
-        BufferKind::Scratch { offset } => {
-            format!("({cq}{ct}*)((char*)p->scratch + {offset})")
-        }
         BufferKind::Shared | BufferKind::Register => {
             unreachable!("kernel-local buffers are never kernel parameters")
         }
     }
 }
 
-fn gen_host(s: &mut String, p: &KernelProgram) {
+fn gen_host(s: &mut String, p: &KirProgram) {
     let n_in = p.input_bufs.len();
     let n_out = p.output_bufs.len();
     let n_par = p.params.len();
@@ -1506,7 +1501,6 @@ fn gen_host(s: &mut String, p: &KernelProgram) {
         r#"struct Prog {{
     void* inputs[{in_cap}];
     void* outputs[{out_cap}];
-    void* scratch;
     int64_t params[{par_cap}];
 }};
 
@@ -1516,8 +1510,7 @@ extern "C" Prog* make_module() {{
     return p;
 }}
 extern "C" void destroy_module(Prog* p) {{ delete p; }}
-extern "C" void set_param(Prog* p, uint64_t i, int64_t v) {{ p->params[i] = v; }}
-extern "C" uint64_t scratch_size(Prog*) {{ return {scratch}ull; }}
+extern "C" void set_symbol(Prog* p, uint64_t i, int64_t v) {{ p->params[i] = v; }}
 extern "C" uint64_t num_outputs(Prog*) {{ return {n_out}ull; }}
 extern "C" uint64_t output_size(Prog* p, uint64_t i) {{
     (void)p;
@@ -1534,12 +1527,10 @@ extern "C" uint64_t input_size(Prog* p, uint64_t i) {{
 }}
 extern "C" void set_input(Prog* p, uint64_t i, void* ptr) {{ p->inputs[i] = ptr; }}
 extern "C" void set_output(Prog* p, uint64_t i, void* ptr) {{ p->outputs[i] = ptr; }}
-extern "C" void set_scratch_buf(Prog* p, void* ptr) {{ p->scratch = ptr; }}
 "#,
         in_cap = n_in.max(1),
         out_cap = n_out.max(1),
         par_cap = n_par.max(1),
-        scratch = p.scratch_bytes,
         n_out = n_out,
         n_in = n_in,
     )

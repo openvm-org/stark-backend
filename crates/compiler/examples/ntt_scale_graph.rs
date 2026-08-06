@@ -19,8 +19,7 @@ use crypto_compiler::{
     ir::{IRBuilder, ScalarType},
     kernel, kernels,
     quast::Quast,
-    runner::{from_monty, to_monty},
-    runtime::CompileOptions,
+    test_utils::{from_monty, to_monty},
 };
 use openvm_cuda_common::{copy::MemCopyH2D, d_buffer::DeviceBuffer, stream::GpuDeviceCtx};
 use p3_baby_bear::BabyBear;
@@ -71,7 +70,6 @@ fn main() {
     let mut exe = GraphCompiler::new()
         .device(DeviceType::Cuda(0))
         .symbol(n_bytes_sym, (n * 4) as i64)
-        .compile_options(CompileOptions::default())
         .compile(g)
         .expect("graph compile");
 

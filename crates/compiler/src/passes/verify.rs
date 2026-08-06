@@ -1,9 +1,9 @@
-//! Structural verification of [`KernelProgram`]s.
+//! Structural verification of [`KirProgram`]s.
 
 use std::collections::{BTreeSet, HashSet};
 
 use crate::{
-    kernel_ir::{Kernel, KernelProgram, SSABlock, SSAOpCode, SSARes},
+    kernel_ir::{Kernel, KirProgram, SSABlock, SSAOpCode, SSARes},
     CompileError,
 };
 
@@ -11,14 +11,14 @@ fn verr(msg: String) -> CompileError {
     CompileError::Verify(msg)
 }
 
-/// Structural checks on a [`KernelProgram`], run after codegen:
+/// Structural checks on a [`KirProgram`], run after codegen:
 ///
 /// 1. every kernel is in SSA form: each value is defined exactly once (as a block operand or an op
 ///    result), and every use — op operands, yields and access-index symbols — refers to a defined
 ///    value;
 /// 2. every par block is primitive: no nested pars, no statement-style loops (loop-carried
 ///    `scf.for`s are allowed and checked recursively) and no syncs.
-pub fn verify(p: &KernelProgram) -> Result<(), CompileError> {
+pub fn verify(p: &KirProgram) -> Result<(), CompileError> {
     for kernel in &p.kernels {
         let mut defined = HashSet::new();
         collect_defs(kernel, &kernel.grid.block, &mut defined)?;
@@ -128,12 +128,11 @@ mod tests {
         kernel_ir::{Kernel, SSAOp},
     };
 
-    fn prog_of(k: Kernel) -> KernelProgram {
-        KernelProgram {
+    fn prog_of(k: Kernel) -> KirProgram {
+        KirProgram {
             name: k.name.clone(),
             buffers: vec![],
             kernels: vec![k],
-            scratch_bytes: 0,
             input_bufs: vec![],
             output_bufs: vec![],
             params: vec![],

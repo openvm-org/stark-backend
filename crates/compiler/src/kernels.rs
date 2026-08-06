@@ -222,10 +222,10 @@ pub fn ntt_module(log_n: usize) -> Module {
 
 /// Twiddle factors for [`ntt_module`]: `w[j] = omega^j` for `j < n/2`, where
 /// `omega = BabyBear::two_adic_generator(log_n)`. Canonical representation:
-/// the runner's [`crate::runner::ModuleRunner`] Montgomery-encodes BabyBear
+/// [`crate::test_utils::TestModuleRunner`] Montgomery-encodes BabyBear
 /// inputs at the H2D boundary. Callers using the low-level
-/// [`crate::runtime::KernelModule`] directly must Mont-encode themselves via
-/// [`crate::runner::to_monty`].
+/// [`crate::runtime::KernelProgram`] directly must Mont-encode themselves via
+/// [`crate::test_utils::to_monty`].
 pub fn ntt_twiddles(log_n: usize) -> Vec<u32> {
     assert!(log_n >= 1);
     BabyBear::two_adic_generator(log_n)

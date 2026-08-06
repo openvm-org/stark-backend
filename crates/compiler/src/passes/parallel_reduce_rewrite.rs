@@ -59,11 +59,13 @@
 //! - outer parallelism `M < OUTER_SATURATION_THRESHOLD` (above that we already have enough
 //!   threads).
 
+use std::collections::BTreeMap;
+
 use rustc_hash::FxHashMap;
 
 use crate::{
-    ir::{BinOp, IRBuilder, Module, Node, NodeId, ReduceOp, VarId},
-    passes::type_infer::type_infer,
+    ir::{BinOp, IRBuilder, Module, Node, NodeId, ReduceOp, SizeExpr, VarId},
+    passes::type_infer::TypeMap,
     CompileError,
 };
 
@@ -90,39 +92,70 @@ const MIN_TOTAL_THREADS: usize = 4 * BLOCK_SIZE;
 /// launch overhead dominates.
 const MIN_STAGE_WORK: usize = BLOCK_SIZE;
 
-/// Runs the parallel-reduce rewrite. Idempotent: a second run does
-/// nothing because rewritten reduces are no longer `Node::Reduce`.
-pub fn rewrite_parallel_reduce(module: Module) -> Result<Module, CompileError> {
-    let _ = type_infer(&module)?;
+/// Runs the parallel-reduce rewrite against a graph node's module.
+///
+/// `types` is the module's cached type map (the graph `typecheck` pass
+/// filled it) — reusing it avoids the redundant `type_infer` the old
+/// standalone entry point did. `env` binds any symbolic parameters that
+/// appear in reduce bounds; concretization is what unlocks the gate for
+/// symbolic-shaped modules whose K is only known once graph bindings are
+/// in play.
+///
+/// Returns `Ok(None)` when the gate fires nowhere (no rewrite happens —
+/// the caller keeps the original module `Arc`), or `Ok(Some(m))` with the
+/// rewritten module. Idempotent: a second run over the returned module
+/// returns `Ok(None)` because the rewritten reduces are no longer
+/// `Node::Reduce`.
+pub fn rewrite_parallel_reduce(
+    module: &Module,
+    types: &TypeMap,
+    env: &BTreeMap<VarId, i64>,
+) -> Result<Option<Module>, CompileError> {
     debug_assert!(BLOCK_SIZE.is_power_of_two());
-    let Module {
-        name,
-        mut builder,
-        body,
-    } = module;
+    // `types` is the pass's contract that the module type-checks; it's
+    // consumed only for that invariant, so `_ = types` documents the
+    // dependency without holding a reference in the RewriteCx.
+    let _ = types;
+
+    let mut builder = module.builder.clone();
+    let body = module.body;
 
     let mut cx = RewriteCx {
         b: &mut builder,
+        env,
         subst: FxHashMap::default(),
         subst_memo: FxHashMap::default(),
         changed: false,
     };
 
     let new_body = cx.walk_top(body)?;
-    let changed = cx.changed;
-
-    Ok(Module {
-        name,
+    if !cx.changed {
+        return Ok(None);
+    }
+    Ok(Some(Module {
+        name: module.name.clone(),
         builder,
-        body: if changed { new_body } else { body },
-    })
+        body: new_body,
+    }))
 }
 
 struct RewriteCx<'a> {
     b: &'a mut IRBuilder,
+    /// Concrete values for the module's symbolic parameters — needed to
+    /// resolve reduce / compute bounds through the gate.
+    env: &'a BTreeMap<VarId, i64>,
     subst: FxHashMap<VarId, NodeId>,
     subst_memo: FxHashMap<NodeId, NodeId>,
     changed: bool,
+}
+
+impl RewriteCx<'_> {
+    /// Concretize a size expression through the pass env. Returns `None`
+    /// when the expression still references an unbound parameter — the
+    /// gate then treats it as un-tree-lowerable and falls through.
+    fn resolve(&self, e: &SizeExpr) -> Option<i64> {
+        e.concretize(self.env).as_const()
+    }
 }
 
 impl RewriteCx<'_> {
@@ -161,15 +194,16 @@ impl RewriteCx<'_> {
     ) -> Result<(Vec<(VarId, NodeId)>, NodeId), CompileError> {
         match self.b.node(id).clone() {
             // The rewrite only fires on concrete bounds: picking G and the
-            // halving-tree depth needs numbers. Symbolic reduces keep the
-            // default sequential lowering.
+            // halving-tree depth needs numbers. A bound that stays
+            // symbolic under the pass env keeps the default sequential
+            // lowering.
             Node::Reduce {
                 op,
                 bound: k,
                 var: i,
                 body,
             } => {
-                if let Some(k) = k.as_const().map(|c| c as usize) {
+                if let Some(k) = self.resolve(&k).map(|c| c as usize) {
                     if should_tree_lower(k, 1) {
                         let (extras, final_expr) = self.build_block_reduce(op, 1, None, k, i, body);
                         self.changed = true;
@@ -193,7 +227,7 @@ impl RewriteCx<'_> {
                     body,
                 } = self.b.node(compute_body).clone()
                 {
-                    if let (Some(k), Some(m)) = (k.as_const(), m.as_const()) {
+                    if let (Some(k), Some(m)) = (self.resolve(&k), self.resolve(&m)) {
                         let (k, m) = (k as usize, m as usize);
                         if should_tree_lower(k, m) {
                             let (extras, final_expr) =

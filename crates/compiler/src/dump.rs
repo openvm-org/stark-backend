@@ -7,7 +7,7 @@
 //! binds their free variables, which keeps deeply shared DAGs (poseidon2)
 //! linear in the number of unique nodes.
 //!
-//! [`dump_kernel_ir`] prints a [`KernelProgram`] in an MLIR-ish concrete
+//! [`dump_kernel_ir`] prints a [`KirProgram`] in an MLIR-ish concrete
 //! syntax. SSA value names `v{n}` match the generated CUDA, so the two can
 //! be cross-referenced; a par's declared reads and writes are shown as
 //! `load`/`store` lines binding the block operands and yields; `Sync` ops
@@ -23,13 +23,10 @@ use std::{
 use crate::{
     ir::{BinOp, IRBuilder, Module, Node, NodeId, ReduceOp, ScalarType, VarId},
     kernel_ir::{
-        Access, BufId, BufferDecl, BufferKind, IndexMap, Kernel, KernelProgram, LinearLayout,
+        Access, BufId, BufferDecl, BufferKind, IndexMap, Kernel, KirProgram, LinearLayout,
         SSABlock, SSANode, SSAOp, SSAOpCode, SSARes,
     },
-    passes::{
-        canonicalize::Program, plan_global_scratch::GlobalScratchPlan, type_infer::TypeMap,
-        SharedMemPlan,
-    },
+    passes::{canonicalize::Program, type_infer::TypeMap, SharedMemPlan},
     quast::{CStrEmitter, ParSpec, Quast, Scatter},
 };
 
@@ -159,28 +156,9 @@ pub fn dump_program(program: &Program) -> String {
     s
 }
 
-/// Renders a [`GlobalScratchPlan`]: total arena bytes and each intermediate
-/// tensor's byte offset.
-pub fn dump_global_scratch(plan: &GlobalScratchPlan) -> String {
-    let mut s = String::new();
-    writeln!(
-        s,
-        "// GlobalScratchPlan: {} intermediates, {} bytes total",
-        plan.offsets.len(),
-        plan.total_bytes,
-    )
-    .unwrap();
-    let mut entries: Vec<_> = plan.offsets.iter().collect();
-    entries.sort_by_key(|(_, &off)| off);
-    for (tref, off) in entries {
-        writeln!(s, "  {tref:?} @ {off}").unwrap();
-    }
-    s
-}
-
 /// Renders a [`SharedMemPlan`]: per-kernel peak shared bytes and per-buffer
 /// offsets, grouped by kernel index.
-pub fn dump_shared_mem(kprog: &KernelProgram, plan: &SharedMemPlan) -> String {
+pub fn dump_shared_mem(kprog: &KirProgram, plan: &SharedMemPlan) -> String {
     let mut s = String::new();
     writeln!(
         s,
@@ -286,13 +264,17 @@ fn reachable(b: &IRBuilder, root: NodeId) -> Vec<NodeId> {
     seen.into_iter().collect()
 }
 
-/// Records the nesting depth of every binder (compute/reduce/let variable)
-/// on its unique root-to-binder path.
-fn binder_depths(
+/// Records the nesting depth and enclosing scope of every binder
+/// (compute/reduce/let variable) on its unique root-to-binder path.
+/// The enclosing scope of a top-level binder is `None`; otherwise it is
+/// the innermost binder that syntactically contains it.
+fn binder_tree(
     b: &IRBuilder,
     id: NodeId,
     d: usize,
+    current_scope: Option<VarId>,
     depth: &mut HashMap<VarId, usize>,
+    parent: &mut HashMap<VarId, Option<VarId>>,
     visited: &mut HashSet<NodeId>,
 ) {
     if !visited.insert(id) {
@@ -301,26 +283,86 @@ fn binder_depths(
     match b.node(id) {
         Node::Compute { var, body, .. } | Node::Reduce { var, body, .. } => {
             depth.insert(*var, d + 1);
-            binder_depths(b, *body, d + 1, depth, visited);
+            parent.insert(*var, current_scope);
+            binder_tree(b, *body, d + 1, Some(*var), depth, parent, visited);
         }
         Node::Let { var, value, body } => {
-            binder_depths(b, *value, d, depth, visited);
+            binder_tree(b, *value, d, current_scope, depth, parent, visited);
             depth.insert(*var, d + 1);
-            binder_depths(b, *body, d + 1, depth, visited);
+            parent.insert(*var, current_scope);
+            binder_tree(b, *body, d + 1, Some(*var), depth, parent, visited);
         }
         node => {
             for c in children(node) {
-                binder_depths(b, c, d, depth, visited);
+                binder_tree(b, c, d, current_scope, depth, parent, visited);
             }
         }
     }
 }
 
+/// Records, for each node reachable from `root`, the set of scopes it is
+/// referenced from. The scope of a use is the innermost binder whose
+/// body contains the parent that reads it (or `None` for uses that lie
+/// at the module top level). A shared node may be reached from multiple
+/// scopes; each distinct one is recorded. Pruning on already-seen
+/// `(id, scope)` pairs keeps the walk linear in the DAG's edge count.
+fn record_scopes(
+    b: &IRBuilder,
+    id: NodeId,
+    current_scope: Option<VarId>,
+    scopes: &mut HashMap<NodeId, BTreeSet<Option<VarId>>>,
+) {
+    if !scopes.entry(id).or_default().insert(current_scope) {
+        return;
+    }
+    match b.node(id) {
+        Node::Compute { var, body, .. } | Node::Reduce { var, body, .. } => {
+            record_scopes(b, *body, Some(*var), scopes);
+        }
+        Node::Let { var, value, body } => {
+            record_scopes(b, *value, current_scope, scopes);
+            record_scopes(b, *body, Some(*var), scopes);
+        }
+        node => {
+            for c in children(node) {
+                record_scopes(b, c, current_scope, scopes);
+            }
+        }
+    }
+}
+
+/// LCA of two scopes in the binder tree (`None` = top-level root).
+/// Walks the shallower scope down to match depth, then walks both up
+/// together until they meet.
+fn scope_lca(
+    depths: &HashMap<VarId, usize>,
+    parents: &HashMap<VarId, Option<VarId>>,
+    mut a: Option<VarId>,
+    mut b: Option<VarId>,
+) -> Option<VarId> {
+    let scope_depth = |s: Option<VarId>| s.map(|v| depths[&v]).unwrap_or(0);
+    while scope_depth(a) > scope_depth(b) {
+        a = parents[&a.unwrap()];
+    }
+    while scope_depth(b) > scope_depth(a) {
+        b = parents[&b.unwrap()];
+    }
+    while a != b {
+        a = parents[&a.unwrap()];
+        b = parents[&b.unwrap()];
+    }
+    a
+}
+
 /// Expression printer. Single-use nodes are inlined; multi-use nodes are
-/// printed once as a `%id = expr` definition in the innermost scope that
-/// binds their free variables (all free variables of a node lie on one
-/// binder path, so the deepest one identifies that scope), which keeps
-/// shared DAGs linear while every use site still sees the definition.
+/// printed once as a `%id = expr` definition in the deepest scope that
+/// dominates every one of the node's use sites — the LCA of its use-site
+/// scopes in the binder tree. This keeps shared DAGs linear while each
+/// name binds at its correct lexical scope: the definition prints as
+/// close to its uses as possible instead of always sinking to the top
+/// level (which is what happens if you only look at the def's own free
+/// variables — a def with no free vars used only inside one compute
+/// body has an empty free set but should still print inside that body).
 struct HirPrinter<'a> {
     b: &'a IRBuilder,
     named: HashSet<NodeId>,
@@ -358,37 +400,37 @@ impl<'a> HirPrinter<'a> {
             })
             .collect();
 
-        // Free-variable sets, children first (ids ascend). Binders may
-        // subtract their own variable from the union: it cannot occur free
-        // in a Let's value because the variable is created after it.
-        let mut free: HashMap<NodeId, BTreeSet<VarId>> = HashMap::new();
-        for &id in &ids {
-            let node = b.node(id);
-            let mut f = BTreeSet::new();
-            for c in children(node) {
-                f.extend(free[&c].iter().copied());
-            }
-            match node {
-                Node::Var(v) => {
-                    f.insert(*v);
-                }
-                Node::Compute { var, .. } | Node::Reduce { var, .. } | Node::Let { var, .. } => {
-                    f.remove(var);
-                }
-                _ => {}
-            }
-            free.insert(id, f);
-        }
-
         let mut depth = HashMap::new();
-        binder_depths(b, root, 0, &mut depth, &mut HashSet::new());
+        let mut binder_parent = HashMap::new();
+        binder_tree(
+            b,
+            root,
+            0,
+            None,
+            &mut depth,
+            &mut binder_parent,
+            &mut HashSet::new(),
+        );
+
+        let mut scopes: HashMap<NodeId, BTreeSet<Option<VarId>>> = HashMap::new();
+        record_scopes(b, root, None, &mut scopes);
 
         let mut defs_of: HashMap<Option<VarId>, Vec<NodeId>> = HashMap::new();
         for &id in &ids {
-            if named.contains(&id) {
-                let anchor = free[&id].iter().copied().max_by_key(|v| depth[v]);
-                defs_of.entry(anchor).or_default().push(id);
+            if !named.contains(&id) {
+                continue;
             }
+            // Anchor at the LCA of every scope the node is used from.
+            // `named` implies uses > 1, so the set is non-empty; the LCA
+            // is always a valid binding site (a scope that dominates
+            // every use also has every free variable of the def in
+            // scope, since each use references the def).
+            let anchor = scopes[&id]
+                .iter()
+                .copied()
+                .reduce(|a, s| scope_lca(&depth, &binder_parent, a, s))
+                .unwrap_or(None);
+            defs_of.entry(anchor).or_default().push(id);
         }
         HirPrinter {
             b,
@@ -695,9 +737,9 @@ fn par_str(p: &ParSpec) -> String {
 // Kernel IR
 // ---------------------------------------------------------------------------
 
-pub fn dump_kernel_ir(p: &KernelProgram, shared: &SharedMemPlan) -> String {
+pub fn dump_kernel_ir(p: &KirProgram, shared: &SharedMemPlan) -> String {
     let mut s = String::new();
-    writeln!(s, "program {} scratch={}B", p.name, p.scratch_bytes).unwrap();
+    writeln!(s, "program {}", p.name).unwrap();
     writeln!(s, "\nbuffers:").unwrap();
     for (i, decl) in p.buffers.iter().enumerate() {
         let shared_off = shared.offsets.get(&BufId(i as u32)).copied();
@@ -722,7 +764,6 @@ fn buffer_str(decl: &BufferDecl, shared_off: Option<usize>) -> String {
     let kind = match (decl.kind, shared_off) {
         (BufferKind::Input(k), _) => format!("input#{k}"),
         (BufferKind::Output(k), _) => format!("output#{k}"),
-        (BufferKind::Scratch { offset }, _) => format!("scratch@{offset}"),
         (BufferKind::Shared, Some(off)) => format!("shared@{off}"),
         (BufferKind::Shared, None) => "shared".into(),
         (BufferKind::Register, _) => "register".into(),
@@ -1035,7 +1076,7 @@ mod tests {
         b.finish("inline_reduce", body)
     }
 
-    fn lowered(module: Module) -> KernelProgram {
+    fn lowered(module: Module) -> KirProgram {
         let mut kprog = test_util::lowered(module);
         layout_infer(&mut kprog);
         insert_sync(&mut kprog);
@@ -1056,8 +1097,55 @@ mod tests {
         assert!(hir.contains("compute[8] |v3| { v2[7 - v3] }"), "{hir}");
     }
 
+    /// A shared subexpression with no free variables that is only used
+    /// inside a compute body binds *inside* that body — not at module
+    /// top level. Anchoring by use-site LCA rather than by the def's own
+    /// free-var set keeps `%N` names bound at their correct lexical
+    /// scope.
+    #[test]
+    fn hir_dump_anchors_shared_scalar_inside_use_scope() {
+        let mut b = IRBuilder::new();
+        let x = b.input("x", ScalarType::BabyBear, vec![2]);
+        let zero = b.const_u32(0);
+        let one = b.const_u32(1);
+        // `s` has no free variables (only reads the input `x`) but is
+        // used three times inside the compute body, so it gets named.
+        let x0 = b.index(x, &[zero]);
+        let x1 = b.index(x, &[one]);
+        let s = b.add(x0, x1);
+        let body = b.compute(3, |b, i| {
+            let z = b.const_u32(0);
+            let o = b.const_u32(1);
+            let eq0 = b.eq(i, z);
+            let eq1 = b.eq(i, o);
+            let alt = b.select(eq1, s, s);
+            b.select(eq0, s, alt)
+        });
+        let module = b.finish("scoped", body);
+        let hir = dump_hir(&module);
+        // The `%N = x[...] + x[...]` def must land after the compute
+        // head, indented one level deeper than a top-level def would be.
+        let compute_pos = hir.find("compute[3]").unwrap_or_else(|| panic!("{hir}"));
+        let def_marker = "x[0] + x[1]";
+        let def_pos = hir.find(def_marker).unwrap_or_else(|| panic!("{hir}"));
+        assert!(
+            def_pos > compute_pos,
+            "shared def landed above the compute head:\n{hir}"
+        );
+        // No two-space-indented def line survives at module top level
+        // (top-level defs would print as `  %N = ...`).
+        for line in hir.lines() {
+            if line.starts_with("  %") && !line.starts_with("   ") {
+                let rest = &line[3..];
+                if rest.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+                    panic!("unexpected top-level def line `{line}`:\n{hir}");
+                }
+            }
+        }
+    }
+
     /// Multi-use nodes are bound as `%id =` definitions in the innermost
-    /// scope that binds their free variables and referenced by name.
+    /// scope that dominates all their use sites.
     #[test]
     fn hir_dump_names_shared_subexpressions() {
         let mut b = IRBuilder::new();

@@ -7,11 +7,11 @@
 use std::time::Instant;
 
 use crypto_compiler::{
-    compile_and_load,
+    graph_exe::{GraphCompiler, GraphExe},
+    graph_ir::GraphModule,
     ir::Module,
     kernels::{ntt_module, ntt_reg_module, ntt_shared_module, ntt_twiddles},
-    runner::{from_monty, to_monty},
-    runtime::{CompileOptions, KernelModule},
+    test_utils::{from_monty, to_monty},
 };
 use openvm_cuda_backend::{ntt::batch_ntt, prelude::F};
 use openvm_cuda_common::{
@@ -54,23 +54,26 @@ fn measure(ctx: &GpuDeviceCtx, warmup: usize, iters: usize, mut f: impl FnMut())
     start.elapsed().as_secs_f64() * 1e3 / iters as f64
 }
 
-/// JIT-compiles `module`, binds the NTT inputs/output and preallocates
-/// scratch; returns the loaded kernel and the nvcc compile time in seconds.
+/// JIT-compiles `module` and binds the NTT inputs/outputs; returns the
+/// compiled [`GraphExe`] (single-kernel — drive it via
+/// [`GraphExe::kernel_program`]) and the nvcc compile time in seconds.
 fn setup_jit(
     module: Module,
-    ctx: &GpuDeviceCtx,
     d_in: &DeviceBuffer<u32>,
     d_tw: &DeviceBuffer<u32>,
     d_out: &DeviceBuffer<u32>,
-) -> (KernelModule, f64) {
+) -> (GraphExe, f64) {
     let t0 = Instant::now();
-    let mut km = compile_and_load(&module, &CompileOptions::default()).expect("JIT compile");
+    let gm = GraphModule::from_ir(module, &[]).unwrap();
+    let mut exe = GraphCompiler::new()
+        .compile(gm.into_builder())
+        .expect("JIT compile");
     let compile_s = t0.elapsed().as_secs_f64();
+    let km = exe.kernel_program(0);
     km.set_input(0, d_in).unwrap();
     km.set_input(1, d_tw).unwrap();
     km.set_output(0, d_out).unwrap();
-    km.ensure_scratch(ctx);
-    (km, compile_s)
+    (exe, compile_s)
 }
 
 fn bench_size(ctx: &GpuDeviceCtx, log_n: usize) {
@@ -79,7 +82,7 @@ fn bench_size(ctx: &GpuDeviceCtx, log_n: usize) {
 
     // JIT NTTs: Montgomery-form u32 in/out, out-of-place, own twiddle
     // input. The DSL kernel operates on Montgomery-encoded BabyBear
-    // throughout, so callers of the raw `KernelModule` (as this bench
+    // throughout, so callers of the raw `KernelProgram` (as this bench
     // does, bypassing `ModuleRunner`) must encode/decode themselves.
     let input_mont: Vec<u32> = input.iter().map(|&x| to_monty(x)).collect();
     let twiddles_mont: Vec<u32> = ntt_twiddles(log_n).iter().map(|&x| to_monty(x)).collect();
@@ -88,18 +91,27 @@ fn bench_size(ctx: &GpuDeviceCtx, log_n: usize) {
     let d_out_flat = DeviceBuffer::<u32>::with_capacity_on(n, ctx);
     let d_out_sh = DeviceBuffer::<u32>::with_capacity_on(n, ctx);
     let d_out_reg = DeviceBuffer::<u32>::with_capacity_on(n, ctx);
-    let (km_flat, _) = setup_jit(ntt_module(log_n), ctx, &d_in, &d_tw, &d_out_flat);
-    let (km_sh, sh_compile_s) = setup_jit(ntt_shared_module(log_n), ctx, &d_in, &d_tw, &d_out_sh);
-    let (km_reg, reg_compile_s) = setup_jit(ntt_reg_module(log_n), ctx, &d_in, &d_tw, &d_out_reg);
+    let (mut exe_flat, _) = setup_jit(ntt_module(log_n), &d_in, &d_tw, &d_out_flat);
+    let (mut exe_sh, sh_compile_s) = setup_jit(ntt_shared_module(log_n), &d_in, &d_tw, &d_out_sh);
+    let (mut exe_reg, reg_compile_s) = setup_jit(ntt_reg_module(log_n), &d_in, &d_tw, &d_out_reg);
 
     // Supra NTT: Montgomery-form BabyBear, in-place, natural-order input.
     let input_f: Vec<F> = input.iter().map(|&x| F::new(x)).collect();
     let d_f = input_f.as_slice().to_device_on(ctx).unwrap();
 
     // One-time cross-check: all four must produce the same NTT.
-    km_flat.run(&ctx.stream).expect("flat JIT NTT run");
-    km_sh.run(&ctx.stream).expect("shared JIT NTT run");
-    km_reg.run(&ctx.stream).expect("reg JIT NTT run");
+    exe_flat
+        .kernel_program(0)
+        .run(&ctx.stream)
+        .expect("flat JIT NTT run");
+    exe_sh
+        .kernel_program(0)
+        .run(&ctx.stream)
+        .expect("shared JIT NTT run");
+    exe_reg
+        .kernel_program(0)
+        .run(&ctx.stream)
+        .expect("reg JIT NTT run");
     // JIT outputs are Montgomery-encoded; decode before comparing against
     // supra's (already-canonicalized-via-`as_canonical_u32`) output below.
     let got_flat: Vec<u32> = d_out_flat
@@ -144,13 +156,22 @@ fn bench_size(ctx: &GpuDeviceCtx, log_n: usize) {
     let warmup = (iters / 10).max(3);
 
     let flat_ms = measure(ctx, warmup, iters, || {
-        km_flat.run(&ctx.stream).expect("flat JIT NTT run");
+        exe_flat
+            .kernel_program(0)
+            .run(&ctx.stream)
+            .expect("flat JIT NTT run");
     });
     let sh_ms = measure(ctx, warmup, iters, || {
-        km_sh.run(&ctx.stream).expect("shared JIT NTT run");
+        exe_sh
+            .kernel_program(0)
+            .run(&ctx.stream)
+            .expect("shared JIT NTT run");
     });
     let reg_ms = measure(ctx, warmup, iters, || {
-        km_reg.run(&ctx.stream).expect("reg JIT NTT run");
+        exe_reg
+            .kernel_program(0)
+            .run(&ctx.stream)
+            .expect("reg JIT NTT run");
     });
     // Repeated in-place transforms of (field-valued) garbage: identical work.
     let supra_ms = measure(ctx, warmup, iters, || {

@@ -257,6 +257,17 @@ INDEX_HTML = """<!DOCTYPE html>
                        border: 1px solid #ddd; border-radius: 3px;
                        background: #fff; min-height: 32px; }
   .panel .fh-detail .hint { color: #888; font-style: italic; }
+  /* Stats panel: kernel-frequency rows clickable to reveal module IR
+     in an inline detail pane below the tables. */
+  .panel table.freq tr.clickable { cursor: pointer; }
+  .panel table.freq tr.clickable:hover td { background: #f6f8fb; }
+  .panel table.freq tr.clickable.selected td { background: #eef4fb; }
+  .panel table.freq td .mod-key { color: #6a8fb0; margin-left: 6px;
+                                   font-size: 10px; }
+  .panel .sp-detail { margin-top: 8px; padding: 6px 8px;
+                       border: 1px solid #ddd; border-radius: 3px;
+                       background: #fff; min-height: 32px; }
+  .panel .sp-detail .hint { color: #888; font-style: italic; }
 </style>
 </head>
 <body>
@@ -343,10 +354,29 @@ function chipRow(ids, names, heading) {
   if (!ids || !ids.length) return "";
   const chips = ids.map((id, i) => {
     const nm = (names && names[i]) || id;
-    return `<span class="chip" data-focus="${escHtml(id)}">${escHtml(nm)}` +
-           `<span class="cid">${escHtml(id)}</span></span>`;
+    // Skip the redundant secondary label when the chip is already keyed
+    // by its node id (used from the stats panel, which lists bare ids).
+    const sub = nm === id ? "" : `<span class="cid">${escHtml(id)}</span>`;
+    return `<span class="chip" data-focus="${escHtml(id)}">${escHtml(nm)}${sub}</span>`;
   }).join("");
   return `<h4>${heading}</h4><div class="chips">${chips}</div>`;
+}
+
+// Renders a kernel node's `param_bindings` map (name -> i64) as a small
+// two-column table. `param_bindings` is emitted on Kernel nodes by
+// `GraphBuilder::to_cytoscape_json`; each row lets the reader tie a
+// symbol in the module HIR back to the concrete value bound for *this*
+// node instantiation. Returns "" for missing / empty bindings.
+function paramBindingsTable(bindings) {
+  if (!bindings) return "";
+  const entries = Object.entries(bindings);
+  if (entries.length === 0) return "";
+  entries.sort((a, b) => a[0].localeCompare(b[0]));
+  const rows = entries.map(([k, v]) =>
+    `<tr><td class="k"><code>${escHtml(k)}</code></td>` +
+    `<td><code>${escHtml(String(v))}</code></td></tr>`
+  ).join("");
+  return `<h4>Parameter bindings</h4><table class="shapes">${rows}</table>`;
 }
 
 // Lays out a FusionHistory tree using a simple Reingold-Tilford-lite:
@@ -589,6 +619,7 @@ function renderNodePanel(data, modules) {
     : "";
   const shapesHtml = shapeTable(data.input_shapes, "Inputs") +
                      shapeTable(data.output_shapes, "Outputs");
+  const bindingsHtml = paramBindingsTable(data.param_bindings);
   const neighborsHtml = chipRow(data.producer_ids, data.producer_names, "Producers") +
                         chipRow(data.consumer_ids, data.consumer_names, "Consumers");
   const ir = data.ir || "";
@@ -609,7 +640,7 @@ function renderNodePanel(data, modules) {
     fusionNodes = tree.nodes;
   }
   const body = document.getElementById("np-body");
-  body.innerHTML = statsHtml + shapesHtml + neighborsHtml +
+  body.innerHTML = statsHtml + shapesHtml + bindingsHtml + neighborsHtml +
                    irHtml + moduleHtml + fusionHtml;
   body.querySelectorAll(".chip[data-focus]").forEach(el => {
     el.addEventListener("click", () => focusNode(el.dataset.focus));
@@ -619,39 +650,116 @@ function renderNodePanel(data, modules) {
 }
 
 function renderStatsPanel(data) {
+  const modules = data.modules || {};
   const counts = {};
-  const byName = {}; // { type: { name: count } }
+  // Kernel nodes group by module *key* (not name): same-name entries in
+  // `data.modules` may be distinct modules (dedup suffixes them `#1`,
+  // `#2`, ...); grouping by key keeps their bodies separate.
+  const kernelGroups = {};   // { module_key: { name, ids: [node_id] } }
+  const blackboxGroups = {}; // { name:       { ids: [node_id] } }
   for (const n of data.elements.nodes) {
-    const t = n.data.type || "?";
+    const nd = n.data;
+    const t = nd.type || "?";
     counts[t] = (counts[t] || 0) + 1;
-    if (t === "Kernel" || t === "BlackboxKernel") {
-      const nm = n.data.name || n.data.id;
-      byName[t] = byName[t] || {};
-      byName[t][nm] = (byName[t][nm] || 0) + 1;
+    if (t === "Kernel") {
+      const key = nd.module || nd.name || nd.id;
+      if (!kernelGroups[key]) {
+        kernelGroups[key] = { name: nd.name || key, ids: [] };
+      }
+      kernelGroups[key].ids.push(nd.id);
+    } else if (t === "BlackboxKernel") {
+      const nm = nd.name || nd.id;
+      if (!blackboxGroups[nm]) blackboxGroups[nm] = { ids: [] };
+      blackboxGroups[nm].ids.push(nd.id);
     }
   }
   const summaryRows = ["Kernel", "BlackboxKernel", "Const", "Memcpy", "Memset", "Input", "Output"]
     .map(t => `<span class="k">${t}</span><span>${counts[t] || 0}</span>`).join("");
   const totalEdges = data.elements.edges.length;
   const totalNodes = data.elements.nodes.length;
-  const freqTable = t => {
-    const rows = Object.entries(byName[t] || {})
-      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
-      .map(([nm, c]) => `<tr><td class="n">${c}</td><td>${escHtml(nm)}</td></tr>`)
-      .join("");
-    if (!rows) return `<h4>${t} — (none)</h4>`;
-    const distinct = Object.keys(byName[t] || {}).length;
-    return `<h4>${t} — ${counts[t] || 0} nodes, ${distinct} distinct</h4>` +
-           `<table class="freq"><thead><tr><th class="n">n</th><th>name</th></tr></thead>` +
-           `<tbody>${rows}</tbody></table>`;
-  };
-  document.getElementById("sp-body").innerHTML =
+
+  // Kernel frequency table — one row per distinct module. The `data-mkey`
+  // attribute keys back into `kernelGroups` + `modules` for the click
+  // handler below.
+  const kernelEntries = Object.entries(kernelGroups)
+    .sort((a, b) => b[1].ids.length - a[1].ids.length
+                    || a[1].name.localeCompare(b[1].name));
+  const kernelRowsHtml = kernelEntries.map(([key, g]) => {
+    const suffix = key !== g.name
+      ? `<span class="mod-key">${escHtml(key)}</span>` : "";
+    return `<tr class="clickable" data-mkey="${escHtml(key)}">` +
+           `<td class="n">${g.ids.length}</td>` +
+           `<td>${escHtml(g.name)}${suffix}</td></tr>`;
+  }).join("");
+  const kernelTable = kernelRowsHtml
+    ? `<h4>Kernel — ${counts.Kernel || 0} nodes, ${kernelEntries.length} distinct modules</h4>` +
+      `<table class="freq"><thead><tr><th class="n">n</th><th>name</th></tr></thead>` +
+      `<tbody>${kernelRowsHtml}</tbody></table>`
+    : `<h4>Kernel — (none)</h4>`;
+
+  // BlackboxKernel table — clickable to list nodes; no HIR body exists.
+  const blackboxEntries = Object.entries(blackboxGroups)
+    .sort((a, b) => b[1].ids.length - a[1].ids.length
+                    || a[0].localeCompare(b[0]));
+  const blackboxRowsHtml = blackboxEntries.map(([nm, g]) =>
+    `<tr class="clickable" data-bname="${escHtml(nm)}">` +
+    `<td class="n">${g.ids.length}</td><td>${escHtml(nm)}</td></tr>`
+  ).join("");
+  const blackboxTable = blackboxRowsHtml
+    ? `<h4>BlackboxKernel — ${counts.BlackboxKernel || 0} nodes, ${blackboxEntries.length} distinct</h4>` +
+      `<table class="freq"><thead><tr><th class="n">n</th><th>name</th></tr></thead>` +
+      `<tbody>${blackboxRowsHtml}</tbody></table>`
+    : `<h4>BlackboxKernel — (none)</h4>`;
+
+  const spBody = document.getElementById("sp-body");
+  spBody.innerHTML =
     `<div class="stats">` +
     `<span class="k">total nodes</span><span>${totalNodes}</span>` +
     `<span class="k">total edges</span><span>${totalEdges}</span>` +
     summaryRows +
     `</div>` +
-    freqTable("Kernel") + freqTable("BlackboxKernel");
+    kernelTable + blackboxTable +
+    `<div class="sp-detail"><span class="hint">` +
+    `Click a row to show its body IR.</span></div>`;
+
+  const detail = spBody.querySelector(".sp-detail");
+  const clearSelection = () => spBody
+    .querySelectorAll("tr.clickable.selected")
+    .forEach(s => s.classList.remove("selected"));
+  const wireChips = () => detail.querySelectorAll(".chip[data-focus]")
+    .forEach(el => el.addEventListener("click", () => focusNode(el.dataset.focus)));
+
+  spBody.querySelectorAll("tr[data-mkey]").forEach(tr => {
+    tr.addEventListener("click", () => {
+      clearSelection();
+      tr.classList.add("selected");
+      const key = tr.dataset.mkey;
+      const grp = kernelGroups[key];
+      const ir = modules[key];
+      const header = `<h4>Module IR — ${escHtml(key)}` +
+                     ` <span class="hint">(${grp.ids.length} node${grp.ids.length === 1 ? "" : "s"})</span></h4>`;
+      const irHtml = ir !== undefined
+        ? `<pre>${escHtml(ir)}</pre>`
+        : `<pre class="hint">(module dump missing)</pre>`;
+      const chips = chipRow(grp.ids, grp.ids, "Nodes");
+      detail.innerHTML = header + irHtml + chips;
+      wireChips();
+    });
+  });
+  spBody.querySelectorAll("tr[data-bname]").forEach(tr => {
+    tr.addEventListener("click", () => {
+      clearSelection();
+      tr.classList.add("selected");
+      const nm = tr.dataset.bname;
+      const grp = blackboxGroups[nm];
+      const header = `<h4>${escHtml(nm)}` +
+                     ` <span class="hint">(blackbox kernel — no HIR body)</span></h4>`;
+      const chips = chipRow(grp.ids, grp.ids, "Nodes");
+      detail.innerHTML = header + chips;
+      wireChips();
+    });
+  });
+
   openPanel("stats-panel");
 }
 

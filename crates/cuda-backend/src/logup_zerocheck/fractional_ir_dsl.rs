@@ -1102,7 +1102,6 @@ mod dsl_port_tests {
         graph_exe::GraphCompiler,
         graph_ir::{ConstBuf, DeviceType, GraphBuilder},
         planner::SchedulerMode,
-        runtime::CompileOptions,
     };
     use openvm_cuda_common::{
         common::get_device,
@@ -1181,7 +1180,6 @@ mod dsl_port_tests {
         let mut exe = GraphCompiler::new()
             .device(DeviceType::Cuda(0))
             .scheduler(SchedulerMode::Heuristic)
-            .compile_options(CompileOptions::default())
             .compile(g)
             .expect("graph compile");
         exe.run(ctx).expect("graph run");

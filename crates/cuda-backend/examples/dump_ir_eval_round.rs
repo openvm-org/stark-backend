@@ -1,10 +1,7 @@
 //! Dump HIR/KIR/CUDA for `frac_precompute_m_eval_round` (small-K case).
 use std::path::PathBuf;
 
-use crypto_compiler::{
-    compile_and_load,
-    runtime::{CompileOptions, Verbosity},
-};
+use crypto_compiler::{graph_exe::GraphCompiler, graph_ir::GraphModule, runtime::Verbosity};
 use openvm_cuda_backend::logup_zerocheck::fractional_ir_dsl::build_frac_precompute_m_eval_round_module;
 
 fn main() {
@@ -29,12 +26,17 @@ fn main() {
     println!("dump dir: {}", dump_dir.display());
 
     let module = build_frac_precompute_m_eval_round_module(w, t);
-    let options = CompileOptions {
-        dump_ir: Some(dump_dir.clone()),
-        verbosity: Verbosity::Verbose,
-        ..CompileOptions::default()
+    let gm = match GraphModule::from_ir(module, &[]) {
+        Ok(gm) => gm,
+        Err(e) => {
+            eprintln!("compile failed (from_ir): {e}");
+            std::process::exit(1);
+        }
     };
-    match compile_and_load(&module, &options) {
+    let compiler = GraphCompiler::new()
+        .dump_dir(dump_dir.clone())
+        .verbosity(Verbosity::Verbose);
+    match compiler.compile(gm.into_builder()) {
         Ok(_) => println!("compile ok"),
         Err(e) => {
             eprintln!("compile failed: {e}");

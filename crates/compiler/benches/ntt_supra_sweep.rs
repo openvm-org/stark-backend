@@ -20,7 +20,7 @@ use crypto_compiler::{
     ir::Module,
     kernels::{ntt_partial_twiddles, ntt_supra_module},
     runner::{from_monty, to_monty},
-    runtime::{CompileOptions, KernelModule},
+    runtime::{CompileOptions, KernelProgram},
 };
 #[cfg(any())]
 use openvm_cuda_backend::{ntt::batch_ntt, prelude::F};
@@ -98,12 +98,11 @@ fn setup_jit(
     d_in: &DeviceBuffer<u32>,
     d_tw: &DeviceBuffer<u32>,
     d_out: &DeviceBuffer<u32>,
-) -> KernelModule {
+) -> KernelProgram {
     let mut km = compile_and_load(&module, &CompileOptions::default()).expect("JIT compile");
     km.set_input(0, d_in).unwrap();
     km.set_input(1, d_tw).unwrap();
     km.set_output(0, d_out).unwrap();
-    km.ensure_scratch(ctx);
     km
 }
 

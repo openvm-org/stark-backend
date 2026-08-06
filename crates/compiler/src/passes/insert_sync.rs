@@ -1,9 +1,9 @@
-//! Barrier insertion over [`KernelProgram`]s.
+//! Barrier insertion over [`KirProgram`]s.
 
 use std::collections::BTreeSet;
 
 use crate::kernel_ir::{
-    AddressSpace, BufId, Kernel, KernelProgram, SSABlock, SSANode, SSAOp, SSAOpCode,
+    AddressSpace, BufId, Kernel, KirProgram, SSABlock, SSANode, SSAOp, SSAOpCode,
 };
 
 /// Inserts [`SSAOpCode::Sync`] barriers: a par that reads a shared buffer
@@ -14,11 +14,11 @@ use crate::kernel_ir::{
 /// buffers into the same physical region. A sequential loop marks its
 /// body's shared writes dirty up front, since iteration i+1 may read what
 /// iteration i wrote (the back edge).
-pub fn insert_sync(p: &mut KernelProgram) {
+pub fn insert_sync(p: &mut KirProgram) {
     /// Walks a statement block; `sid` is its owning loop (`None` for the
     /// grid block). Records `(block, index)` sync insertion points.
     fn walk(
-        p: &KernelProgram,
+        p: &KirProgram,
         k: &Kernel,
         sid: Option<SSANode>,
         body: &[SSANode],
@@ -124,12 +124,7 @@ pub fn insert_sync(p: &mut KernelProgram) {
 }
 
 /// Shared buffers written by any par under `stmts`.
-fn collect_shared_writes(
-    p: &KernelProgram,
-    k: &Kernel,
-    stmts: &[SSANode],
-    out: &mut BTreeSet<BufId>,
-) {
+fn collect_shared_writes(p: &KirProgram, k: &Kernel, stmts: &[SSANode], out: &mut BTreeSet<BufId>) {
     for &sid in stmts {
         let op = k.op(sid);
         match &op.opcode {

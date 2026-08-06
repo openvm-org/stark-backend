@@ -409,7 +409,6 @@ pub struct IRBuilder {
     inputs: Vec<InputDecl>,
     pending_lets: Vec<(VarId, NodeId)>,
     params: Vec<(VarId, String)>,
-    shape_hint: Option<Vec<i64>>,
     block_hint: Option<usize>,
 }
 
@@ -494,15 +493,32 @@ impl IRBuilder {
     /// Declares a symbolic module parameter (`b.symbol("n")`): a named
     /// constant that resolves to a concrete value per kernel instantiation.
     /// The returned handle splices anywhere a constant is allowed.
+    ///
+    /// Panics if `name` was already declared on this builder: param names
+    /// are the keys of per-node `param_bindings` and also collide as
+    /// `p_<name>` kernel arguments, so uniqueness is enforced at the
+    /// source.
     pub fn symbol(&mut self, name: impl Into<String>) -> Sym {
+        let name = name.into();
+        assert!(
+            !self.params.iter().any(|(_, n)| *n == name),
+            "IRBuilder::symbol: duplicate param name `{name}`"
+        );
         let v = self.fresh_var();
-        self.params.push((v, name.into()));
+        self.params.push((v, name));
         Sym(v)
     }
 
     /// Declared symbolic parameters, in declaration order.
     pub fn params(&self) -> &[(VarId, String)] {
         &self.params
+    }
+
+    /// Name of a declared symbolic parameter, if `v` names one.
+    pub fn param_name(&self, v: VarId) -> Option<&str> {
+        self.params
+            .iter()
+            .find_map(|(pv, n)| (*pv == v).then_some(n.as_str()))
     }
 
     /// Re-declares a parameter copied from another builder with a caller
@@ -512,43 +528,12 @@ impl IRBuilder {
         self.params.push((v, name));
     }
 
-    /// Records a canonical concrete instantiation of the module's
-    /// parameters (in declaration order): used for access checking and, for
-    /// stand-alone kernels, as the monomorphization values when no
-    /// graph-derived bindings exist. At most one hint per module; declare
-    /// all symbols before adding it.
-    ///
-    /// Not part of the module-author API: hints are insertion-time data,
-    /// supplied via [`crate::graph_ir::GraphBuilder::insert_kernel`]'s
-    /// `shape_hint` argument (or the `*_with_hint` standalone compile entry
-    /// points), which attach them here internally.
-    pub(crate) fn add_shape_hint(&mut self, values: &[i64]) {
-        assert!(
-            self.shape_hint.is_none(),
-            "at most one shape hint per module"
-        );
-        assert_eq!(
-            values.len(),
-            self.params.len(),
-            "shape hint has {} values but the module declares {} parameters",
-            values.len(),
-            self.params.len()
-        );
-        self.shape_hint = Some(values.to_vec());
-    }
-
-    /// The shape hint, parallel to [`Self::params`], if one was added.
-    pub fn shape_hint(&self) -> Option<&[i64]> {
-        self.shape_hint.as_deref()
-    }
-
-    /// Appends a value for a param declared *after* the hint was recorded
-    /// (fusion appends producer params to a merged module); keeps the hint
-    /// parallel to [`Self::params`]. No-op without a hint.
-    pub(crate) fn extend_shape_hint(&mut self, value: i64) {
-        if let Some(h) = &mut self.shape_hint {
-            h.push(value);
-        }
+    /// Drops every parameter for which `keep(&(VarId, name)) == false`.
+    /// Used by `prune_unused_params` to strip params stranded by
+    /// lower_reduce / monomorphize so the α-normalized module hash stays
+    /// stable across binding sets that used to reference them.
+    pub(crate) fn retain_params(&mut self, keep: impl FnMut(&(VarId, String)) -> bool) {
+        self.params.retain(keep);
     }
 
     /// Fixes the CUDA block size used by kernels whose outer bound stays
@@ -562,6 +547,14 @@ impl IRBuilder {
             "block hint must be in 1..=1024, got {block}"
         );
         self.block_hint = Some(block);
+    }
+
+    /// [`Self::set_block_hint`] but a no-op when a hint is already set —
+    /// authored hints always win over graph-derived ones.
+    pub fn set_block_hint_if_absent(&mut self, block: usize) {
+        if self.block_hint.is_none() {
+            self.set_block_hint(block);
+        }
     }
 
     /// The block-size hint, if one was set.

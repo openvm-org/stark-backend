@@ -1,8 +1,8 @@
-//! Shared-memory placement over [`KernelProgram`]s.
+//! Shared-memory placement over [`KirProgram`]s.
 
 use std::collections::HashMap;
 
-use crate::kernel_ir::{BufId, BufferKind, Kernel, KernelProgram, SSANode, SSAOpCode};
+use crate::kernel_ir::{BufId, BufferKind, Kernel, KirProgram, SSANode, SSAOpCode};
 
 /// Liveness-based placement of shared buffers within each kernel's shared-
 /// memory allocation: buffers whose live ranges do not overlap share the
@@ -12,7 +12,7 @@ pub struct SharedMemPlan {
     /// Byte offset of each shared buffer within its kernel's allocation.
     pub offsets: HashMap<BufId, usize>,
     /// Peak concurrent shared bytes of each kernel, indexed like
-    /// [`KernelProgram::kernels`].
+    /// [`KirProgram::kernels`].
     pub per_kernel: Vec<usize>,
 }
 
@@ -27,9 +27,9 @@ type Interval = (BufId, usize, usize, usize, usize);
 /// separated by another buffer's whole lifetime can share the same slot.
 /// Accesses inside a loop are pinned to the loop's end so the buffer
 /// survives every iteration.
-fn compute_liveness(p: &KernelProgram, k: &Kernel) -> Vec<Interval> {
+fn compute_liveness(p: &KirProgram, k: &Kernel) -> Vec<Interval> {
     fn note(
-        p: &KernelProgram,
+        p: &KirProgram,
         buf: BufId,
         at: usize,
         write: bool,
@@ -45,7 +45,7 @@ fn compute_liveness(p: &KernelProgram, k: &Kernel) -> Vec<Interval> {
         r.1 = r.1.max(at);
     }
     fn walk(
-        p: &KernelProgram,
+        p: &KirProgram,
         k: &Kernel,
         stmts: &[SSANode],
         pos: &mut usize,
@@ -132,7 +132,7 @@ fn assign_offsets(intervals: &[Interval]) -> (HashMap<BufId, usize>, usize) {
     (offsets, peak)
 }
 
-pub fn plan_shared_mem(p: &KernelProgram) -> SharedMemPlan {
+pub fn plan_shared_mem(p: &KirProgram) -> SharedMemPlan {
     let mut offsets = HashMap::new();
     let mut per_kernel = Vec::with_capacity(p.kernels.len());
     for k in &p.kernels {

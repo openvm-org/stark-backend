@@ -2,7 +2,7 @@
 //!
 //! Each entry lives in its own subdirectory named by the hex form of the
 //! source [`ir::Module`]'s [`crate::module_hash::module_hash`]. Inside the
-//! entry sit the artifacts [`crate::runtime::KernelModule`] needs to be
+//! entry sit the artifacts [`crate::runtime::KernelProgram`] needs to be
 //! reconstructed without invoking `nvcc`: `libmodule.so`, `module.cu` and a
 //! `metadata.json` describing the module's input / output scalar types.
 //!
@@ -28,7 +28,7 @@ use parking_lot::Mutex;
 use crate::{
     ir::Module,
     module_hash::module_hash_hex,
-    runtime::{CompileOptions, KernelModule, KERNEL_MODULE_METADATA, KERNEL_MODULE_SO},
+    runtime::{KernelProgram, KERNEL_MODULE_METADATA, KERNEL_MODULE_SO},
     CompileError,
 };
 
@@ -92,13 +92,13 @@ impl KernelCache {
 
     /// Looks up `module` in the cache. On hit, dlopens the persisted `.so`,
     /// touches the entry's mtime so LRU accounting treats it as recent, and
-    /// returns the reconstructed [`KernelModule`]. On miss, returns `None`.
+    /// returns the reconstructed [`KernelProgram`]. On miss, returns `None`.
     ///
     /// An entry that exists but fails to load (torn write from a crashed
     /// producer, concurrent eviction between the existence check and the
     /// dlopen, corrupt artifacts) is treated as a miss rather than an error —
     /// the caller falls back to a fresh compile.
-    pub fn get(&self, module: &Module) -> Result<Option<KernelModule>, CompileError> {
+    pub fn get(&self, module: &Module) -> Result<Option<KernelProgram>, CompileError> {
         let key = module_hash_hex(module);
         let dir = self.entry_dir(&key);
         if !dir.join(KERNEL_MODULE_SO).is_file() || !dir.join(KERNEL_MODULE_METADATA).is_file() {
@@ -107,7 +107,7 @@ impl KernelCache {
         // Touch mtime so this entry moves to the head of the LRU. Best-effort:
         // if the touch fails we still return the module.
         let _ = touch(&dir);
-        match KernelModule::load_from_dir(&dir) {
+        match KernelProgram::load_from_dir(&dir) {
             Ok(km) => Ok(Some(km)),
             Err(e) => {
                 tracing_warn(&format!(
@@ -133,7 +133,7 @@ impl KernelCache {
     /// A best-effort operation: if the underlying filesystem operations fail
     /// mid-way we still return the compiled module — the cache is an
     /// optimization, not a correctness guarantee.
-    pub fn insert(&self, module: &Module, km: &KernelModule) -> Result<(), CompileError> {
+    pub fn insert(&self, module: &Module, km: &KernelProgram) -> Result<(), CompileError> {
         let _guard = self.lock.lock();
         let key = module_hash_hex(module);
         let dir = self.entry_dir(&key);
@@ -224,27 +224,6 @@ struct Entry {
     path: PathBuf,
     mtime: SystemTime,
     size: u64,
-}
-
-/// Compiles `module` with `options`, inserts the fresh artifacts into
-/// `cache`, and returns the loaded module.
-pub fn compile_and_cache(
-    module: &Module,
-    options: &CompileOptions,
-    cache: &KernelCache,
-) -> Result<KernelModule, CompileError> {
-    if let Some(km) = cache.get(module)? {
-        return Ok(km);
-    }
-    let km = crate::compile_and_load(module, options)?;
-    // Cache insert is best-effort — a full disk shouldn't fail the compile.
-    if let Err(e) = cache.insert(module, &km) {
-        tracing_warn(&format!(
-            "kernel_cache: failed to persist entry for {}: {e}",
-            module.name
-        ));
-    }
-    Ok(km)
 }
 
 fn tracing_warn(msg: &str) {

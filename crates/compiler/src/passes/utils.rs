@@ -604,17 +604,15 @@ mod tests {
 pub(crate) mod test_util {
     use crate::{
         ir::Module,
-        kernel_ir::{Kernel, KernelProgram, SSAOpCode},
-        passes::{canonicalize, lower_to_kir, plan_global_scratch, type_infer},
+        kernel_ir::{Kernel, KirProgram, SSAOpCode},
+        passes::{canonicalize, lower_to_kir, type_infer},
     };
 
-    /// Runs the HIR passes: type inference, canonicalization, scratch
-    /// planning and lowering.
-    pub(crate) fn lowered(module: Module) -> KernelProgram {
+    /// Runs the HIR passes: type inference, canonicalization and lowering.
+    pub(crate) fn lowered(module: Module) -> KirProgram {
         let types = type_infer(&module).unwrap();
         let program = canonicalize(module, types).unwrap();
-        let scratch = plan_global_scratch(&program).unwrap();
-        lower_to_kir(&program, &scratch).unwrap()
+        lower_to_kir(&program).unwrap()
     }
 
     pub(crate) fn stmt_kinds(kernel: &Kernel) -> Vec<&'static str> {

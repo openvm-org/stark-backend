@@ -24,13 +24,13 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use super::{
-    canonicalize, codegen::compute_read_sinks, lower_to_kir, monomorphize, plan_global_scratch,
-    rewrite_parallel_reduce, type_infer,
+    canonicalize, codegen::compute_read_sinks, lower_to_kir, monomorphize, rewrite_parallel_reduce,
+    split_program, type_infer,
 };
 use crate::{
     ir::{Module, VarId},
     kernel_ir::{
-        Access, AddressSpace, IndexMap, Kernel, KernelProgram, LinearLayout, SSABlock, SSAOpCode,
+        Access, AddressSpace, IndexMap, Kernel, KirProgram, LinearLayout, SSABlock, SSAOpCode,
     },
     quast::{Quast, EXHAUSTIVE_LIMIT},
     CompileError,
@@ -40,28 +40,14 @@ fn err(msg: String) -> CompileError {
     CompileError::AccessCheck(msg)
 }
 
-/// Checks the standalone instantiation of `module`: its shape hint if it has
-/// parameters, the module itself if it is concrete. Erroring when parameters
-/// exist but no hint does — the flag asks for a check that cannot run.
-pub fn check_accesses_from_hint(module: &Module) -> Result<(), CompileError> {
-    if module.builder.params().is_empty() {
-        return check_module_accesses(module, &[]);
-    }
-    let Some(hint) = module.builder.shape_hint() else {
-        return Err(err(format!(
-            "module `{}` has symbolic parameters but no shape hint; access checking \
-             needs a concrete instantiation",
-            module.name
-        )));
-    };
-    check_module_accesses(module, hint)
-}
-
 /// Checks one concrete instantiation: fully monomorphizes `module` against
-/// `bindings` (one value per declared parameter), lowers it to KernelIR and
-/// runs [`check_program_accesses`]. The concrete canonicalization along the
-/// way performs the scatter bijectivity + inverse validation.
-pub fn check_module_accesses(module: &Module, bindings: &[i64]) -> Result<(), CompileError> {
+/// `bindings` (keyed by parameter name), lowers it to KernelIR and runs
+/// [`check_program_accesses`]. The concrete canonicalization along the way
+/// performs the scatter bijectivity + inverse validation.
+pub fn check_module_accesses(
+    module: &Module,
+    bindings: &BTreeMap<String, i64>,
+) -> Result<(), CompileError> {
     let params = module.builder.params();
     assert_eq!(
         params.len(),
@@ -73,20 +59,38 @@ pub fn check_module_accesses(module: &Module, bindings: &[i64]) -> Result<(), Co
     );
     let env: BTreeMap<VarId, i64> = params
         .iter()
-        .map(|(v, _)| *v)
-        .zip(bindings.iter().copied())
+        .map(|(v, name)| {
+            let &val = bindings.get(name).unwrap_or_else(|| {
+                panic!(
+                    "module `{}`: no binding for param `{name}` (got keys {:?})",
+                    module.name,
+                    bindings.keys().collect::<Vec<_>>(),
+                )
+            });
+            (*v, val)
+        })
         .collect();
     let module = monomorphize(module, &env)?;
-    let module = rewrite_parallel_reduce(module)?;
+    // The access check runs on a fully monomorphized module, so the env
+    // for the rewrite is empty — every param already got substituted.
+    let types = type_infer(&module)?;
+    let module = rewrite_parallel_reduce(&module, &types, &BTreeMap::new())?.unwrap_or(module);
     let types = type_infer(&module)?;
     let program = canonicalize(module, types)?;
-    let scratch = plan_global_scratch(&program)?;
-    let prog = lower_to_kir(&program, &scratch)?;
-    check_program_accesses(&prog)
+    // Multi-kernel programs are split into single-kernel modules before
+    // lowering (`lower_to_kir` requires single-kernel input).
+    let split = split_program(&program)?;
+    for sk in &split.kernels {
+        let types = type_infer(&sk.module)?;
+        let sub = canonicalize((*sk.module).clone(), types)?;
+        let prog = lower_to_kir(&sub)?;
+        check_program_accesses(&prog)?;
+    }
+    Ok(())
 }
 
-/// Validates every par access of a fully concrete [`KernelProgram`].
-pub fn check_program_accesses(prog: &KernelProgram) -> Result<(), CompileError> {
+/// Validates every par access of a fully concrete [`KirProgram`].
+pub fn check_program_accesses(prog: &KirProgram) -> Result<(), CompileError> {
     for kernel in &prog.kernels {
         let grid_sym = VarId(kernel.grid_var().0);
         check_block(prog, kernel, &kernel.grid.block, grid_sym)?;
@@ -105,7 +109,7 @@ struct ParCtx {
 }
 
 fn check_block(
-    prog: &KernelProgram,
+    prog: &KirProgram,
     kernel: &Kernel,
     block: &SSABlock,
     grid_sym: VarId,
@@ -158,7 +162,7 @@ fn check_block(
 }
 
 fn check_access(
-    prog: &KernelProgram,
+    prog: &KirProgram,
     kernel: &Kernel,
     access: &Access,
     cx: &ParCtx,
@@ -357,7 +361,7 @@ mod tests {
         par_bound: usize,
         reads: Vec<Access>,
         writes: Vec<Access>,
-    ) -> KernelProgram {
+    ) -> KirProgram {
         par_prog(
             len,
             par_bound,
@@ -377,7 +381,7 @@ mod tests {
         space: AddressSpace,
         reads: Vec<Access>,
         writes: Vec<Access>,
-    ) -> KernelProgram {
+    ) -> KirProgram {
         let mut k = Kernel::new("k".into(), KBound::Const(1), block_dim);
         let par_idx = k.fresh_val();
         let mut block = SSABlock::default();
@@ -402,7 +406,7 @@ mod tests {
         });
         k.grid.block.body.push(node);
         let global = space == AddressSpace::Global;
-        KernelProgram {
+        KirProgram {
             name: "p".into(),
             buffers: vec![BufferDecl {
                 name: "buf".into(),
@@ -417,7 +421,6 @@ mod tests {
                 layout: None,
             }],
             kernels: vec![k],
-            scratch_bytes: 0,
             input_bufs: vec![],
             output_bufs: if global { vec![BufId(0)] } else { vec![] },
             params: vec![],
@@ -428,7 +431,7 @@ mod tests {
     /// read, whose loaded value is consumed by the yields of an
     /// `if 1 then .. else ..` select as directed by `then_uses` /
     /// `else_uses` (a constant zero stands in when a branch doesn't use it).
-    fn select_guard_prog(read: Access, then_uses: bool, else_uses: bool) -> KernelProgram {
+    fn select_guard_prog(read: Access, then_uses: bool, else_uses: bool) -> KirProgram {
         let mut k = Kernel::new("k".into(), KBound::Const(1), 128);
         let par_idx = k.fresh_val();
         let r0 = k.fresh_val();
@@ -474,7 +477,7 @@ mod tests {
             block,
         });
         k.grid.block.body.push(node);
-        KernelProgram {
+        KirProgram {
             name: "p".into(),
             buffers: vec![BufferDecl {
                 name: "buf".into(),
@@ -485,7 +488,6 @@ mod tests {
                 layout: None,
             }],
             kernels: vec![k],
-            scratch_bytes: 0,
             input_bufs: vec![],
             output_bufs: vec![BufId(0)],
             params: vec![],
@@ -681,7 +683,7 @@ mod tests {
         let x = b.input("x", ScalarType::U32, vec![n]);
         let body = b.compute(n, |b, i| b.index(x, &[i]));
         let module = b.finish("valid", body);
-        check_module_accesses(&module, &[16]).unwrap();
+        check_module_accesses(&module, &[("n".to_string(), 16)].into()).unwrap();
     }
 
     /// Driver catches an out-of-bounds load the static pipeline accepts:
@@ -697,20 +699,7 @@ mod tests {
             b.index(x, &[i1])
         });
         let module = b.finish("oob_shift", body);
-        let e = check_module_accesses(&module, &[8]).unwrap_err();
+        let e = check_module_accesses(&module, &[("n".to_string(), 8)].into()).unwrap_err();
         assert!(e.to_string().contains("out of bounds"), "{e}");
-    }
-
-    /// The hint-driven standalone entry point refuses a parameterized module
-    /// with no hint (the flag asks for a check that cannot run).
-    #[test]
-    fn check_accesses_from_hint_requires_hint() {
-        let mut b = IRBuilder::new();
-        let n = b.symbol("n");
-        let x = b.input("x", ScalarType::U32, vec![n]);
-        let body = b.compute(n, |b, i| b.index(x, &[i]));
-        let module = b.finish("no_hint", body);
-        let e = check_accesses_from_hint(&module).unwrap_err();
-        assert!(e.to_string().contains("shape hint"), "{e}");
     }
 }

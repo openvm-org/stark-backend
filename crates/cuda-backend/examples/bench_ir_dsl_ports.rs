@@ -17,7 +17,6 @@ use crypto_compiler::{
     graph_exe::GraphCompiler,
     graph_ir::{BufId, BufInfo, ConstBuf, DeviceType, GraphBuilder},
     planner::SchedulerMode,
-    runtime::CompileOptions,
 };
 use openvm_cuda_backend::{
     logup_zerocheck::{
@@ -182,7 +181,6 @@ fn bench_graph(
     let mut exe = GraphCompiler::new()
         .device(DeviceType::Cuda(0))
         .scheduler(SchedulerMode::Heuristic)
-        .compile_options(CompileOptions::default())
         .compile(g)?;
 
     // Warmup.

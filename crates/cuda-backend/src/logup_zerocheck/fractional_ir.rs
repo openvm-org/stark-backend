@@ -290,13 +290,13 @@ pub fn extract_root_pq_ir(
         build_extract_pq_slot_module(),
         [layer],
         [root_p],
-        &[0, 0, real_len as i64],
+        &[("r", 0), ("o", 0), ("n", real_len as i64)],
     );
     g.insert_kernel(
         build_extract_pq_slot_module(),
         [layer],
         [root_q],
-        &[0, D_EF as i64, real_len as i64],
+        &[("r", 0), ("o", D_EF as i64), ("n", real_len as i64)],
     );
 }
 
@@ -358,7 +358,11 @@ pub fn extract_claim_pair_ir(
             build_extract_pq_slot_module(),
             [pq],
             [out],
-            &[row as i64, off as i64, pq_alloc_len as i64],
+            &[
+                ("r", row as i64),
+                ("o", off as i64),
+                ("n", pq_alloc_len as i64),
+            ],
         );
     }
     claim
@@ -1345,13 +1349,13 @@ pub fn reconstruct_s_evals_ir(
         build_ef_mul_indexed_module(),
         [d_sum_evals, eq_r_acc],
         [sp_evals[1]],
-        &[0, (GKR_S_DEG - 1) as i64],
+        &[("k", 0), ("n", (GKR_S_DEG - 1) as i64)],
     );
     g.insert_kernel(
         build_ef_mul_indexed_module(),
         [d_sum_evals, eq_r_acc],
         [sp_evals[2]],
-        &[1, (GKR_S_DEG - 1) as i64],
+        &[("k", 1), ("n", (GKR_S_DEG - 1) as i64)],
     );
     // sp(0) = (prev_s_eval - xi_j * sp(1)) * (1 - xi_j)⁻¹.
     g.insert_kernel(
@@ -1376,7 +1380,7 @@ pub fn reconstruct_s_evals_ir(
             build_ef_mul_indexed_module(),
             [eq_points, sp],
             [s_evals[k]],
-            &[k as i64, GKR_S_DEG as i64],
+            &[("k", k as i64), ("n", GKR_S_DEG as i64)],
         );
     }
     (s_evals, sp_evals)
@@ -1591,7 +1595,7 @@ pub fn update_running_scalars_ir(
         build_ef_mul_indexed_module(),
         [eq_r, eq_r_acc],
         [eq_r_acc_next],
-        &[0, 1],
+        &[("k", 0), ("n", 1)],
     );
     // prev_s_eval' = eq_r * interpolate_quadratic_at_012(sp_evals, r).
     let interp = add_ext_scalar_buf(g, device, "sp_interp_at_r");
@@ -1605,7 +1609,7 @@ pub fn update_running_scalars_ir(
         build_ef_mul_indexed_module(),
         [eq_r, interp],
         [prev_s_eval_next],
-        &[0, 1],
+        &[("k", 0), ("n", 1)],
     );
     (prev_s_eval_next, eq_r_acc_next)
 }
@@ -3053,7 +3057,6 @@ mod tests {
         graph_exe::GraphCompiler,
         graph_ir::{DeviceType, GraphBuilder},
         planner::SchedulerMode,
-        runtime::CompileOptions,
     };
     use openvm_cuda_common::{
         common::get_device,
@@ -3228,7 +3231,6 @@ mod tests {
 
         let mut exe = GraphCompiler::new()
             .device(device)
-            .compile_options(CompileOptions::default())
             .compile(g)
             .expect("graph compile");
 
@@ -3351,7 +3353,6 @@ mod tests {
 
         let mut exe = GraphCompiler::new()
             .device(device)
-            .compile_options(CompileOptions::default())
             .compile(g)
             .expect("graph compile");
         exe.run(ctx).expect("graph run");
@@ -3453,7 +3454,6 @@ mod tests {
 
         let mut exe = GraphCompiler::new()
             .device(device)
-            .compile_options(CompileOptions::default())
             .compile(g)
             .expect("graph compile");
         exe.run(ctx).expect("graph run");
@@ -3549,7 +3549,6 @@ mod tests {
         let mut exe = GraphCompiler::new()
             .device(DeviceType::Cuda(0))
             .scheduler(SchedulerMode::Heuristic)
-            .compile_options(CompileOptions::default())
             .compile(g)
             .expect("graph compile");
         exe.run(ctx).expect("graph run");
@@ -4703,10 +4702,7 @@ mod tests {
         let exe = GraphCompiler::new()
             .device(device)
             .scheduler(SchedulerMode::Heuristic)
-            .compile_options(CompileOptions {
-                dump_ir: Some(dir.clone()),
-                ..CompileOptions::default()
-            })
+            .dump_dir(dir.clone())
             .compile(g)
             .expect("graph compile");
         std::fs::write(
@@ -4927,7 +4923,6 @@ mod tests {
             let mut exe = GraphCompiler::new()
                 .device(device)
                 .scheduler(SchedulerMode::Heuristic)
-                .compile_options(CompileOptions::default())
                 .compile(g)
                 .expect("graph compile");
             let compile_ms = t0.elapsed().as_secs_f64() * 1e3;

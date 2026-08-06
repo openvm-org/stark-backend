@@ -16,7 +16,7 @@
 //! carries either device or host bytes. See `graph-ir.md`.
 
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{hash_map::Entry, BTreeMap, BTreeSet, HashMap},
     fmt,
     sync::Arc,
 };
@@ -24,9 +24,13 @@ use std::{
 use openvm_cuda_common::{d_buffer::DeviceBuffer, stream::cudaStream_t};
 
 use crate::{
-    ir::{self, VarId},
-    module_hash::module_hash,
-    passes::split_module::{split_module, ModuleSubgraph, SubgraphValue},
+    ir::{self, Node, VarId},
+    module_hash::{children_of, module_hash},
+    passes::{
+        fusion::renumber_module,
+        split_module::{ModuleSubgraph, SubgraphValue},
+    },
+    planner::MemoryPlan,
     quast::{Quast, SExpr, SymConst},
 };
 
@@ -133,7 +137,7 @@ pub struct MemSetNode {
 /// node per kernel. The invariant is HIR-level only: JIT-time rewrites
 /// (e.g. `rewrite_parallel_reduce` inside [`crate::compile_and_load`]) may
 /// still expand one HIR kernel into several CUDA kernels within its
-/// compiled [`crate::runtime::KernelModule`]. Callers that push
+/// compiled [`crate::runtime::KernelProgram`]. Callers that push
 /// `GraphNode::Kernel` directly into [`GraphBuilder::nodes`] are
 /// responsible for upholding it themselves.
 ///
@@ -145,18 +149,370 @@ pub struct MemSetNode {
 pub struct KernelModuleNode {
     pub module: Arc<ir::Module>,
     /// Concrete value of each `module.builder.params()` entry for *this*
-    /// node, inferred at insertion by unifying the module's input shape
-    /// expressions against the bound graph buffers (see
-    /// [`GraphBuilder::infer_param_bindings`]). Empty iff the module
-    /// declares no parameters. Order-aligned with the params registry.
-    pub param_bindings: Vec<i64>,
+    /// node, keyed by parameter name. Inferred at insertion by unifying
+    /// the module's input shape expressions against the bound graph
+    /// buffers (see [`GraphBuilder::infer_param_bindings`]). Empty iff
+    /// the module declares no parameters; the keys are exactly the
+    /// module's declared param names.
+    pub param_bindings: BTreeMap<String, i64>,
     pub inputs: Vec<BufId>,
     pub outputs: Vec<BufId>,
+    /// Derived state — filled lazily by graph passes; cleared whenever
+    /// [`Self::replace_module`] swaps the module out. `None` on `types`
+    /// / `hash` means "not yet computed"; `canonical = false` means
+    /// "not yet canonicalized" (a fresh insertion can be arbitrary HIR
+    /// until the canonicalize pass runs).
+    pub types: Option<Arc<crate::passes::TypeMap>>,
+    pub hash: Option<[u8; 32]>,
+    pub canonical: bool,
     /// Trace of the fusion steps that produced this kernel. `None` on
     /// un-fused, freshly-lowered kernels; `Some` after
     /// [`crate::passes::fusion::apply_fusion`] merges two kernels. Metadata
     /// only — not part of [`module_hash`], and not read by the runtime.
     pub fusion_history: Option<Arc<FusionHistory>>,
+}
+
+impl KernelModuleNode {
+    /// The single mutation point for `module`: swaps in a new module and
+    /// invalidates every piece of derived state (`types`, `hash`,
+    /// `canonical`). Graph passes must go through this rather than
+    /// mutating `module` directly so `kernel_dedup` etc. never see a
+    /// module out of sync with its cached hash.
+    pub fn replace_module(&mut self, module: impl Into<Arc<ir::Module>>) {
+        self.module = module.into();
+        self.types = None;
+        self.hash = None;
+        self.canonical = false;
+    }
+}
+
+/// Every parameter VarId referenced anywhere in `module` — input shape
+/// dims, `Compute`/`Reduce` bounds, `ConstSym` values. A param not in this
+/// set is dead: [`prune_unused_params`] drops it from both the param
+/// registry and the node's bindings so α-normalized hashes don't fragment
+/// on params stranded by lower_reduce / monomorphize.
+fn used_param_vars(module: &ir::Module) -> BTreeSet<VarId> {
+    let mut out = BTreeSet::new();
+    for decl in module.builder.inputs() {
+        for dim in &decl.shape {
+            dim.param_syms(&mut out);
+        }
+    }
+    let mut seen = BTreeSet::new();
+    let mut stack = vec![module.body];
+    while let Some(id) = stack.pop() {
+        if !seen.insert(id) {
+            continue;
+        }
+        match module.builder.node(id) {
+            Node::Compute { bound, .. } | Node::Reduce { bound, .. } => {
+                bound.param_syms(&mut out);
+            }
+            Node::ConstSym(e) => e.param_syms(&mut out),
+            _ => {}
+        }
+        stack.extend(children_of(module.builder.node(id)));
+    }
+    out
+}
+
+/// Positions of every `GraphNode::Kernel` in `g.nodes`, in insertion
+/// order. The pass driver iterates these to touch only structured
+/// kernels while leaving blackbox / memcpy / const / memset nodes alone.
+pub(crate) fn kernel_node_indices(g: &GraphBuilder) -> Vec<usize> {
+    g.nodes
+        .iter()
+        .enumerate()
+        .filter_map(|(i, n)| matches!(n, GraphNode::Kernel(_)).then_some(i))
+        .collect()
+}
+
+/// Read-only view of the `KernelModuleNode` at position `idx`.
+pub(crate) fn kernel_at(g: &GraphBuilder, idx: usize) -> &KernelModuleNode {
+    match &g.nodes[idx] {
+        GraphNode::Kernel(k) => k,
+        other => panic!("expected Kernel at node {idx}, got {other:?}"),
+    }
+}
+
+/// Mutable view of the `KernelModuleNode` at position `idx`.
+pub(crate) fn kernel_at_mut(g: &mut GraphBuilder, idx: usize) -> &mut KernelModuleNode {
+    match &mut g.nodes[idx] {
+        GraphNode::Kernel(k) => k,
+        other => panic!("expected Kernel at node {idx}, got {other:?}"),
+    }
+}
+
+/// Internal plumbing invoked at every pass entry: fills missing
+/// `node.hash`es (α-normalized structural hash after
+/// [`prune_unused_params`]) and collapses structurally identical modules
+/// onto a single canonical `Arc<ir::Module>` so downstream per-module
+/// work runs once per hash and fans out to all aliases. Shares cached
+/// `types` in whichever direction has them.
+pub(crate) fn kernel_dedup(g: &mut GraphBuilder) {
+    // First: prune + refill hashes on every dirty kernel node. This is
+    // done as a separate pass because computing a hash needs read-only
+    // access to a single node — no cross-node borrow.
+    for idx in kernel_node_indices(g) {
+        let node = kernel_at_mut(g, idx);
+        if node.hash.is_some() {
+            continue;
+        }
+        prune_unused_params(node);
+        node.hash = Some(module_hash(&renumber_module(&node.module)));
+    }
+
+    // Second pass: collapse Arcs. Every kernel now has a hash; the first
+    // occurrence of each hash wins.
+    type Canon = (Arc<ir::Module>, Option<Arc<crate::passes::TypeMap>>);
+    let mut canon: HashMap<[u8; 32], Canon> = HashMap::new();
+    for idx in kernel_node_indices(g) {
+        let node = kernel_at_mut(g, idx);
+        let hash = node.hash.expect("kernel_dedup filled every hash above");
+        match canon.entry(hash) {
+            Entry::Vacant(e) => {
+                e.insert((node.module.clone(), node.types.clone()));
+            }
+            Entry::Occupied(mut e) => {
+                let (cm, ct) = e.get_mut();
+                if !Arc::ptr_eq(&node.module, cm) {
+                    // Hash covers param *names*, so hash-equal modules
+                    // have identical param registries by structure — no
+                    // binding-key remapping needed.
+                    debug_assert!(
+                        node.module.builder.params().iter().map(|(_, n)| n).eq(cm
+                            .builder
+                            .params()
+                            .iter()
+                            .map(|(_, n)| n)),
+                        "hash-equal modules with mismatched param names"
+                    );
+                    node.module = cm.clone();
+                }
+                match (&node.types, ct.as_ref()) {
+                    (None, Some(t)) => node.types = Some(t.clone()),
+                    (Some(t), None) => *ct = Some(t.clone()),
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
+/// Groups all `Kernel` nodes by their (post-`kernel_dedup`) hash and
+/// invokes `f` once per group with the mutable graph and the group's
+/// node indices. Passes reach into `g.nodes` through the indices to
+/// mutate individual nodes — the closure can't be handed disjoint
+/// mutable node references from arbitrary positions, so indices are the
+/// interface. `kernel_dedup` is run first, so every node has a hash.
+pub(crate) fn for_each_unique_kernel<F, E>(g: &mut GraphBuilder, mut f: F) -> Result<(), E>
+where
+    F: FnMut(&mut GraphBuilder, &[usize]) -> Result<(), E>,
+{
+    kernel_dedup(g);
+    let mut groups: BTreeMap<[u8; 32], Vec<usize>> = BTreeMap::new();
+    for idx in kernel_node_indices(g) {
+        let hash = kernel_at(g, idx)
+            .hash
+            .expect("kernel_dedup ran first, so every kernel has a hash");
+        groups.entry(hash).or_default().push(idx);
+    }
+    for (_, idxs) in groups {
+        f(g, &idxs)?;
+    }
+    Ok(())
+}
+
+/// Removes every parameter that neither `node.module` nor `node.param_bindings`
+/// still needs. Called from `kernel_dedup` before hashing so
+/// structurally equal modules with only-cosmetic param registries agree
+/// on their α-normalized hash. Idempotent: on a
+/// well-formed node with no dead params this is a no-op.
+pub(crate) fn prune_unused_params(node: &mut KernelModuleNode) {
+    let used = used_param_vars(&node.module);
+    // Every param not in `used` is dead. Check first so a well-formed
+    // node hits the fast path and shares its `Arc<Module>` with aliases.
+    let has_dead = node
+        .module
+        .builder
+        .params()
+        .iter()
+        .any(|(v, _)| !used.contains(v));
+    if !has_dead {
+        return;
+    }
+    let m = Arc::make_mut(&mut node.module);
+    let dead_names: Vec<String> = m
+        .builder
+        .params()
+        .iter()
+        .filter(|(v, _)| !used.contains(v))
+        .map(|(_, name)| name.clone())
+        .collect();
+    m.builder.retain_params(|(v, _)| used.contains(v));
+    for name in dead_names {
+        node.param_bindings.remove(&name);
+    }
+    // The pruned module is structurally different, so any cached hash is
+    // stale even though `types` and `canonical` still hold.
+    node.hash = None;
+}
+
+/// Splits `parent` (a `Kernel` node whose canonical `subgraph` was
+/// produced by [`split_program`]) into one `Kernel` node per split kernel,
+/// pushed at the end of `g.nodes` in dependency order.
+///
+/// Intermediate buffers get fresh `BufInfo`s on the parent's first input's
+/// device (or the first bound output's device); their byte sizes come from
+/// `OutputSpec::num_elems` evaluated under each child's projected binding
+/// env (an intermediate that stays symbolic under those bindings is an
+/// error — a canonical program is fully typeable). The parent's `outputs`
+/// bind to the last-writer BufIds so external references keep resolving.
+/// Child bindings are projected by name from `parent.param_bindings`.
+///
+/// The parent's `fusion_history` is intentionally *not* propagated — a
+/// fusion trace is a per-kernel identity, and after a split the children
+/// are new kernels that never participated in that merge.
+pub(crate) fn split_kernel_node(
+    g: &mut GraphBuilder,
+    parent: KernelModuleNode,
+    subgraph: &ModuleSubgraph,
+) -> Result<(), crate::CompileError> {
+    let KernelModuleNode {
+        param_bindings: parent_bindings,
+        inputs: in_bufs,
+        outputs: bound_outputs,
+        ..
+    } = parent;
+    assert_eq!(
+        in_bufs.len(),
+        subgraph.num_inputs,
+        "split_kernel_node: parent has {} inputs but subgraph declares {}",
+        in_bufs.len(),
+        subgraph.num_inputs,
+    );
+    assert_eq!(
+        bound_outputs.len(),
+        subgraph.outputs.len(),
+        "split_kernel_node: parent has {} outputs but subgraph declares {}",
+        bound_outputs.len(),
+        subgraph.outputs.len(),
+    );
+    let device = in_bufs
+        .first()
+        .or_else(|| bound_outputs.first())
+        .map(|b| g.bufs[b.0].device_type)
+        .unwrap_or(DeviceType::Cuda(0));
+
+    // Bound outputs by (kernel, out_idx). Only KernelOutput values may
+    // be bound — a raw Input passthrough as a top-level output should
+    // have been simplified by canonicalize.
+    let mut bound: HashMap<SubgraphValue, BufId> = HashMap::new();
+    for (val, &buf) in subgraph.outputs.iter().zip(&bound_outputs) {
+        match val {
+            SubgraphValue::KernelOutput { .. } => {
+                bound.insert(*val, buf);
+            }
+            SubgraphValue::Input(_) => {
+                return Err(crate::CompileError::Canonicalize(format!(
+                    "split_kernel_node: subgraph `{}` has an input-passthrough output {val:?} \
+                     that cannot be bound to a graph buffer",
+                    subgraph.name,
+                )));
+            }
+        }
+    }
+
+    // Per-kernel output BufIds, in kernel order (producers precede
+    // consumers, so back-references always resolve).
+    let mut produced: Vec<Vec<BufId>> = Vec::with_capacity(subgraph.kernels.len());
+    for (ki, k) in subgraph.kernels.iter().enumerate() {
+        let child_in_bufs: Vec<BufId> = k
+            .inputs
+            .iter()
+            .map(|v| match *v {
+                SubgraphValue::Input(i) => in_bufs[i],
+                SubgraphValue::KernelOutput { kernel, out_idx } => produced[kernel][out_idx],
+            })
+            .collect();
+
+        // Project the parent's bindings by name; do not re-infer from
+        // buffer shapes. `split_program` inherits param names verbatim,
+        // so the child's param-name set is a subset of the parent's.
+        let child_bindings: BTreeMap<String, i64> = k
+            .module
+            .builder
+            .params()
+            .iter()
+            .map(|(_, name)| {
+                let &v = parent_bindings.get(name).unwrap_or_else(|| {
+                    panic!(
+                        "split_kernel_node: child kernel `{}` needs param `{name}` but the parent \
+                         has no binding (parent params: {:?})",
+                        k.module.name,
+                        parent_bindings.keys().collect::<Vec<_>>(),
+                    )
+                });
+                (name.clone(), v)
+            })
+            .collect();
+        // The concretization env, keyed by VarId, uses the same values.
+        let env: BTreeMap<VarId, i64> = k
+            .module
+            .builder
+            .params()
+            .iter()
+            .filter_map(|(v, name)| child_bindings.get(name).map(|&val| (*v, val)))
+            .collect();
+
+        let child_out_bufs: Vec<BufId> = k
+            .outputs
+            .iter()
+            .enumerate()
+            .map(|(oi, spec)| {
+                let val = SubgraphValue::KernelOutput {
+                    kernel: ki,
+                    out_idx: oi,
+                };
+                if let Some(&b) = bound.get(&val) {
+                    return b;
+                }
+                let num_elems = spec
+                    .num_elems
+                    .concretize(&env)
+                    .as_const()
+                    .unwrap_or_else(|| {
+                        panic!(
+                        "split_kernel_node: output {oi} of split kernel `{}` has element count \
+                         `{}` that stays symbolic after binding parameters",
+                        k.module.name, spec.num_elems,
+                    )
+                    });
+                g.add_buf(BufInfo {
+                    name: Some(format!("{}.k{ki}.o{oi}", subgraph.name)),
+                    device_type: device,
+                    size: Quast::cst(num_elems * spec.elem.size_bytes() as i64),
+                    elem_size: spec.elem.size_bytes(),
+                })
+            })
+            .collect();
+
+        g.nodes.push(GraphNode::Kernel(KernelModuleNode {
+            module: k.module.clone(),
+            param_bindings: child_bindings,
+            inputs: child_in_bufs,
+            outputs: child_out_bufs.clone(),
+            // Splitting a canonical program yields canonical kernels;
+            // hash is left dirty so the next `kernel_dedup` recomputes.
+            types: None,
+            hash: None,
+            canonical: true,
+            fusion_history: None,
+        }));
+        produced.push(child_out_bufs);
+    }
+    g.plan = None;
+    Ok(())
 }
 
 impl fmt::Debug for KernelModuleNode {
@@ -255,6 +611,9 @@ impl KernelModuleNode {
             param_bindings: self.param_bindings.clone(),
             inputs: self.inputs.clone(),
             outputs: self.outputs.clone(),
+            types: self.types.clone(),
+            hash: self.hash,
+            canonical: self.canonical,
             fusion_history: None,
         });
         let input_shapes = self
@@ -327,13 +686,6 @@ impl fmt::Debug for GraphNode {
     }
 }
 
-/// Key of [`GraphBuilder::subgraph_cache`]: (module_hash, shape hint).
-/// `module_hash` treats the hint as metadata, but the cached split kernels
-/// carry hint *values* (sliced per kernel) that `insert_subgraph_impl` uses
-/// for param-binding inference, so same-HIR modules with different hints
-/// must not share an entry.
-type SubgraphCacheKey = ([u8; 32], Option<Vec<i64>>);
-
 #[derive(Default)]
 pub struct GraphBuilder {
     pub bufs: Vec<BufInfo>,
@@ -342,19 +694,6 @@ pub struct GraphBuilder {
     /// to each [`VarId`] is its printable name.
     pub symbols: BTreeMap<VarId, String>,
     next_var: u32,
-    /// Content-hash → canonical `Arc<ir::Module>` for *split* (single-
-    /// kernel) modules. Kernel insertion collapses structurally identical
-    /// modules onto their first-seen `Arc` so downstream `Arc::as_ptr`
-    /// identity checks (`GraphCompiler`'s per-module JIT dedup, cytoscape
-    /// rendering, …) automatically see the merged set. This is skipped when
-    /// a caller pushes `GraphNode::Kernel` directly into `nodes`, so the
-    /// compiler still runs a hash-based dedup pass as a backstop.
-    module_dedup: HashMap<[u8; 32], Arc<ir::Module>>,
-    /// Content-hash of the *original* (possibly multi-kernel) module →
-    /// its split subgraph. [`GraphBuilder::insert_kernel`] splits a module
-    /// once per unique content and replays the cached subgraph on every
-    /// later insertion.
-    subgraph_cache: HashMap<SubgraphCacheKey, Arc<ModuleSubgraph>>,
     /// Buffers the caller declared as graph inputs, in registration order
     /// (which defines the `set_input` index order). See
     /// [`Self::register_input`].
@@ -363,6 +702,10 @@ pub struct GraphBuilder {
     /// (which defines the `get_output` index order). See
     /// [`Self::register_output`].
     output_bufs: Vec<BufId>,
+    /// Cached result of the `plan_memory` graph pass. Every structural
+    /// mutation (`insert_*`, splits, fusion, dce-removal) resets this to
+    /// `None`; the compile driver reuses it when already populated.
+    pub plan: Option<MemoryPlan>,
 }
 
 impl GraphBuilder {
@@ -446,14 +789,10 @@ impl GraphBuilder {
     /// one output; a tuple body binds one per element).
     ///
     /// `shape_hint` supplies a canonical concrete instantiation of the
-    /// module's symbolic parameters, in declaration order: used for access
-    /// checking and as the binding fallback for parameters that cannot be
-    /// inferred from the input buffer shapes. Pass `&[]` for no hint;
-    /// otherwise its length must equal the module's parameter count. The
-    /// hint is attached to the module here — module authors never record
-    /// hints themselves — and is part of the split cache key, so one module
-    /// inserted under different hints splits (and JITs) per hint while
-    /// structurally identical residuals still content-dedup downstream.
+    /// module's symbolic parameters, by name: used purely as the binding
+    /// fallback for parameters that cannot be inferred from the input
+    /// buffer shapes. The hint is consumed at insertion for inference
+    /// only; it is never attached to the module. Pass `&[]` for no hint.
     ///
     /// Panics if the module fails type checking or canonicalization.
     pub fn insert_kernel(
@@ -461,15 +800,9 @@ impl GraphBuilder {
         module: impl Into<Arc<ir::Module>>,
         inputs: impl IntoIterator<Item = BufId>,
         outputs: impl IntoIterator<Item = BufId>,
-        shape_hint: &[i64],
+        shape_hint: &[(&str, i64)],
     ) {
-        let mut module: Arc<ir::Module> = module.into();
-        if !shape_hint.is_empty() {
-            Arc::make_mut(&mut module)
-                .builder
-                .add_shape_hint(shape_hint);
-        }
-        let module = module;
+        let module: Arc<ir::Module> = module.into();
         let inputs: Vec<BufId> = inputs.into_iter().collect();
         let outputs: Vec<BufId> = outputs.into_iter().collect();
         assert_eq!(
@@ -480,165 +813,22 @@ impl GraphBuilder {
             module.name,
             module.builder.inputs().len(),
         );
-        let key = (
-            module_hash(&module),
-            module.builder.shape_hint().map(<[i64]>::to_vec),
-        );
-        let subgraph = match self.subgraph_cache.get(&key) {
-            Some(sg) => sg.clone(),
-            None => {
-                let sg = split_module(&module).unwrap_or_else(|e| {
-                    panic!(
-                        "insert_kernel: module `{}` failed to split: {e}",
-                        module.name
-                    )
-                });
-                let sg = Arc::new(sg);
-                self.subgraph_cache.insert(key, sg.clone());
-                sg
-            }
-        };
-        assert_eq!(
-            outputs.len(),
-            subgraph.outputs.len(),
-            "insert_kernel: outputs.len() must match the number of module outputs \
-             (module `{}` produces {})",
-            module.name,
-            subgraph.outputs.len(),
-        );
-        self.insert_subgraph_impl(&subgraph, &inputs, Some(&outputs));
-    }
-
-    /// Adds every kernel of a split [`ModuleSubgraph`] (see
-    /// [`crate::passes::split_module::split_module`]), wiring
-    /// [`SubgraphValue::Input`]s to `inputs` and allocating a fresh buffer
-    /// for every kernel output. Returns the buffers holding the subgraph's
-    /// outputs, one per [`ModuleSubgraph::outputs`] entry.
-    ///
-    /// Intermediate and output buffers are allocated on the first input's
-    /// device (`Cuda(0)` if the subgraph has no inputs) with byte sizes
-    /// from the split kernels' [`crate::passes::OutputSpec`]s, evaluated
-    /// under each kernel's inferred parameter bindings.
-    ///
-    /// `inputs.len()` must equal [`ModuleSubgraph::num_inputs`].
-    pub fn insert_subgraph(&mut self, subgraph: &ModuleSubgraph, inputs: &[BufId]) -> Vec<BufId> {
-        self.insert_subgraph_impl(subgraph, inputs, None)
-    }
-
-    /// Shared body of [`Self::insert_kernel`] / [`Self::insert_subgraph`]:
-    /// pushes one [`GraphNode::Kernel`] per split kernel in dependency
-    /// order. With `bound_outputs` set, the subgraph's outputs land in
-    /// those buffers; otherwise fresh buffers are allocated for them like
-    /// for any intermediate.
-    fn insert_subgraph_impl(
-        &mut self,
-        subgraph: &ModuleSubgraph,
-        inputs: &[BufId],
-        bound_outputs: Option<&[BufId]>,
-    ) -> Vec<BufId> {
-        assert_eq!(
-            inputs.len(),
-            subgraph.num_inputs,
-            "insert_subgraph: inputs.len() must match the subgraph's input count \
-             (subgraph `{}` declares {})",
-            subgraph.name,
-            subgraph.num_inputs,
-        );
-        let device = inputs
-            .first()
-            .or_else(|| bound_outputs.and_then(|outs| outs.first()))
-            .map(|b| self.bufs[b.0].device_type)
-            .unwrap_or(DeviceType::Cuda(0));
-
-        // Kernel outputs that are subgraph outputs bound by the caller.
-        let mut bound: HashMap<SubgraphValue, BufId> = HashMap::new();
-        if let Some(outs) = bound_outputs {
-            assert_eq!(outs.len(), subgraph.outputs.len());
-            for (val, &buf) in subgraph.outputs.iter().zip(outs) {
-                match val {
-                    SubgraphValue::KernelOutput { .. } => {
-                        bound.insert(*val, buf);
-                    }
-                    SubgraphValue::Input(_) => panic!(
-                        "insert_kernel: subgraph `{}` output {val:?} is an input \
-                         passthrough and cannot be bound to an output buffer",
-                        subgraph.name,
-                    ),
-                }
-            }
-        }
-
-        // Per-kernel output buffers, in kernel order (producers precede
-        // consumers, so back-references into `produced` always resolve).
-        let mut produced: Vec<Vec<BufId>> = Vec::with_capacity(subgraph.kernels.len());
-        for (ki, k) in subgraph.kernels.iter().enumerate() {
-            let in_bufs: Vec<BufId> = k
-                .inputs
-                .iter()
-                .map(|v| match *v {
-                    SubgraphValue::Input(i) => inputs[i],
-                    SubgraphValue::KernelOutput { kernel, out_idx } => produced[kernel][out_idx],
-                })
-                .collect();
-            let param_bindings = self.infer_param_bindings(&k.module, &in_bufs);
-            let env: BTreeMap<VarId, i64> = k
-                .module
-                .builder
-                .params()
-                .iter()
-                .map(|(v, _)| *v)
-                .zip(param_bindings.iter().copied())
-                .collect();
-            let out_bufs: Vec<BufId> = k
-                .outputs
-                .iter()
-                .enumerate()
-                .map(|(oi, spec)| {
-                    let val = SubgraphValue::KernelOutput {
-                        kernel: ki,
-                        out_idx: oi,
-                    };
-                    if let Some(&b) = bound.get(&val) {
-                        return b;
-                    }
-                    let num_elems =
-                        spec.num_elems
-                            .concretize(&env)
-                            .as_const()
-                            .unwrap_or_else(|| {
-                                panic!(
-                                    "insert_kernel: output {oi} of split kernel `{}` has element \
-                                 count `{}` that stays symbolic after binding parameters",
-                                    k.module.name, spec.num_elems,
-                                )
-                            });
-                    self.add_buf(BufInfo {
-                        name: Some(format!("{}.k{ki}.o{oi}", subgraph.name)),
-                        device_type: device,
-                        size: Quast::cst(num_elems * spec.elem.size_bytes() as i64),
-                        elem_size: spec.elem.size_bytes(),
-                    })
-                })
-                .collect();
-            let module = self.dedup_module(k.module.clone());
-            self.nodes.push(GraphNode::Kernel(KernelModuleNode {
-                module,
-                param_bindings,
-                inputs: in_bufs,
-                outputs: out_bufs.clone(),
-                fusion_history: None,
-            }));
-            produced.push(out_bufs);
-        }
-
-        subgraph
-            .outputs
-            .iter()
-            .map(|v| match *v {
-                SubgraphValue::Input(i) => inputs[i],
-                SubgraphValue::KernelOutput { kernel, out_idx } => produced[kernel][out_idx],
-            })
-            .collect()
+        // Push a single graph node with the (possibly multi-kernel)
+        // module. The `canonicalize` graph pass splits multi-kernel
+        // modules into their child nodes later, allocating intermediate
+        // buffers at that time. `kernel_dedup` handles Arc-content dedup.
+        let param_bindings = self.infer_param_bindings(&module, &inputs, shape_hint);
+        self.plan = None;
+        self.nodes.push(GraphNode::Kernel(KernelModuleNode {
+            module,
+            param_bindings,
+            inputs,
+            outputs,
+            types: None,
+            hash: None,
+            canonical: false,
+            fusion_history: None,
+        }));
     }
 
     /// Infers a concrete value for each of `module`'s parameters by
@@ -657,10 +847,15 @@ impl GraphBuilder {
     /// fixpoint fall back to the module's shape hint. Panics if a
     /// parameter cannot be inferred, or if the bindings are inconsistent
     /// with any concrete input buffer size.
-    fn infer_param_bindings(&self, module: &ir::Module, in_bufs: &[BufId]) -> Vec<i64> {
+    fn infer_param_bindings(
+        &self,
+        module: &ir::Module,
+        in_bufs: &[BufId],
+        shape_hint: &[(&str, i64)],
+    ) -> BTreeMap<String, i64> {
         let params = module.builder.params();
         if params.is_empty() {
-            return Vec::new();
+            return BTreeMap::new();
         }
         let decls = module.builder.inputs();
 
@@ -722,26 +917,27 @@ impl GraphBuilder {
         }
 
         // Parameters the input shapes don't pin down fall back to the
-        // author's shape hint (aligned with the params registry).
+        // caller-provided `shape_hint` (matched by name).
         if env.len() < params.len() {
-            if let Some(hint) = module.builder.shape_hint() {
-                for ((v, _), &h) in params.iter().zip(hint) {
+            for (v, name) in params {
+                if let Some(&(_, h)) = shape_hint.iter().find(|(n, _)| *n == name.as_str()) {
                     env.entry(*v).or_insert(h);
                 }
             }
         }
 
-        let bindings: Vec<i64> = params
+        let bindings: BTreeMap<String, i64> = params
             .iter()
             .map(|(v, name)| {
-                *env.get(v).unwrap_or_else(|| {
+                let v = *env.get(v).unwrap_or_else(|| {
                     panic!(
                         "insert_kernel: cannot infer parameter `{name}` of module `{}` \
                          from its input buffer sizes (add a shape hint or bind the \
                          parameter through an input shape)",
                         module.name,
                     )
-                })
+                });
+                (name.clone(), v)
             })
             .collect();
 
@@ -775,22 +971,10 @@ impl GraphBuilder {
         bindings
     }
 
-    /// Content-dedup: two callers can build structurally identical modules
-    /// at different sites and pass distinct `Arc`s. Fold those onto the
-    /// first-seen `Arc` so the graph carries a single canonical handle per
-    /// unique kernel and downstream `Arc::as_ptr` identity checks see the
-    /// merged set.
-    pub(crate) fn dedup_module(&mut self, module: Arc<ir::Module>) -> Arc<ir::Module> {
-        let hash = module_hash(&module);
-        self.module_dedup
-            .entry(hash)
-            .or_insert_with(|| module.clone())
-            .clone()
-    }
-
     /// Adds a constant node: makes `buf` refer to static bytes carried in
     /// `data` (either device- or host-resident, see [`ConstBuf`]).
     pub fn insert_const(&mut self, buf: BufId, data: ConstBuf) {
+        self.plan = None;
         self.nodes.push(GraphNode::Const(ConstNode { buf, data }));
     }
 
@@ -828,6 +1012,7 @@ impl GraphBuilder {
             .zip(&modifies)
             .filter_map(|(b, &m)| m.then_some(*b))
             .collect();
+        self.plan = None;
         self.nodes.push(GraphNode::BlackboxKernel(KernelNode {
             inputs,
             outputs: outputs.collect(),
@@ -843,6 +1028,7 @@ impl GraphBuilder {
     /// copies with explicit offsets.
     pub fn insert_memcpy(&mut self, src: BufId, dst: BufId) {
         let n = self.bufs[dst.0].size.clone();
+        self.plan = None;
         self.nodes.push(GraphNode::Memcpy(MemcpyNode {
             src,
             src_offset: Quast::cst(0),
@@ -864,6 +1050,7 @@ impl GraphBuilder {
         dst_offset: Quast,
         num_bytes: Quast,
     ) {
+        self.plan = None;
         self.nodes.push(GraphNode::Memcpy(MemcpyNode {
             src,
             src_offset,
@@ -878,6 +1065,7 @@ impl GraphBuilder {
     /// [`Self::insert_memset_range`] for partial fills.
     pub fn insert_memset(&mut self, node: BufId, val: u32) {
         let n = self.bufs[node.0].size.clone();
+        self.plan = None;
         self.nodes.push(GraphNode::Memset(MemSetNode {
             node,
             offset: Quast::cst(0),
@@ -888,6 +1076,7 @@ impl GraphBuilder {
 
     /// Byte-range fill: `buf[offset..offset + num_bytes] <- low_byte(val)`.
     pub fn insert_memset_range(&mut self, node: BufId, offset: Quast, num_bytes: Quast, val: u32) {
+        self.plan = None;
         self.nodes.push(GraphNode::Memset(MemSetNode {
             node,
             offset,
@@ -1201,6 +1390,17 @@ impl GraphBuilder {
             if let GraphNode::Kernel(k) = node {
                 let key = module_key(&k.module);
                 fields.push(("module", format!("\"{}\"", json_escape(&key))));
+                // Concrete value of each symbolic module parameter for this
+                // node — the viewer renders it as a "Parameter bindings"
+                // table so the reader can see, per instantiation, what each
+                // symbol in the module HIR resolves to.
+                let bindings_json: String = k
+                    .param_bindings
+                    .iter()
+                    .map(|(name, val)| format!("\"{}\":{val}", json_escape(name)))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                fields.push(("param_bindings", format!("{{{bindings_json}}}")));
                 if let Some(history) = &k.fusion_history {
                     fields.push(("fusion_history", fusion_history_json(history)));
                 }
@@ -1563,6 +1763,298 @@ fn format_quast_prec(q: &Quast, symbols: &BTreeMap<VarId, String>, prec: u8) -> 
     }
 }
 
+/// Thin wrapper around [`GraphBuilder`] that encapsulates the common
+/// "wrap this HIR module in a one-node graph" pattern used by tests and
+/// benches. Tests build a `GraphModule` and feed it to
+/// [`crate::test_utils::TestModuleRunner`].
+pub struct GraphModule {
+    builder: GraphBuilder,
+}
+
+impl GraphModule {
+    /// Wraps an already-built [`GraphBuilder`] (e.g. a multi-node
+    /// hand-wired graph from a `gpu_graph` test).
+    pub fn from_builder(builder: GraphBuilder) -> Self {
+        Self { builder }
+    }
+
+    /// Wraps a single-kernel [`ir::Module`] in a one-node graph.
+    ///
+    /// Every input declaration becomes a graph input buffer on
+    /// `Cuda(0)`, sized from the declaration's shape under
+    /// `shape_hint`; every top-level output becomes a graph output
+    /// buffer, sized from the module's inferred output type.
+    /// `shape_hint` uses the same `&[(&str, i64)]` shape as
+    /// [`GraphBuilder::insert_kernel`].
+    pub fn from_ir(
+        module: ir::Module,
+        shape_hint: &[(&str, i64)],
+    ) -> Result<Self, crate::CompileError> {
+        let params = module.builder.params();
+        let env: BTreeMap<VarId, i64> = params
+            .iter()
+            .filter_map(|(v, name)| {
+                shape_hint
+                    .iter()
+                    .find_map(|(hn, hv)| (*hn == name.as_str()).then_some((*v, *hv)))
+            })
+            .collect();
+        let types = crate::passes::type_infer(&module)?;
+        let body_ty = types.get(module.body).clone();
+        let output_types: Vec<ir::Type> = match body_ty {
+            ir::Type::Tuple(ts) => ts,
+            other => vec![other],
+        };
+
+        let mut g = GraphBuilder::new();
+        let mut input_bufs = Vec::new();
+        for decl in module.builder.inputs() {
+            let num_elems: i64 = decl
+                .shape
+                .iter()
+                .map(|d| {
+                    d.concretize(&env).as_const().unwrap_or_else(|| {
+                        panic!(
+                            "GraphModule::from_ir: module `{}` input `{}` shape dim `{d}` \
+                             is symbolic under the supplied hint",
+                            module.name, decl.name,
+                        )
+                    })
+                })
+                .product();
+            let byte_size = num_elems * (decl.elem.size_bytes() as i64);
+            let buf = g.add_buf(BufInfo {
+                name: Some(decl.name.clone()),
+                device_type: DeviceType::Cuda(0),
+                size: Quast::cst(byte_size),
+                elem_size: decl.elem.size_bytes(),
+            });
+            input_bufs.push(buf);
+            g.register_input(buf);
+        }
+        let mut output_bufs = Vec::new();
+        for (i, ty) in output_types.iter().enumerate() {
+            let elem = ty.scalar_type().unwrap_or_else(|| {
+                panic!(
+                    "GraphModule::from_ir: module `{}` output {i} has a non-tensor type {ty:?} \
+                     (nested tuple outputs are not supported)",
+                    module.name,
+                )
+            });
+            let num_elems: i64 = ty
+                .shape()
+                .iter()
+                .map(|d| {
+                    d.concretize(&env).as_const().unwrap_or_else(|| {
+                        panic!(
+                            "GraphModule::from_ir: module `{}` output {i} shape dim `{d}` \
+                             is symbolic under the supplied hint",
+                            module.name,
+                        )
+                    })
+                })
+                .product();
+            let byte_size = num_elems * (elem.size_bytes() as i64);
+            let buf = g.add_buf(BufInfo {
+                name: Some(format!("out{i}")),
+                device_type: DeviceType::Cuda(0),
+                size: Quast::cst(byte_size),
+                elem_size: elem.size_bytes(),
+            });
+            output_bufs.push(buf);
+            g.register_output(buf);
+        }
+        g.insert_kernel(module, input_bufs, output_bufs, shape_hint);
+        Ok(Self { builder: g })
+    }
+
+    pub fn as_builder(&self) -> &GraphBuilder {
+        &self.builder
+    }
+
+    pub fn as_builder_mut(&mut self) -> &mut GraphBuilder {
+        &mut self.builder
+    }
+
+    pub fn into_builder(self) -> GraphBuilder {
+        self.builder
+    }
+}
+
+/// Well-formedness check over a graph, run after any structural mutation
+/// (fusion, splits, DCE) to catch shape/hazard bugs at the mutation site
+/// instead of deep in the compile driver.
+///
+/// Two invariants are enforced:
+///
+/// 1. **Shape consistency.** For each `Kernel` node, the declared input shape (evaluated under the
+///    node's `param_bindings`) times the scalar element size must equal the bound graph buffer's
+///    byte size. Outputs are checked the same way against the module's body type: a `Tuple(ts)`
+///    body means `len(ts)` outputs (one shape per tuple element); anything else is a single-output
+///    kernel. Blackbox / Const / Memcpy / Memset nodes are skipped (their buffer sizes are the
+///    caller's responsibility).
+///
+/// 2. **Write-before-read + single-writer.** Every buffer is written by at most one node (SSA); a
+///    read must precede a write of the same buffer in the node vector (which follows topological
+///    order for insertion-time-built graphs). A caller pushing raw `GraphNode::Kernel`s that read
+///    an unwritten buffer is treated as reading a graph input — no error.
+pub fn verify_graph(g: &GraphBuilder) -> Result<(), crate::CompileError> {
+    let n_bufs = g.bufs.len();
+    let env: BTreeMap<VarId, i64> = BTreeMap::new();
+    // Env for buffer-size evaluation: registered graph symbols only
+    // remain unbound (a well-formed graph resolves them at compile
+    // time). Buffer sizes that reference unbound graph symbols are
+    // skipped rather than errored — the same behavior the compile-time
+    // planner uses.
+    let buf_size = |b: BufId| -> Option<usize> {
+        let info = &g.bufs[b.0];
+        let mut syms = BTreeSet::new();
+        info.size.syms(&mut syms);
+        if !syms.is_empty() {
+            return None;
+        }
+        let v = info.size.eval(&env);
+        (v >= 0).then_some(v as usize)
+    };
+
+    // (1) Shape consistency.
+    for (node_idx, node) in g.nodes.iter().enumerate() {
+        let GraphNode::Kernel(k) = node else { continue };
+        let decls = k.module.builder.inputs();
+        if decls.len() != k.inputs.len() {
+            return Err(crate::CompileError::Verify(format!(
+                "verify_graph: node {node_idx} kernel `{}` declares {} inputs, \
+                 graph binds {}",
+                k.module.name,
+                decls.len(),
+                k.inputs.len(),
+            )));
+        }
+        let node_env: BTreeMap<VarId, i64> = k
+            .module
+            .builder
+            .params()
+            .iter()
+            .filter_map(|(v, name)| k.param_bindings.get(name).map(|&val| (*v, val)))
+            .collect();
+        for (i, (decl, &buf_id)) in decls.iter().zip(&k.inputs).enumerate() {
+            let elem = decl.elem.size_bytes() as i64;
+            let elems: i64 = decl
+                .shape
+                .iter()
+                .map(|d| d.concretize(&node_env).as_const().unwrap_or(-1))
+                .product();
+            if elems < 0 {
+                return Err(crate::CompileError::Verify(format!(
+                    "verify_graph: node {node_idx} kernel `{}` input {i} shape {:?} \
+                     stays symbolic under param_bindings {:?}",
+                    k.module.name, decl.shape, k.param_bindings,
+                )));
+            }
+            let want_bytes = (elems * elem) as usize;
+            let Some(got_bytes) = buf_size(buf_id) else {
+                continue;
+            };
+            if got_bytes != want_bytes {
+                return Err(crate::CompileError::Verify(format!(
+                    "verify_graph: node {node_idx} kernel `{}` input {i} (`{}`) \
+                     expects {want_bytes} bytes, bound to {:?} of {got_bytes} bytes",
+                    k.module.name, decl.name, buf_id,
+                )));
+            }
+        }
+
+        // Outputs. `type_infer` gives the body's type; a `Tuple(ts)` body
+        // means one output per element (canonicalize splits tuple-typed
+        // bodies into that many results), anything else is a single-output
+        // kernel. Skip modules whose body doesn't type-check — the compile
+        // driver reports those with better context.
+        let types = match &k.types {
+            Some(t) => t.clone(),
+            None => match crate::passes::type_infer(&k.module) {
+                Ok(t) => Arc::new(t),
+                Err(_) => continue,
+            },
+        };
+        let body_ty = types.get(k.module.body).clone();
+        let member_types: Vec<ir::Type> = match body_ty {
+            ir::Type::Tuple(ts) => ts,
+            other => vec![other],
+        };
+        if member_types.len() != k.outputs.len() {
+            return Err(crate::CompileError::Verify(format!(
+                "verify_graph: node {node_idx} kernel `{}` produces {} outputs, \
+                 graph binds {}",
+                k.module.name,
+                member_types.len(),
+                k.outputs.len(),
+            )));
+        }
+        for (i, (ty, &buf_id)) in member_types.iter().zip(&k.outputs).enumerate() {
+            let Some(elem_st) = ty.scalar_type() else {
+                return Err(crate::CompileError::Verify(format!(
+                    "verify_graph: node {node_idx} kernel `{}` output {i} has non-\
+                     scalar-elem type {ty:?}",
+                    k.module.name,
+                )));
+            };
+            let elem = elem_st.size_bytes() as i64;
+            let elems: i64 = ty
+                .shape()
+                .iter()
+                .map(|d| d.concretize(&node_env).as_const().unwrap_or(-1))
+                .product();
+            if elems < 0 {
+                return Err(crate::CompileError::Verify(format!(
+                    "verify_graph: node {node_idx} kernel `{}` output {i} shape {:?} \
+                     stays symbolic under param_bindings {:?}",
+                    k.module.name,
+                    ty.shape(),
+                    k.param_bindings,
+                )));
+            }
+            let want_bytes = (elems * elem) as usize;
+            let Some(got_bytes) = buf_size(buf_id) else {
+                continue;
+            };
+            if got_bytes != want_bytes {
+                return Err(crate::CompileError::Verify(format!(
+                    "verify_graph: node {node_idx} kernel `{}` output {i} expects \
+                     {want_bytes} bytes ({ty:?}), bound to {:?} of {got_bytes} bytes",
+                    k.module.name, buf_id,
+                )));
+            }
+        }
+    }
+
+    // (2) Write-before-read + single-writer.
+    let (writers, readers) = classify_buf_uses(&g.nodes, n_bufs);
+    for (b, ws) in writers.iter().enumerate() {
+        if ws.len() > 1 {
+            return Err(crate::CompileError::Verify(format!(
+                "verify_graph: buffer {:?} written by {} nodes: {:?}",
+                BufId(b),
+                ws.len(),
+                ws,
+            )));
+        }
+    }
+    for (b, rs) in readers.iter().enumerate() {
+        let Some(&w) = writers[b].first() else {
+            continue;
+        };
+        for &r in rs {
+            if r < w {
+                return Err(crate::CompileError::Verify(format!(
+                    "verify_graph: buffer {:?} read at node {r} before its writer node {w}",
+                    BufId(b),
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn classify_buf_uses(
     nodes: &[GraphNode],
     n_bufs: usize,
@@ -1681,6 +2173,12 @@ mod tests {
         b.register_input(a_buf);
         b.register_output(out_buf);
         b.insert_kernel(module, [a_buf], [out_buf], &[]);
+        // `insert_kernel` pushes a single (multi-kernel) node;
+        // canonicalize splits into per-kernel graph nodes with fresh
+        // intermediate buffers.
+        crate::graph_exe::GraphCompiler::new()
+            .canonicalize(&mut b)
+            .unwrap();
 
         assert_eq!(b.nodes.len(), 2);
         assert!(b.buf_is_interface(a_buf));
@@ -1754,84 +2252,24 @@ mod tests {
     }
 
     #[test]
-    fn insert_kernel_splits_multi_kernel_module() {
+    fn insert_kernel_pushes_single_node_for_multi_kernel_module() {
+        // `insert_kernel` doesn't split at insertion — the multi-kernel
+        // module lands as a single graph node whose `canonicalize` pass
+        // later splits into child nodes.
         let mut b = GraphBuilder::new();
         let a_buf = buf(&mut b, "a", DeviceType::Cuda(0), Quast::cst(32));
         let out_buf = buf(&mut b, "out", DeviceType::Cuda(0), Quast::cst(32));
         b.insert_kernel(two_kernel_chain("chain", 8), [a_buf], [out_buf], &[]);
 
-        // One GraphNode::Kernel per split kernel, chained through an
-        // auto-allocated intermediate buffer on the inputs' device.
-        assert_eq!(b.nodes.len(), 2);
-        let (k0, k1) = match (&b.nodes[0], &b.nodes[1]) {
-            (GraphNode::Kernel(k0), GraphNode::Kernel(k1)) => (k0, k1),
-            other => panic!("expected two structured kernel nodes, got {other:?}"),
+        assert_eq!(b.nodes.len(), 1);
+        let k = match &b.nodes[0] {
+            GraphNode::Kernel(k) => k,
+            other => panic!("expected a structured kernel node, got {other:?}"),
         };
-        assert_eq!(k0.module.name, "chain__k0");
-        assert_eq!(k0.inputs, vec![a_buf]);
-        assert_eq!(k0.outputs.len(), 1);
-        let mid = k0.outputs[0];
-        assert_ne!(mid, out_buf);
-        assert_eq!(k1.module.name, "chain__k1");
-        assert_eq!(k1.inputs, vec![mid, a_buf]);
-        assert_eq!(k1.outputs, vec![out_buf]);
-
-        let mid_info = b.buf_info(mid);
-        assert_eq!(mid_info.name.as_deref(), Some("chain.k0.o0"));
-        assert_eq!(mid_info.device_type, DeviceType::Cuda(0));
-        assert_eq!(mid_info.size.eval(&BTreeMap::new()), 32);
-        assert_eq!(mid_info.elem_size, 4);
-    }
-
-    #[test]
-    fn insert_kernel_replays_cached_subgraph_with_shared_arcs() {
-        let mut b = GraphBuilder::new();
-        let a0 = buf(&mut b, "a0", DeviceType::Cuda(0), Quast::cst(32));
-        let o0 = buf(&mut b, "o0", DeviceType::Cuda(0), Quast::cst(32));
-        let a1 = buf(&mut b, "a1", DeviceType::Cuda(0), Quast::cst(32));
-        let o1 = buf(&mut b, "o1", DeviceType::Cuda(0), Quast::cst(32));
-
-        // Two structurally identical modules built independently: the
-        // second insertion must hit the subgraph cache and reuse the same
-        // canonical Arcs for the split kernels.
-        b.insert_kernel(two_kernel_chain("chain", 8), [a0], [o0], &[]);
-        b.insert_kernel(two_kernel_chain("chain", 8), [a1], [o1], &[]);
-
-        assert_eq!(b.nodes.len(), 4);
-        let kernels: Vec<_> = b
-            .nodes
-            .iter()
-            .map(|n| match n {
-                GraphNode::Kernel(k) => k,
-                other => panic!("expected structured kernel node, got {other:?}"),
-            })
-            .collect();
-        assert!(Arc::ptr_eq(&kernels[0].module, &kernels[2].module));
-        assert!(Arc::ptr_eq(&kernels[1].module, &kernels[3].module));
-        // Second insertion wires its own buffers.
-        assert_eq!(kernels[2].inputs, vec![a1]);
-        assert_eq!(kernels[3].outputs, vec![o1]);
-    }
-
-    #[test]
-    fn insert_subgraph_allocates_and_returns_outputs() {
-        let module = two_kernel_chain("chain", 8);
-        let subgraph = crate::passes::split_module(&module).expect("split");
-
-        let mut b = GraphBuilder::new();
-        let a_buf = buf(&mut b, "a", DeviceType::Cuda(0), Quast::cst(32));
-        let outs = b.insert_subgraph(&subgraph, &[a_buf]);
-
-        assert_eq!(outs.len(), 1);
-        assert_eq!(b.nodes.len(), 2);
-        match &b.nodes[1] {
-            GraphNode::Kernel(k) => assert_eq!(k.outputs, outs),
-            other => panic!("expected structured kernel node, got {other:?}"),
-        }
-        let out_info = b.buf_info(outs[0]);
-        assert_eq!(out_info.name.as_deref(), Some("chain.k1.o0"));
-        assert_eq!(out_info.size.eval(&BTreeMap::new()), 32);
-        assert_eq!(out_info.elem_size, 4);
+        assert_eq!(k.module.name, "chain");
+        assert_eq!(k.inputs, vec![a_buf]);
+        assert_eq!(k.outputs, vec![out_buf]);
+        assert!(!k.canonical, "insertion doesn't canonicalize");
     }
 
     /// `let t = a * 2; out = t + a` over a symbolic length `n`.
@@ -1865,19 +2303,18 @@ mod tests {
 
     #[test]
     fn infers_binding_from_bare_input_dim() {
+        // `insert_kernel` pushes ONE node with the multi-kernel module;
+        // parent bindings are inferred from the parent's input shape
+        // (`n = 8` from the 32-byte buffer). Splitting into child nodes
+        // with per-kernel intermediate buffers is canonicalize's job.
         let mut b = GraphBuilder::new();
         let a_buf = buf(&mut b, "a", DeviceType::Cuda(0), Quast::cst(32));
         let out_buf = buf(&mut b, "out", DeviceType::Cuda(0), Quast::cst(32));
         b.insert_kernel(symbolic_two_kernel_chain("chain"), [a_buf], [out_buf], &[]);
 
-        // Both split kernels bind `n = 8` from the 32-byte (8-element)
-        // input buffer, and the intermediate is sized through the binding.
         let kernels = kernel_nodes(&b);
-        assert_eq!(kernels.len(), 2);
-        assert_eq!(kernels[0].param_bindings, vec![8]);
-        assert_eq!(kernels[1].param_bindings, vec![8]);
-        let mid = kernels[0].outputs[0];
-        assert_eq!(b.buf_info(mid).size.eval(&BTreeMap::new()), 32);
+        assert_eq!(kernels.len(), 1);
+        assert_eq!(kernels[0].param_bindings, [("n".to_string(), 8)].into());
     }
 
     #[test]
@@ -1902,7 +2339,10 @@ mod tests {
         let out_buf = buf(&mut b, "out", DeviceType::Cuda(0), Quast::cst(4 * 32));
         b.insert_kernel(module, [a_buf], [out_buf], &[]);
 
-        assert_eq!(kernel_nodes(&b)[0].param_bindings, vec![32]);
+        assert_eq!(
+            kernel_nodes(&b)[0].param_bindings,
+            [("n".to_string(), 32)].into()
+        );
     }
 
     #[test]
@@ -1922,9 +2362,12 @@ mod tests {
         // both come from the hint; the buffer still checks out (128 elems).
         let a_buf = buf(&mut b, "a", DeviceType::Cuda(0), Quast::cst(4 * 128));
         let out_buf = buf(&mut b, "out", DeviceType::Cuda(0), Quast::cst(4 * 128));
-        b.insert_kernel(module, [a_buf], [out_buf], &[8, 16]);
+        b.insert_kernel(module, [a_buf], [out_buf], &[("n", 8), ("m", 16)]);
 
-        assert_eq!(kernel_nodes(&b)[0].param_bindings, vec![8, 16]);
+        assert_eq!(
+            kernel_nodes(&b)[0].param_bindings,
+            [("n".to_string(), 8), ("m".to_string(), 16)].into()
+        );
     }
 
     #[test]
@@ -1948,12 +2391,18 @@ mod tests {
         let a_buf = buf(&mut b, "a", DeviceType::Cuda(0), Quast::cst(4 * 128));
         let out1 = buf(&mut b, "out1", DeviceType::Cuda(0), Quast::cst(4 * 128));
         let out2 = buf(&mut b, "out2", DeviceType::Cuda(0), Quast::cst(4 * 128));
-        b.insert_kernel(build(), [a_buf], [out1], &[8, 16]);
-        b.insert_kernel(build(), [a_buf], [out2], &[4, 32]);
+        b.insert_kernel(build(), [a_buf], [out1], &[("n", 8), ("m", 16)]);
+        b.insert_kernel(build(), [a_buf], [out2], &[("n", 4), ("m", 32)]);
 
         let kernels = kernel_nodes(&b);
-        assert_eq!(kernels[0].param_bindings, vec![8, 16]);
-        assert_eq!(kernels[1].param_bindings, vec![4, 32]);
+        assert_eq!(
+            kernels[0].param_bindings,
+            [("n".to_string(), 8), ("m".to_string(), 16)].into()
+        );
+        assert_eq!(
+            kernels[1].param_bindings,
+            [("n".to_string(), 4), ("m".to_string(), 32)].into()
+        );
     }
 
     #[test]
@@ -2283,5 +2732,114 @@ mod tests {
             [].into_iter(),
             |_, _, _| {},
         );
+    }
+
+    // -----------------------------------------------------------------
+    // `kernel_dedup` / `prune_unused_params` tests.
+    // -----------------------------------------------------------------
+
+    fn scale_by_two() -> ir::Module {
+        let mut ib = IRBuilder::new();
+        let a = ib.input("a", ScalarType::BabyBear, vec![4]);
+        let body = ib.compute(4, |ib, i| {
+            let ai = ib.index(a, &[i]);
+            let two = ib.const_field(2);
+            ib.mul(ai, two)
+        });
+        ib.finish("scale_by_two", body)
+    }
+
+    /// `kernel_dedup` collapses two Arc-distinct but structurally identical
+    /// modules onto one canonical Arc, fills missing hashes, and shares
+    /// cached type maps in whichever direction has them.
+    #[test]
+    fn kernel_dedup_collapses_arcs_and_fills_hashes() {
+        let mut b = GraphBuilder::new();
+        let in0 = buf(&mut b, "in0", DeviceType::Cuda(0), Quast::cst(16));
+        let in1 = buf(&mut b, "in1", DeviceType::Cuda(0), Quast::cst(16));
+        let out0 = buf(&mut b, "out0", DeviceType::Cuda(0), Quast::cst(16));
+        let out1 = buf(&mut b, "out1", DeviceType::Cuda(0), Quast::cst(16));
+
+        // Push two Arc-distinct copies of scale_by_two directly, skipping
+        // insert_kernel's Arc-dedup so kernel_dedup has real work to do.
+        b.nodes.push(GraphNode::Kernel(KernelModuleNode {
+            module: Arc::new(scale_by_two()),
+            param_bindings: BTreeMap::new(),
+            inputs: vec![in0],
+            outputs: vec![out0],
+            types: None,
+            hash: None,
+            canonical: false,
+            fusion_history: None,
+        }));
+        b.nodes.push(GraphNode::Kernel(KernelModuleNode {
+            module: Arc::new(scale_by_two()),
+            param_bindings: BTreeMap::new(),
+            inputs: vec![in1],
+            outputs: vec![out1],
+            types: None,
+            hash: None,
+            canonical: false,
+            fusion_history: None,
+        }));
+
+        // Before dedup: Arc-distinct, no hashes.
+        let (a0, a1) = match (&b.nodes[0], &b.nodes[1]) {
+            (GraphNode::Kernel(k0), GraphNode::Kernel(k1)) => {
+                (k0.module.clone(), k1.module.clone())
+            }
+            _ => unreachable!(),
+        };
+        assert!(!Arc::ptr_eq(&a0, &a1));
+
+        kernel_dedup(&mut b);
+
+        let (k0, k1) = match (&b.nodes[0], &b.nodes[1]) {
+            (GraphNode::Kernel(k0), GraphNode::Kernel(k1)) => (k0, k1),
+            _ => unreachable!(),
+        };
+        assert!(Arc::ptr_eq(&k0.module, &k1.module));
+        assert_eq!(k0.hash, k1.hash);
+        assert!(k0.hash.is_some());
+    }
+
+    /// `prune_unused_params` drops a symbol that no bound / shape / ConstSym
+    /// references, along with its binding entry.
+    #[test]
+    fn prune_unused_params_drops_dead_symbol() {
+        let mut ib = IRBuilder::new();
+        let _n = ib.symbol("n"); // declared but never used
+        let a = ib.input("a", ScalarType::BabyBear, vec![4]);
+        let body = ib.compute(4, |ib, i| {
+            let ai = ib.index(a, &[i]);
+            let two = ib.const_field(2);
+            ib.mul(ai, two)
+        });
+        let module = ib.finish("has_dead_param", body);
+        assert_eq!(module.builder.params().len(), 1);
+
+        let mut node = KernelModuleNode {
+            module: Arc::new(module),
+            param_bindings: [("n".to_string(), 42)].into(),
+            inputs: vec![],
+            outputs: vec![],
+            types: None,
+            hash: None,
+            canonical: false,
+            fusion_history: None,
+        };
+        prune_unused_params(&mut node);
+        assert!(node.module.builder.params().is_empty());
+        assert!(node.param_bindings.is_empty());
+    }
+
+    /// `IRBuilder::symbol` refuses to declare two params with the same
+    /// name in one module: they'd collide as binding map keys.
+    #[test]
+    #[should_panic(expected = "duplicate param name")]
+    fn ir_builder_symbol_rejects_duplicate_name() {
+        let mut b = IRBuilder::new();
+        let _n1 = b.symbol("n");
+        let _n2 = b.symbol("n");
     }
 }

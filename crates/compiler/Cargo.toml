@@ -41,7 +41,10 @@ libc = "0.2"
 cp_sat = { version = "0.4", optional = true }
 
 [features]
-default = []
+# `planner` is default so `MemoryPlan` and `GraphCompiler` are always
+# available (Refactor 2 decision 3). `planner-ortools` remains optional
+# — the CP-SAT backend requires the OR-Tools shared libs.
+default = ["planner"]
 planner = []
 planner-ortools = ["planner", "dep:cp_sat"]
 

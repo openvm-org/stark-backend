@@ -1,6 +1,6 @@
 //! JIT runtime: compiles generated CUDA C++ with `nvcc` into a shared
 //! library, `dlopen`s it, and wraps the exported C interface in a safe
-//! [`KernelModule`] that integrates with `openvm-cuda-common` buffers and
+//! [`KernelProgram`] that integrates with `openvm-cuda-common` buffers and
 //! streams.
 
 use std::{
@@ -14,11 +14,12 @@ use std::{
 use libloading::Library;
 use openvm_cuda_common::{
     d_buffer::DeviceBuffer,
-    stream::{cudaStream_t, CudaStream, GpuDeviceCtx},
+    stream::{cudaStream_t, CudaStream},
 };
+use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 
-use crate::{ir::ScalarType, kernel_ir::KernelProgram, CompileError};
+use crate::{ir::ScalarType, kernel_ir::KirProgram, CompileError};
 
 /// On-disk metadata written alongside `libmodule.so` and `module.cu`. The
 /// scalar types are tagged as `u8` so the JSON stays stable if ScalarType
@@ -27,7 +28,7 @@ use crate::{ir::ScalarType, kernel_ir::KernelProgram, CompileError};
 struct SavedMetadata {
     input_types: Vec<u8>,
     output_types: Vec<u8>,
-    /// Runtime parameter names, in `KernelProgram::params` order. Defaults
+    /// Runtime parameter names, in `KirProgram::params` order. Defaults
     /// to empty so metadata written before the parameter ABI still loads.
     #[serde(default)]
     params: Vec<String>,
@@ -128,40 +129,34 @@ type DestroyModuleFn = unsafe extern "C" fn(*mut c_void);
 type QueryFn = unsafe extern "C" fn(*mut c_void) -> u64;
 type QueryIdxFn = unsafe extern "C" fn(*mut c_void, u64) -> u64;
 type SetIdxPtrFn = unsafe extern "C" fn(*mut c_void, u64, *mut c_void);
-type SetPtrFn = unsafe extern "C" fn(*mut c_void, *mut c_void);
-type SetParamFn = unsafe extern "C" fn(*mut c_void, u64, i64);
+type SetSymbolFn = unsafe extern "C" fn(*mut c_void, u64, i64);
 type RunFn = unsafe extern "C" fn(*mut c_void, cudaStream_t) -> i32;
 
 struct VTable {
     destroy_module: DestroyModuleFn,
-    scratch_size: QueryFn,
     num_outputs: QueryFn,
     output_size: QueryIdxFn,
     num_inputs: QueryFn,
     input_size: QueryIdxFn,
     set_input: SetIdxPtrFn,
     set_output: SetIdxPtrFn,
-    set_scratch_buf: SetPtrFn,
-    set_param: SetParamFn,
+    set_symbol: SetSymbolFn,
     run: RunFn,
 }
 
 /// A compiled, dlopen-ed kernel module.
-pub struct KernelModule {
+pub struct KernelProgram {
     prog: *mut c_void,
     vt: VTable,
-    scratch: Option<DeviceBuffer<u8>>,
-    /// Whether the C ABI's scratch pointer has been bound this run, either
-    /// through [`KernelModule::ensure_scratch`] (owned) or
-    /// [`KernelModule::set_scratch`] (external).
-    scratch_bound: bool,
-    /// Runtime parameter names, in `KernelProgram::params` order. Buffer
+    /// Runtime parameter names, in `KirProgram::params` order. Buffer
     /// sizes and grid dims are functions of these values, so every
-    /// parameter must be bound via [`KernelModule::set_param`] before the
+    /// parameter must be bound via [`KernelProgram::set_symbol`] before the
     /// sizes are queried or the module is run.
     params: Vec<String>,
     /// Which parameters have been bound so far.
     params_set: Vec<bool>,
+    /// Name → index cache for `set_symbol` name-based lookup.
+    param_index: FxHashMap<String, usize>,
     source: String,
     /// Scalar element type of each module input, in declaration order.
     /// Populated from `kprog.input_bufs` so callers know which buffers hold
@@ -181,20 +176,20 @@ pub struct KernelModule {
 // externally serialized (by `graph_exe`'s single-stream execution or by an
 // enclosing `Mutex`), so sharing across threads is sound as long as callers
 // don't hand the same handle to two threads at once.
-unsafe impl Send for KernelModule {}
-unsafe impl Sync for KernelModule {}
+unsafe impl Send for KernelProgram {}
+unsafe impl Sync for KernelProgram {}
 
-/// Filenames used by [`KernelModule::save_artifacts`] /
-/// [`KernelModule::load_from_dir`].
+/// Filenames used by [`KernelProgram::save_artifacts`] /
+/// [`KernelProgram::load_from_dir`].
 pub const KERNEL_MODULE_SO: &str = "libmodule.so";
 pub const KERNEL_MODULE_CU: &str = "module.cu";
 pub const KERNEL_MODULE_METADATA: &str = "metadata.json";
 
-impl KernelModule {
+impl KernelProgram {
     /// Writes `source` to a temp dir, compiles it with nvcc into a shared
     /// library, loads it and instantiates the module.
     pub fn load(
-        kprog: &KernelProgram,
+        kprog: &KirProgram,
         source: &str,
         options: &CompileOptions,
         module_name: &str,
@@ -372,8 +367,8 @@ impl KernelModule {
     }
 
     /// dlopens `so_path`, invokes `make_module`, and packages the result as a
-    /// `KernelModule`. The caller supplies `input_types` / `output_types` from
-    /// the compiled `KernelProgram` (or from persisted metadata).
+    /// `KernelProgram`. The caller supplies `input_types` / `output_types` from
+    /// the compiled `KirProgram` (or from persisted metadata).
     fn load_from_so(
         so_path: &Path,
         source: String,
@@ -394,15 +389,13 @@ impl KernelModule {
         let make_module: MakeModuleFn = sym!("make_module", MakeModuleFn);
         let vt = VTable {
             destroy_module: sym!("destroy_module", DestroyModuleFn),
-            scratch_size: sym!("scratch_size", QueryFn),
             num_outputs: sym!("num_outputs", QueryFn),
             output_size: sym!("output_size", QueryIdxFn),
             num_inputs: sym!("num_inputs", QueryFn),
             input_size: sym!("input_size", QueryIdxFn),
             set_input: sym!("set_input", SetIdxPtrFn),
             set_output: sym!("set_output", SetIdxPtrFn),
-            set_scratch_buf: sym!("set_scratch_buf", SetPtrFn),
-            set_param: sym!("set_param", SetParamFn),
+            set_symbol: sym!("set_symbol", SetSymbolFn),
             run: sym!("run", RunFn),
         };
 
@@ -411,13 +404,17 @@ impl KernelModule {
             return Err(CompileError::Load("make_module returned null".into()));
         }
         let params_set = vec![false; params.len()];
+        let param_index = params
+            .iter()
+            .enumerate()
+            .map(|(i, n)| (n.clone(), i))
+            .collect();
         Ok(Self {
             prog,
             vt,
-            scratch: None,
-            scratch_bound: false,
             params,
             params_set,
+            param_index,
             source,
             input_types,
             output_types,
@@ -429,7 +426,7 @@ impl KernelModule {
     /// Copies the compiled `.so`, the CUDA source and a small metadata JSON
     /// into `dir` (created if needed). The layout matches
     /// [`Self::load_from_dir`] so a later process can rebuild an equivalent
-    /// `KernelModule` without re-running nvcc.
+    /// `KernelProgram` without re-running nvcc.
     ///
     /// Fails if the module was loaded from a persistent path (in which case
     /// the caller already owns the artifacts) — we only support saving from
@@ -462,7 +459,7 @@ impl KernelModule {
         Ok(())
     }
 
-    /// Reconstructs a `KernelModule` from artifacts previously written by
+    /// Reconstructs a `KernelProgram` from artifacts previously written by
     /// [`Self::save_artifacts`] (a `libmodule.so`, `module.cu` and
     /// `metadata.json` under `dir`). Skips nvcc.
     pub fn load_from_dir(dir: &Path) -> Result<Self, CompileError> {
@@ -507,23 +504,27 @@ impl KernelModule {
         &self.params
     }
 
-    /// Binds runtime parameter `i` (see [`Self::params`] for the order).
-    pub fn set_param(&mut self, i: usize, v: i64) {
-        assert!(i < self.params.len(), "param index out of range");
-        unsafe { (self.vt.set_param)(self.prog, i as u64, v) };
+    /// Binds runtime parameter `name` (see [`Self::params`] for the set of
+    /// valid names). Panics if `name` is not a declared parameter.
+    pub fn set_symbol(&mut self, name: &str, v: i64) {
+        let i = *self
+            .param_index
+            .get(name)
+            .unwrap_or_else(|| panic!("unknown symbol {name:?}"));
+        unsafe { (self.vt.set_symbol)(self.prog, i as u64, v) };
         self.params_set[i] = true;
     }
 
     /// Whether every runtime parameter has been bound. Vacuously true for
     /// fully concrete modules.
-    pub fn params_bound(&self) -> bool {
+    pub fn symbols_bound(&self) -> bool {
         self.params_set.iter().all(|&b| b)
     }
 
     /// Size of input `i` in bytes.
     pub fn input_size(&self, i: usize) -> usize {
         assert!(i < self.num_inputs(), "input index out of range");
-        assert!(self.params_bound(), "input_size before params are bound");
+        assert!(self.symbols_bound(), "input_size before params are bound");
         unsafe { (self.vt.input_size)(self.prog, i as u64) as usize }
     }
 
@@ -543,13 +544,8 @@ impl KernelModule {
     /// Size of output `i` in bytes.
     pub fn output_size(&self, i: usize) -> usize {
         assert!(i < self.num_outputs(), "output index out of range");
-        assert!(self.params_bound(), "output_size before params are bound");
+        assert!(self.symbols_bound(), "output_size before params are bound");
         unsafe { (self.vt.output_size)(self.prog, i as u64) as usize }
-    }
-
-    pub fn scratch_size(&self) -> usize {
-        assert!(self.params_bound(), "scratch_size before params are bound");
-        unsafe { (self.vt.scratch_size)(self.prog) as usize }
     }
 
     /// Binds a device buffer as input `i`. The buffer must stay alive until
@@ -580,48 +576,11 @@ impl KernelModule {
         Ok(())
     }
 
-    /// Allocates (if needed) and binds the scratch buffer.
-    pub fn ensure_scratch(&mut self, ctx: &GpuDeviceCtx) {
-        let size = self.scratch_size();
-        if size == 0 || self.scratch.is_some() {
-            return;
-        }
-        let buf = DeviceBuffer::<u8>::with_capacity_on(size, ctx);
-        unsafe { (self.vt.set_scratch_buf)(self.prog, buf.as_mut_raw_ptr()) };
-        self.scratch = Some(buf);
-        self.scratch_bound = true;
-    }
-
-    /// Binds `buf` as the module's scratch, letting the caller share a
-    /// scratch pool across kernels instead of each `KernelModule` owning
-    /// its own allocation. `buf` must have at least [`scratch_size`] bytes
-    /// and must stay alive until `run` completes. Any previously owned
-    /// scratch is dropped (the C ABI now points at `buf`, so the owned one
-    /// is unreachable and safe to free).
-    pub fn set_scratch(&mut self, buf: &DeviceBuffer<u8>) -> Result<(), CompileError> {
-        let want = self.scratch_size();
-        if buf.len() < want {
-            return Err(CompileError::Runtime(format!(
-                "set_scratch: buffer is {} bytes, need at least {want}",
-                buf.len()
-            )));
-        }
-        unsafe { (self.vt.set_scratch_buf)(self.prog, buf.as_mut_raw_ptr()) };
-        self.scratch = None;
-        self.scratch_bound = true;
-        Ok(())
-    }
-
     /// Launches the whole kernel sequence on `stream` (asynchronous).
     pub fn run(&self, stream: &CudaStream) -> Result<(), CompileError> {
-        if !self.params_bound() {
+        if !self.symbols_bound() {
             return Err(CompileError::Runtime(
-                "module parameters not bound; call set_param for every parameter first".into(),
-            ));
-        }
-        if self.scratch_size() > 0 && !self.scratch_bound {
-            return Err(CompileError::Runtime(
-                "scratch buffer not set; call ensure_scratch or set_scratch first".into(),
+                "module parameters not bound; call set_symbol for every parameter first".into(),
             ));
         }
         let code = unsafe { (self.vt.run)(self.prog, stream.as_raw()) };
@@ -634,7 +593,7 @@ impl KernelModule {
     }
 }
 
-impl Drop for KernelModule {
+impl Drop for KernelProgram {
     fn drop(&mut self) {
         unsafe { (self.vt.destroy_module)(self.prog) };
     }

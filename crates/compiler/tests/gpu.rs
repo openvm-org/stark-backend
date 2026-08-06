@@ -2,13 +2,13 @@
 //! the GPU and compare against p3 CPU references. Requires a CUDA GPU.
 
 use crypto_compiler::{
+    graph_ir::GraphModule,
     ir::{IRBuilder, ScalarType},
     kernels::{
         merkle_tree_module, ntt_module, ntt_reg_module, ntt_shared_module, ntt_twiddles,
         Poseidon2Constants,
     },
-    runner::{maybe_bench, ModuleRunner},
-    runtime::CompileOptions,
+    test_utils::{maybe_bench, TestModuleRunner},
 };
 use p3_baby_bear::{default_babybear_poseidon2_16, BabyBear};
 use p3_dft::{Radix2Dit, TwoAdicSubgroupDft};
@@ -40,16 +40,19 @@ fn bb(x: u32) -> BabyBear {
 /// Dumps both IR levels and the generated CUDA under `target/ir-dumps/gpu/`.
 /// If the `BENCH_KERNEL` env var is set, also benchmarks the kernel.
 fn run_module(module: crypto_compiler::ir::Module, inputs: &[Vec<u32>]) -> Vec<Vec<u32>> {
-    let options = CompileOptions {
-        dump_ir: Some(concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/ir-dumps/gpu").into()),
-        ..Default::default()
-    };
-    let mut runner = ModuleRunner::new(&module, &options).unwrap();
+    let dump_dir = std::path::PathBuf::from(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../target/ir-dumps/gpu"
+    ));
+    let name = module.name.clone();
+    let gm = GraphModule::from_ir(module, &[]).unwrap();
+    let compiler = crypto_compiler::graph_exe::GraphCompiler::new().dump_dir(dump_dir);
+    let mut runner = TestModuleRunner::with_compiler(compiler, gm).unwrap();
     assert_eq!(runner.num_inputs(), inputs.len());
     runner.set_inputs(inputs);
     runner.run();
     let outs = runner.read_outputs();
-    maybe_bench(&mut runner);
+    maybe_bench(&mut runner, &name);
     outs
 }
 

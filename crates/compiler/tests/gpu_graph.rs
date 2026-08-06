@@ -315,16 +315,14 @@ fn caller_supplied_pool_arena() {
     }
 }
 
-/// A graph kernel module must not lower to multiple internal kernels with
-/// intermediate buffers: module-level scratch has a fixed compile-time size,
-/// which is undefined once shapes are symbolic, so graph compilation rejects
-/// it outright.
+/// Post-Phase-7: `lower_to_kir` requires single-kernel modules. A
+/// two-stage parallel-reduce that survives to graph compilation without
+/// being split first triggers a lowering error. The full P7.5 pipeline
+/// will canonicalize + split such modules before lowering; until then,
+/// this pins the error contract at the lowering boundary.
 ///
-/// The one rewrite that can currently break the single-kernel invariant of
-/// `insert_kernel` is the parallel-reduce lowering: a bare top-level
-/// `reduce [K]` (outer parallelism M = 1) with `K >= 512` becomes a
-/// two-stage chain `let stage0 = compute[G] ...; compute[1] ...` whose
-/// `stage0` tensor lands in module scratch.
+/// Replaced in P7.12 by a test that compiles this same graph
+/// successfully by driving canonicalize → split_module.
 #[test]
 fn module_with_intermediate_buffers_is_rejected() {
     const K: usize = 1 << 12;
@@ -341,12 +339,12 @@ fn module_with_intermediate_buffers_is_rejected() {
     g.insert_kernel(m, [x], [out], &[]);
 
     let err = match GraphCompiler::new().compile(g) {
-        Ok(_) => panic!("expected graph compilation to reject module-level scratch"),
+        Ok(_) => panic!("expected graph compilation to reject multi-kernel modules at lowering"),
         Err(e) => e,
     };
     let msg = err.to_string();
     assert!(
-        msg.contains("unimplemented") && msg.contains("module-level scratch"),
+        msg.contains("intermediate tensor") && msg.contains("single-kernel"),
         "unexpected error: {msg}"
     );
 }
@@ -429,8 +427,6 @@ mod symbolic {
         assert_eq!(report.nodes_after, 2);
         assert_eq!(report.fused.len(), 2);
         assert_eq!(exe.num_unique_modules(), 1);
-        assert_eq!(exe.templates().len(), 1);
-        assert_eq!(exe.templates()[0].variants.len(), 1);
 
         let in0 = pseudo_field_elems(n0, 5);
         let in1 = pseudo_field_elems(n1, 6);
@@ -516,8 +512,8 @@ mod symbolic {
         g.register_input(x);
         g.register_output(out0);
         g.register_output(out1);
-        g.insert_kernel(sym_pick(), [x], [out0], &[2]);
-        g.insert_kernel(sym_pick(), [x], [out1], &[5]);
+        g.insert_kernel(sym_pick(), [x], [out0], &[("k", 2)]);
+        g.insert_kernel(sym_pick(), [x], [out1], &[("k", 5)]);
 
         let mut exe = GraphCompiler::new().compile(g).unwrap();
         assert_eq!(exe.num_unique_modules(), 1);
@@ -612,11 +608,6 @@ mod symbolic {
 
         let mut exe = GraphCompiler::new().compile(g).unwrap();
         assert_eq!(exe.num_unique_modules(), 1);
-        let templates = exe.templates();
-        assert_eq!(templates.len(), 1);
-        assert_eq!(templates[0].variants.len(), 1);
-        assert_eq!(templates[0].variants[0].block, Some(256));
-        assert!(templates[0].variants[0].baked.is_empty());
 
         let in0 = pseudo_field_elems(n0, 11);
         let in1 = pseudo_field_elems(n1, 12);
@@ -705,7 +696,7 @@ mod symbolic {
                 producer(),
                 [x],
                 [staging],
-                &[n0 as i64, t0 as i64, a0 as i64],
+                &[("n", n0 as i64), ("t", t0 as i64), ("a", a0 as i64)],
             );
             g.insert_kernel(consumer(), [staging], [out], &[]);
             g
@@ -716,16 +707,6 @@ mod symbolic {
             .compile(build())
             .unwrap();
         assert_eq!(unfused.num_unique_modules(), 2);
-        let mut baked: Vec<Vec<i64>> = unfused
-            .templates()
-            .iter()
-            .map(|tpl| {
-                assert_eq!(tpl.variants.len(), 1);
-                tpl.variants[0].baked.clone()
-            })
-            .collect();
-        baked.sort();
-        assert_eq!(baked, vec![vec![], vec![t0 as i64]]);
 
         let mut fused = GraphCompiler::new().compile(build()).unwrap();
         let report = fused.fusion_report().unwrap();
@@ -733,14 +714,6 @@ mod symbolic {
         assert_eq!(report.nodes_after, 1);
         assert_eq!(report.fused.len(), 1);
         assert_eq!(fused.num_unique_modules(), 1);
-        let templates = fused.templates();
-        assert_eq!(templates.len(), 1);
-        assert_eq!(templates[0].variants.len(), 1);
-        // `t` was already hardcoded by the seam inversion; the merged
-        // module's outer bound (`k`) stays symbolic, so nothing is left
-        // for monomorphization to bake.
-        assert_eq!(templates[0].variants[0].baked, Vec::<i64>::new());
-        assert_eq!(templates[0].variants[0].block, Some(256));
 
         // `x[i+a] * x[i+j]` is a genuine var*var multiply — a Montgomery
         // mul on raw bits — so (unlike the linear chains above, which are

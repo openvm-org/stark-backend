@@ -1,4 +1,4 @@
-//! Lowering from the canonical HIR [`Program`] to [`KernelProgram`].
+//! Lowering from the canonical HIR [`Program`] to [`KirProgram`].
 //!
 //! - Every top-level let output becomes a global buffer (input / output / scratch) with a row-major
 //!   layout.
@@ -16,8 +16,9 @@
 //! - A reduce whose body loads from memory is hoisted out of its par into a register accumulator
 //!   ([`BufferKind::Register`]) initialized by one `Par` and updated by a `Par` inside a sequential
 //!   [`SSAOpCode::Loop`]. A load-free reduce stays inside the par as a carried-value loop.
-//! - Scratch buffers take the offsets assigned by the [`GlobalScratchPlan`] computed before
-//!   lowering.
+//! - Lowering requires a single-kernel module (post-canonicalize + split_module invariant): every
+//!   top-level let output must be a module output, so no intermediate / scratch buffers are emitted
+//!   here.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
@@ -26,13 +27,11 @@ use smallvec::{smallvec, SmallVec};
 use crate::{
     ir::{BinOp, IRBuilder, Node, NodeId, ReduceOp, ScalarType, SizeExpr, Type, VarId},
     kernel_ir::{
-        Access, AddressSpace, BufId, BufferDecl, BufferKind, IndexMap, KBound, Kernel,
-        KernelProgram, ParAttr, SSABlock, SSANode, SSAOp, SSAOpCode, SSARes,
+        Access, AddressSpace, BufId, BufferDecl, BufferKind, IndexMap, KBound, Kernel, KirProgram,
+        ParAttr, SSABlock, SSANode, SSAOp, SSAOpCode, SSARes,
     },
     passes::{
         canonicalize::{is_canonicalized, CanonKernel, CanonValue, Program, ResultExpr, TensorRef},
-        monomorphize::block_size_policy,
-        plan_global_scratch::GlobalScratchPlan,
         utils::{hir_to_quast, hir_to_sexpr, resolve_tensor_ref},
     },
     quast::{self, ParSpec, Quast, ScatterStore, SymConst},
@@ -67,10 +66,7 @@ fn global_shape(shape: &[SizeExpr], what: &str) -> Result<Vec<SizeExpr>, Compile
     Ok(shape.iter().map(|d| d.fold_lits()).collect())
 }
 
-pub fn lower_to_kir(
-    program: &Program,
-    scratch: &GlobalScratchPlan,
-) -> Result<KernelProgram, CompileError> {
+pub fn lower_to_kir(program: &Program) -> Result<KirProgram, CompileError> {
     debug_assert!(is_canonicalized(program));
     let b = &program.module.builder;
 
@@ -114,9 +110,13 @@ pub fn lower_to_kir(
             let tref = TensorRef::Let { let_id, out_idx };
             let kind = match output_pos.get(&tref) {
                 Some(&pos) => BufferKind::Output(pos),
-                None => BufferKind::Scratch {
-                    offset: scratch.offsets[&tref],
-                },
+                None => {
+                    return Err(CompileError::Lower(format!(
+                        "kernel {} output {out_idx} is an intermediate tensor; \
+                         lowering requires a single-kernel module (run split_module first)",
+                        kernel.name
+                    )));
+                }
             };
             let id = BufId(buffers.len() as u32);
             buffers.push(BufferDecl {
@@ -193,28 +193,19 @@ pub fn lower_to_kir(
                         ck.name, ck.outer_bound
                     )));
                 }
-                // Block size policy for symbolic bounds: an explicit block
-                // hint (stamped by the graph compiler) wins; otherwise
-                // evaluate the compute size M from the module's shape hint
-                // and apply the policy (warp multiple, capped at BLOCK_SIZE).
+                // Block size policy for symbolic bounds: an explicit
+                // block hint (stamped by the graph monomorphize pass)
+                // is required. No module-attached hint fallback.
                 let block = match (ck.threads, b.block_hint()) {
                     (Some(t), _) => t,
                     (None, Some(bh)) => bh,
                     (None, None) => {
-                        let hint = b.shape_hint().ok_or_else(|| {
-                            CompileError::Lower(format!(
-                                "kernel {} has a symbolic outer bound {}; a shape or block \
-                                 hint is required to pick a block size",
-                                ck.name, ck.outer_bound
-                            ))
-                        })?;
-                        let env: BTreeMap<VarId, i64> = b
-                            .params()
-                            .iter()
-                            .zip(hint)
-                            .map(|((v, _), &val)| (*v, val))
-                            .collect();
-                        block_size_policy(ck.outer_bound.eval(&env) as usize)
+                        return Err(CompileError::Lower(format!(
+                            "kernel {} has a symbolic outer bound {}; a block hint is \
+                             required to pick a block size (the graph monomorphize pass \
+                             stamps one per template group)",
+                            ck.name, ck.outer_bound
+                        )));
                     }
                 };
                 let grid = ck
@@ -277,11 +268,10 @@ pub fn lower_to_kir(
         kernels.push(k);
     }
 
-    Ok(KernelProgram {
+    Ok(KirProgram {
         name: mod_name,
         buffers,
         kernels,
-        scratch_bytes: scratch.total_bytes,
         input_bufs,
         output_bufs,
         params: b.params().to_vec(),
@@ -1255,7 +1245,7 @@ mod tests {
     use crate::{
         ir::Module,
         passes::{
-            canonicalize, layout_infer, plan_global_scratch, type_infer,
+            canonicalize, layout_infer, type_infer,
             utils::test_util::{lowered, stmt_kinds},
             verify,
         },
@@ -1341,11 +1331,10 @@ mod tests {
         assert_eq!(sloop.operands[1], par_vid);
     }
 
-    fn lower_result(module: Module) -> Result<KernelProgram, CompileError> {
+    fn lower_result(module: Module) -> Result<KirProgram, CompileError> {
         let types = type_infer(&module).unwrap();
         let program = canonicalize(module, types).unwrap();
-        let scratch = plan_global_scratch(&program).unwrap();
-        lower_to_kir(&program, &scratch)
+        lower_to_kir(&program)
     }
 
     /// `#[grid(threads = 32)]` fixes the block size and `#[par((t, s) -> ...)]`

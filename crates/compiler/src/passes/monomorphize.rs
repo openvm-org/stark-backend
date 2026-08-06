@@ -1,5 +1,5 @@
 //! Monomorphization: substitutes concrete values for symbolic module
-//! parameters (see `refactor-plan.md`, Phase 5).
+//! parameters.
 //!
 //! A symbolic module may keep parameters that only appear in *outer*
 //! positions — top-level compute bounds, input shapes, value/index splices —
@@ -103,7 +103,7 @@ fn outer_bounds(m: &Module) -> Vec<SizeExpr> {
 }
 
 /// Block size for a kernel whose largest concrete compute size is `m`:
-/// round up to a warp, cap at 256 (see `refactor-plan.md`, Phase 5).
+/// round up to a warp, cap at 256.
 pub(crate) fn block_size_policy(m: usize) -> usize {
     (m.div_ceil(32) * 32).min(256)
 }
@@ -201,18 +201,6 @@ pub fn monomorphize(m: &Module, env: &BTreeMap<VarId, i64>) -> Result<Module, Co
     }
     if let Some(block) = b.block_hint() {
         nb.set_block_hint(block);
-    }
-    if let Some(h) = b.shape_hint() {
-        let vals: Vec<i64> = b
-            .params()
-            .iter()
-            .zip(h)
-            .filter(|((v, _), _)| !env.contains_key(v))
-            .map(|(_, &x)| x)
-            .collect();
-        if !vals.is_empty() {
-            nb.add_shape_hint(&vals);
-        }
     }
     for d in b.inputs() {
         let shape: Vec<SizeExpr> = d.shape.iter().map(subst).collect();
@@ -321,41 +309,6 @@ fn interim_required_params(m: &Module) -> BTreeSet<VarId> {
     req
 }
 
-/// Monomorphizes a module against its shape hint just enough for the
-/// standalone (graph-less) compilation path: only
-/// [`interim_required_params`] are substituted, so parameters that appear
-/// exclusively in outer bounds and outermost input-shape dims survive into
-/// the runtime parameter ABI. A hint is only mandatory when some parameter
-/// is actually required — a module whose parameters all survive can compile
-/// hint-free (though lowering will still demand a hint or block hint to
-/// pick a block size for a symbolic outer bound).
-pub fn monomorphize_from_hint(m: &Module) -> Result<Module, CompileError> {
-    if m.builder.params().is_empty() {
-        return Ok(m.clone());
-    }
-    let required = interim_required_params(m);
-    if required.is_empty() {
-        return Ok(m.clone());
-    }
-    let Some(hint) = m.builder.shape_hint() else {
-        return Err(CompileError::Monomorphize(format!(
-            "module `{}` has symbolic parameters but no shape hint; supply one via \
-             `compile_and_load_with_hint` (or `GraphBuilder::insert_kernel`) to compile it \
-             standalone",
-            m.name
-        )));
-    };
-    let env: BTreeMap<VarId, i64> = m
-        .builder
-        .params()
-        .iter()
-        .zip(hint)
-        .filter(|((v, _), _)| required.contains(v))
-        .map(|((v, _), &x)| (*v, x))
-        .collect();
-    monomorphize(m, &env)
-}
-
 /// Result of monomorphizing a graph node's module against its inferred
 /// parameter bindings (see [`monomorphize_for_graph`]).
 pub struct GraphMono {
@@ -364,11 +317,11 @@ pub struct GraphMono {
     /// compiler stamps one per template group, from the max concrete size
     /// over the group's instantiations.
     pub residual: Module,
-    /// Binding values of the residual's surviving parameters, order-aligned
-    /// with its registry.
-    pub residual_bindings: Vec<i64>,
-    /// Values baked into the residual, in parameter-declaration order.
-    pub baked: Vec<i64>,
+    /// Binding values of the residual's surviving parameters, keyed by
+    /// parameter name.
+    pub residual_bindings: BTreeMap<String, i64>,
+    /// Values baked into the residual, keyed by parameter name.
+    pub baked: BTreeMap<String, i64>,
     /// Max concrete outer compute size under the node's full bindings —
     /// `Some` iff the residual keeps a symbolic outer bound and therefore
     /// needs a block hint before lowering.
@@ -376,8 +329,12 @@ pub struct GraphMono {
 }
 
 /// Monomorphizes a graph node's module against its inferred parameter
-/// bindings, keeping every parameter that can stay symbolic.
-pub fn monomorphize_for_graph(m: &Module, bindings: &[i64]) -> Result<GraphMono, CompileError> {
+/// bindings, keeping every parameter that can stay symbolic. `bindings`
+/// must have exactly the module's declared param names as keys.
+pub fn monomorphize_for_graph(
+    m: &Module,
+    bindings: &BTreeMap<String, i64>,
+) -> Result<GraphMono, CompileError> {
     let params = m.builder.params();
     assert_eq!(
         params.len(),
@@ -389,8 +346,16 @@ pub fn monomorphize_for_graph(m: &Module, bindings: &[i64]) -> Result<GraphMono,
     );
     let full_env: BTreeMap<VarId, i64> = params
         .iter()
-        .map(|(v, _)| *v)
-        .zip(bindings.iter().copied())
+        .map(|(v, name)| {
+            let &val = bindings.get(name).unwrap_or_else(|| {
+                panic!(
+                    "module `{}`: no binding for param `{name}` (got keys {:?})",
+                    m.name,
+                    bindings.keys().collect::<Vec<_>>(),
+                )
+            });
+            (*v, val)
+        })
         .collect();
     let required = interim_required_params(m);
     let env: BTreeMap<VarId, i64> = full_env
@@ -420,16 +385,16 @@ pub fn monomorphize_for_graph(m: &Module, bindings: &[i64]) -> Result<GraphMono,
     } else {
         None
     };
-    let baked: Vec<i64> = params
+    let baked: BTreeMap<String, i64> = params
         .iter()
         .filter(|(v, _)| env.contains_key(v))
-        .map(|(v, _)| env[v])
+        .map(|(v, name)| (name.clone(), env[v]))
         .collect();
-    let residual_bindings: Vec<i64> = residual
+    let residual_bindings: BTreeMap<String, i64> = residual
         .builder
         .params()
         .iter()
-        .map(|(v, _)| full_env[v])
+        .map(|(v, name)| (name.clone(), full_env[v]))
         .collect();
     Ok(GraphMono {
         residual,
@@ -540,39 +505,6 @@ mod tests {
         assert!(err.to_string().contains("m"), "{err}");
     }
 
-    /// The standalone path: a *required* parameter (inner reduce bound)
-    /// with no shape hint is a compile error, not a panic deeper in the
-    /// pipeline.
-    #[test]
-    fn monomorphize_from_hint_requires_hint() {
-        let mut b = IRBuilder::new();
-        let n = b.symbol("n");
-        let x = b.input("x", ScalarType::U32, vec![n]);
-        let body = b.compute(n, |b, i| {
-            b.reduce_add(n, |b, j| {
-                let xi = b.index(x, &[i]);
-                b.add(xi, j)
-            })
-        });
-        let module = b.finish("no_hint", body);
-        let err = monomorphize_from_hint(&module).err().unwrap();
-        assert!(err.to_string().contains("shape hint"), "{err}");
-    }
-
-    /// A hint-free module whose parameters all survive (outer bound and
-    /// outermost input dim only) passes through untouched: the params reach
-    /// the runtime ABI.
-    #[test]
-    fn monomorphize_from_hint_allows_outer_only_params() {
-        let mut b = IRBuilder::new();
-        let n = b.symbol("n");
-        let x = b.input("x", ScalarType::U32, vec![n]);
-        let body = b.compute(n, |b, i| b.index(x, &[i]));
-        let module = b.finish("outer_only", body);
-        let mono = monomorphize_from_hint(&module).unwrap();
-        assert_eq!(mono.builder.params().len(), 1);
-    }
-
     /// The graph path keeps an outer-only parameter symbolic, reports its
     /// binding value, and surfaces the concrete compute size for the graph
     /// compiler's per-template block selection (no hint is stamped here).
@@ -583,9 +515,10 @@ mod tests {
         let x = b.input("x", ScalarType::U32, vec![n]);
         let body = b.compute(n, |b, i| b.index(x, &[i]));
         let module = b.finish("graph_mono", body);
-        let gm = monomorphize_for_graph(&module, &[40]).unwrap();
+        let bindings: BTreeMap<String, i64> = [("n".to_string(), 40)].into();
+        let gm = monomorphize_for_graph(&module, &bindings).unwrap();
         assert_eq!(gm.residual.builder.params().len(), 1);
-        assert_eq!(gm.residual_bindings, vec![40]);
+        assert_eq!(gm.residual_bindings, bindings);
         assert!(gm.baked.is_empty());
         assert_eq!(gm.max_outer, Some(40));
         assert_eq!(gm.residual.builder.block_hint(), None);
@@ -607,7 +540,9 @@ mod tests {
             })
         });
         let module = b.finish("graph_mono_req", body);
-        let gm = monomorphize_for_graph(&module, &[1000, 4]).unwrap();
+        let bindings: BTreeMap<String, i64> =
+            [("n".to_string(), 1000), ("m".to_string(), 4)].into();
+        let gm = monomorphize_for_graph(&module, &bindings).unwrap();
         let names: Vec<&str> = gm
             .residual
             .builder
@@ -616,8 +551,8 @@ mod tests {
             .map(|(_, n)| n.as_str())
             .collect();
         assert_eq!(names, vec!["n"]);
-        assert_eq!(gm.residual_bindings, vec![1000]);
-        assert_eq!(gm.baked, vec![4]);
+        assert_eq!(gm.residual_bindings, [("n".to_string(), 1000)].into());
+        assert_eq!(gm.baked, [("m".to_string(), 4)].into());
         assert_eq!(gm.max_outer, Some(1000));
     }
 
@@ -635,10 +570,11 @@ mod tests {
             })
         });
         let module = b.finish("graph_mono_concrete", body);
-        let gm = monomorphize_for_graph(&module, &[16]).unwrap();
+        let bindings: BTreeMap<String, i64> = [("n".to_string(), 16)].into();
+        let gm = monomorphize_for_graph(&module, &bindings).unwrap();
         assert!(gm.residual.builder.params().is_empty());
         assert!(gm.residual_bindings.is_empty());
-        assert_eq!(gm.baked, vec![16]);
+        assert_eq!(gm.baked, [("n".to_string(), 16)].into());
         assert_eq!(gm.max_outer, None);
         assert_eq!(gm.residual.builder.block_hint(), None);
     }

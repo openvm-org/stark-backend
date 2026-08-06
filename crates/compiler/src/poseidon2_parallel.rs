@@ -417,10 +417,10 @@ mod tests {
 
     use super::*;
     use crate::{
-        compile_and_load,
+        graph_exe::GraphCompiler,
+        graph_ir::GraphModule,
         kernels::poseidon2_permutation,
-        runner::{from_monty, to_monty},
-        runtime::CompileOptions,
+        test_utils::{from_monty, to_monty},
     };
 
     const P: u64 = 2_013_265_921;
@@ -441,25 +441,23 @@ mod tests {
 
     fn run_perm_module(module: crate::ir::Module, input: &[u32]) -> Vec<u32> {
         let ctx = GpuDeviceCtx::for_current_device().unwrap();
-        let options = CompileOptions {
-            dump_ir: Some(
-                concat!(
-                    env!("CARGO_MANIFEST_DIR"),
-                    "/../../target/ir-dumps/poseidon2-par"
-                )
-                .into(),
-            ),
-            ..Default::default()
-        };
-        let mut km = compile_and_load(&module, &options).unwrap();
+        let dump_dir = std::path::PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../target/ir-dumps/poseidon2-par"
+        ));
+        let gm = GraphModule::from_ir(module, &[]).unwrap();
+        let mut exe = GraphCompiler::new()
+            .dump_dir(dump_dir)
+            .compile(gm.into_builder())
+            .unwrap();
+        let km = exe.kernel_program(0);
         // The emitted CUDA operates on Montgomery-encoded BabyBear; this
-        // helper drives the raw `KernelModule` so it encodes/decodes itself.
+        // helper drives the raw `KernelProgram` so it encodes/decodes itself.
         let mont_input: Vec<u32> = input.iter().map(|&v| to_monty(v)).collect();
         let d_in: DeviceBuffer<u32> = mont_input.as_slice().to_device_on(&ctx).unwrap();
         km.set_input(0, &d_in).unwrap();
         let d_out = DeviceBuffer::<u32>::with_capacity_on(WIDTH, &ctx);
         km.set_output(0, &d_out).unwrap();
-        km.ensure_scratch(&ctx);
         km.run(&ctx.stream).unwrap();
         d_out
             .to_host_on(&ctx)
@@ -604,27 +602,31 @@ mod tests {
             let mut state = base;
             // Run both modules — serial vs parallel — and compare outputs.
             let ctx = GpuDeviceCtx::for_current_device().unwrap();
-            let options = CompileOptions::default();
 
-            let mut km_s = compile_and_load(&serial, &options).unwrap();
-            let mut km_p = compile_and_load(&parallel, &options).unwrap();
+            let gm_s = GraphModule::from_ir(serial.clone(), &[]).unwrap();
+            let gm_p = GraphModule::from_ir(parallel.clone(), &[]).unwrap();
+            let mut exe_s = GraphCompiler::new().compile(gm_s.into_builder()).unwrap();
+            let mut exe_p = GraphCompiler::new().compile(gm_p.into_builder()).unwrap();
             let mont_state: Vec<u32> = state.iter().map(|&v| to_monty(v)).collect();
             let d_state: DeviceBuffer<u32> = mont_state.as_slice().to_device_on(&ctx).unwrap();
             let d_value: DeviceBuffer<u32> =
                 [to_monty(value)].as_slice().to_device_on(&ctx).unwrap();
             let d_out_s = DeviceBuffer::<u32>::with_capacity_on(WIDTH, &ctx);
             let d_out_p = DeviceBuffer::<u32>::with_capacity_on(WIDTH, &ctx);
-            km_s.set_input(0, &d_state).unwrap();
-            km_s.set_input(1, &d_value).unwrap();
-            km_s.set_output(0, &d_out_s).unwrap();
-            km_s.ensure_scratch(&ctx);
-            km_p.set_input(0, &d_state).unwrap();
-            km_p.set_input(1, &d_value).unwrap();
-            km_p.set_output(0, &d_out_p).unwrap();
-            km_p.ensure_scratch(&ctx);
-
-            km_s.run(&ctx.stream).unwrap();
-            km_p.run(&ctx.stream).unwrap();
+            {
+                let km_s = exe_s.kernel_program(0);
+                km_s.set_input(0, &d_state).unwrap();
+                km_s.set_input(1, &d_value).unwrap();
+                km_s.set_output(0, &d_out_s).unwrap();
+                km_s.run(&ctx.stream).unwrap();
+            }
+            {
+                let km_p = exe_p.kernel_program(0);
+                km_p.set_input(0, &d_state).unwrap();
+                km_p.set_input(1, &d_value).unwrap();
+                km_p.set_output(0, &d_out_p).unwrap();
+                km_p.run(&ctx.stream).unwrap();
+            }
             let got_s: Vec<u32> = d_out_s
                 .to_host_on(&ctx)
                 .unwrap()

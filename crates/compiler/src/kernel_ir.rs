@@ -37,7 +37,7 @@ use crate::{
 };
 
 /// A kernel-level extent: either concrete or an expression over the
-/// program's runtime parameters ([`KernelProgram::params`]). Only grid
+/// program's runtime parameters ([`KirProgram::params`]). Only grid
 /// bounds and grid-spanning par bounds may be symbolic; everything inner
 /// (loops, tile shapes, `ParAttr::seq_size`) is concrete by construction
 /// (guaranteed by monomorphization).
@@ -263,8 +263,6 @@ pub enum BufferKind {
     Input(usize),
     /// Bound at runtime via `set_output(i, ptr)`.
     Output(usize),
-    /// Lives at `offset` bytes inside the scratch allocation.
-    Scratch { offset: usize },
     /// Kernel-local shared memory, materialized by an [`SSAOpCode::Alloc`].
     Shared,
     /// Kernel-local registers, materialized by an [`SSAOpCode::Alloc`].
@@ -571,11 +569,10 @@ impl Kernel {
 }
 
 #[derive(Clone, Debug)]
-pub struct KernelProgram {
+pub struct KirProgram {
     pub name: String,
     pub buffers: Vec<BufferDecl>,
     pub kernels: Vec<Kernel>,
-    pub scratch_bytes: usize,
     /// Buffer id per module input index.
     pub input_bufs: Vec<BufId>,
     /// Buffer id per module output index.
@@ -583,11 +580,11 @@ pub struct KernelProgram {
     /// Surviving symbolic module parameters, in declaration order. This
     /// order defines the runtime ABI: device kernels take one trailing
     /// `const uint32_t` per entry and the host `Prog` stores them as
-    /// `int64_t params[]`, bound via `set_param(i, v)`.
+    /// `int64_t params[]`, bound via `set_symbol(name, v)`.
     pub params: Vec<(VarId, String)>,
 }
 
-impl KernelProgram {
+impl KirProgram {
     pub fn buffer(&self, id: BufId) -> &BufferDecl {
         &self.buffers[id.0 as usize]
     }

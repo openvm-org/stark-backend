@@ -472,7 +472,6 @@ mod tests {
         graph_ir::{DeviceType, GraphBuilder},
         passes::fusion::FusionOptions,
         planner::SchedulerMode,
-        runtime::CompileOptions,
     };
     use openvm_cuda_common::{
         common::get_device,
@@ -661,7 +660,6 @@ mod tests {
         let mut exe = GraphCompiler::new()
             .device(device)
             .scheduler(SchedulerMode::Heuristic)
-            .compile_options(CompileOptions::default())
             .compile(g)
             .expect("graph compile");
         // Copy the caller's leaves into the compiled graph's registered
@@ -849,19 +847,20 @@ mod tests {
             dir.display(),
         );
 
-        // Run validate_interface + fuse_graph without compiling, and dump
+        // Run the normalize + fusion passes without compiling, and dump
         // the post-fusion graph alongside per-round stats.
         let fuse_opts = FusionOptions {
             verbose: true,
             max_iterations: 50,
             ..FusionOptions::default()
         };
-        let (g_fused, fusion_report) = GraphCompiler::new()
+        let mut g_fused = g;
+        let report = GraphCompiler::new()
             .device(device)
             .fusion_options(fuse_opts)
-            .fuse_only(g)
-            .expect("fuse-only pass");
-        let report = fusion_report.expect("fusion enabled");
+            .fuse(&mut g_fused)
+            .expect("fuse pass")
+            .expect("fusion enabled");
         std::fs::write(
             dir.join(format!("fractional_sumcheck_v2_n{n}.graph.fused.txt")),
             g_fused.print(),
@@ -878,12 +877,8 @@ mod tests {
         );
         for stats in &report.rounds_detail {
             println!(
-                "  round {}: fused={}, dce_removed={}, nodes_after={}, unique_modules_after={}",
-                stats.round,
-                stats.fused,
-                stats.dce_removed,
-                stats.nodes_after,
-                stats.unique_modules_after,
+                "  round {}: fused={}, dce_removed={}, nodes_after={}, est_modules={}",
+                stats.round, stats.fused, stats.dce_removed, stats.nodes_after, stats.est_modules,
             );
         }
 
@@ -903,10 +898,7 @@ mod tests {
             .device(device)
             .scheduler(SchedulerMode::Heuristic)
             .without_fusion()
-            .compile_options(CompileOptions {
-                dump_ir: Some(dir.clone()),
-                ..CompileOptions::default()
-            })
+            .dump_dir(dir.clone())
             .compile(g_fused)
             .expect("graph compile");
 
@@ -1096,18 +1088,15 @@ mod tests {
                 compiler = compiler.without_fusion();
             }
             let mut exe = compiler
-                .compile_options(CompileOptions {
-                    nvcc_timeout: Some(Duration::from_secs(900)),
-                    dump_ir: Some(
-                        std::env::var_os("FRAC_V2_BENCH_DUMP_IR")
-                            .map(std::path::PathBuf::from)
-                            .unwrap_or_else(|| {
-                                std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                                    .join("../../target/frac_v2_bench_timeouts")
-                            }),
-                    ),
-                    ..CompileOptions::default()
-                })
+                .nvcc_timeout(Some(Duration::from_secs(900)))
+                .dump_dir(
+                    std::env::var_os("FRAC_V2_BENCH_DUMP_IR")
+                        .map(std::path::PathBuf::from)
+                        .unwrap_or_else(|| {
+                            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                                .join("../../target/frac_v2_bench_timeouts")
+                        }),
+                )
                 .compile(g)
                 .expect("graph compile");
             let compile_ms = t0.elapsed().as_secs_f64() * 1e3;

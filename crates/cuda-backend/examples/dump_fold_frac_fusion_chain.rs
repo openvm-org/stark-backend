@@ -146,7 +146,7 @@ fn main() {
         max_iterations: 20,
         ..FusionOptions::default()
     };
-    let report = fuse_graph(&mut g, &opts);
+    let report = fuse_graph(&mut g, &opts).expect("fusion");
     std::env::remove_var("FUSION_DUMP_STEPS");
     println!(
         "  fusion summary: {} -> {} nodes, {} fusions in {} rounds, {} unique modules deduped",

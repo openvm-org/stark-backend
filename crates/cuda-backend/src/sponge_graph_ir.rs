@@ -220,7 +220,7 @@ impl FiatShamirTranscriptGraphIR for DuplexSpongeGpuIR {
                 module,
                 [self.state_buf, value_buf],
                 [new_state_buf],
-                &[self.absorb_idx as i64],
+                &[("i", self.absorb_idx as i64)],
             );
         }
         self.state_buf = new_state_buf;
@@ -247,7 +247,12 @@ impl FiatShamirTranscriptGraphIR for DuplexSpongeGpuIR {
             let permute = self.modules.permute.clone();
             g.insert_kernel(permute, [self.state_buf], [new_state_buf], &[]);
             let reader = self.modules.sample_no_perm.clone();
-            g.insert_kernel(reader, [new_state_buf], [sample_buf], &[(CHUNK - 1) as i64]);
+            g.insert_kernel(
+                reader,
+                [new_state_buf],
+                [sample_buf],
+                &[("i", (CHUNK - 1) as i64)],
+            );
             self.state_buf = new_state_buf;
             self.absorb_idx = 0;
             // The permutation resets `sample_idx = CHUNK`, then the read
@@ -262,7 +267,12 @@ impl FiatShamirTranscriptGraphIR for DuplexSpongeGpuIR {
             let sample_buf =
                 alloc_single_f_buf(g, self.device, &format!("sponge_sample_{}", self.n_ops));
             let module = self.modules.sample_no_perm.clone();
-            g.insert_kernel(module, [self.state_buf], [sample_buf], &[read_idx as i64]);
+            g.insert_kernel(
+                module,
+                [self.state_buf],
+                [sample_buf],
+                &[("i", read_idx as i64)],
+            );
             self.sample_idx = read_idx;
             self.n_ops += 1;
             sample_buf
@@ -284,7 +294,7 @@ impl FiatShamirTranscriptGraphIR for DuplexSpongeGpuIR {
             module,
             [self.state_buf, value_buf],
             [new_state_buf],
-            &[self.absorb_idx as i64],
+            &[("p", self.absorb_idx as i64)],
         );
         self.state_buf = new_state_buf;
         // Simulate the four host-side observes to update the transcript state.
@@ -314,7 +324,7 @@ impl FiatShamirTranscriptGraphIR for DuplexSpongeGpuIR {
                 pack,
                 [self.state_buf, new_state_buf],
                 [ext_buf],
-                &[pre_reads as i64],
+                &[("p", pre_reads as i64)],
             );
             self.state_buf = new_state_buf;
         } else {
@@ -327,7 +337,7 @@ impl FiatShamirTranscriptGraphIR for DuplexSpongeGpuIR {
                 pack,
                 [self.state_buf, self.state_buf],
                 [ext_buf],
-                &[self.sample_idx as i64],
+                &[("p", self.sample_idx as i64)],
             );
         }
         self.absorb_idx = abs;
@@ -673,7 +683,7 @@ fn load_state(b: &mut IRBuilder, state: NodeId) -> [NodeId; 16] {
 
 #[cfg(test)]
 mod tests {
-    use crypto_compiler::{graph_exe::GraphCompiler, runtime::CompileOptions};
+    use crypto_compiler::graph_exe::GraphCompiler;
     use openvm_cuda_common::{
         common::get_device,
         copy::MemCopyH2D,
@@ -791,7 +801,6 @@ mod tests {
 
         let mut exe = GraphCompiler::new()
             .device(DeviceType::Cuda(0))
-            .compile_options(CompileOptions::default())
             .compile(g)
             .expect("graph compile");
 
@@ -982,7 +991,6 @@ mod tests {
         // test is about the Arc/hash dedup accounting of the emitted nodes.
         let exe = GraphCompiler::new()
             .device(DeviceType::Cuda(0))
-            .compile_options(CompileOptions::default())
             .without_fusion()
             .compile(g)
             .expect("graph compile");

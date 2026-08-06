@@ -182,11 +182,11 @@ mod tests {
 
     use super::*;
     use crate::{
-        compile_and_load,
+        graph_exe::GraphCompiler,
+        graph_ir::GraphModule,
         ir::{IRBuilder, ScalarType},
         kernel,
-        runner::{from_monty, to_monty},
-        runtime::CompileOptions,
+        test_utils::{from_monty, to_monty},
     };
 
     type EF = BinomialExtensionField<BabyBear, 4>;
@@ -228,15 +228,16 @@ mod tests {
         let module = b.finish("bb_inverse_test", body);
 
         // The emitted CUDA operates on Montgomery-encoded BabyBear; this
-        // test drives the raw `KernelModule` so it encodes/decodes itself.
+        // test drives the raw `KernelProgram` so it encodes/decodes itself.
         let mont_inputs: Vec<u32> = inputs.iter().map(|&v| to_monty(v)).collect();
         let ctx = GpuDeviceCtx::for_current_device().unwrap();
-        let mut km = compile_and_load(&module, &CompileOptions::default()).unwrap();
+        let gm = GraphModule::from_ir(module, &[]).unwrap();
+        let mut exe = GraphCompiler::new().compile(gm.into_builder()).unwrap();
+        let km = exe.kernel_program(0);
         let d_in: DeviceBuffer<u32> = mont_inputs.as_slice().to_device_on(&ctx).unwrap();
         let d_out = DeviceBuffer::<u32>::with_capacity_on(N, &ctx);
         km.set_input(0, &d_in).unwrap();
         km.set_output(0, &d_out).unwrap();
-        km.ensure_scratch(&ctx);
         km.run(&ctx.stream).unwrap();
         let got: Vec<u32> = d_out
             .to_host_on(&ctx)
@@ -313,16 +314,17 @@ mod tests {
         });
         let module = b.finish("ef_inverse_test", body);
 
-        // Montgomery-encode at the raw `KernelModule` boundary (see
+        // Montgomery-encode at the raw `KernelProgram` boundary (see
         // `bb_inverse_matches_p3`).
         let mont_flat: Vec<u32> = flat.iter().map(|&v| to_monty(v)).collect();
         let ctx = GpuDeviceCtx::for_current_device().unwrap();
-        let mut km = compile_and_load(&module, &CompileOptions::default()).unwrap();
+        let gm = GraphModule::from_ir(module, &[]).unwrap();
+        let mut exe = GraphCompiler::new().compile(gm.into_builder()).unwrap();
+        let km = exe.kernel_program(0);
         let d_in: DeviceBuffer<u32> = mont_flat.as_slice().to_device_on(&ctx).unwrap();
         let d_out = DeviceBuffer::<u32>::with_capacity_on(N * D_EF, &ctx);
         km.set_input(0, &d_in).unwrap();
         km.set_output(0, &d_out).unwrap();
-        km.ensure_scratch(&ctx);
         km.run(&ctx.stream).unwrap();
         let got: Vec<u32> = d_out
             .to_host_on(&ctx)
@@ -352,12 +354,13 @@ mod tests {
         let x = b.input("x", ScalarType::BabyBear, vec![D_EF]);
         let body = b.compute(1, move |b, _i| ef_inverse(b, x));
         let module = b.finish("ef_inverse_single", body);
-        let mut km = compile_and_load(&module, &CompileOptions::default()).unwrap();
+        let gm = GraphModule::from_ir(module, &[]).unwrap();
+        let mut exe = GraphCompiler::new().compile(gm.into_builder()).unwrap();
+        let km = exe.kernel_program(0);
         let d_in: DeviceBuffer<u32> = single.as_slice().to_device_on(&ctx).unwrap();
         let d_out = DeviceBuffer::<u32>::with_capacity_on(D_EF, &ctx);
         km.set_input(0, &d_in).unwrap();
         km.set_output(0, &d_out).unwrap();
-        km.ensure_scratch(&ctx);
         km.run(&ctx.stream).unwrap();
         let got: Vec<u32> = d_out
             .to_host_on(&ctx)
