@@ -19,6 +19,8 @@ pub mod canonicalize;
 pub mod check_accesses;
 pub mod codegen;
 pub mod fusion;
+pub mod fusion_utils;
+pub mod fusion_v2;
 pub mod inplace;
 pub mod insert_sync;
 pub mod layout_infer;

@@ -1,14 +1,22 @@
-//! Poseidon2-16 permutation throughput: crypto-compiler JIT kernels wrapped
-//! around the transcript's on-perm shapes, serial vs warp-parallel. Requires
-//! a CUDA GPU.
+//! Poseidon2-16 permutation and non-perm transcript ops: crypto-compiler JIT
+//! kernels wrapped around the transcript's shapes, serial vs warp-parallel.
+//! Requires a CUDA GPU.
 //!
 //! Each row builds the same wrapper kernel twice — once using the reference
 //! [`poseidon2_permutation`] from `crypto_compiler::kernels`, once using the
 //! warp-parallel [`poseidon2_permute_par`] from
 //! `crypto_compiler::poseidon2_parallel` — then measures average launch time
-//! over many iterations (10 warmup + 100 timed by default). One perm per
-//! launch; the numbers are meant to reflect what a transcript emitting a
-//! single perm at a time actually experiences.
+//! over many iterations (10 warmup + 100 timed by default), both direct
+//! (`GraphExe::run`, dominated by host-side launch overhead) and captured
+//! (`GraphExe::launch_graph`, one `cudaGraphLaunch` per iter — closer to
+//! per-node cost inside a real transcript-heavy graph).
+//!
+//! Also covers non-perm transcript ops (observe, observe_ext, sample_ext_pack)
+//! where the current serial shapes launch a `compute(1)` single-thread kernel
+//! and the parallel variants use a full-warp `compute_with(WIDTH, par=id)`.
+//! For non-perm ops the "work" is a handful of selects/writes per launch, so
+//! the win (if any) is only visible in captured mode where launch overhead
+//! is a small constant.
 //!
 //! Run with: `cargo bench -p crypto-compiler --bench poseidon2`
 
@@ -23,11 +31,7 @@ use crypto_compiler::{
     poseidon2_parallel::{poseidon2_permute_par, WIDTH},
     test_utils::to_monty,
 };
-use openvm_cuda_common::{
-    copy::{MemCopyD2H, MemCopyH2D},
-    d_buffer::DeviceBuffer,
-    stream::GpuDeviceCtx,
-};
+use openvm_cuda_common::{copy::MemCopyH2D, d_buffer::DeviceBuffer, stream::GpuDeviceCtx};
 
 const P: u64 = 2_013_265_921;
 const CHUNK: usize = 8;
@@ -151,33 +155,150 @@ fn sample_perm_parallel(c: &Poseidon2Constants) -> Module {
 }
 
 // ---------------------------------------------------------------------------
+// Non-perm transcript ops. The serial variants match the shapes currently
+// used in `openvm_cuda_backend::sponge_graph_ir` (single-thread `compute(1)`
+// that walks all 16 state slots); the parallel variants distribute the
+// same slot updates across a 16-lane warp under `par=id`.
+// ---------------------------------------------------------------------------
+
+const ABSORB_IDX_0: usize = 0;
+
+/// `sponge_observe` at position 0: slot 0 takes `value[0]`, others pass through.
+/// Serial shape mirrors `sponge_graph_ir::build_observe_module` at absorb_idx 0.
+fn observe_at_0_serial() -> Module {
+    let mut b = IRBuilder::new();
+    let state = b.input("state", ScalarType::BabyBear, vec![1, WIDTH]);
+    let value = b.input("value", ScalarType::BabyBear, vec![1]);
+    let body = b.compute(1, |b, _i| {
+        let mut s = [b.const_u32(0); WIDTH];
+        for (j, slot) in s.iter_mut().enumerate() {
+            *slot = kernel!(b, state[0, #j]);
+        }
+        s[ABSORB_IDX_0] = kernel!(b, value[0]);
+        b.pack(&s)
+    });
+    b.finish("sponge_observe_at_0_serial", body)
+}
+
+/// Parallel gather: 16 lanes under `par=id`, each lane produces its own
+/// output slot with a single select.
+fn observe_at_0_parallel() -> Module {
+    let mut b = IRBuilder::new();
+    let state = b.input("state", ScalarType::BabyBear, vec![1, WIDTH]);
+    let value = b.input("value", ScalarType::BabyBear, vec![1]);
+    let body = b.compute_with(1, None, None, Some(WIDTH), move |b, _outer| {
+        let par = b.par_map(|th, _s, _c| th.clone());
+        b.compute_with(WIDTH, None, Some(par), None, |b, j| {
+            kernel!(b,
+                let orig = state[0, j];
+                let v = value[0];
+                if j == #ABSORB_IDX_0 then v else orig
+            )
+        })
+    });
+    b.finish("sponge_observe_at_0_parallel", body)
+}
+
+/// `sponge_observe_ext` at position 0: slots `0..D_EF` take `value[0..D_EF]`,
+/// others pass through. Serial shape mirrors
+/// `sponge_graph_ir::build_observe_ext_module_serial` at absorb_idx 0.
+fn observe_ext_at_0_serial() -> Module {
+    let mut b = IRBuilder::new();
+    let state = b.input("state", ScalarType::BabyBear, vec![1, WIDTH]);
+    let value = b.input("value", ScalarType::BabyBear, vec![D_EF]);
+    let body = b.compute(1, |b, _i| {
+        let mut s = [b.const_u32(0); WIDTH];
+        for (j, slot) in s.iter_mut().enumerate() {
+            *slot = kernel!(b, state[0, #j]);
+        }
+        for k in 0..D_EF {
+            s[k] = kernel!(b, value[#k]);
+        }
+        b.pack(&s)
+    });
+    b.finish("sponge_observe_ext_at_0_serial", body)
+}
+
+fn observe_ext_at_0_parallel() -> Module {
+    let mut b = IRBuilder::new();
+    let state = b.input("state", ScalarType::BabyBear, vec![1, WIDTH]);
+    let value = b.input("value", ScalarType::BabyBear, vec![D_EF]);
+    let body = b.compute_with(1, None, None, Some(WIDTH), move |b, _outer| {
+        let par = b.par_map(|th, _s, _c| th.clone());
+        b.compute_with(WIDTH, None, Some(par), None, |b, j| {
+            kernel!(b,
+                let orig = state[0, j];
+                let d = #D_EF;
+                if j < d then value[j] else orig
+            )
+        })
+    });
+    b.finish("sponge_observe_ext_at_0_parallel", body)
+}
+
+/// `sample_ext_pack` non-perm path: `p = D_EF`, so every one of the 4
+/// output slots picks a pre-perm read. Serial variant walks the 4-slot
+/// output in `compute(D_EF)`; parallel splits it across 4 lanes.
+fn sample_ext_pack_at_p_serial() -> Module {
+    let mut b = IRBuilder::new();
+    let pre = b.input("pre", ScalarType::BabyBear, vec![1, WIDTH]);
+    let body = b.compute(D_EF, |b, k| {
+        // No-perm: samples[k] = pre[0, p - 1 - k], p = D_EF.
+        let p = b.const_u32(D_EF as u32);
+        let one = b.const_u32(1);
+        let zero = b.const_u32(0);
+        let idx = kernel!(b, p - one - k);
+        b.index(pre, &[zero, idx])
+    });
+    b.finish("sample_ext_pack_serial", body)
+}
+
+fn sample_ext_pack_at_p_parallel() -> Module {
+    let mut b = IRBuilder::new();
+    let pre = b.input("pre", ScalarType::BabyBear, vec![1, WIDTH]);
+    // With D_EF lanes there's no meaningful warp; par=id still yields
+    // one thread per output slot, which is the shape we want to test.
+    let body = b.compute_with(1, None, None, Some(D_EF), move |b, _outer| {
+        let par = b.par_map(|th, _s, _c| th.clone());
+        b.compute_with(D_EF, None, Some(par), None, |b, k| {
+            let p = b.const_u32(D_EF as u32);
+            let one = b.const_u32(1);
+            let zero = b.const_u32(0);
+            let idx = kernel!(b, p - one - k);
+            b.index(pre, &[zero, idx])
+        })
+    });
+    b.finish("sample_ext_pack_parallel", body)
+}
+
+// ---------------------------------------------------------------------------
 // Setup + benchmark driver.
 // ---------------------------------------------------------------------------
 
-/// JIT-compiles a module, binds each input to `input_bufs[i]` (in order),
-/// each output to a fresh device buffer sized from the module's declared
-/// output size, and preallocates scratch. Returns the loaded kernel plus
-/// the output device buffers.
-fn setup_jit(
-    ctx: &GpuDeviceCtx,
-    module: Module,
-    input_bufs: &[&DeviceBuffer<u32>],
-) -> (GraphExe, Vec<DeviceBuffer<u32>>) {
+/// JIT-compiles a module and binds each input to `input_bufs[i]` on the
+/// `GraphExe` (so both `run` and `capture_graph`/`launch_graph` are
+/// callable). Outputs live inside the exe's device pool — read them
+/// back with [`GraphExe::get_output`].
+fn setup_jit(ctx: &GpuDeviceCtx, module: Module, input_bufs: &[&DeviceBuffer<u8>]) -> GraphExe {
     let gm = GraphModule::from_ir(module, &[]).unwrap();
     let mut exe = GraphCompiler::new()
         .compile(gm.into_builder())
         .expect("JIT compile");
-    let km = exe.kernel_program(0);
     for (i, buf) in input_bufs.iter().enumerate() {
-        km.set_input(i, *buf).unwrap();
+        exe.set_input(ctx, i, buf).unwrap();
     }
-    let outs: Vec<DeviceBuffer<u32>> = (0..km.num_outputs())
-        .map(|i| DeviceBuffer::with_capacity_on(km.output_size(i) / 4, ctx))
-        .collect();
-    for (i, buf) in outs.iter().enumerate() {
-        km.set_output(i, buf).unwrap();
-    }
-    (exe, outs)
+    exe
+}
+
+/// Copy a `[u32]` slice into a freshly-allocated `DeviceBuffer<u8>` — the
+/// byte view every `GraphExe::set_input` call expects.
+fn u8_device_buf(ctx: &GpuDeviceCtx, data: &[u32]) -> DeviceBuffer<u8> {
+    // SAFETY: `[u32]` is contiguously laid out; we only reinterpret its
+    // bytes for a device-side H2D copy.
+    let bytes: &[u8] = unsafe {
+        std::slice::from_raw_parts(data.as_ptr() as *const u8, std::mem::size_of_val(data))
+    };
+    bytes.to_device_on(ctx).unwrap()
 }
 
 fn bench_shape(
@@ -185,39 +306,44 @@ fn bench_shape(
     label: &str,
     serial: Module,
     parallel: Module,
-    inputs: &[&DeviceBuffer<u32>],
+    inputs: &[&DeviceBuffer<u8>],
     warmup: usize,
     iters: usize,
 ) {
-    let (mut exe_s, out_s) = setup_jit(ctx, serial, inputs);
-    let (mut exe_p, out_p) = setup_jit(ctx, parallel, inputs);
+    let mut exe_s = setup_jit(ctx, serial, inputs);
+    let mut exe_p = setup_jit(ctx, parallel, inputs);
 
     // Correctness check: single run of each, compare each output vector.
-    exe_s.kernel_program(0).run(&ctx.stream).unwrap();
-    exe_p.kernel_program(0).run(&ctx.stream).unwrap();
-    for (idx, (s, p)) in out_s.iter().zip(&out_p).enumerate() {
-        let sv: Vec<u32> = s.to_host_on(ctx).unwrap();
-        let pv: Vec<u32> = p.to_host_on(ctx).unwrap();
+    exe_s.run(ctx).unwrap();
+    exe_p.run(ctx).unwrap();
+    let num_outputs = exe_s.num_outputs();
+    for i in 0..num_outputs {
+        let sv = exe_s.get_output(i).to_host_on(ctx).unwrap();
+        let pv = exe_p.get_output(i).to_host_on(ctx).unwrap();
         assert_eq!(
             sv, pv,
-            "shape {label} output {idx} differs between serial and parallel"
+            "shape {label} output {i} differs between serial and parallel"
         );
     }
 
-    let serial_us = measure_us(ctx, warmup, iters, || {
-        exe_s
-            .kernel_program(0)
-            .run(&ctx.stream)
-            .expect("serial run");
-    });
-    let parallel_us = measure_us(ctx, warmup, iters, || {
-        exe_p
-            .kernel_program(0)
-            .run(&ctx.stream)
-            .expect("parallel run");
-    });
-    let speedup = serial_us / parallel_us;
-    println!("| {label:<40} | {serial_us:>10.3} | {parallel_us:>12.3} | {speedup:>7.2}x |");
+    // Direct-launch: `GraphExe::run` — one host-side per-node dispatch per
+    // kernel. Dominated by launch overhead for tiny kernels like these.
+    let serial_direct = measure_us(ctx, warmup, iters, || exe_s.run(ctx).unwrap());
+    let parallel_direct = measure_us(ctx, warmup, iters, || exe_p.run(ctx).unwrap());
+    let direct_speedup = serial_direct / parallel_direct;
+
+    // Captured-graph: one `cudaGraphLaunch` per iter. Removes most of the
+    // host-dispatch cost, exposing the actual per-kernel GPU time.
+    exe_s.capture_graph(ctx).expect("capture serial");
+    exe_p.capture_graph(ctx).expect("capture parallel");
+    let serial_captured = measure_us(ctx, warmup, iters, || exe_s.launch_graph(ctx).unwrap());
+    let parallel_captured = measure_us(ctx, warmup, iters, || exe_p.launch_graph(ctx).unwrap());
+    let captured_speedup = serial_captured / parallel_captured;
+
+    println!(
+        "| {label:<40} | {serial_direct:>7.3} | {parallel_direct:>9.3} | {direct_speedup:>5.2}x \
+         | {serial_captured:>7.3} | {parallel_captured:>9.3} | {captured_speedup:>5.2}x |"
+    );
 }
 
 fn main() {
@@ -231,23 +357,24 @@ fn main() {
     // matter; encoding preserves that equivalence.
     let state_vec: Vec<u32> = splitmix(WIDTH, 1).into_iter().map(to_monty).collect();
     let value_vec: Vec<u32> = vec![to_monty(splitmix(1, 2)[0])];
-    let ext_val_vec = splitmix(D_EF, 3);
-    let d_state: DeviceBuffer<u32> = state_vec.as_slice().to_device_on(&ctx).unwrap();
-    let d_value: DeviceBuffer<u32> = value_vec.as_slice().to_device_on(&ctx).unwrap();
-    let _ = &d_state;
-    let _ = &d_value;
-    let _ = ext_val_vec;
+    let ext_val_vec: Vec<u32> = splitmix(D_EF, 3).into_iter().map(to_monty).collect();
+    let d_state = u8_device_buf(&ctx, &state_vec);
+    let d_value = u8_device_buf(&ctx, &value_vec);
+    let d_ext = u8_device_buf(&ctx, &ext_val_vec);
 
     let warmup = 10usize;
     let iters = 100usize;
     println!(
-        "Poseidon2-16 permutation kernels: serial vs warp-parallel (µs/launch, 1 perm per launch)"
+        "Poseidon2-16 transcript kernels: serial vs warp-parallel (µs/launch, 1 op per launch)"
     );
     println!(
-        "| {:<40} | {:>10} | {:>12} | {:>8} |",
-        "shape", "serial", "parallel", "speedup"
+        "| {:<40} | {:>7} | {:>9} | {:>6} | {:>7} | {:>9} | {:>6} |",
+        "shape", "s.dir", "p.dir", "d.spd", "s.cap", "p.cap", "c.spd"
     );
-    println!("|{:-<42}|{:->12}|{:->14}|{:->10}|", "", "", "", "");
+    println!(
+        "|{:-<42}|{:->9}|{:->11}|{:->8}|{:->9}|{:->11}|{:->8}|",
+        "", "", "", "", "", "", ""
+    );
 
     bench_shape(
         &ctx,
@@ -264,6 +391,36 @@ fn main() {
         "sponge_sample_perm",
         sample_perm_serial(&consts),
         sample_perm_parallel(&consts),
+        &[&d_state],
+        warmup,
+        iters,
+    );
+
+    bench_shape(
+        &ctx,
+        "sponge_observe_at_0 (non-perm)",
+        observe_at_0_serial(),
+        observe_at_0_parallel(),
+        &[&d_state, &d_value],
+        warmup,
+        iters,
+    );
+
+    bench_shape(
+        &ctx,
+        "sponge_observe_ext_at_0 (non-perm)",
+        observe_ext_at_0_serial(),
+        observe_ext_at_0_parallel(),
+        &[&d_state, &d_ext],
+        warmup,
+        iters,
+    );
+
+    bench_shape(
+        &ctx,
+        "sponge_sample_ext_pack (no perm)",
+        sample_ext_pack_at_p_serial(),
+        sample_ext_pack_at_p_parallel(),
         &[&d_state],
         warmup,
         iters,

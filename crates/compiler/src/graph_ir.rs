@@ -66,8 +66,9 @@ pub struct BufInfo {
 /// synchronization); [`crate::graph_exe::GraphExe::run`] issues launches in
 /// planner-chosen order on that same stream, so intra-graph dependencies are
 /// enforced by stream ordering.
-pub type KernelFn = Box<dyn Fn(&[*mut ()], &[*mut ()], cudaStream_t)>;
+pub type KernelFn = Arc<dyn Fn(&[*mut ()], &[*mut ()], cudaStream_t) + Send + Sync>;
 
+#[derive(Clone)]
 pub struct KernelNode {
     pub inputs: Vec<BufId>,
     pub outputs: Vec<BufId>,
@@ -686,6 +687,235 @@ impl fmt::Debug for GraphNode {
     }
 }
 
+impl GraphNode {
+    /// Positional logical operands of this node, in the fixed convention
+    /// used by the fusion-v2 alternative graph (see
+    /// `detailed-fusion-plan-v2.md` §5.1):
+    ///
+    /// - explicit operands come first, in variant-defined order;
+    /// - if the node is a partial memcpy/memset, the old destination is appended as a preservation
+    ///   input.
+    ///
+    /// `bufs` is required because deciding whether memcpy/memset covers the
+    /// whole destination compares the write range against the buffer's
+    /// declared size.
+    pub fn get_operands(&self, bufs: &[BufInfo]) -> Vec<BufId> {
+        match self {
+            GraphNode::Kernel(k) => k.inputs.clone(),
+            GraphNode::BlackboxKernel(k) => k.inputs.clone(),
+            GraphNode::Const(_) => Vec::new(),
+            GraphNode::Memcpy(m) => {
+                let mut ops = vec![m.src];
+                if !covers_full_range(&m.dst_offset, &m.num_bytes, &bufs[m.dst.0].size) {
+                    ops.push(m.dst);
+                }
+                ops
+            }
+            GraphNode::Memset(m) => {
+                if covers_full_range(&m.offset, &m.num_bytes, &bufs[m.node.0].size) {
+                    Vec::new()
+                } else {
+                    vec![m.node]
+                }
+            }
+        }
+    }
+
+    /// Positional logical results of this node:
+    ///
+    /// - explicit results come first in variant-defined order;
+    /// - re-exported mutated inputs (blackbox `carried_outputs`) follow the explicit results in
+    ///   input-position order.
+    pub fn get_results(&self) -> Vec<BufId> {
+        match self {
+            GraphNode::Kernel(k) => k.outputs.clone(),
+            GraphNode::BlackboxKernel(k) => {
+                let mut out = k.outputs.clone();
+                // Preserve input-position order for the re-exported carried
+                // outputs (`k.inputs` is the canonical order that
+                // `insert_blackbox_kernel` derives `carried_outputs` from).
+                for b in &k.inputs {
+                    if k.carried_outputs.contains(b) {
+                        out.push(*b);
+                    }
+                }
+                out
+            }
+            GraphNode::Const(c) => vec![c.buf],
+            GraphNode::Memcpy(m) => vec![m.dst],
+            GraphNode::Memset(m) => vec![m.node],
+        }
+    }
+
+    /// Rewrites this node's internal [`BufId`] bindings positionally, so
+    /// the node uses `input_bufs[i]` at every position `i` of
+    /// [`Self::get_operands`] and `output_bufs[j]` at every position `j`
+    /// of [`Self::get_results`].
+    ///
+    /// This is the inverse of [`Self::get_operands`]/[`Self::get_results`]:
+    /// it centralizes the variant-specific rewrite that fusion v2 needs
+    /// during materialization so the fuser doesn't open-code the mapping.
+    ///
+    /// - `Kernel` and `BlackboxKernel`: rewrites `k.inputs` and the explicit-outputs prefix of
+    ///   `k.outputs`. For blackbox, the re-exported carried-outputs suffix is rebuilt from the
+    ///   input positions that also appear as re-exported outputs.
+    /// - `Const`: rewrites the destination buffer.
+    /// - `Memcpy`: rewrites `src` (input 0) and `dst` (output 0); a preservation input (`input 1`,
+    ///   only present for partial writes) must equal `dst` after rewrite.
+    /// - `Memset`: rewrites `node` (output 0); a preservation input (only present for partial
+    ///   writes) must equal `node`.
+    pub fn rewrite_bindings(
+        &mut self,
+        input_bufs: &[BufId],
+        output_bufs: &[BufId],
+    ) -> Result<(), crate::CompileError> {
+        let mkerr = |m: String| crate::CompileError::Canonicalize(m);
+        match self {
+            GraphNode::Kernel(k) => {
+                if input_bufs.len() != k.inputs.len() {
+                    return Err(mkerr(format!(
+                        "rewrite_bindings: Kernel `{}` expects {} inputs, got {}",
+                        k.module.name,
+                        k.inputs.len(),
+                        input_bufs.len()
+                    )));
+                }
+                if output_bufs.len() != k.outputs.len() {
+                    return Err(mkerr(format!(
+                        "rewrite_bindings: Kernel `{}` expects {} outputs, got {}",
+                        k.module.name,
+                        k.outputs.len(),
+                        output_bufs.len()
+                    )));
+                }
+                k.inputs = input_bufs.to_vec();
+                k.outputs = output_bufs.to_vec();
+                Ok(())
+            }
+            GraphNode::BlackboxKernel(k) => {
+                if input_bufs.len() != k.inputs.len() {
+                    return Err(mkerr(format!(
+                        "rewrite_bindings: BlackboxKernel `{}` expects {} inputs, got {}",
+                        k.name,
+                        k.inputs.len(),
+                        input_bufs.len()
+                    )));
+                }
+                let carried_count = k.carried_outputs.len();
+                let explicit_count = k.outputs.len();
+                if output_bufs.len() != explicit_count + carried_count {
+                    return Err(mkerr(format!(
+                        "rewrite_bindings: BlackboxKernel `{}` expects {} outputs (explicit + \
+                         re-exported carried), got {}",
+                        k.name,
+                        explicit_count + carried_count,
+                        output_bufs.len()
+                    )));
+                }
+                // Track which input positions correspond to carried
+                // outputs BEFORE overwriting `k.inputs`, so the
+                // re-exported suffix can be rebuilt against the new
+                // input buffer array.
+                let carried_positions: Vec<usize> = k
+                    .inputs
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, b)| k.carried_outputs.contains(b).then_some(i))
+                    .collect();
+                if carried_positions.len() != carried_count {
+                    return Err(mkerr(format!(
+                        "rewrite_bindings: BlackboxKernel `{}` has {} carried outputs but only \
+                         {} match by BufId; this node's carried set must be a subset of its \
+                         inputs",
+                        k.name,
+                        carried_count,
+                        carried_positions.len()
+                    )));
+                }
+                k.inputs = input_bufs.to_vec();
+                k.outputs = output_bufs[..explicit_count].to_vec();
+                k.carried_outputs = carried_positions.iter().map(|&i| k.inputs[i]).collect();
+                Ok(())
+            }
+            GraphNode::Const(c) => {
+                if !input_bufs.is_empty() {
+                    return Err(mkerr(format!(
+                        "rewrite_bindings: Const expects 0 inputs, got {}",
+                        input_bufs.len()
+                    )));
+                }
+                if output_bufs.len() != 1 {
+                    return Err(mkerr(format!(
+                        "rewrite_bindings: Const expects 1 output, got {}",
+                        output_bufs.len()
+                    )));
+                }
+                c.buf = output_bufs[0];
+                Ok(())
+            }
+            GraphNode::Memcpy(m) => {
+                if input_bufs.is_empty() || input_bufs.len() > 2 {
+                    return Err(mkerr(format!(
+                        "rewrite_bindings: Memcpy expects 1 or 2 inputs, got {}",
+                        input_bufs.len()
+                    )));
+                }
+                if output_bufs.len() != 1 {
+                    return Err(mkerr(format!(
+                        "rewrite_bindings: Memcpy expects 1 output, got {}",
+                        output_bufs.len()
+                    )));
+                }
+                m.src = input_bufs[0];
+                m.dst = output_bufs[0];
+                if input_bufs.len() == 2 && input_bufs[1] != m.dst {
+                    return Err(mkerr(
+                        "rewrite_bindings: Memcpy preservation input must equal the destination"
+                            .into(),
+                    ));
+                }
+                Ok(())
+            }
+            GraphNode::Memset(m) => {
+                if input_bufs.len() > 1 {
+                    return Err(mkerr(format!(
+                        "rewrite_bindings: Memset expects 0 or 1 inputs, got {}",
+                        input_bufs.len()
+                    )));
+                }
+                if output_bufs.len() != 1 {
+                    return Err(mkerr(format!(
+                        "rewrite_bindings: Memset expects 1 output, got {}",
+                        output_bufs.len()
+                    )));
+                }
+                m.node = output_bufs[0];
+                if input_bufs.len() == 1 && input_bufs[0] != m.node {
+                    return Err(mkerr(
+                        "rewrite_bindings: Memset preservation input must equal the destination"
+                            .into(),
+                    ));
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+/// Whether `[offset .. offset + num_bytes]` provably covers the buffer's
+/// declared `size` — used to decide whether a memcpy/memset preserves the
+/// old destination.
+///
+/// A structural equality test after light folding: `offset == 0` and
+/// `num_bytes == size`. Both sides are `Quast`s built by `GraphBuilder`'s
+/// full-range constructors from the same source expression, so the fast
+/// path fires whenever `insert_memcpy` / `insert_memset` was used. The
+/// `insert_*_range` variants pass caller-supplied expressions and are
+/// conservatively treated as partial when they do not match structurally.
+fn covers_full_range(offset: &Quast, num_bytes: &Quast, size: &Quast) -> bool {
+    matches!(offset, Quast::Const(0)) && num_bytes == size
+}
+
 #[derive(Default)]
 pub struct GraphBuilder {
     pub bufs: Vec<BufInfo>,
@@ -992,7 +1222,7 @@ impl GraphBuilder {
         inputs: impl Iterator<Item = BufId>,
         outputs: impl Iterator<Item = BufId>,
         modifies: impl Iterator<Item = bool>,
-        f: impl Fn(&[*mut ()], &[*mut ()], cudaStream_t) + 'static,
+        f: impl Fn(&[*mut ()], &[*mut ()], cudaStream_t) + Send + Sync + 'static,
     ) {
         let inputs: Vec<_> = inputs.collect();
         let modifies: Vec<_> = modifies.collect();
@@ -1017,7 +1247,7 @@ impl GraphBuilder {
             inputs,
             outputs: outputs.collect(),
             carried_outputs,
-            func: Box::new(f),
+            func: Arc::new(f),
             name: name.into(),
         }));
     }
@@ -2094,6 +2324,12 @@ pub(crate) fn classify_buf_uses(
 mod tests {
     use super::*;
     use crate::ir::{IRBuilder, ScalarType, SizeExpr};
+
+    #[test]
+    fn blackbox_kernel_node_is_clone_send_sync() {
+        fn assert_traits<T: Clone + Send + Sync>() {}
+        assert_traits::<KernelNode>();
+    }
 
     fn buf(builder: &mut GraphBuilder, name: &str, device_type: DeviceType, size: Quast) -> BufId {
         builder.add_buf(BufInfo {

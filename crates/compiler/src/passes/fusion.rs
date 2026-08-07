@@ -3365,7 +3365,7 @@ mod tests {
             inputs: vec![a],
             outputs: vec![],
             carried_outputs: vec![],
-            func: Box::new(|_, _, _| {}),
+            func: Arc::new(|_, _, _| {}),
             name: "bb".into(),
         }));
         assert_eq!(dce(&mut g), 0);
