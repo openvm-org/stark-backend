@@ -14,7 +14,7 @@
 //! Feature-gated behind `planner` (needs the CP-SAT planner + OR-Tools).
 
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     ffi::c_void,
     marker::PhantomData,
     mem::ManuallyDrop,
@@ -85,14 +85,12 @@ use crate::{
     ir::{self, VarId},
     kernel_cache::KernelCache,
     module_compiler::ModuleCompiler,
-    module_hash::module_hash,
     passes::{
         check_accesses::check_module_accesses,
-        fusion::{fuse_graph, renumber_module, FusionOptions, FusionReport},
-        monomorphize::{block_size_policy, monomorphize_for_graph},
+        fusion::{fuse_graph, FusionOptions, FusionReport},
         type_infer,
     },
-    planner::{self, access_from_node, MemoryPlan, NodeAccess, PlanError, SchedulerMode},
+    planner::{access_from_node, MemoryPlan, PlanError, SchedulerMode},
     quast::Quast,
     runtime::KernelProgram,
     CompileError,
@@ -500,6 +498,13 @@ impl GraphCompiler {
     /// produces the same result as the explicit chain (per plan's
     /// any-order protocol).
     ///
+    /// `apply_fusion` grafts producer bodies inline, which can denormalize
+    /// the fused module and expose new must-be-concrete inner bounds; a
+    /// fused kernel that keeps a symbolic outer bound also needs a block
+    /// hint stamped. So on rounds that actually fused, we re-run
+    /// `canonicalize` + `monomorphize` to re-normalize and block-hint the
+    /// fused outputs.
+    ///
     /// Returns the [`FusionReport`] from `fuse_graph`, or `None` when
     /// fusion is disabled.
     pub fn fuse(&self, g: &mut GraphBuilder) -> Result<Option<FusionReport>, CompileError> {
@@ -511,6 +516,9 @@ impl GraphCompiler {
             .as_ref()
             .map(|opts| fuse_graph(g, opts))
             .transpose()?;
+
+        self.canonicalize(g)?;
+        self.monomorphize(g)?;
         g.plan = None;
         Ok(report)
     }
@@ -559,39 +567,33 @@ impl GraphCompiler {
     }
 
     /// Consumes the graph, validates its registered interface, plans it and
-    /// compiles every structured kernel.
+    /// compiles every structured kernel. Runs in four stages:
+    ///
+    /// 1. **Normalize**: [`Self::fuse`] (or the explicit `lower_reduce` → `monomorphize` →
+    ///    `canonicalize` chain when fusion is disabled) + [`Self::dce`]. Post-passes every Kernel
+    ///    node's module is a canonical, monomorphized, single-kernel residual and `kernel_dedup`
+    ///    has collapsed structurally identical modules onto one `Arc<ir::Module>`.
+    /// 2. **Compile kernels**: [`Self::compile_unique_kernels`] JITs one artifact per unique module
+    ///    Arc in parallel (cache hits skip nvcc).
+    /// 3. **Plan memory**: [`Self::plan_memory`] fills `g.plan`.
+    /// 4. **Assemble**: build one [`ExeNode`] per graph node in insertion order (execution order is
+    ///    chosen by the plan at runtime), evaluating memcpy/memset offsets and validating kernel
+    ///    input/output sizes against the plan.
     ///
     /// The registered interface (see [`GraphBuilder::register_input`] /
-    /// [`GraphBuilder::register_output`]) is validated against the raw graph
-    /// first: inputs must exist on the target device, be distinct, never be
-    /// written and be read at least once; outputs must exist on the target
-    /// device, be distinct and be written at least once; any unregistered
-    /// buffer that is read but never written is an error.
-    ///
-    /// Unless disabled via [`Self::without_fusion`], the kernel-fusion pass
-    /// ([`fuse_graph`]) then rewrites the graph; the resulting
-    /// [`FusionReport`] is available on the returned exe via
-    /// [`GraphExe::fusion_report`]. The pipeline then runs in three phases:
-    ///
-    /// 1. **Compile-first**: drain the graph's nodes and JIT every `Kernel(Module)` up front. Each
-    ///    graph kernel module is required to be single-kernel by the time compilation runs
-    ///    (post-canonicalize + split_module invariant); intermediate buffers only exist as
-    ///    graph-level buffers placed by the memory planner.
-    /// 2. **Plan + assemble**: run [`planner::plan_raw`] on the `(bufs, node accesses)` pair with
-    ///    the registered inputs/outputs pinned to whole-program lifetimes — every buffer (interface
-    ///    or intermediate) gets a stable offset in one device pool — and package everything into a
-    ///    [`GraphExe`].
+    /// [`GraphBuilder::register_output`]) is validated up front: inputs must
+    /// exist on the target device, be distinct, never be written and be
+    /// read at least once; outputs must exist on the target device, be
+    /// distinct and be written at least once; any unregistered buffer that
+    /// is read but never written is an error.
     pub fn compile(self, mut graph: GraphBuilder) -> Result<GraphExe, CompileError> {
         validate_interface(&graph, self.device)?;
-        let input_bufs = graph.input_bufs().to_vec();
-        let output_bufs = graph.output_bufs().to_vec();
 
-        // Pass driver: run the normalize + (optional) fuse chain before
-        // compilation. Post-passes every Kernel node's `module` is the
-        // residual, `param_bindings` are the residual bindings, and
-        // `node.hash` is set to the residual hash — the inline
-        // monomorphize in Phase 1a below is idempotent on this
-        // already-processed input.
+        // Stage 1: normalize the graph. Post-passes every Kernel node's
+        // module is a canonical, monomorphized, single-kernel residual
+        // with `hash` set; `kernel_dedup` has collapsed structurally
+        // identical modules onto one `Arc<ir::Module>`, so the compile
+        // stage below can dedup by Arc pointer alone.
         let fusion_report = match &self.fusion {
             Some(_) => self.fuse(&mut graph)?,
             None => {
@@ -603,554 +605,40 @@ impl GraphCompiler {
         };
         self.dce(&mut graph);
 
-        // Phase 1: drain and compile every structured kernel.
-        //
-        // `compiled` mirrors the original node order. For structured kernels
-        // the compiled `KernelProgram` is wrapped in `Arc<Mutex<_>>` and
-        // cached by (source `Arc<ir::Module>` pointer, parameter bindings),
-        // so two `Kernel` nodes that carry the same module clone and the
-        // same bindings share one JIT build.
-        // `KernelProgram::set_symbol`/`set_input`/`set_output` take
-        // `&mut self`, hence the `Mutex` for the shared handle.
-        enum PreExe {
-            Kernel {
-                name: String,
-                /// Compact index into `kernels: Vec<KernelProgram>`. Multiple
-                /// `PreExe::Kernel`s may share a `kernel_idx` when their
-                /// source modules dedup to the same residual hash.
-                kernel_idx: usize,
-                inputs: Vec<BufId>,
-                outputs: Vec<BufId>,
-                /// Positional values for the kernel's runtime parameters.
-                /// Aligned with the kernel's declared param order; the
-                /// launch loop pairs each with `KernelProgram::params()` to
-                /// call `set_symbol`.
-                set_params: Vec<i64>,
-            },
-            Blackbox(KernelNode),
-            Const(ConstNode),
-            Memcpy {
-                src: BufId,
-                src_offset: usize,
-                dst: BufId,
-                dst_offset: usize,
-                num_bytes: usize,
-            },
-            Memset {
-                buf: BufId,
-                offset: usize,
-                num_bytes: usize,
-                val: u32,
-            },
-        }
-        let nodes: Vec<GraphNode> = graph.nodes.drain(..).collect();
+        // Stage 2: compile every unique kernel module in parallel.
+        let CompiledKernels {
+            mut kernels,
+            kernel_of_ptr,
+            num_unique_modules,
+            num_cached_modules,
+        } = self.compile_unique_kernels(&graph)?;
 
-        // Phase 1a: partition Kernel nodes from the rest and identify the
-        // unique (module, bindings) pairs to compile. Two `KernelModuleNode`s
-        // sharing an `Arc` pointer and identical parameter bindings alias the
-        // same compiled artifact. A parameterized module is monomorphized
-        // against its bindings here: the *residual* (with its surviving
-        // params) is what gets hashed, cached and compiled, so nodes whose
-        // residuals agree share one JIT build even across different concrete
-        // sizes. The α-normalized hash of the PRE-monomorphization module is
-        // kept as the template grouping key for block selection below.
-        enum ResidualSlot {
-            Shared(Arc<ir::Module>),
-            Owned(ir::Module),
-        }
-        struct PreUnique {
-            residual: ResidualSlot,
-            /// Binding values for the residual's surviving params (empty for
-            /// concrete modules).
-            vals: Vec<i64>,
-            /// Max concrete outer compute size — `Some` iff the residual
-            /// keeps a symbolic outer bound and needs a block hint.
-            max_outer: Option<i64>,
-            template_hash: [u8; 32],
-        }
-        let mut unique: Vec<PreUnique> = Vec::new();
-        let mut key_index: HashMap<(*const ir::Module, BTreeMap<String, i64>), usize> =
-            HashMap::new();
-        // Per-node kernel slot: `Some(kernel_idx)` if this graph node is a
-        // Kernel, referring to `unique[kernel_idx]`.
-        let mut node_module_idx: Vec<Option<usize>> = Vec::with_capacity(nodes.len());
-        for node in &nodes {
-            match node {
-                GraphNode::Kernel(k) => {
-                    let key = (Arc::as_ptr(&k.module), k.param_bindings.clone());
-                    let idx = match key_index.get(&key) {
-                        Some(&idx) => idx,
-                        None => {
-                            if self.module_compiler.check_accesses {
-                                check_module_accesses(&k.module, &k.param_bindings)?;
-                            }
-                            let template_hash = module_hash(&renumber_module(&k.module));
-                            let pu = if k.param_bindings.is_empty() {
-                                PreUnique {
-                                    residual: ResidualSlot::Shared(k.module.clone()),
-                                    vals: Vec::new(),
-                                    max_outer: None,
-                                    template_hash,
-                                }
-                            } else {
-                                let gm = monomorphize_for_graph(&k.module, &k.param_bindings)?;
-                                // Convert name-keyed bindings back to
-                                // positional Vec<i64> aligned with the
-                                // residual module's param order. The
-                                // runtime `set_symbol(name, v)` ABI is
-                                // name-based, but the launch loop pairs
-                                // each value with its corresponding name
-                                // from `KernelProgram::params()`.
-                                let vals = pos_vec(&gm.residual, &gm.residual_bindings);
-                                PreUnique {
-                                    residual: ResidualSlot::Owned(gm.residual),
-                                    vals,
-                                    max_outer: gm.max_outer,
-                                    template_hash,
-                                }
-                            };
-                            unique.push(pu);
-                            let idx = unique.len() - 1;
-                            key_index.insert(key, idx);
-                            idx
-                        }
-                    };
-                    node_module_idx.push(Some(idx));
-                }
-                _ => node_module_idx.push(None),
-            }
-        }
-        drop(key_index);
+        // Stage 3: plan graph memory.
+        self.plan_memory(&mut graph)?;
+        let plan = graph.plan.take().expect("plan_memory populated g.plan");
+        let sizes = evaluate_sizes_bufs(&graph.bufs, &self.env)?;
 
-        // Phase 1a': per-template block selection. Variants of one
-        // template must not fragment into different launch geometries,
-        // so a residual that keeps a symbolic outer bound gets its
-        // block hint from the max concrete compute size over ALL of
-        // the template's instantiations, not just its own node's. An
-        // author-set block hint wins.
-        let mut group_max: HashMap<[u8; 32], i64> = HashMap::new();
-        for pu in &unique {
-            if let Some(m) = pu.max_outer {
-                group_max
-                    .entry(pu.template_hash)
-                    .and_modify(|g| *g = (*g).max(m))
-                    .or_insert(m);
-            }
-        }
-        for pu in &mut unique {
-            if pu.max_outer.is_none() {
-                continue;
-            }
-            let ResidualSlot::Owned(m) = &mut pu.residual else {
-                continue;
-            };
-            if m.builder.block_hint().is_none() {
-                let group_m = group_max[&pu.template_hash];
-                m.builder
-                    .set_block_hint(block_size_policy(group_m as usize));
-            }
-        }
-        drop(group_max);
-        let unique_param_vals: Vec<Vec<i64>> = unique.iter().map(|pu| pu.vals.clone()).collect();
-        let unique_modules: Vec<Arc<ir::Module>> = unique
-            .into_iter()
-            .map(|pu| match pu.residual {
-                ResidualSlot::Shared(a) => a,
-                ResidualSlot::Owned(m) => Arc::new(m),
-            })
-            .collect();
-
-        // Phase 1b: content-based dedup. `Arc::as_ptr` identity picks up
-        // callers who deliberately share a single module handle across
-        // multiple `insert_kernel` calls, but a helper that rebuilds the
-        // same `Module` at each call site produces distinct `Arc`s with
-        // identical bytes. Group by `module_hash` so those still share one
-        // JIT build. `hash_repr[i]` is the *representative* unique-module
-        // index for `unique_modules[i]` (`i` itself if this module was the
-        // first with its hash).
-        let hashes: Vec<[u8; 32]> = unique_modules.iter().map(|m| module_hash(m)).collect();
-        let mut hash_repr: Vec<usize> = Vec::with_capacity(unique_modules.len());
-        let mut representative_of_hash: HashMap<[u8; 32], usize> = HashMap::new();
-        let mut representatives: Vec<usize> = Vec::new();
-        for (i, h) in hashes.iter().enumerate() {
-            match representative_of_hash.get(h) {
-                Some(&repr) => hash_repr.push(repr),
-                None => {
-                    representative_of_hash.insert(*h, i);
-                    representatives.push(i);
-                    hash_repr.push(i);
-                }
-            }
-        }
-        drop(representative_of_hash);
-        let num_unique_content = representatives.len();
-
-        // Each unique_module_idx maps to the *compact* index of its
-        // representative in `kernels: Vec<KernelProgram>`. Aliased entries
-        // share the same compact index.
-        let compact_of_repr: HashMap<usize, usize> = representatives
-            .iter()
-            .enumerate()
-            .map(|(compact, &repr)| (repr, compact))
-            .collect();
-        let unique_to_kernel_idx: Vec<usize> = (0..unique_modules.len())
-            .map(|i| compact_of_repr[&hash_repr[i]])
-            .collect();
-
-        // Phase 1c: probe the on-disk cache, but only for representatives.
-        // Cache hits are loaded on the main thread (cheap; just a dlopen).
-        // `compiled_by_compact[compact_idx] = Some(km)` after Phase 1e.
-        let mut compiled_by_compact: Vec<Option<KernelProgram>> =
-            (0..num_unique_content).map(|_| None).collect();
-        let mut cache_misses: Vec<usize> = Vec::new();
-        let mut num_cached_modules = 0usize;
-        for (compact, &repr) in representatives.iter().enumerate() {
-            let module = &unique_modules[repr];
-            let hit = match &self.kernel_cache {
-                Some(cache) => cache.get(module)?,
-                None => None,
-            };
-            match hit {
-                Some(km) => {
-                    compiled_by_compact[compact] = Some(km);
-                    num_cached_modules += 1;
-                }
-                None => cache_misses.push(compact),
-            }
-        }
-
-        // Phase 1d: JIT the misses in parallel — one compile per unique
-        // content hash, not per unique Arc handle. Prints a progress line
-        // every 5% completion so long compiles at large problem sizes are
-        // observable.
-        let module_compiler = &self.module_compiler;
-        let cache = self.kernel_cache.clone();
-        let n_to_compile = cache_misses.len();
-        let compile_results: Vec<Result<(usize, KernelProgram), CompileError>> = {
-            use std::{
-                sync::atomic::{AtomicUsize, Ordering},
-                time::Instant,
-            };
-
-            use rayon::prelude::*;
-            let done = AtomicUsize::new(0);
-            let next_tick = AtomicUsize::new(0);
-            let start = Instant::now();
-            if n_to_compile > 0 {
-                let total = n_to_compile + num_cached_modules;
-                eprintln!(
-                    "[compile] {n_to_compile}/{total} unique kernel modules need fresh nvcc \
-                     invocations ({num_cached_modules} served from on-disk cache)",
-                );
-            }
-            let out: Vec<Result<(usize, KernelProgram), CompileError>> = cache_misses
-                .par_iter()
-                .map(|&compact| {
-                    let repr = representatives[compact];
-                    let module = &unique_modules[repr];
-                    // The graph passes above leave `module` as a
-                    // canonicalized, monomorphized, single-kernel
-                    // residual — exactly what the strict per-kernel
-                    // backend expects.
-                    let km = module_compiler.compile((**module).clone())?;
-                    if let Some(c) = &cache {
-                        // Best-effort — a failed insert shouldn't fail the compile.
-                        let _ = c.insert(module, &km);
-                    }
-                    let d = done.fetch_add(1, Ordering::Relaxed) + 1;
-                    // Advance the "next 5% tick" pointer past every ceiling we crossed;
-                    // whoever performs the CAS that lands us at or past a tick prints it.
-                    let pct = d * 100 / n_to_compile.max(1);
-                    let tick = (pct / 5) * 5;
-                    let mut cur = next_tick.load(Ordering::Relaxed);
-                    while tick > cur
-                        && next_tick
-                            .compare_exchange_weak(cur, tick, Ordering::Relaxed, Ordering::Relaxed)
-                            .is_err()
-                    {
-                        cur = next_tick.load(Ordering::Relaxed);
-                    }
-                    if tick > cur {
-                        eprintln!(
-                            "[compile] {tick:>3}% ({d}/{n_to_compile}, {:.1}s elapsed)",
-                            start.elapsed().as_secs_f64(),
-                        );
-                    }
-                    Ok((compact, km))
-                })
-                .collect();
-            if n_to_compile > 0 {
-                let succeeded = out.iter().filter(|r| r.is_ok()).count();
-                let failed = n_to_compile - succeeded;
-                if failed == 0 {
-                    eprintln!(
-                        "[compile] done ({succeeded}/{n_to_compile}, {:.1}s total)",
-                        start.elapsed().as_secs_f64(),
-                    );
-                } else {
-                    eprintln!(
-                        "[compile] finished with errors ({succeeded}/{n_to_compile} succeeded, \
-                         {failed} failed, {:.1}s total)",
-                        start.elapsed().as_secs_f64(),
-                    );
-                    let mut timed_out: Vec<(&str, f64, f64)> = out
-                        .iter()
-                        .filter_map(|r| match r {
-                            Err(CompileError::NvccTimeout {
-                                name,
-                                seconds,
-                                limit,
-                            }) => Some((name.as_str(), *seconds, *limit)),
-                            _ => None,
-                        })
-                        .collect();
-                    if !timed_out.is_empty() {
-                        timed_out.sort_by(|a, b| b.1.total_cmp(&a.1));
-                        eprintln!(
-                            "[compile] {} nvcc invocation(s) timed out (limit {:.0}s):",
-                            timed_out.len(),
-                            timed_out[0].2,
-                        );
-                        for (name, secs, _) in &timed_out {
-                            eprintln!("[compile]   [{secs:>7.1}s]  {name}");
-                        }
-                    }
-                    let other_failures: Vec<&CompileError> = out
-                        .iter()
-                        .filter_map(|r| match r {
-                            Err(e) if !matches!(e, CompileError::NvccTimeout { .. }) => Some(e),
-                            _ => None,
-                        })
-                        .collect();
-                    if !other_failures.is_empty() {
-                        eprintln!("[compile] {} non-timeout failure(s):", other_failures.len(),);
-                        for e in other_failures.iter().take(5) {
-                            eprintln!("[compile]   {e}");
-                        }
-                        if other_failures.len() > 5 {
-                            eprintln!("[compile]   ...and {} more", other_failures.len() - 5,);
-                        }
-                    }
-                }
-            }
-            out
-        };
-        for res in compile_results {
-            let (compact, km) = res?;
-            compiled_by_compact[compact] = Some(km);
-        }
-
-        // Move the owned `KernelProgram`s into a compact `Vec` indexed by
-        // the representative's compact index — this is `GraphExe.kernels`.
-        // Aliased unique_module_idxs already share the same compact idx via
-        // `unique_to_kernel_idx`, so no cloning needed. `mut` because the
-        // ExeNode assembly below binds `set_params` on each kernel to
-        // validate sizes.
-        let mut kernels: Vec<KernelProgram> = compiled_by_compact
-            .into_iter()
-            .map(|slot| slot.expect("every compact slot filled"))
-            .collect();
-
-        // Phase 1d: assemble `PreExe`s in original node order. Each Kernel
-        // node's `kernel_idx` points into `kernels`.
-        let mut compiled: Vec<PreExe> = Vec::with_capacity(nodes.len());
-        for (node, mod_idx) in nodes.into_iter().zip(node_module_idx.into_iter()) {
-            compiled.push(match node {
-                GraphNode::Kernel(k) => {
-                    let idx = mod_idx.expect("Kernel node without module index");
-                    let kernel_idx = unique_to_kernel_idx[idx];
-                    let set_params = unique_param_vals[idx].clone();
-                    let name = k.module.name.clone();
-                    PreExe::Kernel {
-                        name,
-                        kernel_idx,
-                        inputs: k.inputs,
-                        outputs: k.outputs,
-                        set_params,
-                    }
-                }
-                GraphNode::BlackboxKernel(k) => PreExe::Blackbox(k),
-                GraphNode::Const(c) => PreExe::Const(c),
-                GraphNode::Memcpy(m) => PreExe::Memcpy {
-                    src: m.src,
-                    src_offset: eval_nonneg(&m.src_offset, &self.env, "memcpy src_offset")?,
-                    dst: m.dst,
-                    dst_offset: eval_nonneg(&m.dst_offset, &self.env, "memcpy dst_offset")?,
-                    num_bytes: eval_nonneg(&m.num_bytes, &self.env, "memcpy num_bytes")?,
-                },
-                GraphNode::Memset(m) => PreExe::Memset {
-                    buf: m.node,
-                    offset: eval_nonneg(&m.offset, &self.env, "memset offset")?,
-                    num_bytes: eval_nonneg(&m.num_bytes, &self.env, "memset num_bytes")?,
-                    val: m.val,
-                },
-            });
-        }
-        // Report content-unique modules rather than Arc-unique ones. This
-        // is the number of nvcc invocations a cold cache would trigger; the
-        // Arc-level count would double-count structurally identical modules
-        // built at different call sites.
-        let num_unique_modules = num_unique_content;
+        // Stage 4: derive `ExeNode`s in the graph's insertion order.
+        // Execution order comes from `plan.order` at runtime.
+        let input_bufs = graph.input_bufs().to_vec();
+        let output_bufs = graph.output_bufs().to_vec();
         let bufs = graph.bufs.clone();
-
-        // Phase 2: build per-node access sets.
-        let accesses: Vec<NodeAccess> = compiled
-            .iter()
-            .map(|p| match p {
-                PreExe::Kernel {
-                    inputs, outputs, ..
-                } => {
-                    let mut a = NodeAccess::default();
-                    a.reads.extend(inputs.iter().copied());
-                    a.writes.extend(outputs.iter().copied());
-                    a
-                }
-                PreExe::Blackbox(k) => access_from_node(&GraphNode::BlackboxKernel(clone_kn(k))),
-                PreExe::Const(c) => access_from_node(&GraphNode::Const(clone_cn(c))),
-                PreExe::Memcpy { src, dst, .. } => NodeAccess {
-                    reads: vec![*src],
-                    writes: vec![*dst],
-                },
-                PreExe::Memset { buf, .. } => NodeAccess {
-                    reads: Vec::new(),
-                    writes: vec![*buf],
-                },
-            })
-            .collect();
-
-        // Registered interface buffers are pinned in the plan: their pool
-        // slots must stay stable and intact for the whole run (and across
-        // replays that skip re-binding inputs), so no intermediate may ever
-        // reuse their memory.
-        let pin: Vec<BufId> = input_bufs
-            .iter()
-            .chain(output_bufs.iter())
-            .copied()
-            .collect();
-
-        // Phase 3: plan and validate.
-        let plan = planner::plan_raw(
-            &bufs,
-            &accesses,
-            &self.env,
-            self.device,
-            &pin,
-            &self.scheduler,
-        )
-        .map_err(|e| match e {
-            PlanError::UnboundSizeSymbol { .. } | PlanError::NegativeSize { .. } => {
-                CompileError::Type(format!("graph plan: {e}"))
-            }
-            #[cfg(feature = "planner-ortools")]
-            PlanError::NoSolution(_) => CompileError::Runtime(format!("graph plan: {e}")),
-        })?;
-        let sizes = evaluate_sizes_bufs(&bufs, &self.env)?;
-
-        // Assemble ExeNodes.
-        let mut nodes = Vec::with_capacity(compiled.len());
-        for p in compiled {
-            nodes.push(match p {
-                PreExe::Kernel {
-                    name,
-                    kernel_idx,
-                    inputs,
-                    outputs,
-                    set_params,
-                } => {
-                    {
-                        // Sizes on a shared handle are functions of the
-                        // currently-bound params; bind this node's before
-                        // querying.
-                        let m = &mut kernels[kernel_idx];
-                        let names: Vec<String> = m.params().to_vec();
-                        for (name, &v) in names.iter().zip(set_params.iter()) {
-                            m.set_symbol(name, v);
-                        }
-                        check_kernel_sizes(m, &inputs, &outputs, &sizes)?;
-                    }
-                    ExeNode::Kernel(ExeKernel {
-                        name,
-                        kernel_idx,
-                        inputs,
-                        outputs,
-                        set_params,
-                    })
-                }
-                PreExe::Blackbox(k) => ExeNode::Blackbox(k),
-                PreExe::Const(c) => ExeNode::Const(c),
-                PreExe::Memcpy {
-                    src,
-                    src_offset,
-                    dst,
-                    dst_offset,
-                    num_bytes,
-                } => {
-                    let src_end = src_offset.checked_add(num_bytes).ok_or_else(|| {
-                        CompileError::Runtime(format!(
-                            "memcpy: src_offset+num_bytes overflows usize \
-                             ({src_offset} + {num_bytes})"
-                        ))
-                    })?;
-                    if src_end > sizes[src.0] {
-                        return Err(CompileError::Runtime(format!(
-                            "memcpy: src range [{src_offset}..{src_end}) exceeds \
-                             buffer {src:?} size {}",
-                            sizes[src.0]
-                        )));
-                    }
-                    let dst_end = dst_offset.checked_add(num_bytes).ok_or_else(|| {
-                        CompileError::Runtime(format!(
-                            "memcpy: dst_offset+num_bytes overflows usize \
-                             ({dst_offset} + {num_bytes})"
-                        ))
-                    })?;
-                    if dst_end > sizes[dst.0] {
-                        return Err(CompileError::Runtime(format!(
-                            "memcpy: dst range [{dst_offset}..{dst_end}) exceeds \
-                             buffer {dst:?} size {}",
-                            sizes[dst.0]
-                        )));
-                    }
-                    ExeNode::Memcpy {
-                        src,
-                        src_offset,
-                        dst,
-                        dst_offset,
-                        num_bytes,
-                    }
-                }
-                PreExe::Memset {
-                    buf,
-                    offset,
-                    num_bytes,
-                    val,
-                } => {
-                    let end = offset.checked_add(num_bytes).ok_or_else(|| {
-                        CompileError::Runtime(format!(
-                            "memset: offset+num_bytes overflows usize ({offset} + {num_bytes})"
-                        ))
-                    })?;
-                    if end > sizes[buf.0] {
-                        return Err(CompileError::Runtime(format!(
-                            "memset: range [{offset}..{end}) exceeds buffer {buf:?} size {}",
-                            sizes[buf.0]
-                        )));
-                    }
-                    ExeNode::Memset {
-                        buf,
-                        offset,
-                        num_bytes,
-                        val,
-                    }
-                }
-            });
+        let mut exe_nodes: Vec<ExeNode> = Vec::with_capacity(graph.nodes.len());
+        for node in graph.nodes.drain(..) {
+            exe_nodes.push(build_exe_node(
+                node,
+                &kernel_of_ptr,
+                &mut kernels,
+                &sizes,
+                &self.env,
+            )?);
         }
 
         Ok(GraphExe {
             plan,
             sizes,
             kernels,
-            nodes,
+            nodes: exe_nodes,
             inputs_bound: vec![false; input_bufs.len()],
             input_bufs,
             output_bufs,
@@ -1163,6 +651,304 @@ impl GraphCompiler {
             captured: None,
         })
     }
+
+    /// Compiles one [`KernelProgram`] per unique `Arc<ir::Module>` seen
+    /// in `graph.nodes`. The graph passes have already dedup'd
+    /// structurally identical modules onto one Arc, so pointer equality
+    /// is the full deduplication key. Cache hits skip nvcc; misses are
+    /// JIT'd in parallel (see [`jit_kernel_misses`]). `check_accesses`
+    /// runs graph-side per unique `(module ptr, bindings)` pair since it
+    /// needs concrete binding values.
+    fn compile_unique_kernels(
+        &self,
+        graph: &GraphBuilder,
+    ) -> Result<CompiledKernels, CompileError> {
+        // Collect unique modules by Arc pointer in first-seen order.
+        let mut unique_modules: Vec<Arc<ir::Module>> = Vec::new();
+        let mut kernel_of_ptr: HashMap<*const ir::Module, usize> = HashMap::new();
+        let mut checked: HashSet<(*const ir::Module, BTreeMap<String, i64>)> = HashSet::new();
+        for node in &graph.nodes {
+            let GraphNode::Kernel(k) = node else { continue };
+            let ptr = Arc::as_ptr(&k.module);
+            kernel_of_ptr.entry(ptr).or_insert_with(|| {
+                unique_modules.push(k.module.clone());
+                unique_modules.len() - 1
+            });
+            if self.module_compiler.check_accesses
+                && checked.insert((ptr, k.param_bindings.clone()))
+            {
+                check_module_accesses(&k.module, &k.param_bindings)?;
+            }
+        }
+
+        // Probe the on-disk cache before spawning nvcc.
+        let mut compiled: Vec<Option<KernelProgram>> =
+            (0..unique_modules.len()).map(|_| None).collect();
+        let mut misses: Vec<usize> = Vec::new();
+        let mut num_cached_modules = 0usize;
+        for (i, module) in unique_modules.iter().enumerate() {
+            let hit = match &self.kernel_cache {
+                Some(cache) => cache.get(module)?,
+                None => None,
+            };
+            match hit {
+                Some(km) => {
+                    compiled[i] = Some(km);
+                    num_cached_modules += 1;
+                }
+                None => misses.push(i),
+            }
+        }
+
+        for res in jit_kernel_misses(
+            &misses,
+            &unique_modules,
+            &self.module_compiler,
+            self.kernel_cache.as_deref(),
+            num_cached_modules,
+        ) {
+            let (i, km) = res?;
+            compiled[i] = Some(km);
+        }
+
+        let kernels: Vec<KernelProgram> = compiled
+            .into_iter()
+            .map(|slot| slot.expect("every unique-module slot filled"))
+            .collect();
+        let num_unique_modules = kernels.len();
+        Ok(CompiledKernels {
+            kernels,
+            kernel_of_ptr,
+            num_unique_modules,
+            num_cached_modules,
+        })
+    }
+}
+
+/// Return value of [`GraphCompiler::compile_unique_kernels`].
+struct CompiledKernels {
+    /// One artifact per unique `Arc<ir::Module>`, indexed by first-seen
+    /// order in `graph.nodes`.
+    kernels: Vec<KernelProgram>,
+    /// Maps a kernel node's `Arc::as_ptr(&module)` to its index in
+    /// [`Self::kernels`]. Every kernel node in the graph appears here.
+    kernel_of_ptr: HashMap<*const ir::Module, usize>,
+    num_unique_modules: usize,
+    num_cached_modules: usize,
+}
+
+/// Parallel JIT for the given cache-miss indices, with periodic progress
+/// output and a post-run summary of failures/timeouts. Best-effort insert
+/// into `cache` when supplied — an insert failure never fails the compile.
+fn jit_kernel_misses(
+    misses: &[usize],
+    unique_modules: &[Arc<ir::Module>],
+    module_compiler: &ModuleCompiler,
+    cache: Option<&KernelCache>,
+    num_cached_modules: usize,
+) -> Vec<Result<(usize, KernelProgram), CompileError>> {
+    use std::{
+        sync::atomic::{AtomicUsize, Ordering},
+        time::Instant,
+    };
+
+    use rayon::prelude::*;
+
+    let n_to_compile = misses.len();
+    if n_to_compile > 0 {
+        let total = n_to_compile + num_cached_modules;
+        eprintln!(
+            "[compile] {n_to_compile}/{total} unique kernel modules need fresh nvcc \
+             invocations ({num_cached_modules} served from on-disk cache)",
+        );
+    }
+    let done = AtomicUsize::new(0);
+    let next_tick = AtomicUsize::new(0);
+    let start = Instant::now();
+    let out: Vec<Result<(usize, KernelProgram), CompileError>> = misses
+        .par_iter()
+        .map(|&i| {
+            let module = &unique_modules[i];
+            let km = module_compiler.compile((**module).clone())?;
+            if let Some(c) = cache {
+                let _ = c.insert(module, &km);
+            }
+            let d = done.fetch_add(1, Ordering::Relaxed) + 1;
+            // Advance past every 5% tick we crossed; whoever CAS's past a
+            // tick prints it.
+            let pct = d * 100 / n_to_compile.max(1);
+            let tick = (pct / 5) * 5;
+            let mut cur = next_tick.load(Ordering::Relaxed);
+            while tick > cur
+                && next_tick
+                    .compare_exchange_weak(cur, tick, Ordering::Relaxed, Ordering::Relaxed)
+                    .is_err()
+            {
+                cur = next_tick.load(Ordering::Relaxed);
+            }
+            if tick > cur {
+                eprintln!(
+                    "[compile] {tick:>3}% ({d}/{n_to_compile}, {:.1}s elapsed)",
+                    start.elapsed().as_secs_f64(),
+                );
+            }
+            Ok((i, km))
+        })
+        .collect();
+    if n_to_compile == 0 {
+        return out;
+    }
+    let succeeded = out.iter().filter(|r| r.is_ok()).count();
+    let failed = n_to_compile - succeeded;
+    if failed == 0 {
+        eprintln!(
+            "[compile] done ({succeeded}/{n_to_compile}, {:.1}s total)",
+            start.elapsed().as_secs_f64(),
+        );
+        return out;
+    }
+    eprintln!(
+        "[compile] finished with errors ({succeeded}/{n_to_compile} succeeded, \
+         {failed} failed, {:.1}s total)",
+        start.elapsed().as_secs_f64(),
+    );
+    let mut timed_out: Vec<(&str, f64, f64)> = out
+        .iter()
+        .filter_map(|r| match r {
+            Err(CompileError::NvccTimeout {
+                name,
+                seconds,
+                limit,
+            }) => Some((name.as_str(), *seconds, *limit)),
+            _ => None,
+        })
+        .collect();
+    if !timed_out.is_empty() {
+        timed_out.sort_by(|a, b| b.1.total_cmp(&a.1));
+        eprintln!(
+            "[compile] {} nvcc invocation(s) timed out (limit {:.0}s):",
+            timed_out.len(),
+            timed_out[0].2,
+        );
+        for (name, secs, _) in &timed_out {
+            eprintln!("[compile]   [{secs:>7.1}s]  {name}");
+        }
+    }
+    let other_failures: Vec<&CompileError> = out
+        .iter()
+        .filter_map(|r| match r {
+            Err(e) if !matches!(e, CompileError::NvccTimeout { .. }) => Some(e),
+            _ => None,
+        })
+        .collect();
+    if !other_failures.is_empty() {
+        eprintln!("[compile] {} non-timeout failure(s):", other_failures.len());
+        for e in other_failures.iter().take(5) {
+            eprintln!("[compile]   {e}");
+        }
+        if other_failures.len() > 5 {
+            eprintln!("[compile]   ...and {} more", other_failures.len() - 5);
+        }
+    }
+    out
+}
+
+/// Turns one `GraphNode` into its `ExeNode`. Evaluates memcpy/memset
+/// offsets under the graph compiler's env, validates range bounds, and
+/// for kernel nodes: looks up the compiled artifact by module Arc
+/// pointer, binds `param_bindings` on the shared handle, and validates
+/// kernel input/output sizes against the plan.
+fn build_exe_node(
+    node: GraphNode,
+    kernel_of_ptr: &HashMap<*const ir::Module, usize>,
+    kernels: &mut [KernelProgram],
+    sizes: &[usize],
+    env: &BTreeMap<VarId, i64>,
+) -> Result<ExeNode, CompileError> {
+    Ok(match node {
+        GraphNode::Kernel(k) => {
+            let kernel_idx = *kernel_of_ptr
+                .get(&Arc::as_ptr(&k.module))
+                .expect("compile_unique_kernels visited every Kernel node");
+            let set_params = pos_vec(&k.module, &k.param_bindings);
+            // Kernel sizes are a function of the currently-bound symbols;
+            // bind this node's before validating.
+            let m = &mut kernels[kernel_idx];
+            let names: Vec<String> = m.params().to_vec();
+            for (name, &v) in names.iter().zip(set_params.iter()) {
+                m.set_symbol(name, v);
+            }
+            check_kernel_sizes(m, &k.inputs, &k.outputs, sizes)?;
+            ExeNode::Kernel(ExeKernel {
+                name: k.module.name.clone(),
+                kernel_idx,
+                inputs: k.inputs,
+                outputs: k.outputs,
+                set_params,
+            })
+        }
+        GraphNode::BlackboxKernel(k) => ExeNode::Blackbox(k),
+        GraphNode::Const(c) => ExeNode::Const(c),
+        GraphNode::Memcpy(m) => {
+            let src_offset = eval_nonneg(&m.src_offset, env, "memcpy src_offset")?;
+            let dst_offset = eval_nonneg(&m.dst_offset, env, "memcpy dst_offset")?;
+            let num_bytes = eval_nonneg(&m.num_bytes, env, "memcpy num_bytes")?;
+            let src_end = src_offset.checked_add(num_bytes).ok_or_else(|| {
+                CompileError::Runtime(format!(
+                    "memcpy: src_offset+num_bytes overflows usize \
+                     ({src_offset} + {num_bytes})"
+                ))
+            })?;
+            if src_end > sizes[m.src.0] {
+                return Err(CompileError::Runtime(format!(
+                    "memcpy: src range [{src_offset}..{src_end}) exceeds \
+                     buffer {:?} size {}",
+                    m.src, sizes[m.src.0]
+                )));
+            }
+            let dst_end = dst_offset.checked_add(num_bytes).ok_or_else(|| {
+                CompileError::Runtime(format!(
+                    "memcpy: dst_offset+num_bytes overflows usize \
+                     ({dst_offset} + {num_bytes})"
+                ))
+            })?;
+            if dst_end > sizes[m.dst.0] {
+                return Err(CompileError::Runtime(format!(
+                    "memcpy: dst range [{dst_offset}..{dst_end}) exceeds \
+                     buffer {:?} size {}",
+                    m.dst, sizes[m.dst.0]
+                )));
+            }
+            ExeNode::Memcpy {
+                src: m.src,
+                src_offset,
+                dst: m.dst,
+                dst_offset,
+                num_bytes,
+            }
+        }
+        GraphNode::Memset(m) => {
+            let offset = eval_nonneg(&m.offset, env, "memset offset")?;
+            let num_bytes = eval_nonneg(&m.num_bytes, env, "memset num_bytes")?;
+            let end = offset.checked_add(num_bytes).ok_or_else(|| {
+                CompileError::Runtime(format!(
+                    "memset: offset+num_bytes overflows usize ({offset} + {num_bytes})"
+                ))
+            })?;
+            if end > sizes[m.node.0] {
+                return Err(CompileError::Runtime(format!(
+                    "memset: range [{offset}..{end}) exceeds buffer {:?} size {}",
+                    m.node, sizes[m.node.0]
+                )));
+            }
+            ExeNode::Memset {
+                buf: m.node,
+                offset,
+                num_bytes,
+                val: m.val,
+            }
+        }
+    })
 }
 
 /// Validates the registered graph interface against the raw (pre-fusion)
@@ -1285,26 +1071,6 @@ fn validate_interface(graph: &GraphBuilder, device: DeviceType) -> Result<(), Co
         }
     }
     Ok(())
-}
-
-fn clone_kn(k: &KernelNode) -> KernelNode {
-    // KernelNode's `func` is not Clone, but `access_from_node` only inspects
-    // the buffer fields. Build a shallow copy with a placeholder closure.
-    KernelNode {
-        inputs: k.inputs.clone(),
-        outputs: k.outputs.clone(),
-        carried_outputs: k.carried_outputs.clone(),
-        func: Box::new(|_, _, _| {}),
-        name: k.name.clone(),
-    }
-}
-
-fn clone_cn(c: &ConstNode) -> ConstNode {
-    ConstNode {
-        buf: c.buf,
-        // Cheap placeholder — access_from_node only reads `buf`.
-        data: ConstBuf::HostBuf(Vec::new()),
-    }
 }
 
 struct ExeKernel {
