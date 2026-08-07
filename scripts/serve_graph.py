@@ -7,47 +7,57 @@ Usage:
 Then open http://localhost:8000. The JSON file is re-read on every page
 reload, so regenerating the dump and hitting F5 picks up the new graph.
 
-Layout: if `node` and the `elkjs` package are available, node positions are
-computed server-side with ELK's layered algorithm (Sugiyama-style crossing
-minimization) and served as a preset layout — this handles thousands of
-nodes, where the in-browser layered layouts (dagre, klay) freeze the tab.
-The result is cached in a `<dump>.pos.json` sidecar keyed on the dump's
-mtime and the layout knobs (direction, wrapping, dup-leaves threshold).
+Layout: node positions are computed offline. Two engines, both producing
+top-to-bottom layered layouts for DAG viewing:
 
-Install elkjs with one of:
+  * `dot` (Graphviz): full Sugiyama with crossing minimization — best
+    quality, but O(|E|²) mincross makes it intractable above a few
+    thousand edges (10+ minutes on the log_n=20 fractional-sumcheck
+    fused graph).
+  * `python-layered` (built-in): longest-path ranking + median-heuristic
+    ordering, no dummy nodes for long edges. Runs in ~50ms on the same
+    graph. Crossings-oblivious so the visual is messier than dot on
+    small graphs, but usable on graphs where dot times out.
 
-    npm install elkjs                          # resolved via ./node_modules
-    npm install --prefix scripts elkjs         # resolved next to this script
-    python3 scripts/serve_graph.py --node-modules /path/to/node_modules ...
+Results are cached in a `<dump>.pos.json` sidecar keyed on the dump's
+mtime plus the layout knobs. `dot` requires Graphviz on PATH — install
+with `apt install graphviz` or `brew install graphviz`.
 
-Without elkjs the viewer falls back to the (fast, crossing-oblivious)
-breadthfirst layout. Client-side overrides: ?layout=breadthfirst|dagre|klay.
+Engine selection (`--engine auto`, the default) picks `dot` when the
+graph has at most `--dot-max-edges` edges (default 2000) and
+`python-layered` otherwise. Force `--engine dot` / `--engine
+python-layered` to override.
 
-Layout knobs (all optional, defaults are tuned for graphs up to ~10k nodes):
+If `dot` is missing (or `--no-layout` is passed) `python-layered` is
+used regardless.
 
-    --direction DOWN|RIGHT|UP|LEFT      flow direction (default DOWN)
-    --wrap-layers                       wrap over-wide layers (opt-in)
+Layout knobs (all optional):
+
+    --engine auto|dot|python-layered    layout engine (default auto)
+    --dot-max-edges N                   `auto` uses dot when the graph
+                                        has at most this many edges,
+                                        python-layered otherwise
+                                        (default 2000)
+    --rankdir TB|LR|BT|RL               flow direction for dot only
+                                        (default TB, top-to-bottom;
+                                        python-layered is TB-only)
     --dup-leaves-threshold N            duplicate Const/Input nodes with
                                         more than N consumers (default 4;
                                         0 to disable) — one shadow copy
-                                        per consumer, so ELK sees short
-                                        local edges instead of a giant
-                                        crossing bundle from a shared leaf
-    --node-heap-mb N                    V8 heap for the ELK subprocess
-                                        (default 16384) — the default 4 GB
-                                        OOMs on graphs of a few thousand
-                                        nodes with heavy edge density
-    --max-elk-nodes N                   fall back to breadthfirst above N
-                                        (post-duplication) nodes; ELK's
-                                        crossing minimization is quadratic
-                                        in the widest layer
-    --no-elk                            skip ELK entirely
+                                        per consumer, so the layout
+                                        engine sees short local edges
+                                        instead of one giant crossing
+                                        bundle from a shared leaf
+    --max-nodes N                       fall back to breadthfirst above N
+                                        (post-duplication) nodes
+    --no-layout                         skip layout entirely
 """
 
 import argparse
 import http.server
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -55,121 +65,6 @@ import threading
 import time
 from pathlib import Path
 
-# Reads the cy.json elements from argv[2], runs ELK layered layout, prints
-# {node_id: [center_x, center_y]} to stdout.
-#
-# Options (via env):
-#   ELK_DIRECTION       flow direction: DOWN|RIGHT|UP|LEFT (default DOWN)
-#   ELK_ASPECT_RATIO    target width/height ratio (default 1.6)
-#   ELK_WRAP            if "1", wrap over-wide layers into stacked sub-rows
-#   ELK_QUALITY         quality/speed preset: fast|balanced|nice
-#                        - fast:     SIMPLE placement, no crossing min, no
-#                                    post-compaction — sub-second on ~10k
-#                                    nodes, edges are messy.
-#                        - balanced: LINEAR_SEGMENTS placement, LAYER_SWEEP
-#                                    crossing min. Default.
-#                        - nice:     BRANDES_KOEPF placement (4-alignment
-#                                    straight-edge LP), LAYER_SWEEP, plus
-#                                    EDGE_LENGTH post-compaction. Slowest.
-#
-# `nice` was the old default — it's the prettiest but on 2k+ node graphs
-# is several × slower than `balanced` because BRANDES_KOEPF re-runs four
-# independent placement alignments and picks the best.
-ELK_JS = """
-const fs = require("fs");
-const ELK = require("elkjs");
-const data = JSON.parse(fs.readFileSync(process.argv[2], "utf8")).elements;
-const direction = process.env.ELK_DIRECTION || "DOWN";
-const aspectRatio = process.env.ELK_ASPECT_RATIO || "1.6";
-const wrap = process.env.ELK_WRAP === "1";
-const quality = process.env.ELK_QUALITY || "balanced";
-const seen = new Set();
-const edges = data.edges.filter(e => {
-  const k = e.data.source + ">" + e.data.target;
-  if (seen.has(k)) return false;
-  seen.add(k);
-  return true;
-});
-const dim = n => {
-  const lines = (n.data.label || n.data.id).split("\\n");
-  const w = Math.max(...lines.map(l => l.length));
-  return { width: Math.max(60, 6 * w + 16), height: 16 + 12 * lines.length };
-};
-// The three presets swap layering strategy, node placement, crossing
-// minimization, and edge routing. NETWORK_SIMPLEX layering is a full LP
-// over all nodes — on 2k+ node graphs it dominates the run time. Switch
-// to LONGEST_PATH for the fast presets: linear-time, gives deeper but
-// visually reasonable layers.
-const PRESETS = {
-  fast: {
-    layering: "LONGEST_PATH",
-    placement: "SIMPLE",
-    crossingMin: "NONE",
-    edgeRouting: "POLYLINE",
-    postCompaction: null,
-  },
-  balanced: {
-    layering: "LONGEST_PATH",
-    placement: "LINEAR_SEGMENTS",
-    crossingMin: "LAYER_SWEEP",
-    edgeRouting: "POLYLINE",
-    postCompaction: null,
-  },
-  nice: {
-    layering: "NETWORK_SIMPLEX",
-    placement: "BRANDES_KOEPF",
-    crossingMin: "LAYER_SWEEP",
-    edgeRouting: "ORTHOGONAL",
-    postCompaction: "EDGE_LENGTH",
-  },
-};
-const preset = PRESETS[quality] || PRESETS.balanced;
-const layoutOptions = {
-  "elk.algorithm": "layered",
-  "elk.direction": direction,
-  "elk.aspectRatio": aspectRatio,
-  "elk.layered.thoroughness": "1",
-  "elk.layered.layering.strategy": preset.layering,
-  "elk.layered.crossingMinimization.strategy": preset.crossingMin,
-  // O(n^2) per layer per iteration — OFF for any preset we support.
-  "elk.layered.crossingMinimization.greedySwitch.type": "OFF",
-  "elk.layered.crossingMinimization.greedySwitchHierarchical.type": "OFF",
-  "elk.layered.nodePlacement.strategy": preset.placement,
-  "elk.edgeRouting": preset.edgeRouting,
-  // Merges parallel edges between the same two layers for layout
-  // purposes (bundled for placement; still drawn separately). A huge
-  // win on graphs with high-fanout hubs (each hub's outgoing bundle
-  // gets treated as one edge for routing).
-  "elk.layered.mergeEdges": "true",
-  "elk.spacing.nodeNode": "20",
-  "elk.layered.spacing.nodeNodeBetweenLayers": "40",
-};
-if (preset.placement === "BRANDES_KOEPF") {
-  layoutOptions["elk.layered.nodePlacement.bk.fixedAlignment"] = "BALANCED";
-}
-if (preset.postCompaction) {
-  layoutOptions["elk.layered.compaction.postCompaction.strategy"] = preset.postCompaction;
-}
-if (wrap) {
-  // MULTI_EDGE wraps whenever the aspect-ratio target would be exceeded,
-  // pulling parts of over-wide layers into stacked sub-rows.
-  layoutOptions["elk.layered.wrapping.strategy"] = "MULTI_EDGE";
-  layoutOptions["elk.layered.wrapping.additionalEdgeSpacing"] = "20";
-}
-const graph = {
-  id: "root",
-  layoutOptions,
-  children: data.nodes.map(n => ({ id: n.data.id, ...dim(n) })),
-  edges: edges.map((e, i) => ({ id: "le" + i, sources: [e.data.source], targets: [e.data.target] })),
-};
-const t0 = Date.now();
-new ELK().layout(graph).then(g => {
-  const pos = {};
-  for (const c of g.children) pos[c.id] = [Math.round(c.x + c.width / 2), Math.round(c.y + c.height / 2)];
-  process.stderr.write(`elk ${quality} preset done in ${((Date.now() - t0) / 1000).toFixed(1)}s\\n`);
-  process.stdout.write(JSON.stringify(pos));
-}).catch(e => { console.error(String(e)); process.exit(1); });
-"""
 
 INDEX_HTML = """<!DOCTYPE html>
 <html>
@@ -177,10 +72,6 @@ INDEX_HTML = """<!DOCTYPE html>
 <meta charset="utf-8">
 <title>Graph IR viewer</title>
 <script src="https://unpkg.com/cytoscape@3.30.2/dist/cytoscape.min.js"></script>
-<script src="https://unpkg.com/dagre@0.8.5/dist/dagre.min.js"></script>
-<script src="https://unpkg.com/cytoscape-dagre@2.5.0/cytoscape-dagre.js"></script>
-<script src="https://unpkg.com/klayjs@0.4.1/klay.js"></script>
-<script src="https://unpkg.com/cytoscape-klay@3.1.4/cytoscape-klay.js"></script>
 <style>
   html, body { margin: 0; height: 100%; font-family: monospace; }
   #cy { width: 100%; height: calc(100% - 28px); display: block; }
@@ -299,16 +190,6 @@ const TYPE_COLORS = {
   Memset: "#76b7b2",
   Input: "#edc948",
   Output: "#e15759",
-};
-
-// "elk" means server-computed preset positions (crossing-minimized layered
-// layout). The in-browser layered layouts (dagre, klay) freeze the tab on
-// graphs beyond a few hundred edges; breadthfirst is near-linear.
-const LAYOUTS = {
-  elk: { name: "preset", fit: true },
-  breadthfirst: { name: "breadthfirst", directed: true, spacingFactor: 1.0, grid: false },
-  dagre: { name: "dagre", rankDir: "TB", nodeSep: 20, rankSep: 50 },
-  klay: { name: "klay", klay: { direction: "DOWN" } },
 };
 
 const escHtml = s => String(s).replace(/[&<>"']/g, c =>
@@ -767,9 +648,16 @@ fetch("graph.json")
   .then(r => { if (!r.ok) throw new Error(r.status + " " + r.statusText); return r.json(); })
   .then(data => {
     DATA = data;
+    // Preset layout consumes the {x, y} positions injected by the Python
+    // side from dot's output. If they're missing (dot not on PATH, or
+    // --no-layout was passed) fall back to cytoscape's built-in
+    // breadthfirst — fast, near-linear, no dependency on any external
+    // layout algorithm.
     const hasPos = data.elements.nodes.length && data.elements.nodes[0].position;
-    const layoutName = new URLSearchParams(location.search).get("layout")
-      || (hasPos ? "elk" : "breadthfirst");
+    const layoutName = hasPos ? "preset" : "breadthfirst";
+    const layout = hasPos
+      ? { name: "preset", fit: true }
+      : { name: "breadthfirst", directed: true, spacingFactor: 1.0, grid: false };
     const big = data.elements.edges.length > 1500;
     const cy = cytoscape({
       container: document.getElementById("cy"),
@@ -822,7 +710,7 @@ fetch("graph.json")
           },
         },
       ],
-      layout: LAYOUTS[layoutName] || LAYOUTS.breadthfirst,
+      layout,
       wheelSensitivity: 0.2,
     });
     CY = cy;
@@ -856,8 +744,8 @@ fetch("graph.json")
       });
     }
     // Cytoscape may apply the initial layout synchronously (preset) or
-    // asynchronously (breadthfirst/dagre/klay). Run once now for the
-    // sync case; layoutstop handles anything async plus later relayouts.
+    // asynchronously (breadthfirst). Run once now for the sync case;
+    // layoutstop handles anything async.
     applyEdgeOpacity();
     cy.on("layoutstop", applyEdgeOpacity);
     cy.on("tap", "node", evt => renderNodePanel(evt.target.data(), data.modules || {}));
@@ -874,7 +762,7 @@ fetch("graph.json")
       .join("");
     document.getElementById("bar-text").innerHTML =
       `${cy.nodes().length} nodes, ${cy.edges().length} edges` +
-      ` — layout: ${layoutName} (?layout=${Object.keys(LAYOUTS).join("|")})` +
+      ` — layout: ${layoutName}` +
       ` — edges: <span style="color:#aaa">black=read</span>,` +
       ` <span style="color:#f66">red=modify</span> —${legend}`;
   })
@@ -885,15 +773,6 @@ fetch("graph.json")
 """
 
 
-def node_path_env(extra: Path | None) -> str:
-    candidates = [extra] if extra else []
-    candidates += [Path.cwd() / "node_modules", Path(__file__).parent / "node_modules"]
-    paths = [str(c) for c in candidates if c and (c / "elkjs").is_dir()]
-    if os.environ.get("NODE_PATH"):
-        paths.append(os.environ["NODE_PATH"])
-    return os.pathsep.join(paths)
-
-
 def duplicate_high_fanout_leaves(doc: dict, threshold: int) -> int:
     """Splits Const / Input nodes with fanout > `threshold` into per-consumer
     shadow copies. Each shadow reuses the original node's data (name, ir,
@@ -901,9 +780,9 @@ def duplicate_high_fanout_leaves(doc: dict, threshold: int) -> int:
     rewritten to originate at the shadow. Layered layouts turn a
     high-fanout leaf into one long-edge bundle that spans the whole graph
     width — duplicating the leaf collapses that into many short local
-    edges, dramatically reducing crossings and shrinking ELK's working
-    set. Returns the number of shadow nodes injected (0 if nothing was
-    eligible).
+    edges, dramatically reducing crossings and shrinking the layout
+    engine's working set. Returns the number of shadow nodes injected
+    (0 if nothing was eligible).
     """
     els = doc["elements"]
     nodes = els["nodes"]
@@ -946,131 +825,335 @@ def duplicate_high_fanout_leaves(doc: dict, threshold: int) -> int:
     return sum(counter.values())
 
 
+def node_dims_px(data: dict) -> tuple[float, float]:
+    """Node width/height in pixels, matching cytoscape's label-sized
+    rendering: ~6px per char horizontally + 16px padding, ~12px per
+    line vertically + 16px padding. Used by both DOT emission (after
+    a /72 conversion to inches) and the Python layered layout."""
+    label = data.get("label") or data["id"]
+    lines = label.split("\n")
+    max_chars = max((len(ln) for ln in lines), default=1)
+    n_lines = len(lines)
+    return (max(60.0, 6 * max_chars + 16), 16.0 + 12 * n_lines)
+
+
+def emit_dot_source(doc: dict, rankdir: str) -> str:
+    """Serialize the cytoscape doc as a Graphviz DOT source. Node widths
+    and heights track the label — `fixedsize=true` so dot leaves enough
+    room for cytoscape to draw the same node without overlap. Parallel
+    edges between the same pair of endpoints are collapsed for layout
+    (they would route separately, but only add crossing-minimization
+    cost for our purposes)."""
+    out = ["digraph G {"]
+    out.append(f"  rankdir={rankdir};")
+    # Spacing tuned so nodes don't collide when cytoscape renders labels
+    # at font-size 9. Ranksep is generous because the labels wrap onto
+    # two lines (name + type) and edge labels sit between ranks.
+    out.append("  nodesep=0.25;")
+    out.append("  ranksep=0.6;")
+    # polyline is much faster than the default `spline` routing and
+    # avoids dot's expensive edge-routing pass on graphs where we throw
+    # the routes away and let cytoscape draw bezier curves anyway.
+    out.append("  splines=polyline;")
+    out.append('  node [shape=box, fixedsize=true];')
+    for n in doc["elements"]["nodes"]:
+        d = n["data"]
+        w_px, h_px = node_dims_px(d)
+        out.append(
+            f'  "{d["id"]}" [width={w_px / 72:.3f}, height={h_px / 72:.3f}];'
+        )
+    seen: set[tuple[str, str]] = set()
+    for e in doc["elements"]["edges"]:
+        s = e["data"]["source"]
+        t = e["data"]["target"]
+        key = (s, t)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(f'  "{s}" -> "{t}";')
+    out.append("}")
+    return "\n".join(out)
+
+
+def python_layered_layout(doc: dict) -> dict[str, tuple[float, float]]:
+    """Pure-Python layered layout for large DAGs. Longest-path ranking
+    via Kahn's algorithm, then a few median-heuristic sweeps to order
+    nodes within each rank (predecessor median top-down, successor
+    median bottom-up), then width-aware x placement.
+
+    Crossings-oblivious (no dummy-node insertion for long edges, no
+    global optimization), but O(V + E · sweeps) — sub-second on graphs
+    dot times out on. The result is a valid TB flow: every edge points
+    from a smaller y to a larger y, which is what makes the graph read
+    as a DAG.
+
+    Any cycles in `doc` (there shouldn't be any — graph_ir is a strict
+    DAG) get their edges dropped from ranking; those nodes settle at
+    rank 0 and won't participate in the median ordering.
+    """
+    from collections import deque
+
+    nodes = doc["elements"]["nodes"]
+    edges_raw = doc["elements"]["edges"]
+    node_ids = [n["data"]["id"] for n in nodes]
+    idx = {nid: i for i, nid in enumerate(node_ids)}
+    n = len(node_ids)
+    dims = [node_dims_px(nd["data"]) for nd in nodes]
+
+    preds: list[list[int]] = [[] for _ in range(n)]
+    succs: list[list[int]] = [[] for _ in range(n)]
+    for e in edges_raw:
+        s = idx.get(e["data"]["source"])
+        t = idx.get(e["data"]["target"])
+        if s is None or t is None or s == t:
+            continue
+        preds[t].append(s)
+        succs[s].append(t)
+
+    # Longest-path ranking. Kahn's peel: any node still with unprocessed
+    # predecessors after the queue drains is part of (or downstream of)
+    # a cycle; leave those at rank 0 rather than crash — the doc is
+    # supposed to be acyclic but a defensive fallback keeps the viewer
+    # useful even if that invariant slips.
+    indeg = [len(p) for p in preds]
+    rank = [0] * n
+    q: deque[int] = deque(i for i in range(n) if indeg[i] == 0)
+    while q:
+        u = q.popleft()
+        for v in succs[u]:
+            if rank[v] < rank[u] + 1:
+                rank[v] = rank[u] + 1
+            indeg[v] -= 1
+            if indeg[v] == 0:
+                q.append(v)
+    max_rank = max(rank) if rank else 0
+    layers: list[list[int]] = [[] for _ in range(max_rank + 1)]
+    for i, r in enumerate(rank):
+        layers[r].append(i)
+
+    # Median-heuristic ordering. Initial positions from insertion order.
+    # Top-down: reorder each rank by median position of predecessors in
+    # the previous rank. Bottom-up: same but with successors. Four
+    # sweeps is enough for our graphs to converge to a stable ordering.
+    pos = [0] * n
+    for layer in layers:
+        for j, ni in enumerate(layer):
+            pos[ni] = j
+
+    def resort(layer: list[int], neighbors: list[list[int]], r_neighbor: int) -> list[int]:
+        keyed = []
+        for ni in layer:
+            neigh_pos = sorted(pos[nb] for nb in neighbors[ni] if rank[nb] == r_neighbor)
+            if neigh_pos:
+                m = len(neigh_pos)
+                key = (
+                    neigh_pos[m // 2]
+                    if m % 2 == 1
+                    else (neigh_pos[m // 2 - 1] + neigh_pos[m // 2]) / 2
+                )
+            else:
+                key = pos[ni]
+            keyed.append((key, ni))
+        keyed.sort()
+        return [ni for _, ni in keyed]
+
+    for _ in range(4):
+        for r in range(1, len(layers)):
+            layers[r] = resort(layers[r], preds, r - 1)
+            for j, ni in enumerate(layers[r]):
+                pos[ni] = j
+        for r in range(len(layers) - 2, -1, -1):
+            layers[r] = resort(layers[r], succs, r + 1)
+            for j, ni in enumerate(layers[r]):
+                pos[ni] = j
+
+    # X placement: pack each layer L→R by node width + a gap. Then
+    # center each layer horizontally so narrow ranks float in the
+    # middle of the canvas rather than left-aligning. Y is per-rank
+    # multiples of RANKSEP.
+    NODESEP = 20.0
+    RANKSEP = 60.0
+    layer_widths = []
+    for layer in layers:
+        w = 0.0
+        for ni in layer:
+            w += dims[ni][0] + NODESEP
+        layer_widths.append(max(0.0, w - NODESEP))
+    max_w = max(layer_widths) if layer_widths else 0.0
+    positions: dict[str, tuple[float, float]] = {}
+    for r, layer in enumerate(layers):
+        offset = (max_w - layer_widths[r]) / 2
+        xoff = offset
+        y = r * RANKSEP
+        for ni in layer:
+            w, _ = dims[ni]
+            positions[node_ids[ni]] = (xoff + w / 2, y)
+            xoff += w + NODESEP
+    return positions
+
+
+def parse_dot_positions(text: str) -> dict[str, tuple[float, float]]:
+    """Extract `{node_id: (x, y_screen)}` from `dot -Tjson0` output. Dot's
+    y-axis points up (graphics convention); we flip using the graph
+    bounding box (`bb` = "x0,y0,x1,y1") so downstream consumers get
+    screen coordinates (y increases downward). Coordinates come back in
+    points (72 per inch); we pass them straight to cytoscape, which
+    treats them as pixels at zoom 1.0 — a 1:1 pt→px mapping is close
+    enough that dot's spacing choices survive without extra scaling."""
+    j = json.loads(text)
+    bb = j.get("bb", "0,0,0,0").split(",")
+    max_y = float(bb[3]) if len(bb) == 4 else 0.0
+    positions: dict[str, tuple[float, float]] = {}
+    for obj in j.get("objects", []):
+        name = obj.get("name")
+        pos = obj.get("pos")
+        if not name or not pos:
+            continue
+        parts = pos.split(",")
+        if len(parts) != 2:
+            continue
+        x, y = float(parts[0]), float(parts[1])
+        positions[name] = (x, max_y - y)
+    return positions
+
+
+def pick_engine(auto_engine: str, n_edges: int, dot_max_edges: int) -> str:
+    """Resolve `auto` to `dot` when the (post-duplication) edge count
+    fits under the threshold and `python-layered` otherwise. dot's
+    mincross is O(|E|²) per iteration, so the crossover is
+    edge-count-driven, not node-count."""
+    if auto_engine == "auto":
+        return "dot" if n_edges <= dot_max_edges else "python-layered"
+    return auto_engine
+
+
 class LayoutCache:
-    """ELK positions for a dump file, cached in memory and in a
+    """Layout positions for a dump file, cached in memory and in a
     `<dump>.pos.json` sidecar. Keyed on `(dump_mtime, params_hash)` so
-    layout knobs changing (direction, wrap, dup-leaves threshold, …)
-    force a recompute."""
+    layout knobs changing (engine, rankdir, dup-leaves threshold) force
+    a recompute."""
 
     def __init__(
         self,
         json_path: Path,
-        node_modules: Path | None,
-        node_heap_mb: int,
-        direction: str,
-        wrap: bool,
-        quality: str,
+        auto_engine: str,
+        rankdir: str,
         dup_leaves_threshold: int,
-        max_elk_nodes: int,
-        use_elk: bool,
+        max_nodes: int,
+        dot_max_edges: int,
+        use_layout: bool,
     ):
         self.json_path = json_path
         self.sidecar = Path(str(json_path) + ".pos.json")
-        self.node_heap_mb = node_heap_mb
-        self.direction = direction
-        self.wrap = wrap
-        self.quality = quality
+        self.auto_engine = auto_engine
+        self.rankdir = rankdir
         self.dup_leaves_threshold = dup_leaves_threshold
-        self.max_elk_nodes = max_elk_nodes
-        self.use_elk = use_elk
-        # `NODE_OPTIONS=--max-old-space-size=N` bumps V8's heap ceiling —
-        # ELK's crossing-minimization matrices exceed the default 4 GB on
-        # any graph with a few thousand nodes per layer.
-        prior_opts = os.environ.get("NODE_OPTIONS", "")
-        node_opts = f"--max-old-space-size={node_heap_mb}"
-        if prior_opts:
-            node_opts = f"{prior_opts} {node_opts}"
-        self.env = {
-            **os.environ,
-            "NODE_PATH": node_path_env(node_modules),
-            "NODE_OPTIONS": node_opts,
-            "ELK_DIRECTION": direction,
-            "ELK_WRAP": "1" if wrap else "0",
-            "ELK_QUALITY": quality,
-        }
-        self.params_hash = json.dumps(
-            {
-                "direction": direction,
-                "wrap": wrap,
-                "quality": quality,
-                "dup_leaves_threshold": dup_leaves_threshold,
-            },
-            sort_keys=True,
-        )
+        self.max_nodes = max_nodes
+        self.dot_max_edges = dot_max_edges
+        self.use_layout = use_layout
         self.lock = threading.Lock()
-        self.mtime = None
+        self.mtime: float | None = None
         self.body = b""  # serialized graph.json response
-        self.available = use_elk and self._elk_available()
-        if use_elk and not self.available:
+
+    def _params_hash(self, engine: str) -> str:
+        # rankdir only affects dot; omit it from the python-layered
+        # cache key so switching --rankdir doesn't force a recompute
+        # for graphs handled by the built-in.
+        params = {
+            "engine": engine,
+            "dup_leaves_threshold": self.dup_leaves_threshold,
+        }
+        if engine == "dot":
+            params["rankdir"] = self.rankdir
+        return json.dumps(params, sort_keys=True)
+
+    def _resolve_engine(self, n_edges: int) -> str:
+        """Auto → concrete engine, with a fallback to python-layered
+        when dot is requested but not installed. Warns once via the
+        caller's log line."""
+        engine = pick_engine(self.auto_engine, n_edges, self.dot_max_edges)
+        if engine == "dot" and shutil.which("dot") is None:
             print(
-                "note: node/elkjs not found - falling back to the in-browser "
-                "breadthfirst layout.\nFor a crossing-minimized layout run "
-                "`npm install elkjs` (or `npm install --prefix scripts elkjs`, "
-                "or pass --node-modules).",
+                "note: `dot` not on PATH — falling back to python-layered.\n"
+                "Install Graphviz with `apt install graphviz` or "
+                "`brew install graphviz` for the higher-quality layered "
+                "layout on small graphs.",
                 file=sys.stderr,
             )
+            engine = "python-layered"
+        return engine
 
-    def _elk_available(self) -> bool:
-        try:
-            return (
-                subprocess.run(
-                    ["node", "-e", "require('elkjs')"],
-                    env=self.env,
-                    capture_output=True,
-                    timeout=30,
-                ).returncode
-                == 0
-            )
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            return False
-
-    def _compute_positions(self, transformed_path: Path, n_nodes: int) -> dict | None:
+    def _compute_positions(
+        self, doc: dict, n_nodes: int, n_edges: int
+    ) -> dict[str, tuple[float, float]] | None:
         mtime = self.json_path.stat().st_mtime
+        engine = self._resolve_engine(n_edges)
+        params_hash = self._params_hash(engine)
         if self.sidecar.is_file():
             try:
                 cached = json.loads(self.sidecar.read_text())
                 if (
                     cached.get("mtime") == mtime
-                    and cached.get("params_hash") == self.params_hash
+                    and cached.get("params_hash") == params_hash
                 ):
-                    return cached["positions"]
+                    return {k: (v[0], v[1]) for k, v in cached["positions"].items()}
             except (json.JSONDecodeError, KeyError):
                 pass
-        if not self.available:
+        if not self.use_layout:
             return None
-        if n_nodes > self.max_elk_nodes:
+        if n_nodes > self.max_nodes:
             print(
-                f"note: {n_nodes} nodes exceeds --max-elk-nodes "
-                f"({self.max_elk_nodes}); skipping ELK and falling back to "
+                f"note: {n_nodes} nodes exceeds --max-nodes "
+                f"({self.max_nodes}); skipping layout and falling back to "
                 "the in-browser breadthfirst layout. Bump the threshold or "
-                "pass --no-elk to silence.",
+                "pass --no-layout to silence.",
                 file=sys.stderr,
             )
             return None
-        print(f"computing ELK layout for {self.json_path} ...", flush=True)
-        t0 = time.time()
-        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as f:
-            f.write(ELK_JS)
-            script = f.name
-        try:
-            r = subprocess.run(
-                ["node", script, str(transformed_path)],
-                env=self.env,
-                capture_output=True,
-                timeout=1800,
+        why = ""
+        if self.auto_engine == "auto":
+            cmp_op = "<=" if engine == "dot" else ">"
+            why = (
+                f" (auto: {n_edges} edges {cmp_op} "
+                f"--dot-max-edges={self.dot_max_edges})"
             )
-        finally:
-            os.unlink(script)
-        if r.returncode != 0:
-            print(f"ELK layout failed: {r.stderr.decode().strip()}", file=sys.stderr)
-            return None
-        positions = json.loads(r.stdout)
+        print(
+            f"computing {engine} layout for {self.json_path}{why} ...",
+            flush=True,
+        )
+        t0 = time.time()
+        if engine == "python-layered":
+            positions = python_layered_layout(doc)
+        else:
+            dot_src = emit_dot_source(doc, self.rankdir)
+            try:
+                r = subprocess.run(
+                    ["dot", "-Tjson0"],
+                    input=dot_src,
+                    capture_output=True,
+                    text=True,
+                    timeout=1800,
+                )
+            except FileNotFoundError:
+                # Race with dot being removed between the `which` check
+                # in _resolve_engine and here — bail on this attempt.
+                return None
+            if r.returncode != 0:
+                print(f"dot layout failed: {r.stderr.strip()}", file=sys.stderr)
+                return None
+            positions = parse_dot_positions(r.stdout)
         self.sidecar.write_text(
             json.dumps(
-                {"mtime": mtime, "params_hash": self.params_hash, "positions": positions}
+                {
+                    "mtime": mtime,
+                    "params_hash": params_hash,
+                    # JSON has no tuples; store as [x, y] and reconstruct
+                    # on load.
+                    "positions": {k: [v[0], v[1]] for k, v in positions.items()},
+                }
             )
         )
-        print(f"ELK layout done in {time.time() - t0:.1f}s", flush=True)
+        print(f"{engine} layout done in {time.time() - t0:.2f}s", flush=True)
         return positions
 
     def graph_json(self) -> bytes:
@@ -1095,20 +1178,11 @@ class LayoutCache:
                     f"{len(doc['elements']['edges'])} edges",
                     flush=True,
                 )
-            # ELK reads its input from a file — write the (possibly
-            # leaf-duplicated) doc to a temp file so the JS side sees the
-            # same graph the browser will render.
-            with tempfile.NamedTemporaryFile(
-                "w", suffix=".json", delete=False
-            ) as f:
-                json.dump({"elements": doc["elements"]}, f)
-                transformed_path = Path(f.name)
-            try:
-                positions = self._compute_positions(
-                    transformed_path, len(doc["elements"]["nodes"])
-                )
-            finally:
-                os.unlink(transformed_path)
+            positions = self._compute_positions(
+                doc,
+                len(doc["elements"]["nodes"]),
+                len(doc["elements"]["edges"]),
+            )
             if positions:
                 for n in doc["elements"]["nodes"]:
                     p = positions.get(n["data"]["id"])
@@ -1124,72 +1198,52 @@ def main():
     ap.add_argument("json_path", type=Path, help="Cytoscape .cy.json dump to serve")
     ap.add_argument("--port", type=int, default=8000)
     ap.add_argument(
-        "--node-modules",
-        type=Path,
-        default=None,
-        help="node_modules directory containing elkjs",
+        "--engine",
+        default="auto",
+        choices=["auto", "dot", "python-layered"],
+        help="Layout engine. `auto` (default) picks dot for small graphs "
+        "and the built-in python-layered otherwise — see --dot-max-edges. "
+        "Force one explicitly to bypass the heuristic.",
     )
     ap.add_argument(
-        "--node-heap-mb",
+        "--dot-max-edges",
         type=int,
-        default=16384,
-        help="V8 heap ceiling for the ELK subprocess in MB (default 16384). "
-        "ELK's crossing-minimization matrices blow past Node's default 4 GB "
-        "on graphs with a few thousand nodes.",
+        default=2000,
+        help="Edge-count threshold for the `auto` engine choice: at or "
+        "below this many edges (post-duplication) use dot, otherwise "
+        "python-layered. Default 2000 — dot's mincross is O(|E|²) per "
+        "iteration and takes 10+ minutes past ~5000 edges on typical "
+        "IR graphs.",
     )
     ap.add_argument(
-        "--direction",
-        default="DOWN",
-        choices=["DOWN", "RIGHT", "UP", "LEFT"],
-        help="ELK layered flow direction (default DOWN).",
-    )
-    ap.add_argument(
-        "--wrap-layers",
-        action="store_true",
-        help="Wrap over-wide layers into stacked sub-rows using ELK's "
-        "MULTI_EDGE wrapping. Off by default: the wrap adds vertical "
-        "sub-layers that can obscure the layer structure.",
-    )
-    ap.add_argument(
-        "--elk-quality",
-        default="fast",
-        choices=["fast", "balanced", "nice"],
-        help="ELK layout quality/speed trade-off:\n"
-        "  `fast` (default): LONGEST_PATH layering + SIMPLE placement + no "
-        "crossing minimization + POLYLINE edge routing. ~70s on a 2700-node "
-        "graph. Best choice for anything above ~1000 nodes.\n"
-        "  `balanced`: LONGEST_PATH layering + LINEAR_SEGMENTS placement + "
-        "LAYER_SWEEP crossing min. LAYER_SWEEP is O(widest_layer²) per "
-        "iteration and can take 15+ minutes on high-fanout graphs — use only "
-        "for graphs of a few hundred nodes.\n"
-        "  `nice`: NETWORK_SIMPLEX layering + BRANDES_KOEPF placement + "
-        "LAYER_SWEEP crossing min + EDGE_LENGTH post-compaction + ORTHOGONAL "
-        "edge routing. Prettiest, but elkjs has been observed to hit its JS "
-        "stack limit on graphs above ~1500 nodes.",
+        "--rankdir",
+        default="TB",
+        choices=["TB", "LR", "BT", "RL"],
+        help="Graphviz layered flow direction for dot only (default TB, "
+        "top-to-bottom). Ignored by python-layered (TB-only).",
     )
     ap.add_argument(
         "--dup-leaves-threshold",
         type=int,
         default=4,
         help="Duplicate any Const/Input node with more than this many "
-        "consumers, injecting one shadow copy per consumer so ELK sees "
-        "short local edges instead of a giant crossing bundle. Set to 0 "
-        "to disable. Default 4.",
+        "consumers, injecting one shadow copy per consumer so the layout "
+        "engine sees short local edges instead of a giant crossing "
+        "bundle. Set to 0 to disable. Default 4.",
     )
     ap.add_argument(
-        "--max-elk-nodes",
+        "--max-nodes",
         type=int,
-        default=20000,
-        help="Skip ELK and fall back to the in-browser breadthfirst layout "
-        "when the (possibly duplicated) graph exceeds this many nodes. "
-        "LAYER_SWEEP crossing minimization is quadratic in the widest "
-        "layer, so past ~20k nodes it will OOM even with a big heap.",
+        default=25000,
+        help="Skip layout and fall back to the in-browser breadthfirst "
+        "layout when the (possibly duplicated) graph exceeds this many "
+        "nodes. Default 25000.",
     )
     ap.add_argument(
-        "--no-elk",
+        "--no-layout",
         action="store_true",
-        help="Skip ELK unconditionally (useful for huge dumps where the "
-        "in-browser breadthfirst layout is fine).",
+        help="Skip Graphviz unconditionally (useful for huge dumps where "
+        "the in-browser breadthfirst layout is fine).",
     )
     args = ap.parse_args()
     if not args.json_path.is_file():
@@ -1197,14 +1251,12 @@ def main():
 
     cache = LayoutCache(
         args.json_path,
-        args.node_modules,
-        node_heap_mb=args.node_heap_mb,
-        direction=args.direction,
-        wrap=args.wrap_layers,
-        quality=args.elk_quality,
+        auto_engine=args.engine,
+        rankdir=args.rankdir,
         dup_leaves_threshold=args.dup_leaves_threshold,
-        max_elk_nodes=args.max_elk_nodes,
-        use_elk=not args.no_elk,
+        max_nodes=args.max_nodes,
+        dot_max_edges=args.dot_max_edges,
+        use_layout=not args.no_layout,
     )
     cache.graph_json()  # warm the layout before serving
 
