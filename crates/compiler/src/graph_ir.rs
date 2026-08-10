@@ -30,7 +30,7 @@ use crate::{
         fusion::renumber_module,
         split_module::{ModuleSubgraph, SubgraphValue},
     },
-    planner::MemoryPlan,
+    planner::StreamMemoryPlan,
     quast::{Quast, SExpr, SymConst},
 };
 
@@ -705,7 +705,7 @@ pub struct GraphBuilder {
     /// Cached result of the `plan_memory` graph pass. Every structural
     /// mutation (`insert_*`, splits, fusion, dce-removal) resets this to
     /// `None`; the compile driver reuses it when already populated.
-    pub plan: Option<MemoryPlan>,
+    pub plan: Option<StreamMemoryPlan>,
 }
 
 impl GraphBuilder {

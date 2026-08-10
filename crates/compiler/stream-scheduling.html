@@ -1,0 +1,586 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Stream &amp; Memory Co-Scheduling</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<script>
+  window.MathJax = {
+    tex: { inlineMath: [['$', '$'], ['\\(', '\\)']] },
+    svg: { fontCache: 'global' }
+  };
+</script>
+<script id="MathJax-script" async
+        src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js"></script>
+<style>
+  :root {
+    --bg: #ffffff;
+    --panel: #f6f7f9;
+    --ink: #1a1d24;
+    --muted: #5b6472;
+    --accent: #2b57c9;
+    --accent2: #b46b12;
+    --warn: #c0392b;
+    --ok: #2f8f4d;
+    --border: #e2e5eb;
+  }
+  html, body {
+    background: var(--bg);
+    color: var(--ink);
+    font: 16px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    margin: 0;
+  }
+  .page {
+    max-width: 900px;
+    margin: 0 auto;
+    padding: 48px 32px 96px;
+  }
+  h1 { font-size: 2rem; margin: 0 0 8px; }
+  h2 {
+    font-size: 1.35rem;
+    margin: 40px 0 12px;
+    padding-top: 12px;
+    border-top: 1px solid var(--border);
+  }
+  h3 { font-size: 1.05rem; margin: 24px 0 8px; color: var(--accent); }
+  p, li { color: var(--ink); }
+  code, pre {
+    font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  code { background: #eef1f6; padding: 1px 5px; border-radius: 4px; }
+  pre {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    padding: 14px 16px;
+    border-radius: 8px;
+    overflow-x: auto;
+  }
+  pre code { background: none; padding: 0; }
+  .lede {
+    color: var(--muted);
+    font-size: 1.05rem;
+    margin-bottom: 24px;
+  }
+  .callout {
+    background: var(--panel);
+    border-left: 3px solid var(--accent);
+    padding: 12px 16px;
+    margin: 16px 0;
+    border-radius: 4px;
+  }
+  .callout.warn { border-left-color: var(--warn); }
+  .callout.ok { border-left-color: var(--ok); }
+  .fig {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    padding: 16px;
+    border-radius: 8px;
+    margin: 20px 0;
+  }
+  .fig-caption {
+    font-size: 0.9rem;
+    color: var(--muted);
+    margin-top: 10px;
+    text-align: center;
+  }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 12px 0;
+    font-size: 0.95rem;
+  }
+  th, td {
+    text-align: left;
+    padding: 8px 10px;
+    border-bottom: 1px solid var(--border);
+  }
+  th { color: var(--muted); font-weight: 600; }
+  .tag {
+    display: inline-block;
+    padding: 1px 8px;
+    border-radius: 999px;
+    font-size: 0.75rem;
+    background: #e2e6ee;
+    color: var(--muted);
+    margin-right: 6px;
+  }
+  .grid-2 {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+    margin: 16px 0;
+  }
+  .grid-2 .fig { margin: 0; }
+  svg { display: block; margin: 0 auto; }
+  .swim text.lbl { fill: var(--muted); font: 11px ui-monospace, monospace; }
+  .swim rect.slot { rx: 4; }
+  .node-a { fill: #3b5bdb; }
+  .node-b { fill: #6741d9; }
+  .node-c { fill: #c2255c; }
+  .node-d { fill: #e67700; }
+  .node-e { fill: #2f9e44; }
+  .edge { stroke: #6b7280; stroke-width: 1.6; fill: none; marker-end: url(#arrow); }
+  .sync { stroke: var(--warn); stroke-dasharray: 4 3; }
+  .footnote { color: var(--muted); font-size: 0.9rem; }
+</style>
+</head>
+<body>
+<div class="page">
+
+<h1>Stream &amp; Memory Co-Scheduling</h1>
+<p class="lede">
+How the compiler decides <em>what runs when</em>, <em>on which GPU stream</em>,
+and <em>where each buffer lives in memory</em> — all at once. Written for
+engineers comfortable with GPUs but not necessarily with compiler internals.
+</p>
+
+<h2>1. The setting</h2>
+<p>
+The compiler lowers a mathematical program into a directed acyclic graph (DAG)
+of kernels. Each node is one launch: a GPU kernel, a memory copy, or a memset.
+Edges express data dependencies — <em>node <code>v</code> reads a buffer that
+node <code>u</code> writes</em>, so <code>u</code> must finish before
+<code>v</code> starts.
+</p>
+<p>
+Today the runtime issues every launch onto a single CUDA stream, in a
+topological order that also minimises peak memory. That's safe and simple, but
+it leaves two forms of concurrency on the table:
+</p>
+<ul>
+  <li><strong>Kernel-level:</strong> two independent kernels could run on
+      different streams and overlap on the GPU.</li>
+  <li><strong>Copy/compute overlap:</strong> a host-to-device copy on one
+      stream can hide behind a kernel on another.</li>
+</ul>
+<p>
+Turning that concurrency on isn't free. Two kernels running at the same time
+also need their input <em>and</em> output buffers resident at the same time.
+If the device is memory-constrained (large workloads, small GPUs), naively
+parallelising the schedule can push peak memory past the budget and OOM. So
+the question is <em>joint</em>: choose an order, a stream per node, and a
+memory offset per buffer that together minimise wall-clock time subject to a
+memory cap.
+</p>
+
+<div class="callout">
+The problem has three knobs, one per axis of the trade-off:
+<ul style="margin-bottom:0">
+  <li><code>max_concurrency</code> — how many streams the scheduler may use.</li>
+  <li><code>max_memory</code> — the byte cap on the shared device pool.</li>
+  <li>Look-ahead depth <code>k</code> and beam width <code>b</code> — how hard
+      the scheduler is allowed to think before committing to each pick.</li>
+</ul>
+</div>
+
+<h2>2. A worked example</h2>
+<p>
+Consider five nodes with different runtimes and different output-buffer
+sizes (in some notional MB):
+</p>
+
+<table>
+  <thead>
+    <tr><th>Node</th><th>Reads</th><th>Writes</th><th>Output size</th><th>Runtime</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>N1 <span class="tag">load A</span></td><td>—</td><td>A</td><td>400</td><td>10 ms</td></tr>
+    <tr><td>N2 <span class="tag">load B</span></td><td>—</td><td>B</td><td>50</td><td>2 ms</td></tr>
+    <tr><td>N3 <span class="tag">transform A</span></td><td>A</td><td>C</td><td>200</td><td>30 ms</td></tr>
+    <tr><td>N4 <span class="tag">transform B</span></td><td>B</td><td>D</td><td>50</td><td>5 ms</td></tr>
+    <tr><td>N5 <span class="tag">merge</span></td><td>C, D</td><td>E</td><td>100</td><td>8 ms</td></tr>
+  </tbody>
+</table>
+
+<div class="fig">
+<svg width="640" height="220" viewBox="0 0 640 220">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5"
+            markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#6b7280"/>
+    </marker>
+  </defs>
+  <!-- N1 -->
+  <g><circle cx="90"  cy="60"  r="26" class="node-a"/>
+     <text x="90" y="64" text-anchor="middle" fill="white" font-weight="bold">N1</text>
+     <text x="90" y="20" text-anchor="middle" fill="#5b6472" font-size="12">load A · 10ms · 400MB</text></g>
+  <!-- N2 -->
+  <g><circle cx="90"  cy="160" r="26" class="node-b"/>
+     <text x="90" y="164" text-anchor="middle" fill="white" font-weight="bold">N2</text>
+     <text x="90" y="200" text-anchor="middle" fill="#5b6472" font-size="12">load B · 2ms · 50MB</text></g>
+  <!-- N3 -->
+  <g><circle cx="290" cy="60"  r="26" class="node-c"/>
+     <text x="290" y="64" text-anchor="middle" fill="white" font-weight="bold">N3</text>
+     <text x="290" y="20" text-anchor="middle" fill="#5b6472" font-size="12">tf A · 30ms · 200MB</text></g>
+  <!-- N4 -->
+  <g><circle cx="290" cy="160" r="26" class="node-d"/>
+     <text x="290" y="164" text-anchor="middle" fill="white" font-weight="bold">N4</text>
+     <text x="290" y="200" text-anchor="middle" fill="#5b6472" font-size="12">tf B · 5ms · 50MB</text></g>
+  <!-- N5 -->
+  <g><circle cx="500" cy="110" r="26" class="node-e"/>
+     <text x="500" y="114" text-anchor="middle" fill="white" font-weight="bold">N5</text>
+     <text x="500" y="70" text-anchor="middle" fill="#5b6472" font-size="12">merge · 8ms · 100MB</text></g>
+
+  <path class="edge" d="M116,60 L264,60"/>
+  <path class="edge" d="M116,160 L264,160"/>
+  <path class="edge" d="M316,60  L474,102"/>
+  <path class="edge" d="M316,160 L474,118"/>
+</svg>
+<div class="fig-caption">Figure 1 — a small compute DAG. Two independent
+loads feed two transforms; both feed a merge.</div>
+</div>
+
+<h3>What single-stream does</h3>
+<p>
+Runs everyone sequentially: N1 → N2 → N3 → N4 → N5. Wall-clock is
+<code>10 + 2 + 30 + 5 + 8 = 55&nbsp;ms</code>. Peak memory is bounded by
+whatever's alive at once — with careful ordering, only A + C ever coexist,
+so about 600&nbsp;MB.
+</p>
+
+<h3>What two-stream with unlimited memory does</h3>
+<div class="fig">
+<svg class="swim" width="640" height="140" viewBox="0 0 640 140">
+  <text class="lbl" x="10" y="24">stream 0</text>
+  <text class="lbl" x="10" y="88">stream 1</text>
+  <line x1="90" y1="18" x2="620" y2="18" stroke="#d1d5db"/>
+  <line x1="90" y1="82" x2="620" y2="82" stroke="#d1d5db"/>
+
+  <!-- stream 0: N1(0-10) N3(10-40) N5(46-54) -->
+  <rect class="slot node-a" x="90"  y="6" width="90"  height="24"/>
+  <text x="135" y="23" text-anchor="middle" fill="white" font-size="12">N1 (10)</text>
+  <rect class="slot node-c" x="180" y="6" width="270" height="24"/>
+  <text x="315" y="23" text-anchor="middle" fill="white" font-size="12">N3 (30)</text>
+  <rect class="slot node-e" x="510" y="6" width="72"  height="24"/>
+  <text x="546" y="23" text-anchor="middle" fill="white" font-size="12">N5 (8)</text>
+
+  <!-- stream 1: N2(0-2) N4(2-7) idle -->
+  <rect class="slot node-b" x="90"  y="70" width="18" height="24"/>
+  <text x="99"  y="87" text-anchor="middle" fill="white" font-size="11">N2</text>
+  <rect class="slot node-d" x="108" y="70" width="45" height="24"/>
+  <text x="130" y="87" text-anchor="middle" fill="white" font-size="12">N4 (5)</text>
+
+  <!-- sync edge: N4 finish -> N5 start on stream 0 (WaitOn) -->
+  <path class="sync" d="M153,82 C 200,82 460,50 510,30" marker-end="url(#arrow)"/>
+  <text x="330" y="70" fill="#c0392b" font-size="11">WaitOn(event from N4)</text>
+
+  <!-- axis ticks -->
+  <line x1="90" y1="118" x2="620" y2="118" stroke="#c7cbd3"/>
+  <g class="lbl">
+    <text x="90"  y="132" text-anchor="middle">0</text>
+    <text x="270" y="132" text-anchor="middle">20</text>
+    <text x="450" y="132" text-anchor="middle">40</text>
+    <text x="582" y="132" text-anchor="middle">54</text>
+  </g>
+  <text class="lbl" x="530" y="132">ms</text>
+</svg>
+<div class="fig-caption">Figure 2 — two-stream schedule with 2 streams and
+no memory cap. Makespan drops to 54&nbsp;ms; the critical path is
+N1&nbsp;→&nbsp;N3&nbsp;→&nbsp;N5.</div>
+</div>
+<p>
+Peak memory in that schedule is roughly <code>A(400) + B(50) + C(200) + D(50)
+= 700&nbsp;MB</code> — all four buffers coexist briefly.
+</p>
+
+<h3>What happens with a 500 MB cap</h3>
+<p>
+Now the concurrency we just bought is illegal: running the two branches in
+parallel would push us above 500&nbsp;MB. The scheduler has to choose between
+several imperfect options:
+</p>
+<ul>
+  <li><strong>Serialise the branches.</strong> Do N1 → N3, freeing A before
+      starting the B branch. Wall-clock 55&nbsp;ms.</li>
+  <li><strong>Interleave.</strong> N1 on stream 0 while N2 runs on stream 1
+      (fits: 450&nbsp;MB). N4 finishes early; hold N3 until B and D are dead;
+      then N3 fits alone. Better than pure serial, still worse than the
+      unbounded-memory schedule.</li>
+  <li><strong>Reorder.</strong> Notice that <em>starting N3 earlier</em>
+      dominates makespan, so pushing N2/N4 later is fine — they hide behind
+      N3's 30&nbsp;ms anyway.</li>
+</ul>
+<p>
+Picking the right compromise is exactly the co-scheduling problem. Even on
+this five-node graph, the answer changes depending on the memory cap and
+stream count. On a real graph with hundreds of kernels, hand-tuning is not
+an option — the scheduler has to do it.
+</p>
+
+<h2>3. High-level ideas in the V1 scheduler</h2>
+
+<h3>3.1 Score each ready node with a critical-path heuristic</h3>
+<p>
+At any moment, some nodes are <em>ready</em> — all their predecessors have
+been scheduled. The scheduler needs a way to pick "the best" one. It uses
+the <strong>bottom level</strong>, a classic list-scheduling heuristic:
+</p>
+<pre><code>bl(v) = runtime(v) + max over successors u of bl(u)</code></pre>
+<p>
+<code>bl(v)</code> is the longest weighted path from <code>v</code> to any
+sink. Intuitively: <em>if we delay this node, how much do we delay the whole
+program in the worst case?</em> High-bl nodes go first because they sit on
+the critical path.
+</p>
+
+<h3>3.2 Add pressure terms for memory and stream idleness</h3>
+<p>
+Bottom-level alone doesn't know about memory. The full step score adds two
+more terms:
+</p>
+<pre><code>score(v) = w_cp   · (bl(v) + est_finish(v))
+         + w_mem  · max(0, live_bytes_after_v − 0.9 · max_memory)</code></pre>
+<p>
+The first term still pushes the critical path. The second term only kicks in
+once the pool is 90% full — a soft "you're running out of room" penalty that
+biases the scheduler toward nodes whose outputs are small or whose inputs
+die immediately, freeing space.
+</p>
+
+<h3>3.3 Look ahead a few picks before committing</h3>
+<p>
+Pure greedy scheduling gets stuck. Example: a small-output node scores well
+right now, but taking it starves a large-output node that then can't fit
+later. V1 avoids that with <strong>beam search</strong>:
+</p>
+<ol>
+  <li>Score every ready node. Take the top <code>beam</code> candidates
+      (typically 2–4).</li>
+  <li>For each candidate, snapshot the scheduler state, tentatively place it,
+      and recurse for <code>k</code> more picks.</li>
+  <li>Score the leaf state by simulated makespan + a small memory penalty.</li>
+  <li>Commit only the <em>first move</em> of the best rollout. Then re-plan
+      from the new state.</li>
+</ol>
+<p>
+The cost is <code>O(beam<sup>k</sup> · score_cost)</code> per decision. With
+<code>k = 3, beam = 2</code> that's 8× a greedy pick — cheap for graphs with
+&lt;1000 nodes.
+</p>
+
+<h3>3.4 Best-fit memory placement, with an offline repack at the end</h3>
+<p>
+When a node is committed, its output buffers each need a byte offset in the
+pool. The online allocator does a <strong>best-fit</strong> search: sort the
+currently-live intervals by offset, sweep the gaps, and pick the smallest gap
+that fits. Alignment is honoured by rounding the candidate offset up.
+</p>
+<p>
+Online best-fit is fast but shortsighted — it doesn't know what's coming.
+Once the schedule is fixed, V1 runs an <strong>offline best-fit-decreasing
+(BFD) repack</strong> over the wall-clock lifetime intervals: sort all
+buffers by size (largest first), place each at the smallest aligned offset
+that avoids every already-placed <em>lifetime-overlapping</em> buffer. This
+is the same trick the single-stream heuristic backend uses, adapted to
+continuous-time intervals so it works for multi-stream plans.
+</p>
+
+<h3>3.5 Cross-stream synchronization via events</h3>
+<p>
+If node <code>v</code> reads a buffer produced by <code>u</code> and the two
+ended up on different streams, the runtime needs a <em>wait</em>. V1 emits
+this by having <code>u</code> record a CUDA event, and inserting a
+<code>WaitOn(v's stream, event)</code> instruction into the plan before
+<code>v</code>'s launch. Repeated waits on the same event are de-duplicated.
+Nodes with no cross-stream consumers record no event, keeping event count
+small.
+</p>
+
+<div class="callout">
+The output of the scheduler is a single flat list of instructions:
+<pre><code>enum StreamInstr {
+    Node(usize),           // launch node k on stream[k]
+    WaitOn(stream, event), // stream waits for event to fire
+}</code></pre>
+Plus one <code>Option&lt;offset&gt;</code> per buffer. The runtime just walks
+the list.
+</div>
+
+<h2>4. Formalizing the optimization problem</h2>
+
+<p>
+Let $G = (V, E)$ be the DAG. Each node $v \in V$ has an estimated runtime
+$r_v \in \mathbb{R}_{\ge 0}$. Each buffer $b \in B$ has size $s_b \in
+\mathbb{Z}_{>0}$ and alignment $\alpha_b$. The set of buffers read by node
+$v$ is $R(v) \subseteq B$; the set written is $W(v) \subseteq B$.
+</p>
+
+<p><strong>Decision variables.</strong></p>
+<ul>
+  <li>$t_v \in \mathbb{R}_{\ge 0}$ — start time of node $v$.</li>
+  <li>$\sigma_v \in \{0, 1, \dots, M-1\}$ — stream assignment, where $M$
+      is <code>max_concurrency</code>.</li>
+  <li>$o_b \in \{0, 1, \dots, C-1\}$ — byte offset of buffer $b$ in the
+      device pool, where $C$ is <code>max_memory</code>.</li>
+</ul>
+
+<p><strong>Derived quantities.</strong></p>
+<p>
+The <em>birth</em> and <em>death</em> of a buffer $b$ come from the nodes
+that touch it:
+</p>
+<p>
+$$
+\mathrm{birth}(b) \;=\; \min_{u \in \mathrm{writers}(b)} t_u,
+\qquad
+\mathrm{death}(b) \;=\; \max_{v \in \mathrm{writers}(b) \cup \mathrm{readers}(b)} \bigl(t_v + r_v\bigr).
+$$
+</p>
+<p>
+Two buffers $b_1, b_2$ have <em>overlapping lifetimes</em> iff
+$\mathrm{birth}(b_1) &lt; \mathrm{death}(b_2)$ and
+$\mathrm{birth}(b_2) &lt; \mathrm{death}(b_1)$.
+</p>
+
+<p><strong>Constraints.</strong></p>
+
+<p>
+<em>(C1) Precedence.</em> For every edge $(u, v) \in E$,
+$$
+t_v \;\ge\; t_u + r_u.
+$$
+</p>
+
+<p>
+<em>(C2) Same-stream serialization.</em> For every pair of distinct nodes
+$u, v$ with $\sigma_u = \sigma_v$, one must precede the other on the timeline:
+$$
+t_u + r_u \le t_v \quad \lor \quad t_v + r_v \le t_u.
+$$
+</p>
+
+<p>
+<em>(C3) Memory disjointness.</em> For every pair of buffers $b_1 \ne b_2$
+with overlapping lifetimes, their byte ranges must not overlap:
+$$
+o_{b_1} + s_{b_1} \le o_{b_2} \quad \lor \quad o_{b_2} + s_{b_2} \le o_{b_1}.
+$$
+</p>
+
+<p>
+<em>(C4) Alignment.</em>
+$$
+o_b \equiv 0 \pmod{\alpha_b}, \qquad \forall b \in B.
+$$
+</p>
+
+<p>
+<em>(C5) Memory budget.</em>
+$$
+o_b + s_b \;\le\; C, \qquad \forall b \in B.
+$$
+</p>
+
+<p><strong>Objective.</strong> Minimise the makespan
+$$
+T \;=\; \max_{v \in V} \bigl( t_v + r_v \bigr),
+$$
+optionally with a secondary penalty on the peak occupied memory
+$P = \max_b (o_b + s_b)$:
+$$
+\min\; \alpha \cdot T \;+\; \beta \cdot P.
+$$
+</p>
+
+<h3>4.1 Why this is hard</h3>
+<p>
+This problem contains three NP-hard sub-problems as special cases:
+</p>
+<ul>
+  <li>Ignoring memory (drop (C3)–(C5)) collapses to the classic
+      <strong>$P_M \mid \mathrm{prec}, r_j \mid C_{\max}$</strong> job-shop
+      scheduling problem — NP-hard for $M \ge 2$.</li>
+  <li>Fixing the schedule and asking only for offsets is
+      <strong>dynamic storage allocation</strong> (DSA), also called
+      <em>interval graph colouring with bandwidth</em> — NP-hard
+      (Gergov, 1999).</li>
+  <li>The joint problem is at least as hard as either piece and adds coupling
+      between them: the schedule determines the lifetime intervals, which
+      determine feasibility of the offset packing.</li>
+</ul>
+<p>
+So we can't expect an exact solver to scale. V1 attacks it with a beam-search
+list scheduler for $(t_v, \sigma_v)$ and best-fit + offline BFD repack for
+$o_b$ — a decoupling that trades optimality for compile-time predictability.
+</p>
+
+<h3>4.2 Bounds and quality signals</h3>
+<p>
+Two easy lower bounds serve as sanity checks:
+</p>
+<p>
+$$
+T \;\ge\; \max_v \mathrm{bl}(v), \qquad
+T \;\ge\; \frac{1}{M} \sum_{v \in V} r_v.
+$$
+</p>
+<p>
+The first is the critical-path length under infinite concurrency; the second
+is the sum of runtimes divided by the number of streams (work / machines).
+If the scheduler's returned $T$ is close to either bound, there's not much
+optimization headroom left.
+</p>
+
+<h2>5. What V1 does <em>not</em> do</h2>
+<ul>
+  <li>No <strong>spilling to host memory</strong>. If the graph can't fit at
+      any legal schedule, the compiler errors — it won't insert a
+      device-to-host swap.</li>
+  <li>No <strong>reordering of committed nodes</strong>. Look-ahead is the
+      only backtracking mechanism; there's no post-hoc local search / kernel
+      swap.</li>
+  <li>No <strong>partial-overlap analysis</strong> on <code>Memcpy</code>
+      source/destination ranges — a memcpy is treated as reading its src and
+      writing its dst, atomically.</li>
+  <li>No <strong>event coalescing</strong> beyond de-duplication at plan
+      time — multiple consumers of the same producer on the same stream will
+      still share a single WaitOn, but consumers on different streams each
+      wait individually.</li>
+</ul>
+
+<h2>6. Where to look in the code</h2>
+<table>
+  <thead><tr><th>File</th><th>What lives there</th></tr></thead>
+  <tbody>
+    <tr>
+      <td><code>crates/compiler/src/planner/mod.rs</code></td>
+      <td>Public entry <code>plan()</code>, <code>SchedulerMode</code>
+          selector (CP-SAT / Heuristic / ListV1).</td>
+    </tr>
+    <tr>
+      <td><code>crates/compiler/src/planner/ctx.rs</code></td>
+      <td><code>PlanCtx</code>: preprocessed sizes, alignments, writer/reader
+          lists, precedence edges shared by every backend.</td>
+    </tr>
+    <tr>
+      <td><code>crates/compiler/src/planner/plan.rs</code></td>
+      <td><code>StreamMemoryPlan</code>, <code>StreamInstr</code> — the
+          runtime-facing output.</td>
+    </tr>
+    <tr>
+      <td><code>crates/compiler/src/planner/list_v1.rs</code></td>
+      <td><code>ListSchedulerV1</code>: bottom-level priority, beam search,
+          online best-fit, offline BFD repack, cross-stream event emission.</td>
+    </tr>
+    <tr>
+      <td><code>crates/compiler/src/planner/heuristic.rs</code></td>
+      <td>Single-stream solver-free backend (memory-only). Reference point
+          for the multi-stream planner.</td>
+    </tr>
+    <tr>
+      <td><code>crates/compiler/src/graph_exe.rs</code></td>
+      <td>Consumes the plan: creates auxiliary streams, allocates events,
+          walks the <code>StreamInstr</code> tape at run time.</td>
+    </tr>
+  </tbody>
+</table>
+
+<p class="footnote">
+See also <code>crates/compiler/stream-scheduling.md</code> (design spec) and
+<code>crates/compiler/layout_optimization_problem.md</code> for the analogous
+formalization of the buffer-layout sub-problem.
+</p>
+
+</div>
+</body>
+</html>

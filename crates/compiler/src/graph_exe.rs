@@ -49,6 +49,35 @@ extern "C" {
     fn cudaGraphLaunch(graph_exec: cudaGraphExec_t, stream: cudaStream_t) -> i32;
     fn cudaGraphDestroy(graph: cudaGraph_t) -> i32;
     fn cudaGraphExecDestroy(graph_exec: cudaGraphExec_t) -> i32;
+    fn cudaMemcpyAsync(
+        dst: *mut c_void,
+        src: *const c_void,
+        count: usize,
+        kind: i32,
+        stream: cudaStream_t,
+    ) -> i32;
+}
+
+/// `cudaMemcpyKind` values matching `crates/cuda-common/src/copy.rs`.
+const CUDA_MEMCPY_HOST_TO_DEVICE: i32 = 1;
+const CUDA_MEMCPY_DEVICE_TO_DEVICE: i32 = 3;
+
+/// Thin raw-stream `cudaMemcpyAsync` wrapper. Prefer this in the multi-
+/// stream launch loop; `cuda_memcpy_on` from cuda-common is bound to a
+/// `GpuDeviceCtx` and always uses `ctx.stream`.
+///
+/// # Safety
+/// Standard `cudaMemcpyAsync` rules: pointers must be valid for `count`
+/// bytes in the appropriate memory space (host vs device) implied by
+/// `kind`.
+unsafe fn cuda_memcpy_async_on_raw(
+    dst: *mut c_void,
+    src: *const c_void,
+    count: usize,
+    kind: i32,
+    stream: cudaStream_t,
+) -> i32 {
+    cudaMemcpyAsync(dst, src, count, kind, stream)
 }
 
 /// RAII owner for the pair of CUDA-graph handles returned by
@@ -90,7 +119,9 @@ use crate::{
         fusion::{fuse_graph, FusionOptions, FusionReport},
         type_infer,
     },
-    planner::{access_from_node, MemoryPlan, PlanError, SchedulerMode},
+    planner::{
+        access_from_node, ListSchedulerV1, PlanError, SchedulerMode, StreamInstr, StreamMemoryPlan,
+    },
     quast::Quast,
     runtime::KernelProgram,
     CompileError,
@@ -209,6 +240,16 @@ impl GraphCompiler {
     /// the OR-Tools-free fallback described in [`planner::plan_heuristic`].
     pub fn scheduler(mut self, scheduler: SchedulerMode) -> Self {
         self.scheduler = scheduler;
+        self
+    }
+
+    /// Convenience toggle: enables stream-aware list scheduling
+    /// ([`SchedulerMode::ListV1`]) with the given tuning parameters.
+    /// When `params.max_concurrency == 1`, this degenerates to a
+    /// single-stream schedule identical in shape to the heuristic
+    /// backend (no `WaitOn` instructions, no auxiliary streams).
+    pub fn stream_planning(mut self, params: ListSchedulerV1) -> Self {
+        self.scheduler = SchedulerMode::ListV1 { params };
         self
     }
 
@@ -561,6 +602,7 @@ impl GraphCompiler {
             }
             #[cfg(feature = "planner-ortools")]
             PlanError::NoSolution(_) => CompileError::Runtime(format!("graph plan: {e}")),
+            PlanError::Infeasible(_) => CompileError::Runtime(format!("graph plan: {e}")),
         })?;
         g.plan = Some(plan);
         Ok(())
@@ -624,13 +666,15 @@ impl GraphCompiler {
         let output_bufs = graph.output_bufs().to_vec();
         let bufs = graph.bufs.clone();
         let mut exe_nodes: Vec<ExeNode> = Vec::with_capacity(graph.nodes.len());
-        for node in graph.nodes.drain(..) {
+        for (idx, node) in graph.nodes.drain(..).enumerate() {
+            let stream = plan.stream.get(idx).copied().unwrap_or(0);
             exe_nodes.push(build_exe_node(
                 node,
                 &kernel_of_ptr,
                 &mut kernels,
                 &sizes,
                 &self.env,
+                stream,
             )?);
         }
 
@@ -649,6 +693,8 @@ impl GraphCompiler {
             num_cached_modules,
             fusion_report,
             captured: None,
+            streams: Vec::new(),
+            events: Vec::new(),
         })
     }
 
@@ -864,6 +910,7 @@ fn build_exe_node(
     kernels: &mut [KernelProgram],
     sizes: &[usize],
     env: &BTreeMap<VarId, i64>,
+    stream: u32,
 ) -> Result<ExeNode, CompileError> {
     Ok(match node {
         GraphNode::Kernel(k) => {
@@ -885,9 +932,12 @@ fn build_exe_node(
                 inputs: k.inputs,
                 outputs: k.outputs,
                 set_params,
+                stream,
             })
         }
-        GraphNode::BlackboxKernel(k) => ExeNode::Blackbox(k),
+        GraphNode::BlackboxKernel(k) => {
+            ExeNode::Blackbox(ExeBlackbox { kernel: k, stream })
+        }
         GraphNode::Const(c) => ExeNode::Const(c),
         GraphNode::Memcpy(m) => {
             let src_offset = eval_nonneg(&m.src_offset, env, "memcpy src_offset")?;
@@ -1088,11 +1138,19 @@ struct ExeKernel {
     /// value with its corresponding name and calls `set_symbol` before
     /// launching.
     set_params: Vec<i64>,
+    /// Stream index this kernel launches on. `0` is `ctx.stream`; higher
+    /// indices are internally-owned auxiliary streams.
+    stream: u32,
+}
+
+struct ExeBlackbox {
+    kernel: KernelNode,
+    stream: u32,
 }
 
 enum ExeNode {
     Kernel(ExeKernel),
-    Blackbox(KernelNode),
+    Blackbox(ExeBlackbox),
     Const(ConstNode),
     Memcpy {
         src: BufId,
@@ -1117,7 +1175,15 @@ enum ExeNode {
 /// [`Self::get_output`]. Because every node always resolves the same
 /// device addresses, a run is CUDA-graph capturable and replayable.
 pub struct GraphExe {
-    plan: MemoryPlan,
+    plan: StreamMemoryPlan,
+    /// Auxiliary CUDA streams for `stream_idx >= 1`. `streams[0]` is the
+    /// caller's `ctx.stream`, so it's stored as `None` and resolved at
+    /// run-time. `streams[i]` for `i >= 1` is an owned non-blocking stream
+    /// created once and reused for every `run()`.
+    streams: Vec<Option<Arc<openvm_cuda_common::stream::CudaStream>>>,
+    /// Cross-stream synchronization events. Indexed by the `event_idx`
+    /// carried in `WaitOn`/`record_event`. Allocated once in `compile()`.
+    events: Vec<openvm_cuda_common::stream::CudaEvent>,
     sizes: Vec<usize>,
     /// One compiled artifact per unique residual hash. `ExeKernel` nodes
     /// carry a `kernel_idx` into this vec; multiple nodes may share an
@@ -1293,7 +1359,13 @@ impl GraphExe {
             "// Device pool size: {} bytes\n",
             self.scratch_bytes()
         ));
-        out.push_str(&format!("// Execution order: {:?}\n", self.plan.order));
+        out.push_str(&format!("// Execution order: {:?}\n", self.plan.order()));
+        if self.plan.num_streams > 1 {
+            out.push_str(&format!(
+                "// Streams: {} (per-node: {:?})\n",
+                self.plan.num_streams, self.plan.stream
+            ));
+        }
 
         if !self.input_bufs.is_empty() {
             out.push_str("// Inputs (registered; bound via set_input):\n");
@@ -1309,9 +1381,26 @@ impl GraphExe {
         }
         out.push('\n');
 
-        for &node_idx in &self.plan.order {
-            out.push_str(&self.format_exe_node_line(&self.nodes[node_idx]));
-            out.push('\n');
+        for instr in &self.plan.instructions {
+            match instr {
+                StreamInstr::Node(node_idx) => {
+                    out.push_str(&self.format_exe_node_line(&self.nodes[*node_idx]));
+                    if self.plan.num_streams > 1 {
+                        out.push_str(&format!(
+                            "  // stream={}{}",
+                            self.plan.stream[*node_idx],
+                            match self.plan.record_event[*node_idx] {
+                                Some(e) => format!(", record_event={e}"),
+                                None => String::new(),
+                            }
+                        ));
+                    }
+                    out.push('\n');
+                }
+                StreamInstr::WaitOn(stream, event) => {
+                    out.push_str(&format!("// WaitOn(stream={stream}, event={event})\n"));
+                }
+            }
         }
         out
     }
@@ -1360,7 +1449,8 @@ impl GraphExe {
                     attrs,
                 )
             }
-            ExeNode::Blackbox(k) => {
+            ExeNode::Blackbox(bb) => {
+                let k = &bb.kernel;
                 let mut attrs = format!("name=\"{}\"", k.name);
                 if !k.carried_outputs.is_empty() {
                     attrs.push_str(&format!(
@@ -1511,7 +1601,14 @@ impl GraphExe {
         }
     }
 
-    /// Executes the graph on `ctx.stream`.
+    /// Executes the graph on `ctx.stream` (stream index 0).
+    ///
+    /// For multi-stream plans, auxiliary streams (index >= 1) are used
+    /// internally; cross-stream data dependencies are enforced by
+    /// pre-recorded events (see `StreamInstr::WaitOn`). All work still
+    /// completes before subsequent host-side syncs on `ctx.stream` because
+    /// the plan issues implicit fork/join events around the multi-stream
+    /// region (see [`Self::ensure_streams`]).
     ///
     /// Every buffer resolves to `pool + planned_offset`, so consecutive
     /// runs replay identical device addresses (CUDA-graph capturable). All
@@ -1529,6 +1626,7 @@ impl GraphExe {
             )));
         }
         self.ensure_pool(ctx);
+        self.ensure_streams()?;
 
         // Destructure so `nodes` and `kernels` can be borrowed mutably at
         // the same time (disjoint fields). `pool`/`plan`/`device` stay
@@ -1540,142 +1638,261 @@ impl GraphExe {
             pool,
             device,
             sizes,
+            streams,
+            events,
             ..
         } = self;
         let pool = pool.as_ref().expect("pool ensured above");
         let device = *device;
         let bufid_ptr = |b: BufId| resolve_ptr(pool, &plan.offsets, device, b);
 
-        for &node_idx in &plan.order {
-            match &mut nodes[node_idx] {
-                ExeNode::Kernel(k) => {
-                    // Re-binding params / inputs / outputs just before the
-                    // launch is safe even when this artifact is shared
-                    // with other nodes (multiple `ExeKernel`s can point
-                    // at the same `kernel_idx`), because execution is
-                    // sequential. Params first: the sizes queried below
-                    // are functions of the currently-bound params, which
-                    // the previous node may have overwritten.
-                    let m = &mut kernels[k.kernel_idx];
-                    let names: Vec<String> = m.params().to_vec();
-                    for (name, &v) in names.iter().zip(k.set_params.iter()) {
-                        m.set_symbol(name, v);
-                    }
-                    for (i, &bid) in k.inputs.iter().enumerate() {
-                        let ptr = bufid_ptr(bid)?;
-                        let expected = m.input_size(i);
-                        let fake = ManuallyDrop::new(unsafe {
-                            DeviceBuffer::<u8>::from_raw_parts(ptr, expected)
-                        });
-                        m.set_input(i, &fake)?;
-                    }
-                    for (i, &bid) in k.outputs.iter().enumerate() {
-                        let ptr = bufid_ptr(bid)?;
-                        let expected = m.output_size(i);
-                        let fake = ManuallyDrop::new(unsafe {
-                            DeviceBuffer::<u8>::from_raw_parts(ptr, expected)
-                        });
-                        m.set_output(i, &fake)?;
-                    }
-                    m.run(&ctx.stream)?;
+        // For multi-stream plans, fork from ctx.stream to every auxiliary
+        // stream via a shared start event so their launches join the
+        // CUDA-graph capture DAG (if capturing) and don't race with any
+        // work still in flight on ctx.stream.
+        let multi_stream = plan.num_streams > 1;
+        let start_event = if multi_stream {
+            let ev = openvm_cuda_common::stream::CudaEvent::new().map_err(|e| {
+                CompileError::Runtime(format!("start event alloc failed: {e:?}"))
+            })?;
+            ev.record_on(&ctx.stream).map_err(|e| {
+                CompileError::Runtime(format!("start event record failed: {e:?}"))
+            })?;
+            for aux in streams.iter().skip(1).filter_map(|s| s.as_ref()) {
+                aux.wait(&ev).map_err(|e| {
+                    CompileError::Runtime(format!("aux fork wait failed: {e:?}"))
+                })?;
+            }
+            Some(ev)
+        } else {
+            None
+        };
+
+        // Resolve a stream index to a raw handle, using ctx.stream for
+        // index 0 and the owned auxiliary streams otherwise.
+        let stream_raw = |idx: u32| -> cudaStream_t {
+            if idx == 0 {
+                ctx.stream.as_raw()
+            } else {
+                streams[idx as usize]
+                    .as_ref()
+                    .expect("aux stream ensured")
+                    .as_raw()
+            }
+        };
+        let stream_ref = |idx: u32| -> &openvm_cuda_common::stream::CudaStream {
+            if idx == 0 {
+                &ctx.stream
+            } else {
+                streams[idx as usize]
+                    .as_ref()
+                    .expect("aux stream ensured")
+            }
+        };
+
+        for instr in &plan.instructions {
+            match *instr {
+                StreamInstr::WaitOn(s, e) => {
+                    let ev = &events[e];
+                    stream_ref(s as u32).wait(ev).map_err(|err| {
+                        CompileError::Runtime(format!(
+                            "WaitOn(stream={s}, event={e}) failed: {err:?}"
+                        ))
+                    })?;
                 }
-                ExeNode::Blackbox(k) => {
-                    let ins: Vec<*mut ()> = k
-                        .inputs
-                        .iter()
-                        .map(|&b| bufid_ptr(b).map(|p| p as *mut ()))
-                        .collect::<Result<_, _>>()?;
-                    let outs: Vec<*mut ()> = k
-                        .outputs
-                        .iter()
-                        .map(|&b| bufid_ptr(b).map(|p| p as *mut ()))
-                        .collect::<Result<_, _>>()?;
-                    (k.func)(&ins, &outs, ctx.stream.as_raw());
-                }
-                ExeNode::Const(c) => {
-                    let dst = bufid_ptr(c.buf)?;
-                    let n = sizes[c.buf.0];
-                    match &c.data {
-                        ConstBuf::HostBuf(bytes) => {
-                            if bytes.len() != n {
-                                return Err(CompileError::Runtime(format!(
-                                    "Const HostBuf for {:?} is {} bytes, buffer is {n}",
-                                    c.buf,
-                                    bytes.len()
-                                )));
+                StreamInstr::Node(node_idx) => {
+                    let s_raw = stream_raw(plan.stream[node_idx]);
+                    match &mut nodes[node_idx] {
+                        ExeNode::Kernel(k) => {
+                            let m = &mut kernels[k.kernel_idx];
+                            let names: Vec<String> = m.params().to_vec();
+                            for (name, &v) in names.iter().zip(k.set_params.iter()) {
+                                m.set_symbol(name, v);
                             }
-                            unsafe {
-                                cuda_memcpy_on::<false, true>(
-                                    dst as *mut c_void,
-                                    bytes.as_ptr() as *const c_void,
-                                    n,
-                                    ctx,
-                                )
-                                .map_err(memcpy_err)?;
+                            for (i, &bid) in k.inputs.iter().enumerate() {
+                                let ptr = bufid_ptr(bid)?;
+                                let expected = m.input_size(i);
+                                let fake = ManuallyDrop::new(unsafe {
+                                    DeviceBuffer::<u8>::from_raw_parts(ptr, expected)
+                                });
+                                m.set_input(i, &fake)?;
+                            }
+                            for (i, &bid) in k.outputs.iter().enumerate() {
+                                let ptr = bufid_ptr(bid)?;
+                                let expected = m.output_size(i);
+                                let fake = ManuallyDrop::new(unsafe {
+                                    DeviceBuffer::<u8>::from_raw_parts(ptr, expected)
+                                });
+                                m.set_output(i, &fake)?;
+                            }
+                            m.run(stream_ref(k.stream))?;
+                        }
+                        ExeNode::Blackbox(bb) => {
+                            let k = &bb.kernel;
+                            let ins: Vec<*mut ()> = k
+                                .inputs
+                                .iter()
+                                .map(|&b| bufid_ptr(b).map(|p| p as *mut ()))
+                                .collect::<Result<_, _>>()?;
+                            let outs: Vec<*mut ()> = k
+                                .outputs
+                                .iter()
+                                .map(|&b| bufid_ptr(b).map(|p| p as *mut ()))
+                                .collect::<Result<_, _>>()?;
+                            (k.func)(&ins, &outs, stream_raw(bb.stream));
+                        }
+                        ExeNode::Const(c) => {
+                            let dst = bufid_ptr(c.buf)?;
+                            let n = sizes[c.buf.0];
+                            match &c.data {
+                                ConstBuf::HostBuf(bytes) => {
+                                    if bytes.len() != n {
+                                        return Err(CompileError::Runtime(format!(
+                                            "Const HostBuf for {:?} is {} bytes, buffer is {n}",
+                                            c.buf,
+                                            bytes.len()
+                                        )));
+                                    }
+                                    let code = unsafe {
+                                        cuda_memcpy_async_on_raw(
+                                            dst as *mut c_void,
+                                            bytes.as_ptr() as *const c_void,
+                                            n,
+                                            CUDA_MEMCPY_HOST_TO_DEVICE,
+                                            s_raw,
+                                        )
+                                    };
+                                    if code != 0 {
+                                        return Err(CompileError::Runtime(format!(
+                                            "cudaMemcpyAsync H2D failed with code {code}"
+                                        )));
+                                    }
+                                }
+                                ConstBuf::DeviceBuf(src) => {
+                                    let code = unsafe {
+                                        cuda_memcpy_async_on_raw(
+                                            dst as *mut c_void,
+                                            src.as_raw_ptr(),
+                                            n,
+                                            CUDA_MEMCPY_DEVICE_TO_DEVICE,
+                                            s_raw,
+                                        )
+                                    };
+                                    if code != 0 {
+                                        return Err(CompileError::Runtime(format!(
+                                            "cudaMemcpyAsync D2D failed with code {code}"
+                                        )));
+                                    }
+                                }
                             }
                         }
-                        ConstBuf::DeviceBuf(src) => unsafe {
-                            cuda_memcpy_on::<true, true>(
-                                dst as *mut c_void,
-                                src.as_raw_ptr(),
-                                n,
-                                ctx,
-                            )
-                            .map_err(memcpy_err)?;
-                        },
+                        ExeNode::Memcpy {
+                            src,
+                            src_offset,
+                            dst,
+                            dst_offset,
+                            num_bytes,
+                        } => {
+                            let src_ptr = bufid_ptr(*src)?;
+                            let dst_ptr = bufid_ptr(*dst)?;
+                            let code = unsafe {
+                                openvm_cuda_common::error::check(cuda_memcpy_async_on_raw(
+                                    dst_ptr.add(*dst_offset) as *mut c_void,
+                                    src_ptr.add(*src_offset) as *const c_void,
+                                    *num_bytes,
+                                    CUDA_MEMCPY_DEVICE_TO_DEVICE,
+                                    s_raw,
+                                ))
+                            };
+                            code.map_err(|e| {
+                                CompileError::Runtime(format!("cudaMemcpyAsync D2D: {e:?}"))
+                            })?;
+                        }
+                        ExeNode::Memset {
+                            buf,
+                            offset,
+                            num_bytes,
+                            val,
+                        } => {
+                            let val_bytes = val.to_le_bytes();
+                            if val_bytes[0] != val_bytes[1]
+                                || val_bytes[0] != val_bytes[2]
+                                || val_bytes[0] != val_bytes[3]
+                            {
+                                return Err(CompileError::Runtime(format!(
+                                    "Memset value {val:#x} is not byte-uniform; only byte-pattern \
+                                     fills are supported today"
+                                )));
+                            }
+                            let ptr = bufid_ptr(*buf)?;
+                            let code = unsafe {
+                                cudaMemsetAsync(
+                                    ptr.add(*offset) as *mut c_void,
+                                    val_bytes[0] as i32,
+                                    *num_bytes,
+                                    s_raw,
+                                )
+                            };
+                            if code != 0 {
+                                return Err(CompileError::Runtime(format!(
+                                    "cudaMemsetAsync failed with code {code}"
+                                )));
+                            }
+                        }
                     }
-                }
-                ExeNode::Memcpy {
-                    src,
-                    src_offset,
-                    dst,
-                    dst_offset,
-                    num_bytes,
-                } => {
-                    let src_ptr = bufid_ptr(*src)?;
-                    let dst_ptr = bufid_ptr(*dst)?;
-                    unsafe {
-                        cuda_memcpy_on::<true, true>(
-                            dst_ptr.add(*dst_offset) as *mut c_void,
-                            src_ptr.add(*src_offset) as *const c_void,
-                            *num_bytes,
-                            ctx,
-                        )
-                        .map_err(memcpy_err)?;
-                    }
-                }
-                ExeNode::Memset {
-                    buf,
-                    offset,
-                    num_bytes,
-                    val,
-                } => {
-                    let val_bytes = val.to_le_bytes();
-                    if val_bytes[0] != val_bytes[1]
-                        || val_bytes[0] != val_bytes[2]
-                        || val_bytes[0] != val_bytes[3]
-                    {
-                        return Err(CompileError::Runtime(format!(
-                            "Memset value {val:#x} is not byte-uniform; only byte-pattern \
-                             fills are supported today"
-                        )));
-                    }
-                    let ptr = bufid_ptr(*buf)?;
-                    let code = unsafe {
-                        cudaMemsetAsync(
-                            ptr.add(*offset) as *mut c_void,
-                            val_bytes[0] as i32,
-                            *num_bytes,
-                            ctx.stream.as_raw(),
-                        )
-                    };
-                    if code != 0 {
-                        return Err(CompileError::Runtime(format!(
-                            "cudaMemsetAsync failed with code {code}"
-                        )));
+                    if let Some(e) = plan.record_event[node_idx] {
+                        let s = plan.stream[node_idx];
+                        events[e as usize].record_on(stream_ref(s)).map_err(|err| {
+                            CompileError::Runtime(format!(
+                                "record_event({e}) on stream {s} failed: {err:?}"
+                            ))
+                        })?;
                     }
                 }
             }
+        }
+
+        // Join every auxiliary stream back into ctx.stream so callers can
+        // sync on ctx.stream and observe all work.
+        if let Some(_ev0) = start_event {
+            for aux in streams.iter().skip(1).filter_map(|s| s.as_ref()) {
+                let e = openvm_cuda_common::stream::CudaEvent::new().map_err(|err| {
+                    CompileError::Runtime(format!("join event alloc failed: {err:?}"))
+                })?;
+                e.record_on(aux).map_err(|err| {
+                    CompileError::Runtime(format!("join event record failed: {err:?}"))
+                })?;
+                ctx.stream.wait(&e).map_err(|err| {
+                    CompileError::Runtime(format!("join wait on ctx.stream failed: {err:?}"))
+                })?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Allocates auxiliary streams and events lazily on the first
+    /// [`Self::run`]. Slot 0 stays `None` and resolves to `ctx.stream` at
+    /// run-time; slots >= 1 are internally-owned non-blocking streams.
+    fn ensure_streams(&mut self) -> Result<(), CompileError> {
+        if self.streams.len() != self.plan.num_streams as usize {
+            let mut new = Vec::with_capacity(self.plan.num_streams as usize);
+            new.push(None);
+            for _ in 1..self.plan.num_streams {
+                let s = openvm_cuda_common::stream::CudaStream::new_non_blocking().map_err(
+                    |e| CompileError::Runtime(format!("aux stream alloc failed: {e:?}")),
+                )?;
+                new.push(Some(Arc::new(s)));
+            }
+            self.streams = new;
+        }
+        if self.events.len() != self.plan.num_events as usize {
+            let mut evs = Vec::with_capacity(self.plan.num_events as usize);
+            for _ in 0..self.plan.num_events {
+                evs.push(openvm_cuda_common::stream::CudaEvent::new().map_err(|e| {
+                    CompileError::Runtime(format!("event alloc failed: {e:?}"))
+                })?);
+            }
+            self.events = evs;
         }
         Ok(())
     }

@@ -471,7 +471,7 @@ mod tests {
         graph_exe::GraphCompiler,
         graph_ir::{DeviceType, GraphBuilder},
         passes::fusion::FusionOptions,
-        planner::SchedulerMode,
+        planner::{ListSchedulerV1, SchedulerMode},
     };
     use openvm_cuda_common::{
         common::get_device,
@@ -1073,10 +1073,29 @@ mod tests {
                     .max_kernels(4096)
                     .storage_size(200 * 1024 * 1024 * 1024),
             );
+            let scheduler_mode = match std::env::var("FRAC_V2_BENCH_SCHEDULER")
+                .unwrap_or_else(|_| "heuristic".into())
+                .as_str()
+            {
+                "list_v1" | "streams" => {
+                    let max_conc: u32 = std::env::var("FRAC_V2_BENCH_STREAMS")
+                        .ok()
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(2);
+                    SchedulerMode::ListV1 {
+                        params: ListSchedulerV1 {
+                            max_concurrency: max_conc,
+                            ..ListSchedulerV1::default()
+                        },
+                    }
+                }
+                _ => SchedulerMode::Heuristic,
+            };
+            println!("scheduler: {scheduler_mode:?}");
             let t0 = Instant::now();
             let mut compiler = GraphCompiler::new()
                 .device(device)
-                .scheduler(SchedulerMode::Heuristic)
+                .scheduler(scheduler_mode)
                 .kernel_cache(kernel_cache)
                 .fusion_options(FusionOptions {
                     verbose: true,
@@ -1256,12 +1275,14 @@ mod tests {
             let eager_median = median(&st.eager_ms);
             let graph_median = median(&st.graph_ms);
             let capture_median = median(&st.graph_capture_ms);
+            let peak_mib = st.exe.scratch_bytes() as f64 / (1024.0 * 1024.0);
             println!(
                 "\n--- fractional sumcheck v2: n = 2^{} = {} leaves ---\n\
                  eager (median):          {:.2} ms   raw: {:.2?}\n\
                  v2 build: {:.2} ms ({} nodes pre-fusion -> {} post-fusion, \
                  {} fusions in {} rounds, {} unique modules); compile: {:.2} ms; \
                  capture: {:.2} ms\n\
+                 v2 peak memory:          {} bytes ({:.2} MiB)\n\
                  v2 exec (median):        {:.2} ms   raw: {:.2?}   ratio: {:.3}× eager\n\
                  v2 capture (median):     {:.2} ms   raw: {:.2?}   \
                  ratio: {:.3}× eager, {:.3}× graph",
@@ -1277,6 +1298,8 @@ mod tests {
                 st.unique_modules,
                 st.compile_ms,
                 st.capture_ms,
+                st.exe.scratch_bytes(),
+                peak_mib,
                 graph_median,
                 st.graph_ms,
                 graph_median / eager_median,
@@ -1300,6 +1323,289 @@ mod tests {
                 got_sum, st.eager_sum,
                 "fractional_sum mismatch at 2^{}",
                 st.log_n
+            );
+        }
+    }
+
+    /// Single-nsys-profile bench comparing eager, heuristic, and list_v1
+    /// with 1/2/3 streams — every workload wrapped in an NVTX range inside
+    /// one `cudaProfilerStart/Stop` window per AGENTS.md profiling guide.
+    ///
+    /// Size controlled by `FRAC_V2_BENCH_LOG_N` (single value, defaults 20).
+    ///
+    /// Recommended invocation (matches AGENTS.md profile requirements):
+    ///
+    /// ```text
+    /// FRAC_V2_BENCH_LOG_N=20 NSYS_ENABLED=1 nsys profile \
+    ///     --capture-range=cudaProfilerApi \
+    ///     --trace=cuda,nvtx --cuda-graph-trace=node \
+    ///     --gpu-metrics-devices=visible \
+    ///     -o frac_v2_all_schedulers --force-overwrite=true \
+    ///     cargo nextest run -p openvm-cuda-backend --features graph-ir \
+    ///         --run-ignored all --no-capture \
+    ///         -E 'test(bench_fractional_sumcheck_all_schedulers_nsys)'
+    /// ```
+    #[test]
+    #[ignore]
+    fn bench_fractional_sumcheck_all_schedulers_nsys() {
+        use std::{
+            sync::Arc,
+            time::{Duration, Instant},
+        };
+
+        use crypto_compiler::{
+            graph_exe::GraphExe, kernel_cache::KernelCache, passes::fusion::FusionOptions,
+            planner::ListSchedulerV1,
+        };
+        use openvm_cuda_common::memory_manager::MemTracker;
+
+        const ITERS: usize = 3;
+        const WARMUPS: usize = 2;
+
+        let ctx = test_ctx();
+        let device = DeviceType::Cuda(0);
+        let log_n: usize = std::env::var("FRAC_V2_BENCH_LOG_N")
+            .ok()
+            .and_then(|s| s.trim().parse().ok())
+            .unwrap_or(20);
+        let n = 1usize << log_n;
+        let nsys_enabled = std::env::var_os("NSYS_ENABLED").is_some();
+        let no_fusion = std::env::var_os("FRAC_V2_BENCH_NO_FUSION").is_some();
+
+        // ---------- Setup phase (excluded from cudaProfilerStart window) ----------
+
+        println!(
+            "\n=== all-schedulers nsys bench: n = 2^{log_n} = {n} leaves, \
+             nsys_enabled={nsys_enabled} ==="
+        );
+
+        let leaves = make_host_leaves(n, 0x5EED_BE9C ^ log_n as u64);
+
+        // We rebuild the graph per scheduler variant (build_v2_graph is
+        // cheap, ~40 ms at log_n=20); GraphBuilder isn't Clone because it
+        // holds boxed closures for blackbox kernels.
+        let make_graph = |log_n: usize| {
+            let V2GraphBundle {
+                mut g,
+                proof: proof_ir,
+                alpha,
+            } = build_v2_graph(log_n);
+            let roots: [BufId; 2] = [proof_ir.fractional_sum.0, proof_ir.fractional_sum.1];
+            register_all_proof_outputs(&mut g, &proof_ir);
+            (g, roots, alpha)
+        };
+        // Discover the alpha + root export ids from the first build (they're
+        // deterministic in log_n).
+        let (_g0, root_exports, alpha) = make_graph(log_n);
+
+        // Eager reference — computes the ground-truth sum on the same
+        // (leaves, alpha) the graph was built with.
+        let eager_sum = {
+            let d_leaves = leaves_to_device(&leaves, &ctx);
+            let mut sponge = DuplexSpongeGpu::default();
+            let mut mem = MemTracker::start("bench.fractional_v2_eager");
+            ctx.stream.synchronize().expect("sync");
+            let (proof, _xi) = fractional_sumcheck_gpu::<SC, _>(
+                &mut sponge,
+                d_leaves,
+                FractionalInputSize::dense(n),
+                alpha,
+                false,
+                &mut mem,
+                &ctx,
+            )
+            .expect("eager reference");
+            ctx.stream.synchronize().expect("sync");
+            proof.fractional_sum
+        };
+
+        // Shared kernel cache so subsequent scheduler compiles hit warm
+        // artifacts. The compiled binaries are identical across schedulers
+        // (only order/stream/offset differ); after the first compile every
+        // subsequent one is a cache-hit walk.
+        let kernel_cache = Arc::new(
+            KernelCache::new()
+                .max_kernels(4096)
+                .storage_size(200 * 1024 * 1024 * 1024),
+        );
+
+        // Stream counts for list_v1 sweep — env-var-driven so the same
+        // test doubles as a spot-check (1,2,3) or a full sweep (1..=8).
+        let stream_sweep: Vec<u32> = std::env::var("FRAC_V2_BENCH_STREAM_SWEEP")
+            .unwrap_or_else(|_| "1,2,3".into())
+            .split(',')
+            .map(|s| s.trim().parse().expect("FRAC_V2_BENCH_STREAM_SWEEP entry"))
+            .collect();
+
+        let mut configs: Vec<(String, SchedulerMode)> =
+            vec![("heuristic".to_string(), SchedulerMode::Heuristic)];
+        for s in &stream_sweep {
+            configs.push((
+                format!("listv1_s{s}"),
+                SchedulerMode::ListV1 {
+                    params: ListSchedulerV1 {
+                        max_concurrency: *s,
+                        ..ListSchedulerV1::default()
+                    },
+                },
+            ));
+        }
+
+        struct Compiled {
+            name: String,
+            exe: GraphExe,
+            peak_bytes: usize,
+        }
+
+        // Compile every scheduler variant, upload the input, warm each up
+        // and pre-capture their CUDA graphs — all before cudaProfilerStart.
+        let mut compiled: Vec<Compiled> = Vec::with_capacity(configs.len());
+        for (name, mode) in configs {
+            println!("[setup] compiling scheduler={name} ...");
+            let t0 = Instant::now();
+            let mut compiler = GraphCompiler::new()
+                .device(device)
+                .scheduler(mode)
+                .kernel_cache(kernel_cache.clone())
+                .fusion_options(FusionOptions {
+                    verbose: false,
+                    max_iterations: 20,
+                    ..FusionOptions::default()
+                });
+            if no_fusion {
+                compiler = compiler.without_fusion();
+            }
+            let (g, _, _) = make_graph(log_n);
+            let mut exe = compiler
+                .nvcc_timeout(Some(Duration::from_secs(900)))
+                .compile(g)
+                .expect("graph compile");
+            let peak_bytes = exe.scratch_bytes();
+            let compile_ms = t0.elapsed().as_secs_f64() * 1e3;
+            println!(
+                "[setup] {name}: compile={compile_ms:.1} ms, peak={peak_bytes} bytes \
+                 ({:.2} MiB), unique_modules={}",
+                peak_bytes as f64 / (1024.0 * 1024.0),
+                exe.num_unique_modules()
+            );
+
+            // Bind input once — the exe owns a stable device slot.
+            assert_eq!(exe.num_inputs(), 1);
+            let d_input = frac_bytes(&leaves).to_device_on(&ctx).expect("H2D");
+            exe.set_input(&ctx, 0, &d_input).expect("set_input");
+
+            // Warmup direct exec + capture graph + warmup graph replay.
+            for _ in 0..WARMUPS {
+                ctx.stream.synchronize().expect("sync");
+                exe.run(&ctx).expect("graph warmup");
+                ctx.stream.synchronize().expect("sync");
+            }
+            ctx.stream.synchronize().expect("sync");
+            exe.capture_graph(&ctx).expect("graph capture");
+            ctx.stream.synchronize().expect("sync");
+            for _ in 0..WARMUPS {
+                ctx.stream.synchronize().expect("sync");
+                exe.launch_graph(&ctx).expect("graph capture warmup");
+                ctx.stream.synchronize().expect("sync");
+            }
+            compiled.push(Compiled { name, exe, peak_bytes });
+        }
+
+        // Eager needs its own d_leaves per iteration (the eager solver
+        // consumes the buffer), so we pre-allocate a handful up front.
+        let mut eager_leaves: Vec<DeviceBuffer<Frac<EF>>> =
+            (0..ITERS).map(|_| leaves_to_device(&leaves, &ctx)).collect();
+
+        // ---------- Timed phase: single profiler window over every workload ----------
+
+        ctx.stream.synchronize().expect("sync pre-profile");
+        if nsys_enabled {
+            unsafe { cudaProfilerStart() };
+        }
+
+        // Eager reference workload.
+        for i in 0..ITERS {
+            let d_leaves = eager_leaves.pop().expect("pre-alloc'd eager leaves");
+            let mut sponge = DuplexSpongeGpu::default();
+            let mut mem = MemTracker::start("bench.fractional_v2_eager");
+            ctx.stream.synchronize().expect("sync");
+            if nsys_enabled {
+                nvtx::range_push!("eager iter={i}");
+            }
+            let _ = fractional_sumcheck_gpu::<SC, _>(
+                &mut sponge,
+                d_leaves,
+                FractionalInputSize::dense(n),
+                alpha,
+                false,
+                &mut mem,
+                &ctx,
+            )
+            .expect("eager");
+            ctx.stream.synchronize().expect("sync");
+            if nsys_enabled {
+                nvtx::range_pop!();
+            }
+        }
+
+        // Per-scheduler: exec workload, then CUDA-graph replay workload.
+        for c in compiled.iter_mut() {
+            for i in 0..ITERS {
+                ctx.stream.synchronize().expect("sync");
+                if nsys_enabled {
+                    let label = format!("{}_exec iter={i}", c.name);
+                    nvtx::range_push!("{}", label);
+                }
+                c.exe.run(&ctx).expect("graph run");
+                ctx.stream.synchronize().expect("sync");
+                if nsys_enabled {
+                    nvtx::range_pop!();
+                }
+            }
+            for i in 0..ITERS {
+                ctx.stream.synchronize().expect("sync");
+                if nsys_enabled {
+                    let label = format!("{}_graph iter={i}", c.name);
+                    nvtx::range_push!("{}", label);
+                }
+                c.exe.launch_graph(&ctx).expect("graph launch");
+                ctx.stream.synchronize().expect("sync");
+                if nsys_enabled {
+                    nvtx::range_pop!();
+                }
+            }
+        }
+
+        if nsys_enabled {
+            unsafe { cudaProfilerStop() };
+        }
+
+        // ---------- Correctness sanity check (outside profile window) ----------
+
+        for c in &compiled {
+            let read_export = |bid: BufId| -> EF {
+                let idx = (0..c.exe.num_outputs())
+                    .find(|&i| c.exe.output_buf_id(i) == bid)
+                    .expect("export output index");
+                ef_from_bytes(&c.exe.get_output(idx).to_host_on(&ctx).expect("D2H"))
+            };
+            let got_sum = (read_export(root_exports[0]), read_export(root_exports[1]));
+            assert_eq!(
+                got_sum, eager_sum,
+                "fractional_sum mismatch on scheduler {}",
+                c.name
+            );
+        }
+
+        // Summary print.
+        println!("\n=== nsys-bench summary (n = 2^{log_n}) ===");
+        println!("scheduler        peak_bytes     peak_MiB");
+        for c in &compiled {
+            println!(
+                "{:<15}  {:>10}   {:>8.2}",
+                c.name,
+                c.peak_bytes,
+                c.peak_bytes as f64 / (1024.0 * 1024.0),
             );
         }
     }
