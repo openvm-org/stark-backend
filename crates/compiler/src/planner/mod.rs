@@ -35,7 +35,9 @@ pub mod heuristic;
 pub mod list_v1;
 mod plan;
 
-pub use ctx::{access_from_node, align_up, eval_size, NodeAccess, PlanCtx, PlanError};
+pub use ctx::{
+    access_from_node, align_up, eval_size, propagate_alias_offsets, NodeAccess, PlanCtx, PlanError,
+};
 pub use list_v1::ListSchedulerV1;
 pub use plan::{StreamInstr, StreamMemoryPlan};
 
@@ -72,6 +74,9 @@ impl Default for SchedulerMode {
 /// Buffers whose device does not match `device` are ignored (they still
 /// affect scheduling through their reads/writes but do not contribute to
 /// the packed memory pool).
+///
+/// Threads `graph.aliases` through so buffers renamed by
+/// `passes::restore_ssa` share a pool slot with their canonical.
 pub fn plan(
     graph: &GraphBuilder,
     env: &BTreeMap<VarId, i64>,
@@ -84,6 +89,7 @@ pub fn plan(
         env,
         device,
         &[],
+        &graph.aliases,
         &SchedulerMode::default(),
     )
 }
@@ -94,15 +100,20 @@ pub fn plan(
 /// per-kernel scratch buffers into the model.
 ///
 /// `pin` lists buffers whose lifetime is pinned to the end of the program.
+///
+/// `aliases` may be empty (no aliases) or the same length as `bufs`:
+/// `aliases[b] = Some(parent)` means `b` and `parent` must share a pool
+/// slot.
 pub fn plan_raw(
     bufs: &[BufInfo],
     nodes: &[NodeAccess],
     env: &BTreeMap<VarId, i64>,
     device: DeviceType,
     pin: &[crate::graph_ir::BufId],
+    aliases: &[Option<crate::graph_ir::BufId>],
     scheduler: &SchedulerMode,
 ) -> Result<StreamMemoryPlan, PlanError> {
-    let ctx = PlanCtx::build(bufs, nodes, env, device, pin)?;
+    let ctx = PlanCtx::build_with_aliases(bufs, nodes, env, device, pin, aliases)?;
     if ctx.n_nodes == 0 {
         return Ok(StreamMemoryPlan {
             instructions: Vec::new(),
@@ -114,12 +125,18 @@ pub fn plan_raw(
             num_events: 0,
         });
     }
-    match scheduler {
+    let canon = ctx.canon.clone();
+    let mut plan = match scheduler {
         #[cfg(feature = "planner-ortools")]
         SchedulerMode::CpSat { max_secs } => cpsat::plan_cpsat(bufs, &ctx, *max_secs),
         SchedulerMode::Heuristic => heuristic::plan_heuristic(bufs, &ctx),
         SchedulerMode::ListV1 { params } => params.clone().schedule(ctx, |_| 1.0),
-    }
+    }?;
+    // Backends assigned offsets only for canonical entries — alias
+    // members need to inherit the same slot so mutating blackbox
+    // closures and downstream readers hit the same pool address.
+    propagate_alias_offsets(&mut plan.offsets, &canon);
+    Ok(plan)
 }
 
 #[cfg(test)]
