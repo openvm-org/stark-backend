@@ -212,11 +212,7 @@ pub fn access_from_node(node: &GraphNode) -> NodeAccess {
     a
 }
 
-pub fn eval_size(
-    buf: BufId,
-    size: &Quast,
-    env: &BTreeMap<VarId, i64>,
-) -> Result<i64, PlanError> {
+pub fn eval_size(buf: BufId, size: &Quast, env: &BTreeMap<VarId, i64>) -> Result<i64, PlanError> {
     let mut syms = std::collections::BTreeSet::new();
     size.syms(&mut syms);
     for s in &syms {

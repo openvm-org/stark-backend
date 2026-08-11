@@ -3,8 +3,8 @@
 //! Picks an execution order for graph nodes and a byte offset per buffer
 //! on the target device such that:
 //! - peak bytes on that device are minimized (single-stream backends), or
-//! - execution time is minimized under an optional memory + concurrency
-//!   budget (multi-stream list scheduler).
+//! - execution time is minimized under an optional memory + concurrency budget (multi-stream list
+//!   scheduler).
 //!
 //! Backends are selected via [`SchedulerMode`]:
 //!

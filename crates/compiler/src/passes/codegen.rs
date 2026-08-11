@@ -672,11 +672,11 @@ fn gen_par(
     Ok(())
 }
 
-/// Reads whose value is only used inside one select branch, to be emitted
-/// at that branch's entry instead of at the top of the par body. This keeps
-/// [`SSAOpCode::Select`]'s short-circuit guarantee: the untaken side's
-/// loads (and their possibly out-of-bounds address arithmetic) never
-/// execute.
+/// Reads whose value is only used inside select branches, to be emitted at
+/// each use's innermost branch entry instead of at the top of the par
+/// body. This keeps [`SSAOpCode::Select`]'s short-circuit guarantee: the
+/// untaken side's loads (and their possibly out-of-bounds address
+/// arithmetic) never execute.
 struct ReadSinks<'a> {
     reads: &'a [Access],
     /// The par block's operands (`[par index, one value per read...]`).
@@ -715,24 +715,22 @@ impl ReadSinks<'_> {
     }
 }
 
-/// For each value, the first select crossing on the path from the par block
-/// to its use sites: absent = unused, `Some(None)` = some use is reached
-/// without entering a select branch (or uses disagree on the first
-/// crossing), `Some(Some(c))` = every use sits below crossing `c`.
+/// For each value, the innermost select crossing enclosing each of its use
+/// sites: absent = unused, `None` = some use is reached without entering
+/// any select branch, `Some(set)` = every use sits inside a select branch,
+/// with `set` the distinct innermost crossings.
 fn mark_use(
-    first: &mut HashMap<SSARes, Option<(SSANode, bool)>>,
+    innermost: &mut HashMap<SSARes, Option<HashSet<(SSANode, bool)>>>,
     v: SSARes,
     c: Option<(SSANode, bool)>,
 ) {
-    match first.entry(v) {
-        std::collections::hash_map::Entry::Vacant(e) => {
-            e.insert(c);
+    let entry = innermost.entry(v).or_insert_with(|| Some(HashSet::new()));
+    match (entry.as_mut(), c) {
+        (Some(set), Some(c)) => {
+            set.insert(c);
         }
-        std::collections::hash_map::Entry::Occupied(mut e) => {
-            if *e.get() != c {
-                e.insert(None);
-            }
-        }
+        (Some(_), None) => *entry = None,
+        (None, _) => {}
     }
 }
 
@@ -741,32 +739,52 @@ fn walk_uses(
     body: &[SSANode],
     yields: &[SSARes],
     crossing: Option<(SSANode, bool)>,
-    first: &mut HashMap<SSARes, Option<(SSANode, bool)>>,
+    innermost: &mut HashMap<SSARes, Option<HashSet<(SSANode, bool)>>>,
 ) {
     for &nid in body {
         let op = k.op(nid);
         for &o in &op.operands {
-            mark_use(first, o, crossing);
+            mark_use(innermost, o, crossing);
         }
         if let SSAOpCode::Select { else_block } = &op.opcode {
-            let then = crossing.or(Some((nid, false)));
-            walk_uses(k, &op.block.body, &op.block.yields, then, first);
-            let other = crossing.or(Some((nid, true)));
-            walk_uses(k, &else_block.body, &else_block.yields, other, first);
+            walk_uses(
+                k,
+                &op.block.body,
+                &op.block.yields,
+                Some((nid, false)),
+                innermost,
+            );
+            walk_uses(
+                k,
+                &else_block.body,
+                &else_block.yields,
+                Some((nid, true)),
+                innermost,
+            );
         } else {
-            walk_uses(k, &op.block.body, &op.block.yields, crossing, first);
+            walk_uses(k, &op.block.body, &op.block.yields, crossing, innermost);
         }
     }
     for &y in yields {
-        mark_use(first, y, crossing);
+        mark_use(innermost, y, crossing);
     }
 }
 
-/// Decides which reads sink into a select branch: every use of the read's
-/// value must sit below one branch crossing, the read's index must not
-/// depend on anything defined inside the par block (so it is emittable at
-/// the branch entry), and no other read's index may consume the value (a
-/// gather's index load must stay eager or the gather never becomes ready).
+/// Decides which reads sink into select branches: every use of the read's
+/// value must sit inside some select branch, and the read is emitted at
+/// each use's innermost enclosing branch entry (a value consumed under
+/// several branches is declared once per branch — the untaken sides still
+/// never execute the load). A value used on both sides of the same select
+/// is effectively unguarded there, so it stays eager. The read's index
+/// must not depend on anything defined inside the par block (so it is
+/// emittable at a branch entry), and no other read's index may consume the
+/// value (a gather's index load must stay eager or the gather never
+/// becomes ready).
+///
+/// Innermost (rather than outermost) placement matters when canonicalize
+/// duplicates a guarded expression into both branches of an enclosing
+/// select: only the innermost select is the guard that keeps a possibly
+/// out-of-bounds load from executing.
 ///
 /// Also consulted by `check_accesses`: a sunk read only executes on the
 /// taken side of its select, so the checker exempts it from bounds
@@ -796,16 +814,25 @@ pub(crate) fn compute_read_sinks(
         r.index_syms(&mut index_deps);
     }
 
-    let mut first = HashMap::new();
-    walk_uses(k, &block.body, &block.yields, None, &mut first);
+    let mut innermost = HashMap::new();
+    walk_uses(k, &block.body, &block.yields, None, &mut innermost);
 
     let mut sunk: HashMap<(SSANode, bool), Vec<usize>> = HashMap::new();
     for (ri, read) in reads.iter().enumerate() {
         let operand = block.operands[1 + ri];
-        let Some(&Some(crossing)) = first.get(&operand) else {
+        let Some(Some(crossings)) = innermost.get(&operand) else {
             continue;
         };
         if index_deps.contains(&operand) {
+            continue;
+        }
+        // Both sides of one select in the set means the load runs whenever
+        // that select does — its condition is no guard at all — so the
+        // read stays eager (semantically equivalent) and bounds-checked.
+        if crossings
+            .iter()
+            .any(|&(n, side)| crossings.contains(&(n, !side)))
+        {
             continue;
         }
         let mut syms = BTreeSet::new();
@@ -813,7 +840,9 @@ pub(crate) fn compute_read_sinks(
         if syms.iter().any(|v| defined_inside.contains(v)) {
             continue;
         }
-        sunk.entry(crossing).or_default().push(ri);
+        for &crossing in crossings {
+            sunk.entry(crossing).or_default().push(ri);
+        }
     }
     sunk
 }

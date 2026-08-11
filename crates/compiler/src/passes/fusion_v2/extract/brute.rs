@@ -97,7 +97,14 @@ pub fn extract(
             .sum();
         let cost = LexCost {
             runtime,
-            artifact_count: artifacts.len() as u64,
+            // Stage 2 is optional (see `ExtractOptions::optimize_artifact_count`);
+            // a constant 0 drops it from the lex order, matching the CP-SAT
+            // extractor's skipped stage.
+            artifact_count: if options.optimize_artifact_count {
+                artifacts.len() as u64
+            } else {
+                0
+            },
             node_count: selected.len() as u64,
             value_count: materialized.len() as u64,
         };

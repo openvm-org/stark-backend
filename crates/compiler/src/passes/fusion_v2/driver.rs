@@ -143,6 +143,10 @@ pub struct FusionOptionsV2 {
     /// [`FusionReportV2::candidates_rejected_pass_cap`]. Set to zero
     /// to disable per-pass truncation.
     pub max_alternatives_per_pass_per_round: usize,
+    /// Whether the extractor's artifact-count objective (§13.5 stage 2)
+    /// runs. Default `false` — see
+    /// [`ExtractOptions::optimize_artifact_count`].
+    pub optimize_artifact_count: bool,
     /// M11 (§15): print per-round saturation counters and the selected
     /// extraction (node ids, kinds, costs, fallback reason) to stderr,
     /// mirroring the existing pass's `FusionOptions::verbose`.
@@ -175,6 +179,7 @@ impl Default for FusionOptionsV2 {
             blackbox_hint_cycles: 0.0,
             max_rounds: 4,
             max_alternatives_per_pass_per_round: 0,
+            optimize_artifact_count: false,
             verbose: false,
         }
     }
@@ -473,6 +478,7 @@ pub fn fuse_graph_v2(
         solver_time_limit_secs: options.solver_time_limit_secs,
         solver_num_workers: options.solver_num_workers,
         cycle_quantum: options.cycle_quantum,
+        optimize_artifact_count: options.optimize_artifact_count,
         verbose: options.verbose,
         ..Default::default()
     };
@@ -502,10 +508,9 @@ pub fn fuse_graph_v2(
             let crate::graph_ir::GraphNode::Kernel(k) = node else {
                 continue;
             };
-            if let Err(e) = crate::passes::check_accesses::check_module_accesses(
-                &k.module,
-                &k.param_bindings,
-            ) {
+            if let Err(e) =
+                crate::passes::check_accesses::check_module_accesses(&k.module, &k.param_bindings)
+            {
                 eprintln!(
                     "[fusion-v2-check] module `{}` failed ({e}); bindings={:?}\n{}",
                     k.module.name,

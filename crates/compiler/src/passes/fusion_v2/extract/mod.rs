@@ -139,8 +139,16 @@ pub struct ExtractOptions {
     /// the model.
     pub cycle_quantum: i64,
     /// PPM slack tolerance for stage-1 (runtime) equality when moving to
-    /// stage 2. Zero means strict lexicographic.
+    /// the later stages. Zero means strict lexicographic.
     pub runtime_tolerance_ppm: u32,
+    /// Whether the artifact-count objective (§13.5 stage 2) runs.
+    /// Default `false`: it is the only stage that consistently fails to
+    /// prove optimality within the wall-time budget (progress doc,
+    /// sessions 16-17), and hard artifact pressure is still available
+    /// via the `max_modules` / `max_new_modules` constraints. Both
+    /// extractors honor this flag so CP-SAT and brute-force stay in
+    /// lexicographic agreement.
+    pub optimize_artifact_count: bool,
     /// Print model size and per-stage solver status/objective/wall time
     /// to stderr (CP-SAT extractor only).
     pub verbose: bool,
@@ -155,6 +163,7 @@ impl Default for ExtractOptions {
             max_new_modules: None,
             cycle_quantum: 1,
             runtime_tolerance_ppm: 0,
+            optimize_artifact_count: false,
             verbose: false,
         }
     }

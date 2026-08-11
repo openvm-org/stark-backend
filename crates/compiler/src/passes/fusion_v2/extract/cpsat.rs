@@ -286,17 +286,14 @@ pub fn extract(
     };
     m.add_le(runtime_expr(&m), LinearExpr::from(runtime_opt + slack));
 
-    // TEMP EXPERIMENT: `FUSION_V2_SKIP_STAGE2=1` bypasses the
-    // artifact-count stage entirely so stages 3-4 hint from stage 1
-    // directly. Purpose: measure how many compiled artifacts the
-    // runtime-only optimum requires when there's no consolidation
-    // pressure. Remove after measurement.
-    let skip_stage2 = std::env::var_os("FUSION_V2_SKIP_STAGE2").is_some();
-
-    // Stage 2: artifact count.
-    let r2 = if skip_stage2 {
+    // Stage 2: artifact count. Off by default (see
+    // `ExtractOptions::optimize_artifact_count`); when disabled,
+    // stages 3-4 hint from stage 1 directly.
+    let r2 = if !options.optimize_artifact_count {
         if options.verbose {
-            eprintln!("[fusion-v2] cpsat stage 2 (artifacts): SKIPPED (FUSION_V2_SKIP_STAGE2 set)");
+            eprintln!(
+                "[fusion-v2] cpsat stage 2 (artifacts): skipped (optimize_artifact_count=false)"
+            );
         }
         r1
     } else {

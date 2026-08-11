@@ -407,7 +407,12 @@ mod extractor {
         data.artifact_keys[y.0] = Some(artifact(1));
         data.artifact_keys[z.0] = Some(artifact(2));
 
-        let opts = ExtractOptions::default();
+        // Stage 2 is off by default; enable it since this test's point
+        // is the artifact-count objective.
+        let opts = ExtractOptions {
+            optimize_artifact_count: true,
+            ..ExtractOptions::default()
+        };
         let sol = brute::extract(&gf, &data, &opts).unwrap();
         // Some single-candidate solution is chosen. The seeds add up
         // to cost 2, so they should still win stage 1.
@@ -670,33 +675,45 @@ mod cpsat_agreement {
 
     #[test]
     fn agree_random_property() {
-        for seed in 0..32u64 {
-            let (gf, data) = random_gf_and_data(seed, 6);
-            let opts = ExtractOptions::default();
-            let b = brute::extract(&gf, &data, &opts).unwrap();
-            let c = cpsat::extract(&gf, &data, &opts);
-            let mut b_nodes: Vec<usize> = b.nodes.iter().map(|n| n.0).collect();
-            let mut c_nodes: Vec<usize> = c.nodes.iter().map(|n| n.0).collect();
-            b_nodes.sort();
-            c_nodes.sort();
-            // Because two feasible solutions can share the same lex cost
-            // (perfect ties on all four stages), we compare *cost tuples*
-            // rather than requiring identical selected sets.
-            let b_cost = solution_cost(&gf, &data, &b);
-            let c_cost = solution_cost(&gf, &data, &c);
-            assert_eq!(
-                b_cost, c_cost,
-                "seed {seed}: brute {b_nodes:?} cost {b_cost:?} vs cpsat {c_nodes:?} cost {c_cost:?}"
-            );
+        // Exercise both objective shapes: the default 3-stage lex
+        // (artifact stage skipped) and the full 4-stage lex.
+        for optimize_artifact_count in [false, true] {
+            for seed in 0..32u64 {
+                let (gf, data) = random_gf_and_data(seed, 6);
+                let opts = ExtractOptions {
+                    optimize_artifact_count,
+                    ..ExtractOptions::default()
+                };
+                let b = brute::extract(&gf, &data, &opts).unwrap();
+                let c = cpsat::extract(&gf, &data, &opts);
+                let mut b_nodes: Vec<usize> = b.nodes.iter().map(|n| n.0).collect();
+                let mut c_nodes: Vec<usize> = c.nodes.iter().map(|n| n.0).collect();
+                b_nodes.sort();
+                c_nodes.sort();
+                // Because two feasible solutions can share the same lex cost
+                // (perfect ties on all stages), we compare *cost tuples*
+                // rather than requiring identical selected sets. When the
+                // artifact stage is off, its component is not part of the
+                // objective and is zeroed out of the comparison.
+                let b_cost = solution_cost(&gf, &data, &b, optimize_artifact_count);
+                let c_cost = solution_cost(&gf, &data, &c, optimize_artifact_count);
+                assert_eq!(
+                    b_cost, c_cost,
+                    "seed {seed} (artifacts={optimize_artifact_count}): brute {b_nodes:?} cost \
+                     {b_cost:?} vs cpsat {c_nodes:?} cost {c_cost:?}"
+                );
+            }
         }
     }
 
-    /// Recomputes the four-stage lex cost of a solution: (runtime,
-    /// artifact_count, node_count, value_count).
+    /// Recomputes the lex cost of a solution: (runtime, artifact_count,
+    /// node_count, value_count), with artifact_count zeroed when the
+    /// artifact stage is disabled.
     fn solution_cost(
         gf: &crate::passes::fusion_v2::GraphFuser,
         data: &ExtractionData,
         sol: &crate::passes::fusion_v2::ExtractionSolution,
+        optimize_artifact_count: bool,
     ) -> (i128, u64, u64, u64) {
         let runtime: i128 = sol
             .nodes
@@ -719,7 +736,11 @@ mod cpsat_agreement {
         }
         (
             runtime,
-            artifacts.len() as u64,
+            if optimize_artifact_count {
+                artifacts.len() as u64
+            } else {
+                0
+            },
             sol.nodes.len() as u64,
             materialized.len() as u64,
         )
@@ -4839,5 +4860,191 @@ mod general_pc_tests {
         assert_eq!(draft_bindings(&d12), bindings(&[("q", 2), ("q#1", 1)]));
         // One artifact for every level of the chain.
         assert_eq!(module_hash(&m01), module_hash(&draft_module(&d12)));
+    }
+}
+
+/// Repro scaffolding for the GKR `fused_drop` OOB (`pre[0, -1]`, p=0):
+/// select-guarded reads must survive σ substitution — a read that codegen
+/// sinks into a select branch in the producer must still sink in the
+/// fused module, or the fused kernel executes it unconditionally.
+mod select_guard_tests {
+    use std::collections::BTreeMap;
+
+    use crate::{
+        ir::{IRBuilder, ScalarType, SizeExpr},
+        passes::check_accesses::check_module_accesses,
+    };
+
+    fn bindings(pairs: &[(&str, i64)]) -> BTreeMap<String, i64> {
+        pairs.iter().map(|(k, v)| (k.to_string(), *v)).collect()
+    }
+
+    /// Original producer shape: `compute[4] |v| { if v < p then
+    /// pre[0, p-1-v] else post[0, 7+p-v] }`. The pre-read is guarded;
+    /// with p=0 every lane takes the else branch.
+    #[test]
+    fn guarded_read_producer_shape_passes_check() {
+        let mut b = IRBuilder::new();
+        let p = b.symbol("p");
+        let pre = b.input(
+            "pre",
+            ScalarType::BabyBear,
+            vec![SizeExpr::from(1), SizeExpr::from(16)],
+        );
+        let post = b.input(
+            "post",
+            ScalarType::BabyBear,
+            vec![SizeExpr::from(1), SizeExpr::from(16)],
+        );
+        let body = b.compute(4, |b, v| {
+            let cp = b.const_sym(p);
+            let cond = b.lt(v, cp);
+            let one = b.const_u32(1);
+            let zero = b.const_u32(0);
+            let pm1 = b.sub(cp, one);
+            let idx_then = b.sub(pm1, v);
+            let t = b.index(pre, &[zero, idx_then]);
+            let seven = b.const_u32(7);
+            let sp = b.add(seven, cp);
+            let idx_else = b.sub(sp, v);
+            let f = b.index(post, &[zero, idx_else]);
+            b.select(cond, t, f)
+        });
+        let m = b.finish("orig", body);
+        check_module_accesses(&m, &bindings(&[("p", 0)])).unwrap();
+    }
+
+    /// Fused shape after σ substitution (consumer read coords are
+    /// literals): `compute[1] |_| { if 0 < p then pre[0, p-1] else
+    /// post[0, 7+p] }`. Must also pass — the guard still dominates the
+    /// read.
+    #[test]
+    fn guarded_read_fused_shape_passes_check() {
+        let mut b = IRBuilder::new();
+        let p = b.symbol("p");
+        let pre = b.input(
+            "pre",
+            ScalarType::BabyBear,
+            vec![SizeExpr::from(1), SizeExpr::from(16)],
+        );
+        let post = b.input(
+            "post",
+            ScalarType::BabyBear,
+            vec![SizeExpr::from(1), SizeExpr::from(16)],
+        );
+        let body = b.compute(1, |b, _v| {
+            let cp = b.const_sym(p);
+            let one = b.const_u32(1);
+            let zero = b.const_u32(0);
+            let cond = b.lt(zero, cp);
+            let idx_then = b.sub(cp, one);
+            let t = b.index(pre, &[zero, idx_then]);
+            let seven = b.const_u32(7);
+            let idx_else = b.add(seven, cp);
+            let f = b.index(post, &[zero, idx_else]);
+            b.select(cond, t, f)
+        });
+        let m = b.finish("fused_shape", body);
+        check_module_accesses(&m, &bindings(&[("p", 0)])).unwrap();
+    }
+}
+
+/// Regression test for read sinking under duplicated guards: a GKR
+/// `fused_drop` module whose four select-guarded eq-prefix reads combine
+/// into an FpExt value feeding both branches of an outer select.
+/// Canonicalize duplicates the guarded tree into each outer branch, so a
+/// read's uses end up under several distinct crossings; codegen must sink
+/// the read at each use's innermost guard (`compute_read_sinks`) or the
+/// p=0 `pre[0, -1]` load executes eagerly and faults.
+#[cfg(test)]
+mod select_guard_full_repro {
+    use std::collections::BTreeMap;
+
+    use crate::{
+        ir::{IRBuilder, Module, NodeId, ScalarType, SizeExpr},
+        passes::check_accesses::check_module_accesses,
+    };
+
+    fn build_repro() -> (Module, BTreeMap<String, i64>) {
+        let mut b = IRBuilder::new();
+        let p = b.symbol("p");
+        let k = b.symbol("k");
+        let _n = b.symbol("n");
+        let pre = b.input(
+            "pre",
+            ScalarType::BabyBear,
+            vec![SizeExpr::from(1), SizeExpr::from(16)],
+        );
+        let post = b.input(
+            "post",
+            ScalarType::BabyBear,
+            vec![SizeExpr::from(1), SizeExpr::from(16)],
+        );
+        let sp0 = b.input("sp0", ScalarType::FpExt, vec![SizeExpr::from(1)]);
+        let sp2 = b.input("sp2", ScalarType::FpExt, vec![SizeExpr::from(1)]);
+        let sp1 = b.input("sp1", ScalarType::FpExt, vec![SizeExpr::from(1)]);
+        let body = b.compute(1, |b, _v| {
+            let cp = b.const_sym(p);
+            let zero = b.const_u32(0);
+            // term j: lift(if j < p then pre[0, p-1-j] else post[0, 7+p-j]) * e_j
+            let mut terms: Vec<NodeId> = Vec::new();
+            for j in 0..4u32 {
+                let cj = b.const_u32(j);
+                let cond = b.lt(cj, cp);
+                let c1j = b.const_u32(1 + j);
+                let idx_then = b.sub(cp, c1j);
+                let t = b.index(pre, &[zero, idx_then]);
+                let c7j = b.const_u32(7 - j);
+                let idx_else = b.add(c7j, cp);
+                let f = b.index(post, &[zero, idx_else]);
+                let sel = b.select(cond, t, f);
+                terms.push(b.lift_fpext(sel));
+            }
+            let e1 = b.const_fpext([0, 1, 0, 0]);
+            let e2 = b.const_fpext([0, 0, 1, 0]);
+            let e3 = b.const_fpext([0, 0, 0, 1]);
+            let t1 = b.mul(terms[1], e1);
+            let t2 = b.mul(terms[2], e2);
+            let t3 = b.mul(terms[3], e3);
+            let s01 = b.add(terms[0], t1);
+            let s012 = b.add(s01, t2);
+            let v53 = b.add(s012, t3);
+            let v55 = b.const_fpext([3, 0, 0, 0]);
+            // outer select over k: if k == 0 then %53 else (if k == 1 then %55*%53 - 1 else 5*%53 -
+            // 2)
+            let ck = b.const_sym(k);
+            let k0 = b.eq(ck, zero);
+            let one_u = b.const_u32(1);
+            let k1 = b.eq(ck, one_u);
+            let f1 = b.const_fpext([1, 0, 0, 0]);
+            let f2 = b.const_fpext([2, 0, 0, 0]);
+            let f5 = b.const_fpext([5, 0, 0, 0]);
+            let m1 = b.mul(v55, v53);
+            let br1 = b.sub(m1, f1);
+            let m2 = b.mul(f5, v53);
+            let br2 = b.sub(m2, f2);
+            let inner_sel = b.select(k1, br1, br2);
+            let outer_sel = b.select(k0, v53, inner_sel);
+            // * (sp0[0] + %55 * (sp2[0] - sp1[0]))
+            let r0 = b.index(sp0, &[zero]);
+            let r2 = b.index(sp2, &[zero]);
+            let r1 = b.index(sp1, &[zero]);
+            let d = b.sub(r2, r1);
+            let md = b.mul(v55, d);
+            let sum = b.add(r0, md);
+            b.mul(outer_sel, sum)
+        });
+        let m = b.finish("fused_drop_repro", body);
+        let bindings: BTreeMap<String, i64> = [("p", 0i64), ("k", 2), ("n", 3)]
+            .iter()
+            .map(|(s, v)| (s.to_string(), *v))
+            .collect();
+        (m, bindings)
+    }
+
+    #[test]
+    fn gkr_fused_drop_shape_passes_check() {
+        let (m, bindings) = build_repro();
+        check_module_accesses(&m, &bindings).unwrap();
     }
 }
