@@ -211,8 +211,8 @@ fn observe_ext_at_0_serial() -> Module {
         for (j, slot) in s.iter_mut().enumerate() {
             *slot = kernel!(b, state[0, #j]);
         }
-        for k in 0..D_EF {
-            s[k] = kernel!(b, value[#k]);
+        for (k, slot) in s.iter_mut().enumerate().take(D_EF) {
+            *slot = kernel!(b, value[#k]);
         }
         b.pack(&s)
     });

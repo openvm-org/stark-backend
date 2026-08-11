@@ -171,8 +171,7 @@ impl ListSchedulerV1 {
                         .fold(f64::INFINITY, f64::min);
                     if !next.is_finite() {
                         return Err(PlanError::Infeasible(
-                            "list scheduler: no legal placement and no pending expiry"
-                                .to_string(),
+                            "list scheduler: no legal placement and no pending expiry".to_string(),
                         ));
                     }
                     state.now = state.now.max(next);
@@ -454,13 +453,15 @@ impl ListSchedulerV1 {
             }
             let size = ctx.sizes[b] as u64;
             let align = ctx.aligns[b].max(1);
-            let off = state.best_fit(size, align, self.max_memory).ok_or_else(|| {
-                PlanError::Infeasible(format!(
-                    "list scheduler: cannot fit buffer BufId({b}) of size {size} bytes \
+            let off = state
+                .best_fit(size, align, self.max_memory)
+                .ok_or_else(|| {
+                    PlanError::Infeasible(format!(
+                        "list scheduler: cannot fit buffer BufId({b}) of size {size} bytes \
                      within max_memory={} (live_bytes={})",
-                    self.max_memory, state.live_bytes
-                ))
-            })?;
+                        self.max_memory, state.live_bytes
+                    ))
+                })?;
             new_placements.push((b, off));
             state.offsets[b] = Some(off);
             state.buf_placed[b] = true;
@@ -489,7 +490,7 @@ impl ListSchedulerV1 {
                 };
                 // De-dup: don't wait on the same event twice.
                 let dup = state.instructions.iter().any(|instr| {
-                    matches!(instr, StreamInstr::WaitOn(ss, ee) if *ss == s && *ee as usize == event_idx as usize)
+                    matches!(instr, StreamInstr::WaitOn(ss, ee) if *ss == s && *ee == event_idx as usize)
                 });
                 let _ = producer_node;
                 if !dup {
@@ -632,13 +633,12 @@ fn offline_repack(state: &mut SchedState, ctx: &PlanCtx) {
 
     // Per-buffer lifetime in wall-clock time.
     //
-    // * Buffers with no writer (graph inputs / pinned inputs) are alive
-    //   from time `-inf` — they must reserve their slot from the start.
+    // * Buffers with no writer (graph inputs / pinned inputs) are alive from time `-inf` — they
+    //   must reserve their slot from the start.
     // * Buffers pinned to the end of the program die at `+inf`.
-    // * A regular buffer's lifetime spans the earliest writer's `t_start`
-    //   through the latest access's `t_finish`. Writers count as accesses
-    //   (a pure overwrite must keep the previous slot valid through the
-    //   overwrite itself, matching CP-SAT semantics).
+    // * A regular buffer's lifetime spans the earliest writer's `t_start` through the latest
+    //   access's `t_finish`. Writers count as accesses (a pure overwrite must keep the previous
+    //   slot valid through the overwrite itself, matching CP-SAT semantics).
     let mut birth = vec![f64::INFINITY; n_bufs];
     let mut death = vec![f64::NEG_INFINITY; n_bufs];
     for b in 0..n_bufs {
@@ -668,9 +668,8 @@ fn offline_repack(state: &mut SchedState, ctx: &PlanCtx) {
 
     // Two intervals overlap unless one strictly precedes the other. Match
     // the heuristic's strict-less-than disjoint rule.
-    let overlaps = |b1: usize, b2: usize| -> bool {
-        !(death[b1] < birth[b2] || death[b2] < birth[b1])
-    };
+    let overlaps =
+        |b1: usize, b2: usize| -> bool { !(death[b1] < birth[b2] || death[b2] < birth[b1]) };
 
     let mut to_place: Vec<usize> = (0..n_bufs).filter(|&b| ctx.packable(b)).collect();
     to_place.sort_by(|&a, &b| {
@@ -727,11 +726,7 @@ fn offline_repack(state: &mut SchedState, ctx: &PlanCtx) {
 }
 
 fn leaf_score(state: &SchedState) -> f64 {
-    let makespan = state
-        .stream_free
-        .iter()
-        .copied()
-        .fold(0.0f64, f64::max);
+    let makespan = state.stream_free.iter().copied().fold(0.0f64, f64::max);
     makespan + 1e-3 * (state.peak_bytes as f64)
 }
 
@@ -819,8 +814,8 @@ impl SchedState {
     fn new(ctx: &PlanCtx, indeg: &[usize], _node_reads: &[Vec<usize>], m: usize) -> Self {
         let n = ctx.n_nodes;
         let mut ready = BTreeSetLike::new();
-        for i in 0..n {
-            if indeg[i] == 0 {
+        for (i, &d) in indeg.iter().enumerate().take(n) {
+            if d == 0 {
                 ready.insert(i);
             }
         }
@@ -884,7 +879,7 @@ impl SchedState {
             let start = align_up_u(cursor, align);
             if start + size <= lo {
                 let gap = lo - start;
-                if best.map_or(true, |(g, _)| gap < g) {
+                if best.is_none_or(|(g, _)| gap < g) {
                     best = Some((gap, start));
                 }
             }
@@ -893,7 +888,7 @@ impl SchedState {
         let start = align_up_u(cursor, align);
         if start.saturating_add(size) <= cap {
             let gap = cap - start;
-            if best.map_or(true, |(g, _)| gap < g) {
+            if best.is_none_or(|(g, _)| gap < g) {
                 best = Some((gap, start));
             }
         }
@@ -953,8 +948,8 @@ mod tests {
             reads: vec![],
             writes: vec![crate::graph_ir::BufId(0)],
         }];
-        let ctx = PlanCtx::build(&bufs, &nodes, &BTreeMap::new(), DeviceType::Cuda(0), &[])
-            .unwrap();
+        let ctx =
+            PlanCtx::build(&bufs, &nodes, &BTreeMap::new(), DeviceType::Cuda(0), &[]).unwrap();
         let sched = ListSchedulerV1::default();
         let plan = sched.schedule(ctx, |_| 1.0).unwrap();
         assert_eq!(plan.instructions.len(), 1);
@@ -985,8 +980,8 @@ mod tests {
                 writes: vec![c],
             },
         ];
-        let ctx = PlanCtx::build(&bufs, &nodes, &BTreeMap::new(), DeviceType::Cuda(0), &[])
-            .unwrap();
+        let ctx =
+            PlanCtx::build(&bufs, &nodes, &BTreeMap::new(), DeviceType::Cuda(0), &[]).unwrap();
         let sched = ListSchedulerV1 {
             max_concurrency: 2,
             ..Default::default()

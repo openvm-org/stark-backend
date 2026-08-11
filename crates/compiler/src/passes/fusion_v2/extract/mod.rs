@@ -121,6 +121,11 @@ pub struct ExtractOptions {
     /// Wall-time cap for the CP-SAT solve, in seconds. Ignored by the
     /// brute-force extractor.
     pub solver_time_limit_secs: f64,
+    /// Number of CP-SAT search workers (ignored by the brute-force
+    /// extractor). `1` (default) is deterministic per plan §2.4;
+    /// higher values enable the parallel portfolio; `0` lets CP-SAT
+    /// decide.
+    pub solver_num_workers: usize,
     /// Optional hard cap on the number of selected artifacts
     /// (`sum_m z_m <= max_modules`). If configured below the number of
     /// artifacts required by the original graph the extractor returns
@@ -136,16 +141,21 @@ pub struct ExtractOptions {
     /// PPM slack tolerance for stage-1 (runtime) equality when moving to
     /// stage 2. Zero means strict lexicographic.
     pub runtime_tolerance_ppm: u32,
+    /// Print model size and per-stage solver status/objective/wall time
+    /// to stderr (CP-SAT extractor only).
+    pub verbose: bool,
 }
 
 impl Default for ExtractOptions {
     fn default() -> Self {
         Self {
             solver_time_limit_secs: 5.0,
+            solver_num_workers: 1,
             max_modules: None,
             max_new_modules: None,
             cycle_quantum: 1,
             runtime_tolerance_ppm: 0,
+            verbose: false,
         }
     }
 }

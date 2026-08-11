@@ -29,13 +29,11 @@ pub enum StreamInstr {
 /// Joint execution schedule + memory layout.
 ///
 /// * `instructions` is the flat sequence the runtime issues in order.
-/// * `stream[b]` is the stream index every graph node runs on
-///   (`0..num_streams`).
-/// * `record_event[b]` is `Some(e)` for nodes whose completion downstream
-///   waiters synchronize on; `None` for nodes with no cross-stream
-///   consumer.
-/// * `offsets[b]` is the byte offset per `BufId` in the unified pool
-///   (`None` for off-device buffers).
+/// * `stream[b]` is the stream index every graph node runs on (`0..num_streams`).
+/// * `record_event[b]` is `Some(e)` for nodes whose completion downstream waiters synchronize on;
+///   `None` for nodes with no cross-stream consumer.
+/// * `offsets[b]` is the byte offset per `BufId` in the unified pool (`None` for off-device
+///   buffers).
 ///
 /// For a single-stream plan: `num_streams = 1`, `num_events = 0`,
 /// `stream = vec![0; n_nodes]`, `record_event = vec![None; n_nodes]`, and

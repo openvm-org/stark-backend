@@ -1101,6 +1101,7 @@ mod dsl_port_tests {
     use crypto_compiler::{
         graph_exe::GraphCompiler,
         graph_ir::{ConstBuf, DeviceType, GraphBuilder},
+        passes::fusion_v2::FusionOptionsV2,
         planner::SchedulerMode,
     };
     use openvm_cuda_common::{
@@ -1177,11 +1178,35 @@ mod dsl_port_tests {
         for &b in bufs {
             g.register_output(b);
         }
-        let mut exe = GraphCompiler::new()
+        let mut compiler = GraphCompiler::new()
             .device(DeviceType::Cuda(0))
-            .scheduler(SchedulerMode::Heuristic)
-            .compile(g)
-            .expect("graph compile");
+            .scheduler(SchedulerMode::Heuristic);
+        // `FRAC_DSL_FUSION=v2` replays the whole suite through the
+        // fusion-v2 pipeline (M12 bit-for-bit gate; enable
+        // `crypto-compiler/planner-ortools` so extraction is CP-SAT-backed
+        // beyond the brute-force cap); `off` compiles the graph unfused.
+        // Default remains the existing fusion pass.
+        match std::env::var("FRAC_DSL_FUSION").as_deref() {
+            Ok("v2") => {
+                compiler = compiler.fusion_v2_options(FusionOptionsV2 {
+                    verbose: true,
+                    ..FusionOptionsV2::default()
+                })
+            }
+            Ok("off") => compiler = compiler.without_fusion(),
+            _ => {}
+        }
+        let mut exe = compiler.compile(g).expect("graph compile");
+        if let Some(v2) = exe.fusion_report().and_then(|r| r.v2.as_ref()) {
+            eprintln!(
+                "[dsl-fusion-v2] nodes {} -> {}, inserted={}, selected={}, fallback={:?}",
+                v2.nodes_before,
+                v2.nodes_after,
+                v2.candidates_inserted,
+                v2.selected_from_solver,
+                v2.fallback_reason,
+            );
+        }
         exe.run(ctx).expect("graph run");
         bufs.iter()
             .map(|&bid| {

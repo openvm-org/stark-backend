@@ -1876,6 +1876,12 @@ pub struct FusionReport {
     pub deduped: usize,
     /// One entry per fusion round (post-initial-DCE), in order.
     pub rounds_detail: Vec<RoundStats>,
+    /// Populated when [`crate::graph_exe::GraphCompiler`] ran fusion v2
+    /// (plan §15: the existing report type is extended rather than
+    /// replaced while v2 is opt-in). When set, only `nodes_before` /
+    /// `nodes_after` of the v1 fields above are meaningful; the v1
+    /// per-round counters stay at their defaults.
+    pub v2: Option<crate::passes::fusion_v2::FusionReportV2>,
 }
 
 /// Per-round counters recorded by [`fuse_graph`].

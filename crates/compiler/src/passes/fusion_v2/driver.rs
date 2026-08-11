@@ -33,7 +33,7 @@ use crate::{
             estimate_non_kernel, ArtifactContext, EstimatorConfig, GraphNodeCost, KernelCostManager,
         },
         extract::{ExtractOptions, ExtractionData, ExtractionSolution, FallbackReason},
-        fusions::producer_consumer,
+        fusions::{epilogue, fanout, horizontal, producer_consumer, small_kernel},
         model::{GraphFuser, NodeId},
         saturate::{CandidateKey, SaturationState},
         validate::would_create_cycle,
@@ -58,8 +58,44 @@ pub struct FusionOptionsV2 {
     pub validate_alt_graph_acyclicity: bool,
     /// Wall-time cap for the CP-SAT solve, in seconds.
     pub solver_time_limit_secs: f64,
+    /// Number of CP-SAT search workers. The default of `1` keeps the
+    /// solve deterministic (plan §2.4); higher values enable the
+    /// parallel portfolio, which is faster but breaks run-to-run
+    /// reproducibility of tie-broken solutions. `0` lets CP-SAT
+    /// decide.
+    pub solver_num_workers: usize,
     /// Whether producer-consumer candidates should be enumerated.
     pub enable_producer_consumer: bool,
+    /// Whether M7 fanout candidates should be enumerated (§10.5,
+    /// §15 default `true`). Fanout emits one candidate per legal
+    /// `(producer, k≥2 consumers)` grouping with an identity seam
+    /// read; individual `(producer, consumer)` pairs still get
+    /// producer-consumer candidates.
+    pub enable_fanout: bool,
+    /// Whether M8 small-kernel block-fusion candidates should be
+    /// enumerated (§10.7, §15 default `true`). Small-kernel fuses
+    /// linear chains of concrete-bound kernels into a single kernel
+    /// with shared-memory-backed intermediate tiles — different
+    /// domain sizes per layer are supported.
+    pub enable_small_kernel: bool,
+    /// Byte budget for the combined shared-memory footprint of all
+    /// small-kernel tiles in one candidate (§10.7). Default: 48 KiB.
+    pub small_kernel_shared_bytes: usize,
+    /// Maximum kernels a small-kernel chain may contain (§11
+    /// `max_region_seed_nodes`). Default: 6.
+    pub small_kernel_max_chain: usize,
+    /// Whether M9 same-domain horizontal candidates should be
+    /// enumerated (§10.6, §15 default `true`). Horizontal fuses pairs
+    /// of dataflow-independent flat kernels with equal concrete outer
+    /// domain into one kernel returning the concatenated tuple of
+    /// outputs; larger groups compose across saturation rounds.
+    pub enable_horizontal: bool,
+    /// Whether M10 epilogue candidates should be enumerated (§10.4,
+    /// §15 default `true`). Epilogue fuses a flat pointwise consumer
+    /// into its producer's launch schedule (`par`/`threads`/block
+    /// hint retained); producers already covered by the
+    /// producer-consumer pass are skipped.
+    pub enable_epilogue: bool,
     /// Whether keep-seam variants should be emitted alongside drop
     /// candidates (§10.2, plan §15). Emission is still gated per-seam
     /// on the trigger conditions in §10.2; setting this to `false`
@@ -107,6 +143,10 @@ pub struct FusionOptionsV2 {
     /// [`FusionReportV2::candidates_rejected_pass_cap`]. Set to zero
     /// to disable per-pass truncation.
     pub max_alternatives_per_pass_per_round: usize,
+    /// M11 (§15): print per-round saturation counters and the selected
+    /// extraction (node ids, kinds, costs, fallback reason) to stderr,
+    /// mirroring the existing pass's `FusionOptions::verbose`.
+    pub verbose: bool,
 }
 
 impl Default for FusionOptionsV2 {
@@ -115,7 +155,14 @@ impl Default for FusionOptionsV2 {
             max_total_alternatives: 5000,
             validate_alt_graph_acyclicity: true,
             solver_time_limit_secs: 5.0,
+            solver_num_workers: 1,
             enable_producer_consumer: true,
+            enable_fanout: true,
+            enable_small_kernel: true,
+            small_kernel_shared_bytes: 48 * 1024,
+            small_kernel_max_chain: 6,
+            enable_horizontal: true,
+            enable_epilogue: true,
             enable_keep_variants: true,
             enable_all_keep_variants: false,
             estimator: EstimatorConfig::default(),
@@ -128,6 +175,7 @@ impl Default for FusionOptionsV2 {
             blackbox_hint_cycles: 0.0,
             max_rounds: 4,
             max_alternatives_per_pass_per_round: 0,
+            verbose: false,
         }
     }
 }
@@ -214,16 +262,90 @@ pub fn fuse_graph_v2(
     // round + inserted candidates, so round r+1 only enumerates pairs
     // involving at least one node inserted in round r.
     let mut min_new_parent_id = 0usize;
+    let sat_t0 = std::time::Instant::now();
     for round in 0..max_rounds {
         let frozen = gf.nodes.len();
 
         // Enumerate. Passes see the frozen prefix and current origins.
-        let drafts = if options.enable_producer_consumer {
+        // `pass_stats` records `(pass, generated, wall time)` per pass
+        // for the verbose dump.
+        let mut pass_stats: Vec<(&'static str, usize, std::time::Duration)> = Vec::new();
+        let t = std::time::Instant::now();
+        let mut drafts = if options.enable_producer_consumer {
             enumerate_producer_consumer(&gf, &sat, frozen, min_new_parent_id, options)
         } else {
             Vec::new()
         };
-        candidates_generated += drafts.len();
+        pass_stats.push(("producer-consumer", drafts.len(), t.elapsed()));
+        if options.enable_fanout {
+            let t = std::time::Instant::now();
+            let before = drafts.len();
+            let fanout_ctx = producer_consumer::EnumerateContext {
+                frozen_node_count: frozen,
+                origins: &sat.origins,
+                min_new_parent_id,
+                options: producer_consumer::EnumerateOptions::default(),
+            };
+            drafts.extend(fanout::enumerate(&gf, &fanout_ctx));
+            pass_stats.push(("fanout", drafts.len() - before, t.elapsed()));
+        }
+        if options.enable_small_kernel {
+            let t = std::time::Instant::now();
+            let before = drafts.len();
+            let sk_ctx = producer_consumer::EnumerateContext {
+                frozen_node_count: frozen,
+                origins: &sat.origins,
+                min_new_parent_id,
+                options: producer_consumer::EnumerateOptions::default(),
+            };
+            let sk_opts = small_kernel::SmallKernelOptions {
+                max_shared_bytes: options.small_kernel_shared_bytes,
+                max_chain_length: options.small_kernel_max_chain,
+            };
+            drafts.extend(small_kernel::enumerate(&gf, &sk_ctx, sk_opts));
+            pass_stats.push(("small-kernel", drafts.len() - before, t.elapsed()));
+        }
+        if options.enable_horizontal {
+            let t = std::time::Instant::now();
+            let before = drafts.len();
+            let h_ctx = producer_consumer::EnumerateContext {
+                frozen_node_count: frozen,
+                origins: &sat.origins,
+                min_new_parent_id,
+                options: producer_consumer::EnumerateOptions::default(),
+            };
+            drafts.extend(horizontal::enumerate(&gf, &h_ctx));
+            pass_stats.push(("horizontal", drafts.len() - before, t.elapsed()));
+        }
+        if options.enable_epilogue {
+            let t = std::time::Instant::now();
+            let before = drafts.len();
+            let e_ctx = producer_consumer::EnumerateContext {
+                frozen_node_count: frozen,
+                origins: &sat.origins,
+                min_new_parent_id,
+                options: producer_consumer::EnumerateOptions {
+                    enable_all_keep_variants: options.enable_all_keep_variants
+                        && options.enable_keep_variants,
+                },
+            };
+            let mut e_drafts = epilogue::enumerate(&gf, &e_ctx);
+            if !options.enable_keep_variants {
+                e_drafts.retain(|d| d.variant != producer_consumer::FusionVariant::Keep);
+            }
+            drafts.extend(e_drafts);
+            pass_stats.push(("epilogue", drafts.len() - before, t.elapsed()));
+        }
+        let generated_this_round = drafts.len();
+        candidates_generated += generated_this_round;
+        if options.verbose {
+            for (pass, generated, dt) in &pass_stats {
+                eprintln!(
+                    "[fusion-v2] round {round} pass {pass}: generated={generated} in {:.1} ms",
+                    dt.as_secs_f64() * 1e3,
+                );
+            }
+        }
 
         // Per-pass cap: soft-truncate the drafts list to
         // `max_alternatives_per_pass_per_round`.
@@ -238,6 +360,12 @@ pub fn fuse_graph_v2(
         };
         candidates_rejected_pass_cap += over_cap;
 
+        let insert_t0 = std::time::Instant::now();
+        let (dedup0, cycle0, cap0) = (
+            candidates_rejected_dedup,
+            candidates_rejected_cycle,
+            candidates_rejected_cap,
+        );
         let mut inserted_this_round = 0usize;
         for draft in drafts {
             if candidates_inserted >= options.max_total_alternatives {
@@ -271,6 +399,18 @@ pub fn fuse_graph_v2(
             inserted_this_round += 1;
         }
         rounds_inserted.push(inserted_this_round);
+        if options.verbose {
+            eprintln!(
+                "[fusion-v2] round {round}: generated={generated_this_round}, \
+                 inserted={inserted_this_round}, alt_nodes={}, rejected \
+                 dedup={} cycle={} cap={} pass_cap={over_cap}, insert took {:.1} ms",
+                gf.nodes.len(),
+                candidates_rejected_dedup - dedup0,
+                candidates_rejected_cycle - cycle0,
+                candidates_rejected_cap - cap0,
+                insert_t0.elapsed().as_secs_f64() * 1e3,
+            );
+        }
 
         if inserted_this_round == 0 {
             break;
@@ -288,6 +428,14 @@ pub fn fuse_graph_v2(
         min_new_parent_id = frozen;
     }
     let rounds_run = rounds_inserted.len();
+    if options.verbose {
+        eprintln!(
+            "[fusion-v2] saturation: {rounds_run} round(s), generated={candidates_generated}, \
+             inserted={candidates_inserted}, alt_nodes={}, total {:.1} ms",
+            gf.nodes.len(),
+            sat_t0.elapsed().as_secs_f64() * 1e3,
+        );
+    }
 
     // Step 3: build extraction data and extract.
     let mut manager = KernelCostManager::new(
@@ -296,24 +444,85 @@ pub fn fuse_graph_v2(
         options.graph_symbols.clone(),
         options.cycle_quantum,
     );
+    let cost_t0 = std::time::Instant::now();
     let data = build_extraction_data(&gf, &g.bufs, &mut manager, options);
+    let stats = manager.stats();
+    if options.verbose {
+        let est_ms = stats.estimate_time.as_secs_f64() * 1e3;
+        let runs = stats.misses + stats.failures;
+        eprintln!(
+            "[fusion-v2] costing: {} nodes in {:.1} ms; kernel cost cache hits={} misses={} \
+             failures={}; estimator (HIR→KIR + analysis) {:.1} ms total, {:.2} ms/run",
+            gf.nodes.len(),
+            cost_t0.elapsed().as_secs_f64() * 1e3,
+            stats.hits,
+            stats.misses,
+            stats.failures,
+            est_ms,
+            est_ms / runs.max(1) as f64,
+        );
+    }
+    // Failure sentinels would saturate the diagnostic sum; skip them.
     let total_runtime_units: i64 = data
         .costs
         .iter()
+        .filter(|c| !c.is_failure())
         .map(|c| c.runtime_units)
         .fold(0i64, i64::saturating_add);
     let extract_opts = ExtractOptions {
         solver_time_limit_secs: options.solver_time_limit_secs,
+        solver_num_workers: options.solver_num_workers,
         cycle_quantum: options.cycle_quantum,
+        verbose: options.verbose,
         ..Default::default()
     };
+    let solve_t0 = std::time::Instant::now();
     let solution = choose_extractor(&gf, &data, &extract_opts);
     let selected_from_solver = solution.nodes.len();
     let fallback_reason = solution.fallback.clone();
-    let stats = manager.stats();
+    if options.verbose {
+        eprintln!(
+            "[fusion-v2] solve: {:.1} ms, status={:?}, fallback={:?}, selected={}",
+            solve_t0.elapsed().as_secs_f64() * 1e3,
+            solution.status,
+            solution.fallback,
+            solution.nodes.len(),
+        );
+        dump_extraction(&gf, &data, &solution);
+    }
 
     // Step 4: apply solution back to the builder.
+    let apply_t0 = std::time::Instant::now();
     apply_solution(g, gf, &solution)?;
+    // Debug-only: statically access-check every selected kernel and dump
+    // the HIR of violators (keeps going; the graph compile's own
+    // `check_accesses` gate is the enforcing one).
+    if std::env::var_os("FUSION_V2_CHECK_SELECTED").is_some() {
+        for node in &g.nodes {
+            let crate::graph_ir::GraphNode::Kernel(k) = node else {
+                continue;
+            };
+            if let Err(e) = crate::passes::check_accesses::check_module_accesses(
+                &k.module,
+                &k.param_bindings,
+            ) {
+                eprintln!(
+                    "[fusion-v2-check] module `{}` failed ({e}); bindings={:?}\n{}",
+                    k.module.name,
+                    k.param_bindings,
+                    crate::dump::dump_hir(&k.module)
+                );
+            }
+        }
+    }
+    if options.verbose {
+        eprintln!(
+            "[fusion-v2] apply: {:.1} ms, nodes {} -> {}",
+            apply_t0.elapsed().as_secs_f64() * 1e3,
+            nodes_before,
+            g.nodes.len(),
+        );
+    }
 
     Ok(FusionReportV2 {
         nodes_before,
@@ -333,6 +542,34 @@ pub fn fuse_graph_v2(
         rounds_inserted,
         max_rounds_hit,
     })
+}
+
+/// `verbose` one-line summary of the selected extraction (§15): how
+/// many seeds survived unfused, how many fused (alt) nodes replaced
+/// how many seeds, and the estimated runtime of the selection.
+fn dump_extraction(gf: &GraphFuser, data: &ExtractionData, solution: &ExtractionSolution) {
+    let seeds_kept = solution
+        .nodes
+        .iter()
+        .filter(|n| n.0 < gf.seed_node_count)
+        .count();
+    let fused = solution.nodes.len() - seeds_kept;
+    let seeds_fused = gf.seed_node_count - seeds_kept;
+    let selected_runtime_units: i64 = solution
+        .nodes
+        .iter()
+        .map(|n| data.costs[n.0])
+        .filter(|c| !c.is_failure())
+        .map(|c| c.runtime_units)
+        .fold(0i64, i64::saturating_add);
+    eprintln!(
+        "[fusion-v2] extraction: {fused} fused node(s) replace {seeds_fused}/{} seeds \
+         ({seeds_kept} seeds kept unfused; selected {}/{} alt-graph nodes, est. runtime \
+         {selected_runtime_units} units)",
+        gf.seed_node_count,
+        solution.nodes.len(),
+        gf.nodes.len(),
+    );
 }
 
 /// Runs the producer-consumer enumerator with the caller's flags
@@ -407,9 +644,27 @@ fn build_extraction_data(
         match &alt.node {
             GraphNode::Kernel(k) => {
                 let hash = k.hash.unwrap_or_else(|| module_hash(&k.module));
+                // Lowering panics on a synthesized module map to the
+                // failure sentinel, so the extractor excludes the
+                // broken candidate.
                 let cost = manager
                     .cost_of(hash, &k.module, &k.param_bindings)
-                    .unwrap_or_else(|_| GraphNodeCost::new(1));
+                    .unwrap_or_else(|e| {
+                        if std::env::var_os("FUSION_V2_DEBUG").is_some() {
+                            eprintln!(
+                                "[fusion-v2-debug] cost_of `{}` failed (block_hint={:?}, \
+                                 params={:?}, bindings={:?}): {e}",
+                                k.module.name,
+                                k.module.builder.block_hint(),
+                                k.module.builder.params(),
+                                k.param_bindings,
+                            );
+                            if crate::passes::fusion_v2::fusions::debug_reject_level() >= 2 {
+                                eprintln!("{}", crate::dump::dump_hir(&k.module));
+                            }
+                        }
+                        GraphNodeCost::FAILED
+                    });
                 costs.push(cost);
                 artifact_keys.push(Some(options.artifact.key_for(hash)));
             }

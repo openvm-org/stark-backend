@@ -75,7 +75,7 @@ fn must_concrete_exprs(m: &Module) -> Vec<SizeExpr> {
 /// The outermost bound of each top-level compute kernel — the grid
 /// dimension of each launched kernel. These are exactly the bounds that
 /// [`must_concrete_exprs`] exempts.
-fn outer_bounds(m: &Module) -> Vec<SizeExpr> {
+pub(crate) fn outer_bounds(m: &Module) -> Vec<SizeExpr> {
     fn top_value(b: &IRBuilder, id: NodeId, out: &mut Vec<SizeExpr>) {
         match b.node(id) {
             Node::Compute { bound, .. } => out.push(bound.clone()),

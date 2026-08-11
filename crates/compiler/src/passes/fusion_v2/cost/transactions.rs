@@ -188,12 +188,11 @@ fn eval_quast(expr: &Quast, par_idx: u64, enclosing: &BTreeMap<VarId, i64>) -> O
                 }
             }
             Expr::Const(c) => Some(*c),
-            Expr::Add(a, b) => {
-                Some(eval(a, par_idx, enclosing, par_var)? + eval(b, par_idx, enclosing, par_var)?)
-            }
-            Expr::Mul(a, c) => Some(eval(a, par_idx, enclosing, par_var)? * *c),
-            Expr::FloorDiv(a, c) => Some(eval(a, par_idx, enclosing, par_var)?.div_euclid(*c)),
-            Expr::Neg(a) => Some(-eval(a, par_idx, enclosing, par_var)?),
+            Expr::Add(a, b) => eval(a, par_idx, enclosing, par_var)?
+                .checked_add(eval(b, par_idx, enclosing, par_var)?),
+            Expr::Mul(a, c) => eval(a, par_idx, enclosing, par_var)?.checked_mul(*c),
+            Expr::FloorDiv(a, c) => eval(a, par_idx, enclosing, par_var)?.checked_div_euclid(*c),
+            Expr::Neg(a) => eval(a, par_idx, enclosing, par_var)?.checked_neg(),
         }
     }
     // Detect the par's own var: the syms of `expr` minus keys of `enclosing`.

@@ -19,42 +19,57 @@
 //! - the seed graph has another original consumer of the seam that is not the current consumer;
 //! - the caller requests all keep variants via `FusionOptionsV2::enable_all_keep_variants`.
 //!
-//! Supported cases (both variants):
+//! Supported cases (drop variant):
 //!
-//! - both producer and consumer are pure structured kernels;
-//! - both are single-`compute` modules with a scalar body (no scatter, no `par`, no `threads`
-//!   hint);
-//! - the producer body may be a plain scalar expression, an inline `Let` chain, or a `Reduce`
-//!   (which evaluates to one scalar per outer iteration — the "reduction producer" case);
-//! - the consumer body may be flat or contain an inner `Compute` / `Reduce` — reads of the seam are
-//!   detected regardless of their scope, as long as their index expression is a quasi-affine
-//!   function of the enclosing loop variables (**identity, affine permutation, and nested-index**
-//!   cases);
-//! - the two kernels share the same concrete outer bound;
+//! - both producer and consumer are single-`compute` structured kernels;
+//! - the consumer may carry `scatter` / `par` / `threads` attributes — they transfer verbatim onto
+//!   the fused compute; the producer may carry a `scatter`, whose *provided inverse* is composed
+//!   into every seam read (the inverse is trusted, never verified);
+//! - seam reads may have arbitrary rank: read coordinates are linearized over the consumer's
+//!   declared seam view and delinearized over the producer's physical output shape whenever the two
+//!   shapes do not agree axis-wise (the "reshape view" case);
+//! - the producer body may be a scalar expression, an inline `Let` chain, a `Reduce`, a `Pack`
+//!   (rank-extending), or a nest of inner `Compute`s — reads that drill into a `Pack` must resolve
+//!   to literal component indices;
+//! - producer and consumer outer bounds may differ; the drop gate is seam *element-count* equality,
+//!   proven symbolically when possible and otherwise certified against the concrete parameter
+//!   bindings of the candidate pair;
+//! - module parameters unify by (name, bound value); a name bound to two different values is split
+//!   (`n`, `n#1`, …), so a chain of the *same* symbolic kernel invoked at shrinking sizes fuses
+//!   into a single symbolic artifact shared by every level;
 //! - the seam value has exactly one producer output position (single output on the producer
 //!   kernel).
+//!
+//! The keep variant additionally requires plain kernels (no attributes),
+//! a scalar producer body (no rank-extending spine), and equal outer
+//! bounds, because the seam is materialized at the fused domain's index.
 //!
 //! Synthesis is a capture-free HIR clone. The consumer's compute body is
 //! cloned into a fresh module. At every seam-read site the producer body
 //! is *re-cloned* with the producer's outer variable substituted by the
-//! quasi-affine index expression that appeared at that consumer read
-//! (evaluated as a fresh HIR expression in the fused builder).
+//! composed coordinate σ (read coords → linearize over the seam view →
+//! delinearize over the producer's physical shape → provided scatter
+//! inverse), evaluated as a fresh HIR expression in the fused builder.
 //!
 //! The multi-seam case (§10.1 grouping) is deferred: it requires
 //! multi-output producers, which live outside this M3 slice.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::{
+    collections::{BTreeMap, BTreeSet, HashMap},
+    sync::Arc,
+};
 
+pub(super) use crate::passes::fusion_utils::remap_size_expr;
 use crate::{
     graph_ir::{GraphNode, KernelModuleNode},
     ir::{IRBuilder, Module, Node, NodeId as HirNodeId, SizeExpr, VarId},
     module_hash::children_of,
     passes::{
-        fusion_utils::{clone_expr, clone_expr_with_hook, CloneError},
+        fusion_utils::{clone_expr_with_params, CloneError},
         fusion_v2::model::{AltGraphNode, GraphFuser, NodeId, ValueClassId},
-        utils::hir_to_quast,
+        utils::hir_to_sexpr,
     },
-    quast::{Quast, QuastEmitter},
+    quast::{ParSpec, SExpr, Scatter, SymConst},
     CompileError,
 };
 
@@ -89,72 +104,90 @@ pub struct CandidateDraft {
 /// Structural facts about a producer or consumer kernel module used to
 /// synthesize a fused module.
 ///
-/// The recognizer covers the M3 exit-gate cases:
+/// The recognizer covers:
 ///
 /// - **identity**: `y[outer_var]`;
 /// - **affine permutation**: `y[a*outer_var + b]`, `y[N-1-outer_var]`, etc. — any quasi-affine
-///   function of the enclosing loop variables;
+///   function of the enclosing loop variables and module parameters;
+/// - **rank-k reads**: every axis of a multi-index read is captured as its own [`SExpr`];
 /// - **nested-index consumers**: consumer body may contain an inner `Compute` or `Reduce`; reads
 ///   inside that inner scope are captured with their index-scope (`inner_vars`) recorded;
 /// - **reduction producers**: the producer body is a `Reduce` (single scalar per outer iteration),
 ///   which we detect but do not treat specially — the fused synthesis clones the reduce
 ///   sub-expression at every seam read like any other body expression.
+///
+/// Attributes on the outer compute (`scatter` / `par` / `threads`) are
+/// recorded, not rejected; callers that only support plain kernels must
+/// filter with [`KernelShape::is_plain`].
 #[derive(Debug, Clone)]
-struct KernelShape {
+pub(super) struct KernelShape {
     /// Fresh [`VarId`] of the outer `compute` iteration variable.
-    outer_var: VarId,
+    pub(super) outer_var: VarId,
     /// Symbolic outer bound.
-    outer_bound: SizeExpr,
+    pub(super) outer_bound: SizeExpr,
     /// The scalar body expression (per-outer-iteration return value).
-    body_root: HirNodeId,
+    pub(super) body_root: HirNodeId,
     /// Every `Node::Index` site reachable from `body_root` whose
-    /// `tensor` is a `Node::Input(_)` and whose indices form a
-    /// quasi-affine expression in `outer_var` and any inner-scope
-    /// binders.
-    reads: Vec<ReadSite>,
+    /// `tensor` is a `Node::Input(_)`.
+    pub(super) reads: Vec<ReadSite>,
+    /// Write map of the outer compute, if any.
+    pub(super) scatter: Option<Box<Scatter>>,
+    /// Compute layout of the outer compute, if any.
+    pub(super) par: Option<Box<ParSpec>>,
+    /// Thread-count hint of the outer compute, if any.
+    pub(super) threads: Option<usize>,
+}
+
+impl KernelShape {
+    /// No `scatter` / `par` / `threads` attributes on the outer compute.
+    pub(super) fn is_plain(&self) -> bool {
+        self.scatter.is_none() && self.par.is_none() && self.threads.is_none()
+    }
 }
 
 #[derive(Debug, Clone)]
-struct ReadSite {
+pub(super) struct ReadSite {
     /// Module input position this site reads.
-    input_pos: usize,
+    pub(super) input_pos: usize,
     /// [`Node::Index`] site.
-    index_node: HirNodeId,
-    /// The Quast that names the read index (single-index tensors only).
-    /// `None` for multi-index reads, which are conservatively skipped:
-    /// they can only be a seam if the read is not inside an inner loop
-    /// scope, and the fused synthesis path currently emits scalars.
-    index_expr: Option<Quast>,
+    pub(super) index_node: HirNodeId,
+    /// Per-axis index expressions in the source module's variable
+    /// namespace: loop vars appear in `Sym` position, module parameters
+    /// in `SymConst::Sym` position. `None` when any axis is not
+    /// expressible as an [`SExpr`] over the enclosing scope — such a
+    /// read can never be a fused seam.
+    pub(super) index_exprs: Option<Vec<SExpr>>,
     /// In-scope binders at this read site, outer-first. Each entry is
-    /// the source module's [`VarId`] and its concrete bound.
-    inner_vars: Vec<VarId>,
+    /// the source module's [`VarId`].
+    pub(super) inner_vars: Vec<VarId>,
 }
 
 /// Recognizes a producer- or consumer-shaped kernel module. Returns
 /// `None` if the module does not fit any of the supported shapes.
-fn identify_kernel_shape(module: &Module) -> Option<KernelShape> {
-    let (outer_var, outer_bound, body_root) = match module.builder.node(module.body) {
-        Node::Compute {
-            bound,
-            var,
-            body,
-            scatter,
-            par,
-            threads,
-        } => {
-            if scatter.is_some() || par.is_some() || threads.is_some() {
-                return None;
-            }
-            (*var, bound.clone(), *body)
-        }
-        _ => return None,
-    };
+pub(super) fn identify_kernel_shape(module: &Module) -> Option<KernelShape> {
+    let (outer_var, outer_bound, body_root, scatter, par, threads) =
+        match module.builder.node(module.body) {
+            Node::Compute {
+                bound,
+                var,
+                body,
+                scatter,
+                par,
+                threads,
+            } => (
+                *var,
+                bound.clone(),
+                *body,
+                scatter.clone(),
+                par.clone(),
+                *threads,
+            ),
+            _ => return None,
+        };
 
     // Walk the body, recording read sites and the scope they occur in.
     // We track scope as a stack of (VarId, ...) — only Compute/Reduce
-    // bodies push. Let bindings do not extend the index scope for
-    // quasi-affine purposes but their local values are chased inline
-    // via `hir_to_quast`'s `lets` argument.
+    // bodies push.
     let mut reads: Vec<ReadSite> = Vec::new();
     let mut input_reached_via_index: HashMap<HirNodeId, ()> = HashMap::new();
     let mut seen: std::collections::HashSet<HirNodeId> = std::collections::HashSet::new();
@@ -171,29 +204,22 @@ fn identify_kernel_shape(module: &Module) -> Option<KernelShape> {
         if let Node::Index { tensor, indices } = node {
             if let Node::Input(k) = module.builder.node(*tensor) {
                 input_reached_via_index.insert(*tensor, ());
-                // Attempt to convert the single-index expression to a
-                // Quast in the source module's variable namespace.
-                let (index_expr, ok) = if indices.len() == 1 {
-                    let syms =
-                        |v: VarId| -> Option<Quast> { scope.contains(&v).then(|| Quast::sym(v)) };
-                    let lets = |_v: VarId| -> Option<HirNodeId> { None };
-                    let expr = hir_to_quast(&module.builder, indices[0], &syms, &lets).ok();
-                    (expr, true)
-                } else {
-                    // Multi-index reads (tensor with rank > 1) — reject
-                    // by declining to record an index expression. The
-                    // synthesis path treats absent index_expr as
-                    // "cannot fuse through this read".
-                    (None, false)
-                };
-                if ok {
-                    reads.push(ReadSite {
-                        input_pos: *k,
-                        index_node: id,
-                        index_expr,
-                        inner_vars: scope.clone(),
-                    });
-                }
+                // Convert every index axis to an SExpr in the source
+                // module's variable namespace; any non-convertible axis
+                // voids the whole site's expression vector.
+                let syms =
+                    |v: VarId| -> Option<SExpr> { scope.contains(&v).then(|| SExpr::sym(v)) };
+                let lets = |_v: VarId| -> Option<HirNodeId> { None };
+                let index_exprs: Option<Vec<SExpr>> = indices
+                    .iter()
+                    .map(|&ix| hir_to_sexpr(&module.builder, ix, &syms, &lets).ok())
+                    .collect();
+                reads.push(ReadSite {
+                    input_pos: *k,
+                    index_node: id,
+                    index_exprs,
+                    inner_vars: scope.clone(),
+                });
             }
         }
         if !seen.insert(id) {
@@ -233,6 +259,9 @@ fn identify_kernel_shape(module: &Module) -> Option<KernelShape> {
         outer_bound,
         body_root,
         reads,
+        scatter,
+        par,
+        threads,
     })
 }
 
@@ -244,7 +273,8 @@ pub enum SynthesisFailure {
     NotAKernel,
     /// One of the parent modules did not fit the supported shape.
     UnsupportedShape,
-    /// Producer and consumer have different outer bounds.
+    /// Keep variant only: producer and consumer have different outer
+    /// bounds (drop tolerates this via the element-count gate).
     OuterBoundMismatch,
     /// The producer produces zero or several outputs. The M3 slice
     /// only supports single-output producers.
@@ -254,6 +284,16 @@ pub enum SynthesisFailure {
     /// A consumer read of the seam has an index expression that is not
     /// a quasi-affine function of the enclosing scope.
     SeamIndexNotAffine,
+    /// The consumer's declared seam view and the producer's output
+    /// shape disagree in total element count, or a shape axis needed by
+    /// the linearize/delinearize roundtrip is not a positive literal.
+    SeamShapeMismatch,
+    /// A drill coordinate into a producer `Pack` component did not fold
+    /// to an in-range literal.
+    SeamComponentNotConst,
+    /// The composed logical coordinate rank disagrees with the producer
+    /// body's rank-extending spine.
+    ProducerBodyRankMismatch,
     /// Clone-time failure — internal compiler error.
     CloneError(String),
     /// Post-synthesis type inference rejected the module.
@@ -274,10 +314,13 @@ pub enum SynthesisFailure {
 ///   compute body wraps the consumer and producer expressions in a `Tuple` so both are emitted from
 ///   the same iteration (§10.2).
 ///
-/// The producer body is *re-cloned* at each seam-read site with
-/// the producer's outer variable substituted by that read's index
-/// expression, so identity, affine-permutation, and nested-index
-/// consumers all reduce to the same synthesis loop.
+/// The producer body is *re-cloned* at each seam-read site with the
+/// producer's outer variable substituted by that read's composed
+/// coordinate σ, so identity, affine-permutation, nested-index,
+/// reshape-view and scattered-producer consumers all reduce to the same
+/// synthesis loop. Rank-extending producer bodies (`Pack`, inner
+/// `Compute` nests) are drilled per read using the trailing composed
+/// coordinates.
 pub fn synthesize_producer_consumer(
     gf: &GraphFuser,
     producer_node: NodeId,
@@ -302,9 +345,6 @@ pub fn synthesize_producer_consumer(
     if p_alt.outputs.len() != 1 {
         return Err(SynthesisFailure::ProducerNotSingleOutput);
     }
-    if p_shape.outer_bound != c_shape.outer_bound {
-        return Err(SynthesisFailure::OuterBoundMismatch);
-    }
 
     // Consumer input position(s) at which the seam is bound.
     let seam_positions: Vec<usize> = c_alt
@@ -324,45 +364,117 @@ pub fn synthesize_producer_consumer(
         .iter()
         .filter(|r| seam_positions.contains(&r.input_pos))
         .collect();
-    if seam_reads.iter().any(|r| r.index_expr.is_none()) {
+    if seam_reads.iter().any(|r| r.index_exprs.is_none()) {
         return Err(SynthesisFailure::SeamIndexNotAffine);
     }
 
     // Fused-module boundary: producer inputs first, followed by consumer
     // inputs whose positions are not seam positions.
+    //
+    // Parameters unify by (name, bound value): a name already claimed at
+    // a *different* value re-probes as `name#1`, `name#2`, … until an
+    // unclaimed or equal-valued slot is found, so a chain of the same
+    // symbolic kernel invoked at shrinking sizes fuses without
+    // collapsing its sizes. Fused param VarIds are allocated first
+    // (producer side, then consumer, in first-appearance order) because
+    // `module_hash` hashes param VarIds raw — reference modules built
+    // by hand allocate params at the lowest VarIds, and fused modules
+    // must match.
     let mut fb = IRBuilder::new();
-    let mut merged_bindings = p_binding.clone();
-    for (name, val) in &c_binding {
-        match merged_bindings.get(name) {
-            Some(existing) if existing != val => {
-                return Err(SynthesisFailure::UnsupportedShape);
-            }
-            _ => {
-                merged_bindings.insert(name.clone(), *val);
-            }
+    let mut claimed: HashMap<String, (VarId, Option<i64>)> = HashMap::new();
+    let mut merged_bindings: BTreeMap<String, i64> = BTreeMap::new();
+    let p_param_map = normalize_params(
+        &mut fb,
+        &mut claimed,
+        &mut merged_bindings,
+        &p_module,
+        &p_binding,
+    );
+    let c_param_map = normalize_params(
+        &mut fb,
+        &mut claimed,
+        &mut merged_bindings,
+        &c_module,
+        &c_binding,
+    );
+
+    let p_ctx = SideCtx {
+        param_map: &p_param_map,
+        env: side_env(&p_module, &p_binding),
+    };
+    let c_ctx = SideCtx {
+        param_map: &c_param_map,
+        env: side_env(&c_module, &c_binding),
+    };
+
+    // Producer output geometry. `spine` is the rank-extending chain of
+    // Pack / inner-Compute steps under the outer compute; `p_logical`
+    // is the producer's logical output shape (outer bound ++ spine
+    // dims); `p_phys` is what the seam buffer actually stores — equal
+    // to `p_logical` unless a scatter rewrites the layout.
+    let spine = producer_spine(&p_module, p_shape.body_root)?;
+    let mut p_logical: Vec<SExpr> = vec![p_shape.outer_bound.clone()];
+    p_logical.extend(spine.iter().map(|s| s.dim.clone()));
+    let p_phys: Vec<SExpr> = match &p_shape.scatter {
+        None => p_logical.clone(),
+        Some(sc) => {
+            let conc: Vec<usize> = p_logical
+                .iter()
+                .map(|d| {
+                    d.concretize(&p_ctx.env)
+                        .as_const()
+                        .and_then(|c| usize::try_from(c).ok())
+                })
+                .collect::<Option<Vec<usize>>>()
+                .ok_or(SynthesisFailure::UnsupportedShape)?;
+            sc.out_shape_for(&conc)
+                .map_err(|_| SynthesisFailure::UnsupportedShape)?
+                .into_iter()
+                .map(|d| SExpr::cst(SymConst::Lit(d as i64)))
+                .collect()
+        }
+    };
+
+    if variant == FusionVariant::Keep {
+        // Keep materializes the seam at the fused domain's index, so it
+        // requires plain kernels, a scalar producer body, and equal
+        // outer bounds.
+        if !p_shape.is_plain() || !c_shape.is_plain() || !spine.is_empty() {
+            return Err(SynthesisFailure::UnsupportedShape);
+        }
+        if !two_tier_eq(&p_shape.outer_bound, &p_ctx, &c_shape.outer_bound, &c_ctx) {
+            return Err(SynthesisFailure::OuterBoundMismatch);
         }
     }
-    // Track producer/consumer param VarIds mapped into fb, so
-    // ConstSym / shape expressions can be alpha-renamed.
-    let mut param_map: HashMap<VarId, VarId> = HashMap::new();
-    let mut seen_names: HashMap<String, VarId> = HashMap::new();
-    for (v, name) in p_module.builder.params() {
-        let fresh = *seen_names.entry(name.clone()).or_insert_with(|| {
-            let n = fb.var_watermark();
-            fb.raise_var_watermark(n + 1);
-            fb.inherit_param(VarId(n), name.clone());
-            VarId(n)
-        });
-        param_map.insert(*v, fresh);
+
+    // Drop gate: the consumer's declared seam view must cover exactly
+    // as many elements as the producer writes — proven symbolically
+    // when possible, otherwise certified against the concrete bindings
+    // of this candidate pair.
+    for &pos in &seam_positions {
+        let decl = &c_module.builder.inputs()[pos].shape;
+        if !counts_eq(decl, &c_ctx, &p_logical, &p_ctx) {
+            return Err(SynthesisFailure::SeamShapeMismatch);
+        }
     }
-    for (v, name) in c_module.builder.params() {
-        let fresh = *seen_names.entry(name.clone()).or_insert_with(|| {
-            let n = fb.var_watermark();
-            fb.raise_var_watermark(n + 1);
-            fb.inherit_param(VarId(n), name.clone());
-            VarId(n)
-        });
-        param_map.insert(*v, fresh);
+
+    // Compose σ per seam read: read coords → linearize over the
+    // declared seam view → delinearize over the producer's physical
+    // shape → provided scatter inverse → drill down the producer's
+    // rank-extending spine.
+    let mut read_plans: HashMap<HirNodeId, ReadPlan> = HashMap::new();
+    for read in &seam_reads {
+        let decl = &c_module.builder.inputs()[read.input_pos].shape;
+        let plan = plan_read(
+            read,
+            decl,
+            &p_phys,
+            &spine,
+            p_shape.scatter.as_deref(),
+            &p_ctx,
+            &c_ctx,
+        )?;
+        read_plans.insert(read.index_node, plan);
     }
 
     // Declare inputs and remember their Input NodeIds in fb.
@@ -374,7 +486,7 @@ pub fn synthesize_producer_consumer(
         let shape: Vec<SizeExpr> = decl
             .shape
             .iter()
-            .map(|d| remap_size_expr(d, &param_map))
+            .map(|d| remap_size_expr(d, &p_param_map))
             .collect();
         let n = fb.input(decl.name.clone(), decl.elem, shape);
         fused_p_input_nodes.push(n);
@@ -386,16 +498,16 @@ pub fn synthesize_producer_consumer(
         let shape: Vec<SizeExpr> = decl
             .shape
             .iter()
-            .map(|d| remap_size_expr(d, &param_map))
+            .map(|d| remap_size_expr(d, &c_param_map))
             .collect();
         let n = fb.input(decl.name.clone(), decl.elem, shape);
         fused_c_input_nodes[i] = Some(n);
     }
 
-    // Pre-compute the maps needed by clone_expr, keyed on the *source*
+    // Pre-compute the maps needed by the clone, keyed on the *source*
     // modules' Input NodeIds. These maps are stable across
     // producer-body inlines because each seam read only differs in the
-    // *index expression* substituted for `p_shape.outer_var`.
+    // coordinate σ substituted for `p_shape.outer_var`.
     let consumer_input_nodes: HashMap<usize, HirNodeId> =
         find_input_nodes(&c_module, c_shape.body_root);
     let producer_input_nodes: HashMap<usize, HirNodeId> =
@@ -410,12 +522,8 @@ pub fn synthesize_producer_consumer(
     // body-construction closure is straightforward. `k_var` is the
     // fused module's outer iteration variable; `k_var_node` its
     // `Node::Var` NodeId.
-    let outer_bound_fb = remap_size_expr(&c_shape.outer_bound, &param_map);
-    let k_var = {
-        let n = fb.var_watermark();
-        fb.raise_var_watermark(n + 1);
-        VarId(n)
-    };
+    let outer_bound_fb = remap_size_expr(&c_shape.outer_bound, &c_param_map);
+    let k_var = fb.fresh_var();
     let k_var_node = fb.intern(Node::Var(k_var));
 
     // Consumer non-seam Input NodeIds → their fused Input NodeIds.
@@ -427,75 +535,76 @@ pub fn synthesize_producer_consumer(
     }
 
     // Consumer VarId → fused NodeId. Outer var fuses to `k_var_node`;
-    // inner Compute/Reduce bound vars are introduced by `clone_expr`
-    // itself when it descends. Parameter VarIds map to their remapped
-    // fused-module Sym nodes.
+    // inner Compute/Reduce bound vars are introduced by the clone
+    // itself when it descends. Params never appear as `Node::Var` in a
+    // well-formed module — they ride in `ConstSym` / shape positions,
+    // which the clone remaps through the param map directly.
     let mut consumer_vars: HashMap<VarId, HirNodeId> = HashMap::new();
     consumer_vars.insert(c_shape.outer_var, k_var_node);
-    for (from, to) in &param_map {
-        let dst = fb.intern(Node::Var(*to));
-        consumer_vars.insert(*from, dst);
-    }
-
-    // Build a fast lookup from seam-read NodeId to (index_expr, scope).
-    let seam_read_by_node: HashMap<HirNodeId, &ReadSite> =
-        seam_reads.iter().map(|r| (r.index_node, *r)).collect();
 
     // Substitute at every seam read via a clone-time hook. The hook
-    // fires when clone_expr visits the seam Index NodeId, with the
+    // fires when the clone visits the seam Index NodeId, with the
     // current `vars` snapshot — which includes the fresh identities
-    // clone_expr has already allocated for any inner Compute/Reduce
+    // the clone has already allocated for any inner Compute/Reduce
     // binders. That means nested-index seam reads are handled the
     // same way as top-level ones.
     let hook = |dst: &mut IRBuilder,
                 src_id: HirNodeId,
                 vars: &HashMap<VarId, HirNodeId>|
      -> Result<Option<HirNodeId>, CloneError> {
-        let Some(read) = seam_read_by_node.get(&src_id) else {
+        let Some(plan) = read_plans.get(&src_id) else {
             return Ok(None);
         };
-        let sigma = read
-            .index_expr
-            .as_ref()
-            .expect("seam_reads was filtered to Some(index_expr)");
-        // Build the emit env: every in-scope source VarId (outer +
-        // inner binders currently on `vars`) maps to its
-        // destination NodeId.
+        // Emit env: every source VarId appearing in σ or in a drill
+        // coordinate maps to its destination NodeId from the clone's
+        // current scope.
+        let mut needed: BTreeSet<VarId> = BTreeSet::new();
+        plan.sigma.syms(&mut needed);
+        for (_, step) in &plan.drill {
+            if let DrillStepPlan::BindInner(e) = step {
+                e.syms(&mut needed);
+            }
+        }
         let mut env: HashMap<VarId, HirNodeId> = HashMap::new();
-        for &v in &read.inner_vars {
+        for v in needed {
             let n = *vars.get(&v).ok_or(CloneError::UnboundVar { var: v })?;
             env.insert(v, n);
         }
-        let bounds: BTreeMap<VarId, u64> = read.inner_vars.iter().map(|&v| (v, u64::MAX)).collect();
-        let sigma_node = {
-            let mut em = IndexEmitter { b: dst, env: &env };
-            sigma
-                .emit(&bounds, &mut em)
-                .expect("index emit succeeds on quasi-affine expressions")
-        };
-        // Clone the producer body with producer.outer_var → sigma_node.
+        let sigma_node = emit_sexpr(dst, &plan.sigma, &env, &c_param_map)?;
+        let mut drill: HashMap<HirNodeId, DrillAction> = HashMap::new();
+        for (node, step) in &plan.drill {
+            let action = match step {
+                DrillStepPlan::PackElem(k) => DrillAction::PackElem(*k),
+                DrillStepPlan::BindInner(e) => {
+                    DrillAction::BindInner(emit_sexpr(dst, e, &env, &c_param_map)?)
+                }
+            };
+            drill.insert(*node, action);
+        }
+        // Clone the producer body with producer.outer_var → sigma_node,
+        // drilling Pack / inner-Compute spine steps per this read's
+        // plan.
         let mut producer_vars: HashMap<VarId, HirNodeId> = HashMap::new();
         producer_vars.insert(p_shape.outer_var, sigma_node);
-        for (from, to) in &param_map {
-            let n = dst.intern(Node::Var(*to));
-            producer_vars.insert(*from, n);
-        }
-        let inlined = clone_expr(
+        let inlined = clone_with_drill(
             &p_module,
             p_shape.body_root,
             dst,
             &producer_subst,
             &producer_vars,
+            &p_param_map,
+            &drill,
         )?;
         Ok(Some(inlined))
     };
 
-    let cloned_body = clone_expr_with_hook(
+    let cloned_body = clone_expr_with_params(
         &c_module,
         c_shape.body_root,
         &mut fb,
         &consumer_subst,
         &consumer_vars,
+        &c_param_map,
         hook,
     )
     .map_err(|e| SynthesisFailure::CloneError(format!("{e:?}")))?;
@@ -511,29 +620,33 @@ pub fn synthesize_producer_consumer(
         FusionVariant::Keep => {
             let mut producer_vars: HashMap<VarId, HirNodeId> = HashMap::new();
             producer_vars.insert(p_shape.outer_var, k_var_node);
-            for (from, to) in &param_map {
-                let dst = fb.intern(Node::Var(*to));
-                producer_vars.insert(*from, dst);
-            }
-            let seam_body = clone_expr(
+            let seam_body = clone_expr_with_params(
                 &p_module,
                 p_shape.body_root,
                 &mut fb,
                 &producer_subst,
                 &producer_vars,
+                &p_param_map,
+                |_, _, _| Ok(None),
             )
             .map_err(|e| SynthesisFailure::CloneError(format!("{e:?}")))?;
             fb.intern(Node::Tuple(vec![cloned_body, seam_body]))
         }
     };
 
+    // The consumer's launch attributes transfer verbatim: their exprs
+    // reference only the consumer's own binders (which keep their
+    // meaning on the fused compute). Producer par / threads are launch
+    // hints that vanish under inlining; only the producer scatter
+    // affects stored layout, and that is already composed into every
+    // seam read via the provided inverse.
     let fused_body_id = fb.intern(Node::Compute {
         bound: outer_bound_fb,
         var: k_var,
         body: compute_body,
-        scatter: None,
-        par: None,
-        threads: None,
+        scatter: c_shape.scatter.clone(),
+        par: c_shape.par.clone(),
+        threads: c_shape.threads,
     });
     // Use a canonical name for fused modules so structurally-identical
     // compositions (e.g. `(A+B)+C` and `A+(B+C)`) hash to the same
@@ -604,77 +717,479 @@ pub fn synthesize_producer_consumer(
     })
 }
 
-/// `QuastEmitter` that lowers a Quast into HIR nodes on a mutable
-/// `IRBuilder`. `env` maps every symbol appearing in the Quast to a
-/// pre-interned NodeId in the destination builder.
-struct IndexEmitter<'a> {
-    b: &'a mut IRBuilder,
-    env: &'a HashMap<VarId, HirNodeId>,
+// -------------------------------------------------------------------------
+// Synthesis helpers
+// -------------------------------------------------------------------------
+
+/// One rank-extending step under the producer's outer compute.
+struct SpineStep {
+    /// The producer-module HIR node of the step.
+    node: HirNodeId,
+    kind: SpineKind,
+    /// Extent of the dimension this step introduces.
+    dim: SExpr,
 }
 
-impl QuastEmitter for IndexEmitter<'_> {
-    type Val = HirNodeId;
-    fn sym(&mut self, v: VarId) -> HirNodeId {
-        *self
-            .env
-            .get(&v)
-            .unwrap_or_else(|| panic!("unbound symbol {v:?} in IndexEmitter"))
+enum SpineKind {
+    Pack { len: usize },
+    Compute,
+}
+
+/// Walks the producer body from `body_root`, skipping `Let`s, and
+/// collects the rank-extending spine: inner `Compute` nests terminated
+/// by an optional `Pack`. Any other node ends the spine (scalar body).
+/// Inner computes must be attribute-free — a scatter/par/threads there
+/// has no meaning once the loop is unrolled into the consumer.
+fn producer_spine(
+    module: &Module,
+    body_root: HirNodeId,
+) -> Result<Vec<SpineStep>, SynthesisFailure> {
+    let mut spine = Vec::new();
+    let mut cur = body_root;
+    loop {
+        match module.builder.node(cur) {
+            Node::Let { body, .. } => cur = *body,
+            Node::Pack(elems) => {
+                spine.push(SpineStep {
+                    node: cur,
+                    kind: SpineKind::Pack { len: elems.len() },
+                    dim: SExpr::cst(SymConst::Lit(elems.len() as i64)),
+                });
+                break;
+            }
+            Node::Compute {
+                bound,
+                body,
+                scatter,
+                par,
+                threads,
+                ..
+            } => {
+                if scatter.is_some() || par.is_some() || threads.is_some() {
+                    return Err(SynthesisFailure::UnsupportedShape);
+                }
+                spine.push(SpineStep {
+                    node: cur,
+                    kind: SpineKind::Compute,
+                    dim: bound.clone(),
+                });
+                cur = *body;
+            }
+            _ => break,
+        }
     }
-    fn cst(&mut self, c: u32) -> HirNodeId {
-        self.b.const_u32(c)
-    }
-    fn add(&mut self, a: HirNodeId, b: HirNodeId) -> HirNodeId {
-        self.b.add(a, b)
-    }
-    fn sub(&mut self, a: HirNodeId, b: HirNodeId) -> HirNodeId {
-        self.b.sub(a, b)
-    }
-    fn mul(&mut self, a: HirNodeId, b: HirNodeId) -> HirNodeId {
-        self.b.mul(a, b)
-    }
-    fn div(&mut self, a: HirNodeId, b: HirNodeId) -> HirNodeId {
-        self.b.div(a, b)
-    }
-    fn rem(&mut self, a: HirNodeId, b: HirNodeId) -> HirNodeId {
-        self.b.rem(a, b)
+    Ok(spine)
+}
+
+/// Strips a `#k` split suffix from a parameter name (`n#1` → `n`).
+/// Returns the name unchanged when there is no well-formed suffix.
+fn strip_split_suffix(name: &str) -> &str {
+    match name.rsplit_once('#') {
+        Some((base, suffix))
+            if !base.is_empty()
+                && !suffix.is_empty()
+                && suffix.bytes().all(|b| b.is_ascii_digit()) =>
+        {
+            base
+        }
+        _ => name,
     }
 }
 
-/// Alpha-renames every [`VarId`] mentioned in `e` through `map`. Used
-/// to remap shape expressions and `ConstSym`-carried symbols when
-/// cloning parent module input declarations.
-fn remap_size_expr(e: &SizeExpr, map: &HashMap<VarId, VarId>) -> SizeExpr {
-    use crate::quast::{Expr, SymConst};
+/// Allocates fused-module params for one side. Each source param claims
+/// the first `base`, `base#1`, `base#2`, … slot whose bound value
+/// matches (an unbound param only unifies with another unbound one).
+/// Returns the side's source-VarId → fused-VarId map.
+fn normalize_params(
+    fb: &mut IRBuilder,
+    claimed: &mut HashMap<String, (VarId, Option<i64>)>,
+    merged_bindings: &mut BTreeMap<String, i64>,
+    module: &Module,
+    binding: &BTreeMap<String, i64>,
+) -> HashMap<VarId, VarId> {
+    let mut map = HashMap::new();
+    for (v, name) in module.builder.params() {
+        let value = binding.get(name).copied();
+        let base = strip_split_suffix(name);
+        let mut k = 0usize;
+        let fused = loop {
+            let probe = if k == 0 {
+                base.to_string()
+            } else {
+                format!("{base}#{k}")
+            };
+            match claimed.get(&probe) {
+                None => {
+                    let fresh = fb.fresh_var();
+                    fb.inherit_param(fresh, probe.clone());
+                    if let Some(val) = value {
+                        merged_bindings.insert(probe.clone(), val);
+                    }
+                    claimed.insert(probe, (fresh, value));
+                    break fresh;
+                }
+                Some((existing, ev)) if *ev == value => break *existing,
+                Some(_) => k += 1,
+            }
+        };
+        map.insert(*v, fused);
+    }
+    map
+}
+
+/// Per-side context for symbolic/concrete shape comparisons.
+struct SideCtx<'a> {
+    /// Source param VarId → fused param VarId.
+    param_map: &'a HashMap<VarId, VarId>,
+    /// Source param VarId → concrete value from the candidate's
+    /// `param_bindings`.
+    env: BTreeMap<VarId, i64>,
+}
+
+fn side_env(module: &Module, binding: &BTreeMap<String, i64>) -> BTreeMap<VarId, i64> {
+    module
+        .builder
+        .params()
+        .iter()
+        .filter_map(|(v, name)| binding.get(name).map(|&val| (*v, val)))
+        .collect()
+}
+
+/// Two-tier size equality. Tier 1 proves symbolically in the fused
+/// param namespace (`n == n` after unification). Tier 2 certifies
+/// against the concrete bindings of this candidate pair (`n@8 == m@8`).
+/// Tier 2 is sound because the driver re-runs synthesis per candidate,
+/// so a relation that only holds concretely is re-checked at every
+/// pair; the module text itself stays symbolic either way.
+fn two_tier_eq(a: &SExpr, a_ctx: &SideCtx, b: &SExpr, b_ctx: &SideCtx) -> bool {
+    if remap_size_expr(a, a_ctx.param_map).fold_lits()
+        == remap_size_expr(b, b_ctx.param_map).fold_lits()
+    {
+        return true;
+    }
+    match (
+        a.concretize(&a_ctx.env).as_const(),
+        b.concretize(&b_ctx.env).as_const(),
+    ) {
+        (Some(x), Some(y)) => x == y,
+        _ => false,
+    }
+}
+
+/// Element-count equality of two shapes: [`two_tier_eq`] on symbolic
+/// products when both are representable, otherwise concrete per-dim
+/// products.
+fn counts_eq(a: &[SExpr], a_ctx: &SideCtx, b: &[SExpr], b_ctx: &SideCtx) -> bool {
+    if let (Some(pa), Some(pb)) = (SExpr::product(a), SExpr::product(b)) {
+        if two_tier_eq(&pa, a_ctx, &pb, b_ctx) {
+            return true;
+        }
+    }
+    let conc = |dims: &[SExpr], ctx: &SideCtx| -> Option<i64> {
+        dims.iter().try_fold(1i64, |acc, d| {
+            Some(acc * d.concretize(&ctx.env).as_const()?)
+        })
+    };
+    match (conc(a, a_ctx), conc(b, b_ctx)) {
+        (Some(x), Some(y)) => x == y,
+        _ => false,
+    }
+}
+
+/// σ and per-spine-step drill actions for one seam read, in the
+/// consumer's variable namespace (loop vars in `Sym` position, consumer
+/// params in `SymConst::Sym` position — remapped at emit time).
+struct ReadPlan {
+    /// Coordinate substituted for the producer's outer var.
+    sigma: SExpr,
+    /// Drill steps, outermost first, keyed by the producer spine node
+    /// they apply to.
+    drill: Vec<(HirNodeId, DrillStepPlan)>,
+}
+
+enum DrillStepPlan {
+    /// Take component `k` of a producer `Pack`.
+    PackElem(usize),
+    /// Bind a producer inner `Compute` var to this coordinate.
+    BindInner(SExpr),
+}
+
+/// Emitted form of a [`DrillStepPlan`] within one hook invocation.
+enum DrillAction {
+    PackElem(usize),
+    BindInner(HirNodeId),
+}
+
+/// Composes the coordinate pipeline for one seam read: read coords →
+/// linearize over the consumer's declared seam view → delinearize over
+/// the producer's physical shape → provided scatter inverse → split
+/// into the outer-var image (σ) and per-spine drill coordinates.
+fn plan_read(
+    read: &ReadSite,
+    decl_dims: &[SExpr],
+    p_phys: &[SExpr],
+    spine: &[SpineStep],
+    scatter: Option<&Scatter>,
+    p_ctx: &SideCtx,
+    c_ctx: &SideCtx,
+) -> Result<ReadPlan, SynthesisFailure> {
+    let coords = read
+        .index_exprs
+        .as_ref()
+        .expect("caller filtered index_exprs to Some");
+
+    // Fast path: the declared view agrees with the physical shape
+    // axis-wise, so the read coordinates are already physical.
+    let axiswise = decl_dims.len() == p_phys.len()
+        && coords.len() == p_phys.len()
+        && decl_dims
+            .iter()
+            .zip(p_phys)
+            .all(|(a, b)| two_tier_eq(a, c_ctx, b, p_ctx));
+    let phys: Vec<SExpr> = if axiswise {
+        coords.clone()
+    } else {
+        // Reshape view: linearize row-major over the declared view
+        // (Horner), then delinearize over the physical shape. All inner
+        // extents must be positive literals for strides to be
+        // expressible.
+        if coords.len() != decl_dims.len() {
+            return Err(SynthesisFailure::SeamShapeMismatch);
+        }
+        let mut flat = coords[0].clone();
+        for (c, d) in coords[1..].iter().zip(&decl_dims[1..]) {
+            let d = d
+                .as_const()
+                .filter(|&d| d > 0)
+                .ok_or(SynthesisFailure::SeamShapeMismatch)?;
+            flat = flat.mul_c(SymConst::Lit(d)).add(c);
+        }
+        if p_phys.len() == 1 {
+            vec![flat]
+        } else {
+            let trailing: Vec<i64> = p_phys[1..]
+                .iter()
+                .map(|d| {
+                    d.as_const()
+                        .filter(|&d| d > 0)
+                        .ok_or(SynthesisFailure::SeamShapeMismatch)
+                })
+                .collect::<Result<_, _>>()?;
+            let mut strides = vec![1i64; p_phys.len()];
+            for j in (0..p_phys.len() - 1).rev() {
+                strides[j] = strides[j + 1] * trailing[j];
+            }
+            (0..p_phys.len())
+                .map(|j| {
+                    let q = if strides[j] == 1 {
+                        flat.clone()
+                    } else {
+                        flat.floordiv(SymConst::Lit(strides[j]))
+                    };
+                    if j > 0 {
+                        q.rem_c(SymConst::Lit(trailing[j - 1]))
+                    } else {
+                        q
+                    }
+                })
+                .collect()
+        }
+    };
+
+    // Compose the provided scatter inverse (physical → logical). The
+    // inverse is trusted, never verified against the forward map.
+    let logical: Vec<SExpr> = match scatter {
+        None => phys,
+        Some(sc) => {
+            if sc.inv_params.len() != phys.len() {
+                return Err(SynthesisFailure::SeamShapeMismatch);
+            }
+            let map: BTreeMap<VarId, SExpr> = sc
+                .inv_params
+                .iter()
+                .copied()
+                .zip(phys.iter().cloned())
+                .collect();
+            sc.inv_exprs
+                .iter()
+                .map(|q| SExpr::from(q).substitute(&map))
+                .collect()
+        }
+    };
+    let logical: Vec<SExpr> = logical.iter().map(SExpr::fold_lits).collect();
+
+    if logical.len() != 1 + spine.len() {
+        return Err(SynthesisFailure::ProducerBodyRankMismatch);
+    }
+
+    let mut drill = Vec::with_capacity(spine.len());
+    for (step, coord) in spine.iter().zip(&logical[1..]) {
+        let plan = match step.kind {
+            SpineKind::Pack { len } => {
+                // Pack components are positional, so the coordinate
+                // must fold to an in-range literal. Deliberately NOT
+                // certified via `concretize`: a binding-dependent
+                // component pick would bake this candidate's sizes into
+                // the module text and break one-artifact-per-chain.
+                let k = coord
+                    .as_const()
+                    .filter(|&k| k >= 0 && (k as usize) < len)
+                    .ok_or(SynthesisFailure::SeamComponentNotConst)?;
+                DrillStepPlan::PackElem(k as usize)
+            }
+            SpineKind::Compute => DrillStepPlan::BindInner(coord.clone()),
+        };
+        drill.push((step.node, plan));
+    }
+
+    Ok(ReadPlan {
+        sigma: logical[0].clone(),
+        drill,
+    })
+}
+
+/// Lowers an [`SExpr`] into HIR arithmetic on `b`. `env` maps every
+/// loop-var `Sym` to a pre-interned NodeId; `param_map` alpha-renames
+/// parameter symbols into the fused namespace. Loop-var-free
+/// sub-expressions become `const_u32` / `const_sym` leaves; `a - b` is
+/// recovered from `Add(x, Neg(y))` after literal folding.
+fn emit_sexpr(
+    b: &mut IRBuilder,
+    e: &SExpr,
+    env: &HashMap<VarId, HirNodeId>,
+    param_map: &HashMap<VarId, VarId>,
+) -> Result<HirNodeId, CloneError> {
+    let e = push_negs(&e.fold_lits());
+    emit_sexpr_rec(b, &e, env, param_map)
+}
+
+fn emit_sexpr_rec(
+    b: &mut IRBuilder,
+    e: &SExpr,
+    env: &HashMap<VarId, HirNodeId>,
+    param_map: &HashMap<VarId, VarId>,
+) -> Result<HirNodeId, CloneError> {
+    use crate::quast::Expr;
+    let mut vars = BTreeSet::new();
+    e.syms(&mut vars);
+    if vars.is_empty() {
+        // Loop-var-free: a literal or a parameter expression.
+        return Ok(match e.as_const() {
+            Some(c) if c >= 0 => b.const_u32(c as u32),
+            _ => b.const_sym(remap_size_expr(e, param_map)),
+        });
+    }
+    Ok(match e {
+        Expr::Sym(v) => *env.get(v).ok_or(CloneError::UnboundVar { var: *v })?,
+        Expr::Add(x, y) => match (x.as_ref(), y.as_ref()) {
+            (_, Expr::Neg(y2)) => {
+                let xa = emit_sexpr_rec(b, x, env, param_map)?;
+                let ya = emit_sexpr_rec(b, y2, env, param_map)?;
+                b.sub(xa, ya)
+            }
+            (Expr::Neg(x2), _) => {
+                let ya = emit_sexpr_rec(b, y, env, param_map)?;
+                let xa = emit_sexpr_rec(b, x2, env, param_map)?;
+                b.sub(ya, xa)
+            }
+            _ => {
+                let xa = emit_sexpr_rec(b, x, env, param_map)?;
+                let ya = emit_sexpr_rec(b, y, env, param_map)?;
+                b.add(xa, ya)
+            }
+        },
+        Expr::Mul(x, c) => {
+            let xa = emit_sexpr_rec(b, x, env, param_map)?;
+            let ca = emit_symconst(b, c, param_map);
+            b.mul(xa, ca)
+        }
+        Expr::FloorDiv(x, c) => {
+            let xa = emit_sexpr_rec(b, x, env, param_map)?;
+            let ca = emit_symconst(b, c, param_map);
+            b.div(xa, ca)
+        }
+        Expr::Neg(x) => {
+            let zero = b.const_u32(0);
+            let xa = emit_sexpr_rec(b, x, env, param_map)?;
+            b.sub(zero, xa)
+        }
+        // `syms` returned non-empty, so this cannot be a Const leaf.
+        Expr::Const(_) => unreachable!("const leaf has no syms"),
+    })
+}
+
+fn emit_symconst(b: &mut IRBuilder, c: &SymConst, param_map: &HashMap<VarId, VarId>) -> HirNodeId {
+    match c {
+        SymConst::Lit(x) => b.const_u32(*x as u32),
+        SymConst::Sym(v) => {
+            let mapped = *param_map.get(v).unwrap_or(v);
+            b.const_sym(SExpr::cst(SymConst::Sym(mapped)))
+        }
+    }
+}
+
+/// Rewrites `Mul(a, -c)` as `Neg(Mul(a, c))` so subtraction recovery in
+/// [`emit_sexpr_rec`] sees the negation at the `Add` level.
+fn push_negs(e: &SExpr) -> SExpr {
+    use crate::quast::Expr;
     match e {
-        Expr::Sym(v) => Expr::Sym(*map.get(v).unwrap_or(v)),
-        Expr::Const(SymConst::Lit(_)) => e.clone(),
-        Expr::Const(SymConst::Sym(v)) => Expr::Const(SymConst::Sym(*map.get(v).unwrap_or(v))),
-        Expr::Add(a, b) => Expr::Add(
-            std::sync::Arc::new(remap_size_expr(a, map)),
-            std::sync::Arc::new(remap_size_expr(b, map)),
-        ),
-        Expr::Mul(a, c) => {
-            let c = match c {
-                SymConst::Lit(_) => *c,
-                SymConst::Sym(v) => SymConst::Sym(*map.get(v).unwrap_or(v)),
-            };
-            Expr::Mul(std::sync::Arc::new(remap_size_expr(a, map)), c)
-        }
-        Expr::FloorDiv(a, c) => {
-            let c = match c {
-                SymConst::Lit(_) => *c,
-                SymConst::Sym(v) => SymConst::Sym(*map.get(v).unwrap_or(v)),
-            };
-            Expr::FloorDiv(std::sync::Arc::new(remap_size_expr(a, map)), c)
-        }
-        Expr::Neg(a) => Expr::Neg(std::sync::Arc::new(remap_size_expr(a, map))),
+        Expr::Mul(a, SymConst::Lit(c)) if *c < 0 => Expr::Neg(Arc::new(Expr::Mul(
+            Arc::new(push_negs(a)),
+            SymConst::Lit(-c),
+        ))),
+        Expr::Add(a, b) => Expr::Add(Arc::new(push_negs(a)), Arc::new(push_negs(b))),
+        Expr::Mul(a, c) => Expr::Mul(Arc::new(push_negs(a)), *c),
+        Expr::FloorDiv(a, c) => Expr::FloorDiv(Arc::new(push_negs(a)), *c),
+        Expr::Neg(a) => Expr::Neg(Arc::new(push_negs(a))),
+        Expr::Sym(_) | Expr::Const(_) => e.clone(),
     }
+}
+
+/// [`clone_expr_with_params`] wrapper whose hook drills the producer's
+/// rank-extending spine: `Pack` steps collapse to the planned
+/// component, inner `Compute` steps are dissolved by binding their var
+/// to the planned coordinate.
+fn clone_with_drill(
+    src: &Module,
+    root: HirNodeId,
+    dst: &mut IRBuilder,
+    subst: &HashMap<HirNodeId, HirNodeId>,
+    vars: &HashMap<VarId, HirNodeId>,
+    param_map: &HashMap<VarId, VarId>,
+    drill: &HashMap<HirNodeId, DrillAction>,
+) -> Result<HirNodeId, CloneError> {
+    clone_expr_with_params(
+        src,
+        root,
+        dst,
+        subst,
+        vars,
+        param_map,
+        |dst, id, vars_now| {
+            let Some(action) = drill.get(&id) else {
+                return Ok(None);
+            };
+            let node = src.builder.node(id).clone();
+            match (node, action) {
+                (Node::Pack(elems), DrillAction::PackElem(k)) => {
+                    clone_with_drill(src, elems[*k], dst, subst, vars_now, param_map, drill)
+                        .map(Some)
+                }
+                (Node::Compute { var, body, .. }, DrillAction::BindInner(coord)) => {
+                    let mut inner = vars_now.clone();
+                    inner.insert(var, *coord);
+                    clone_with_drill(src, body, dst, subst, &inner, param_map, drill).map(Some)
+                }
+                _ => Err(CloneError::MissingSubst { node: id }),
+            }
+        },
+    )
 }
 
 /// Locates the [`Node::Input`] NodeIds reachable from `root`. Because
 /// hash-consing interns one NodeId per distinct `Node::Input(k)`, each
 /// referenced input position appears exactly once in the returned map.
-fn find_input_nodes(module: &Module, root: HirNodeId) -> HashMap<usize, HirNodeId> {
+pub(super) fn find_input_nodes(module: &Module, root: HirNodeId) -> HashMap<usize, HirNodeId> {
     let mut out = HashMap::new();
     let mut work = vec![root];
     let mut seen = std::collections::HashSet::new();
@@ -792,21 +1307,24 @@ impl OwnedEnumerateContext {
 pub fn enumerate(gf: &GraphFuser, ctx: &EnumerateContext) -> Vec<CandidateDraft> {
     let frozen = ctx.frozen_node_count.min(gf.nodes.len());
     let min_new = ctx.min_new_parent_id;
-    let mut out = Vec::new();
+    let debug = super::debug_reject_level();
+    // Site collection is cheap (index scans + origin checks); synthesis
+    // dominates, so it runs in parallel over the collected sites.
+    //
+    // Every producer of `v` is considered (§10.1). A value can have more
+    // than one producer once fused candidates that materialize it
+    // land — e.g. B and drop(A,B) both produce B's output value
+    // class. We consider each `(producer, consumer)` pair
+    // independently; deduplication is handled downstream by
+    // `CandidateKey`.
+    let mut sites: Vec<(NodeId, NodeId, ValueClassId)> = Vec::new();
     for (v, producers) in gf.producers.iter().enumerate() {
-        // Iterate every producer of `v` (§10.1). A value can have more
-        // than one producer once fused candidates that materialize it
-        // land — e.g. B and drop(A,B) both produce B's output value
-        // class. We consider each `(producer, consumer)` pair
-        // independently; deduplication is handled downstream by
-        // `CandidateKey`.
         for pu in producers {
             let p_node = pu.node;
             if p_node.0 >= frozen {
                 continue;
             }
-            let consumers = &gf.consumers[v];
-            for cu in consumers {
+            for cu in &gf.consumers[v] {
                 let c_node = cu.node;
                 if c_node.0 >= frozen {
                     continue;
@@ -823,21 +1341,41 @@ pub fn enumerate(gf: &GraphFuser, ctx: &EnumerateContext) -> Vec<CandidateDraft>
                 if !disjoint_origins(&ctx.origins[p_node.0], &ctx.origins[c_node.0]) {
                     continue;
                 }
-                let seam = ValueClassId(v);
-                if let Ok(draft) =
-                    synthesize_producer_consumer(gf, p_node, c_node, seam, FusionVariant::Drop)
-                {
-                    out.push(draft);
+                sites.push((p_node, c_node, ValueClassId(v)));
+            }
+        }
+    }
+    let (out, rejects) = super::par_enumerate(sites, |(p_node, c_node, seam)| {
+        let mut drafts = Vec::new();
+        let mut rejects: Vec<(String, u64)> = Vec::new();
+        match synthesize_producer_consumer(gf, p_node, c_node, seam, FusionVariant::Drop) {
+            Ok(draft) => drafts.push(draft),
+            Err(e) => {
+                if debug >= 2 {
+                    eprintln!(
+                        "[fusion-v2-debug] pc drop p={} c={} seam={}: {:?}",
+                        p_node.0, c_node.0, seam.0, e
+                    );
                 }
-                if should_emit_keep(gf, seam, c_node, frozen, &ctx.options) {
-                    if let Ok(draft) =
-                        synthesize_producer_consumer(gf, p_node, c_node, seam, FusionVariant::Keep)
-                    {
-                        out.push(draft);
+                if debug >= 1 {
+                    rejects.push((super::variant_name(&e), 1));
+                }
+            }
+        }
+        if should_emit_keep(gf, seam, c_node, frozen, &ctx.options) {
+            match synthesize_producer_consumer(gf, p_node, c_node, seam, FusionVariant::Keep) {
+                Ok(draft) => drafts.push(draft),
+                Err(e) => {
+                    if debug >= 1 {
+                        rejects.push((format!("keep:{}", super::variant_name(&e)), 1));
                     }
                 }
             }
         }
+        (drafts, rejects)
+    });
+    if debug >= 1 {
+        super::dump_rejects("producer-consumer", &rejects);
     }
     out
 }
@@ -847,7 +1385,7 @@ fn disjoint_origins(a: &BTreeSet<NodeId>, b: &BTreeSet<NodeId>) -> bool {
 }
 
 /// Predicate for §10.2's keep-trigger conditions.
-fn should_emit_keep(
+pub(super) fn should_emit_keep(
     gf: &GraphFuser,
     seam: ValueClassId,
     current_consumer: NodeId,

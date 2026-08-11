@@ -141,10 +141,12 @@ fn score_node(
     }
     let mut freed = 0i64;
     for &b in &node_reads[node] {
-        if remaining_readers[b] == 1 && ctx.packable(b) && !ctx.pinned[b] {
-            if alive[b] || node_writes[node].contains(&b) {
-                freed += ctx.sizes[b];
-            }
+        if remaining_readers[b] == 1
+            && ctx.packable(b)
+            && !ctx.pinned[b]
+            && (alive[b] || node_writes[node].contains(&b))
+        {
+            freed += ctx.sizes[b];
         }
     }
     (new_births, freed)

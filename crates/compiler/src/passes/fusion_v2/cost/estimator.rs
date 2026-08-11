@@ -26,6 +26,7 @@ use crate::{
             liveness::{estimate_registers, RegisterEstimate},
             transactions::{estimate_access, is_global, AccessSampleCfg},
         },
+        monomorphize::{block_size_policy, outer_bounds},
         plan_shared_mem,
     },
     quast::{Expr, Quast, SExpr, SymConst},
@@ -167,11 +168,45 @@ pub fn estimate_kernel(
     let mc = ModuleCompiler::new();
     // Lowering the module can panic on malformed inputs; the compiler
     // pipeline returns `CompileError` for structured failures.
-    let kp = mc.lower(module.clone())?;
+    let kp = mc.lower(stamp_block_hint(module, ctx))?;
     let plan = plan_shared_mem(&kp);
     let breakdown = analyze_program(&kp, &plan.per_kernel, ctx, cfg, module_hash)?;
     let cost = GraphNodeCost::from_cycles(breakdown.total_cycles, cycle_quantum);
     Ok((cost, breakdown))
+}
+
+/// Candidate modules reach the estimator before the graph monomorphize
+/// pass stamps block hints (canonicalize rebuilds modules and drops
+/// them), and synthesized fused modules never had one — but lowering a
+/// symbolic outer bound requires a hint. Mirror monomorphize's policy
+/// (`block_size_policy` of the largest outer bound) using the caller's
+/// bindings; if the bound stays symbolic under the full env, lowering
+/// fails as before and the caller assigns the sentinel cost.
+fn stamp_block_hint(module: &ir::Module, ctx: &EstimateContext) -> ir::Module {
+    let mut m = module.clone();
+    if m.builder.block_hint().is_some() {
+        return m;
+    }
+    let bounds = outer_bounds(&m);
+    if bounds.iter().all(|e| e.as_const().is_some()) {
+        return m;
+    }
+    let mut env = ctx.graph_symbols.clone();
+    for (v, name) in m.builder.params().iter() {
+        if let Some(&val) = ctx.param_bindings.get(name) {
+            env.insert(*v, val);
+        }
+    }
+    let max = bounds
+        .iter()
+        .filter_map(|e| e.concretize(&env).as_const())
+        .max();
+    if let Some(mx) = max {
+        if mx > 0 {
+            m.builder.set_block_hint(block_size_policy(mx as usize));
+        }
+    }
+    m
 }
 
 /// Closed-form cost for non-kernel graph nodes (§12.8).
@@ -271,6 +306,18 @@ fn analyze_program(
     }
     let k = &kp.kernels[0];
     let shared_bytes = *shared_bytes_per_kernel.first().unwrap_or(&0);
+    // Bind surviving KIR params known through the name-keyed
+    // `param_bindings` into the VarId-keyed symbol env, so grid
+    // resolution and the transaction sampler see them. The sampler
+    // treats any unbound symbol as the par index, which mis-prices
+    // addresses built from genuinely-known sizes.
+    let mut aug = ctx.clone();
+    for (v, name) in &kp.params {
+        if let Some(&val) = ctx.param_bindings.get(name) {
+            aug.graph_symbols.entry(*v).or_insert(val);
+        }
+    }
+    let ctx = &aug;
     // Grid dimension (may be symbolic).
     let grid_dim = resolve_kbound(&k.grid.bound, ctx).unwrap_or(1) as u32;
 

@@ -24,7 +24,7 @@ use cp_sat::{
 };
 
 use crate::passes::fusion_v2::{
-    cost::ArtifactKey,
+    cost::{ArtifactKey, GraphNodeCost},
     extract::{ExtractOptions, ExtractionData, ExtractionSolution, FallbackReason, SolverStatus},
     model::{GraphFuser, NodeId, ValueClassId},
 };
@@ -138,13 +138,29 @@ pub fn extract(
         m.add_le(sum, LinearExpr::from(cap as i64));
     }
 
+    // Costing-failure sentinels ([`GraphNodeCost::FAILED`]) would
+    // overflow CP-SAT's int64 objective validation. A failed
+    // *alternative* is force-excluded — the seed prefix always covers
+    // the graph, so feasibility is preserved. A failed *seed* must
+    // stay selectable, so its objective coefficient is instead clamped
+    // to a value where the objective sum cannot overflow.
+    let coeff_clamp: i64 = GraphNodeCost::FAILED.runtime_units / (n_nodes as i64).max(1);
+    let mut excluded = vec![false; n_nodes];
+    for (a, cost) in data.costs.iter().enumerate() {
+        if cost.is_failure() && a >= gf.seed_node_count {
+            excluded[a] = true;
+            m.add_eq(x[a], 0i64);
+        }
+    }
+    let runtime_coeff = |a: usize| -> i64 { data.costs[a].runtime_units.min(coeff_clamp) };
+
     // Objective terms (each recomputed as an expression each stage).
     let runtime_expr = |m: &CpModelBuilder| -> LinearExpr {
         let _ = m;
         let mut e = LinearExpr::from(0);
-        for (a, cost) in data.costs.iter().enumerate() {
-            if cost.runtime_units != 0 {
-                e += LinearExpr::from((cost.runtime_units, x[a]));
+        for a in 0..n_nodes {
+            if !excluded[a] && runtime_coeff(a) != 0 {
+                e += LinearExpr::from((runtime_coeff(a), x[a]));
             }
         }
         e
@@ -173,24 +189,92 @@ pub fn extract(
 
     let params = SatParameters {
         max_time_in_seconds: Some(options.solver_time_limit_secs),
-        num_search_workers: Some(1),
+        num_search_workers: Some(options.solver_num_workers as i32),
         random_seed: Some(1),
         ..Default::default()
     };
+    if options.verbose {
+        eprintln!(
+            "[fusion-v2] cpsat model: x={n_nodes} y={} z={n_artifacts} \
+             ({} seeds, {} cost-failure excluded), time limit {:.1}s/stage, {} worker(s)",
+            gf.num_values(),
+            gf.seed_node_count,
+            excluded.iter().filter(|&&b| b).count(),
+            options.solver_time_limit_secs,
+            options.solver_num_workers,
+        );
+    }
+    let stage_log =
+        |stage: &str, status: &SolverStatus, obj: Option<i64>, t: std::time::Instant| {
+            if options.verbose {
+                let obj = obj.map_or("none".to_string(), |v| v.to_string());
+                eprintln!(
+                    "[fusion-v2] cpsat stage {stage}: status={status:?}, objective={obj}, {:.1}s",
+                    t.elapsed().as_secs_f64(),
+                );
+            }
+        };
+
+    // Solution hints. The original seed extraction is always feasible
+    // (§13.2), so hint it before stage 1 — on large models a cold
+    // CP-SAT can burn the whole stage budget searching for a first
+    // feasible solution and return Unknown. Each later stage re-hints
+    // the previous stage's solution, which stays feasible under the
+    // added objective-lock constraint.
+    let apply_hints = |m: &mut CpModelBuilder, hx: &[bool], hy: &[bool], hz: &[bool]| {
+        m.del_hints();
+        for (v, &b) in x.iter().zip(hx) {
+            m.add_hint(*v, b as i64);
+        }
+        for (v, &b) in y.iter().zip(hy) {
+            m.add_hint(*v, b as i64);
+        }
+        for (v, &b) in z.iter().zip(hz) {
+            m.add_hint(*v, b as i64);
+        }
+    };
+    let solution_hints =
+        |r: &cp_sat::proto::CpSolverResponse| -> (Vec<bool>, Vec<bool>, Vec<bool>) {
+            (
+                x.iter().map(|v| v.solution_value(r)).collect(),
+                y.iter().map(|v| v.solution_value(r)).collect(),
+                z.iter().map(|v| v.solution_value(r)).collect(),
+            )
+        };
+    apply_hints(
+        &mut m,
+        &(0..n_nodes)
+            .map(|i| i < gf.seed_node_count)
+            .collect::<Vec<_>>(),
+        &vec![true; y.len()],
+        &original_artifact_bit,
+    );
 
     // Stage 1: runtime.
     m.minimize(runtime_expr(&m));
+    let t1 = std::time::Instant::now();
     let r1 = m.solve_with_parameters(&params);
     let status1 = solver_status(r1.status());
     if !status_is_solution(&status1) {
+        stage_log("1 (runtime)", &status1, None, t1);
         return fallback_original(gf, status1);
     }
-    let runtime_opt: i64 = data
-        .costs
-        .iter()
-        .enumerate()
-        .map(|(a, c)| c.runtime_units * x[a].solution_value(&r1) as i64)
+    // Must use the same (clamped) coefficients as `runtime_expr` so
+    // the stage lock below is consistent with the solved objective.
+    let runtime_opt: i64 = (0..n_nodes)
+        .filter(|&a| !excluded[a])
+        .map(|a| runtime_coeff(a) * x[a].solution_value(&r1) as i64)
         .sum();
+    stage_log("1 (runtime)", &status1, Some(runtime_opt), t1);
+    // Diagnostic: how many artifacts stage 1 actually activated, before
+    // any artifact pressure is applied. Compare against the stage-2
+    // optimum to see how much stage 2 consolidates.
+    let stage1_artifact_count: i64 = z.iter().map(|zv| zv.solution_value(&r1) as i64).sum();
+    if options.verbose {
+        eprintln!(
+            "[fusion-v2] cpsat stage 1 artifacts-active={stage1_artifact_count}/{n_artifacts}"
+        );
+    }
     // Stage 1 -> Stage 2 lock. Honor runtime_tolerance_ppm as an upper
     // slack: `runtime_expr <= runtime_opt + slack`.
     let slack: i64 = if options.runtime_tolerance_ppm == 0 {
@@ -202,33 +286,64 @@ pub fn extract(
     };
     m.add_le(runtime_expr(&m), LinearExpr::from(runtime_opt + slack));
 
+    // TEMP EXPERIMENT: `FUSION_V2_SKIP_STAGE2=1` bypasses the
+    // artifact-count stage entirely so stages 3-4 hint from stage 1
+    // directly. Purpose: measure how many compiled artifacts the
+    // runtime-only optimum requires when there's no consolidation
+    // pressure. Remove after measurement.
+    let skip_stage2 = std::env::var_os("FUSION_V2_SKIP_STAGE2").is_some();
+
     // Stage 2: artifact count.
-    m.minimize(artifact_expr(&m));
-    let r2 = m.solve_with_parameters(&params);
-    let status2 = solver_status(r2.status());
-    if !status_is_solution(&status2) {
-        return fallback_original(gf, status2);
-    }
-    let artifact_opt: i64 = z.iter().map(|zv| zv.solution_value(&r2) as i64).sum();
-    m.add_le(artifact_expr(&m), LinearExpr::from(artifact_opt));
+    let r2 = if skip_stage2 {
+        if options.verbose {
+            eprintln!("[fusion-v2] cpsat stage 2 (artifacts): SKIPPED (FUSION_V2_SKIP_STAGE2 set)");
+        }
+        r1
+    } else {
+        let (hx, hy, hz) = solution_hints(&r1);
+        apply_hints(&mut m, &hx, &hy, &hz);
+        m.minimize(artifact_expr(&m));
+        let t2 = std::time::Instant::now();
+        let r2 = m.solve_with_parameters(&params);
+        let status2 = solver_status(r2.status());
+        if !status_is_solution(&status2) {
+            stage_log("2 (artifacts)", &status2, None, t2);
+            return fallback_original(gf, status2);
+        }
+        let artifact_opt: i64 = z.iter().map(|zv| zv.solution_value(&r2) as i64).sum();
+        stage_log("2 (artifacts)", &status2, Some(artifact_opt), t2);
+        m.add_le(artifact_expr(&m), LinearExpr::from(artifact_opt));
+        r2
+    };
 
     // Stage 3: node count.
+    let (hx, hy, hz) = solution_hints(&r2);
+    apply_hints(&mut m, &hx, &hy, &hz);
     m.minimize(node_count_expr(&m));
+    let t3 = std::time::Instant::now();
     let r3 = m.solve_with_parameters(&params);
     let status3 = solver_status(r3.status());
     if !status_is_solution(&status3) {
+        stage_log("3 (nodes)", &status3, None, t3);
         return fallback_original(gf, status3);
     }
     let node_opt: i64 = x.iter().map(|xv| xv.solution_value(&r3) as i64).sum();
+    stage_log("3 (nodes)", &status3, Some(node_opt), t3);
     m.add_le(node_count_expr(&m), LinearExpr::from(node_opt));
 
     // Stage 4: value count.
+    let (hx, hy, hz) = solution_hints(&r3);
+    apply_hints(&mut m, &hx, &hy, &hz);
     m.minimize(value_count_expr(&m));
+    let t4 = std::time::Instant::now();
     let r4 = m.solve_with_parameters(&params);
     let status4 = solver_status(r4.status());
     if !status_is_solution(&status4) {
+        stage_log("4 (values)", &status4, None, t4);
         return fallback_original(gf, status4);
     }
+    let value_opt: i64 = y.iter().map(|yv| yv.solution_value(&r4) as i64).sum();
+    stage_log("4 (values)", &status4, Some(value_opt), t4);
 
     let selected: Vec<NodeId> = (0..n_nodes)
         .filter(|&i| x[i].solution_value(&r4))

@@ -475,7 +475,7 @@ mod tests {
     };
     use openvm_cuda_common::{
         common::get_device,
-        copy::MemCopyH2D,
+        copy::{cuda_memcpy_on, MemCopyH2D},
         d_buffer::DeviceBuffer,
         stream::{CudaStream, GpuDeviceCtx, StreamGuard},
     };
@@ -1043,27 +1043,6 @@ mod tests {
             let build_ms = t0.elapsed().as_secs_f64() * 1e3;
             let n_nodes = g.nodes.len();
 
-            // Eager warmup — computes the reference `eager_sum` on the same
-            // (leaves, alpha) the graph was built with.
-            let eager_sum = {
-                let d_leaves = leaves_to_device(&leaves, &ctx);
-                let mut sponge = DuplexSpongeGpu::default();
-                let mut mem = MemTracker::start("bench.fractional_v2_eager");
-                ctx.stream.synchronize().expect("sync");
-                let (proof, _xi) = fractional_sumcheck_gpu::<SC, _>(
-                    &mut sponge,
-                    d_leaves,
-                    FractionalInputSize::dense(n),
-                    alpha,
-                    false,
-                    &mut mem,
-                    &ctx,
-                )
-                .expect("eager warmup");
-                ctx.stream.synchronize().expect("sync");
-                proof.fractional_sum
-            };
-
             // Larger kernel cache — the default 300-entry / 10 GiB cap
             // evicts previously-compiled kernels when a fresh run produces
             // >300 unique modules (which the log_n=20 v2 graph does),
@@ -1106,7 +1085,49 @@ mod tests {
             if std::env::var_os("FRAC_V2_BENCH_NO_FUSION").is_some() {
                 compiler = compiler.without_fusion();
             }
-            let mut exe = compiler
+            // `FRAC_V2_BENCH_FUSION_V2=1` benchmarks the fusion-v2
+            // pipeline instead. Build with
+            // `--features crypto-compiler/planner-ortools`; without it,
+            // graphs beyond the 32-alt-node brute-force cap fall back to
+            // the original (unfused) extraction and the comparison is
+            // meaningless.
+            // The default 5s/stage CP-SAT limit returns
+            // SolverStatusUnknown on the full graph's ~7.6k-variable
+            // model (falls back to the original unfused extraction);
+            // tune with `FRAC_V2_BENCH_SOLVER_SECS` /
+            // `FRAC_V2_BENCH_MAX_ALTS`.
+            if std::env::var_os("FRAC_V2_BENCH_FUSION_V2").is_some() {
+                let solver_secs = std::env::var("FRAC_V2_BENCH_SOLVER_SECS")
+                    .ok()
+                    .and_then(|s| s.parse::<f64>().ok())
+                    .unwrap_or(120.0);
+                let max_alts = std::env::var("FRAC_V2_BENCH_MAX_ALTS")
+                    .ok()
+                    .and_then(|s| s.parse::<usize>().ok())
+                    .unwrap_or(10_000);
+                // Horizontal is off by default: on this graph it costs
+                // ~99% of enumeration time for a handful of launch-quantum
+                // savings. `FRAC_V2_BENCH_HORIZONTAL=1` re-enables it.
+                let horizontal = std::env::var_os("FRAC_V2_BENCH_HORIZONTAL").is_some();
+                // All cores by default: the bench doesn't need the
+                // deterministic single-worker solve, and one worker is
+                // Feasible-not-Optimal even at 120s/stage.
+                let solver_workers = std::env::var("FRAC_V2_BENCH_SOLVER_WORKERS")
+                    .ok()
+                    .and_then(|s| s.parse::<usize>().ok())
+                    .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get()));
+                compiler = compiler.fusion_v2_options(
+                    crypto_compiler::passes::fusion_v2::FusionOptionsV2 {
+                        verbose: true,
+                        solver_time_limit_secs: solver_secs,
+                        solver_num_workers: solver_workers,
+                        max_total_alternatives: max_alts,
+                        enable_horizontal: horizontal,
+                        ..Default::default()
+                    },
+                );
+            }
+            let exe = compiler
                 .nvcc_timeout(Some(Duration::from_secs(900)))
                 .dump_dir(
                     std::env::var_os("FRAC_V2_BENCH_DUMP_IR")
@@ -1133,50 +1154,40 @@ mod tests {
                 exe.num_cached_modules(),
                 exe.scratch_bytes(),
             );
+            if let Some(v2) = exe.fusion_report().and_then(|r| r.v2.as_ref()) {
+                println!(
+                    "fusion v2: generated={}, inserted={}, selected={}, rounds={:?}, \
+                     cost cache {}h/{}m, total_runtime_units={}, fallback={:?}",
+                    v2.candidates_generated,
+                    v2.candidates_inserted,
+                    v2.selected_from_solver,
+                    v2.rounds_inserted,
+                    v2.cost_cache_hits,
+                    v2.cost_cache_misses,
+                    v2.total_runtime_units,
+                    v2.fallback_reason,
+                );
+            }
 
             assert_eq!(exe.num_inputs(), 1);
-            let d_input = frac_bytes(&leaves).to_device_on(&ctx).expect("H2D");
-            exe.set_input(&ctx, 0, &d_input).expect("set_input");
 
-            // Graph warmups.
-            for _ in 0..WARMUPS {
-                ctx.stream.synchronize().expect("sync");
-                exe.run(&ctx).expect("graph warmup");
-                ctx.stream.synchronize().expect("sync");
-            }
-
-            // One-time CUDA-graph capture + instantiate, then a replay
-            // warmup so the timed pass measures only `cudaGraphLaunch` cost.
-            // Capture is bound to the same device pool as `run`, so
-            // consecutive `set_input`s and future `launch_graph` calls
-            // resolve the same device addresses (capture-stability
-            // contract enforced by `GraphExe`'s planner).
-            ctx.stream.synchronize().expect("sync");
-            let t0 = Instant::now();
-            exe.capture_graph(&ctx).expect("graph capture");
-            ctx.stream.synchronize().expect("sync");
-            let capture_ms = t0.elapsed().as_secs_f64() * 1e3;
-            println!(
-                "graph capture: {capture_ms:>8.2} ms (single cudaStreamBeginCapture + \
-                 cudaGraphInstantiateWithFlags over the {n_nodes_post_fusion}-node graph)"
-            );
-            for _ in 0..WARMUPS {
-                ctx.stream.synchronize().expect("sync");
-                exe.launch_graph(&ctx).expect("graph capture warmup");
-                ctx.stream.synchronize().expect("sync");
-            }
-
+            // Pool alloc, H2D of leaves, graph warmups, and graph capture
+            // are deferred to the timed pass — done per-size *after* the
+            // eager loop so eager's ~13 GiB of transient buffers at
+            // log_n=28 don't have to coexist with the ~25 GiB graph pool
+            // on a 32 GiB card. `eager_sum` and `capture_ms` start as
+            // placeholders and are populated in the timed pass.
             states.push(PerSize {
                 log_n,
                 n,
                 leaves,
                 alpha,
-                eager_sum,
+                eager_sum: (EF::ZERO, EF::ZERO),
                 exe,
                 root_exports,
                 build_ms,
                 compile_ms,
-                capture_ms,
+                capture_ms: 0.0,
                 n_nodes,
                 n_nodes_post_fusion,
                 fusion_rounds,
@@ -1190,19 +1201,47 @@ mod tests {
 
         // Timed pass — wrapped in a single cudaProfilerStart/Stop window
         // when `NSYS_ENABLED=1` so nsys emits one .nsys-rep containing
-        // only the labeled timed work. Setup (build, compile, warmup,
-        // one-shot graph capture) already ran above and is excluded.
+        // only the labeled timed work. Setup (build, compile) already ran
+        // above and is excluded; per-size eager warmup, pool alloc, graph
+        // warmups, and one-shot graph capture happen inside the profile
+        // window but outside NVTX ranges — the NVTX-tagged intervals are
+        // exactly the timed iterations.
         if nsys_enabled {
             unsafe { cudaProfilerStart() };
         }
-        // NVTX ranges are pushed *per iteration* and wrap only the timed
-        // compute (matching the `t0..elapsed` interval). Per-iter H2D setup,
-        // sponge init, and the internal-D2H readback of `proof.fractional_sum`
-        // in the eager path all happen outside the range — for the eager
-        // path the D2H is unavoidable inside `fractional_sumcheck_gpu`, so
-        // we hoist it out by re-ordering: the sync + scalar readback of the
-        // returned `(EF, EF)` on the CPU happens after the range pop.
+        // Per-size order: (1) eager warmup + eager timed iters (no graph
+        // pool held), (2) bind the graph input by H2D-ing leaves directly
+        // into the pool slot via `get_input_ptr`, (3) graph warmups +
+        // capture + launch warmups, (4) graph timed + graph_capture
+        // timed iters. Eager runs first so its ~13 GiB of transient
+        // per-iter allocations (input leaves, work buffer, tmp block
+        // sums, …) don't have to coexist with the ~24 GiB graph pool —
+        // critical at log_n=28 on a 32 GiB card.
         for st in states.iter_mut() {
+            // Eager warmup — untimed run that also sets `eager_sum` as
+            // the reference the graph's fractional_sum is asserted
+            // against at report time. All device buffers drop at scope
+            // exit, restoring the GPU to a clean state before the pool
+            // allocation below.
+            {
+                let d_leaves = leaves_to_device(&st.leaves, &ctx);
+                let mut sponge = DuplexSpongeGpu::default();
+                let mut mem = MemTracker::start("bench.fractional_v2_eager");
+                ctx.stream.synchronize().expect("sync");
+                let (proof, _xi) = fractional_sumcheck_gpu::<SC, _>(
+                    &mut sponge,
+                    d_leaves,
+                    FractionalInputSize::dense(st.n),
+                    st.alpha,
+                    false,
+                    &mut mem,
+                    &ctx,
+                )
+                .expect("eager warmup");
+                ctx.stream.synchronize().expect("sync");
+                st.eager_sum = proof.fractional_sum;
+            }
+
             for i in 0..ITERS {
                 // Setup (H2D, sponge init) outside the NVTX range and outside
                 // the timed window.
@@ -1232,6 +1271,56 @@ mod tests {
                 st.eager_ms.push(elapsed_ms);
                 st.eager_sum = proof.fractional_sum;
             }
+
+            // Bind the graph input by H2D-ing leaves directly into the
+            // pool slot returned by `get_input_ptr`. This skips the
+            // ~8 GiB device staging buffer that `set_input` would
+            // require, so peak concurrent device memory during pool
+            // alloc drops from `pool + staging` (~32 GiB at log_n=28)
+            // to just `pool` (~24 GiB).
+            ctx.stream.synchronize().expect("sync");
+            let dst = st.exe.get_input_ptr(&ctx, 0).expect("get_input_ptr");
+            let src = frac_bytes(&st.leaves);
+            unsafe {
+                cuda_memcpy_on::<false, true>(
+                    dst,
+                    src.as_ptr() as *const std::ffi::c_void,
+                    src.len(),
+                    &ctx,
+                )
+                .expect("H2D leaves into pool slot");
+            }
+            ctx.stream.synchronize().expect("sync");
+
+            // Graph warmups.
+            for _ in 0..WARMUPS {
+                ctx.stream.synchronize().expect("sync");
+                st.exe.run(&ctx).expect("graph warmup");
+                ctx.stream.synchronize().expect("sync");
+            }
+
+            // One-time CUDA-graph capture + instantiate, then a replay
+            // warmup so the timed pass measures only `cudaGraphLaunch`
+            // cost. Capture is bound to the same device pool as `run`,
+            // so future `launch_graph` calls resolve identical device
+            // addresses (capture-stability contract enforced by
+            // `GraphExe`'s planner).
+            ctx.stream.synchronize().expect("sync");
+            let t0 = Instant::now();
+            st.exe.capture_graph(&ctx).expect("graph capture");
+            ctx.stream.synchronize().expect("sync");
+            st.capture_ms = t0.elapsed().as_secs_f64() * 1e3;
+            println!(
+                "graph capture: {:>8.2} ms (single cudaStreamBeginCapture + \
+                 cudaGraphInstantiateWithFlags over the {}-node graph)",
+                st.capture_ms, st.n_nodes_post_fusion,
+            );
+            for _ in 0..WARMUPS {
+                ctx.stream.synchronize().expect("sync");
+                st.exe.launch_graph(&ctx).expect("graph capture warmup");
+                ctx.stream.synchronize().expect("sync");
+            }
+
             for i in 0..ITERS {
                 ctx.stream.synchronize().expect("sync");
                 if nsys_enabled {
@@ -1508,13 +1597,18 @@ mod tests {
                 exe.launch_graph(&ctx).expect("graph capture warmup");
                 ctx.stream.synchronize().expect("sync");
             }
-            compiled.push(Compiled { name, exe, peak_bytes });
+            compiled.push(Compiled {
+                name,
+                exe,
+                peak_bytes,
+            });
         }
 
         // Eager needs its own d_leaves per iteration (the eager solver
         // consumes the buffer), so we pre-allocate a handful up front.
-        let mut eager_leaves: Vec<DeviceBuffer<Frac<EF>>> =
-            (0..ITERS).map(|_| leaves_to_device(&leaves, &ctx)).collect();
+        let mut eager_leaves: Vec<DeviceBuffer<Frac<EF>>> = (0..ITERS)
+            .map(|_| leaves_to_device(&leaves, &ctx))
+            .collect();
 
         // ---------- Timed phase: single profiler window over every workload ----------
 

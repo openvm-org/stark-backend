@@ -83,6 +83,19 @@ pub struct GraphNodeCost {
 }
 
 impl GraphNodeCost {
+    /// Sentinel for a node whose costing failed (e.g. kernel lowering
+    /// panicked on a synthesized module). Deliberately enormous so no
+    /// real cost reaches it, and recognizable so extractors exclude
+    /// the node instead of overflowing their integer objectives.
+    pub const FAILED: Self = Self {
+        runtime_units: i64::MAX / 4,
+    };
+
+    /// True when this cost is the [`Self::FAILED`] sentinel (or worse).
+    pub const fn is_failure(&self) -> bool {
+        self.runtime_units >= Self::FAILED.runtime_units
+    }
+
     pub const fn new(runtime_units: i64) -> Self {
         Self { runtime_units }
     }

@@ -8,7 +8,9 @@
 //! intermediates — lives at a fixed offset inside one device pool, so
 //! consecutive [`GraphExe::run`]s replay identical device addresses (the
 //! CUDA-graph-capture contract). Inputs are bound by eager D2D copy via
-//! [`GraphExe::set_input`]; outputs are read back through the [`DevSlice`]
+//! [`GraphExe::set_input`] or by writing directly into the pool slot at
+//! the pointer returned by [`GraphExe::get_input_ptr`] (skips the D2D
+//! staging buffer); outputs are read back through the [`DevSlice`]
 //! views returned by [`GraphExe::get_output`].
 //!
 //! Feature-gated behind `planner` (needs the CP-SAT planner + OR-Tools).
@@ -117,6 +119,7 @@ use crate::{
     passes::{
         check_accesses::check_module_accesses,
         fusion::{fuse_graph, FusionOptions, FusionReport},
+        fusion_v2::{fuse_graph_v2, FusionOptionsV2},
         type_infer,
     },
     planner::{
@@ -149,9 +152,18 @@ pub struct GraphCompiler {
     /// compilation entirely. `None` disables the cache. Defaults to a shared
     /// `~/.openvm/kernel_cache` with the [`KernelCache`] defaults.
     kernel_cache: Option<Arc<KernelCache>>,
-    /// Kernel-fusion pass tunables; `None` disables the pass. Defaults to
-    /// [`FusionOptions::default`].
-    fusion: Option<FusionOptions>,
+    /// Kernel-fusion strategy; `None` disables the pass. Defaults to the
+    /// existing implementation with [`FusionOptions::default`].
+    fusion: Option<FusionStrategy>,
+}
+
+/// Which kernel-fusion implementation [`GraphCompiler::fuse`] runs
+/// (plan v2 §16). The existing pass stays the default; v2 is selected
+/// explicitly via [`GraphCompiler::fusion_v2_options`] until the plan's
+/// §21 completion criteria flip the default.
+enum FusionStrategy {
+    Existing(FusionOptions),
+    V2(Box<FusionOptionsV2>),
 }
 
 impl Default for GraphCompiler {
@@ -168,7 +180,7 @@ impl GraphCompiler {
             module_compiler: ModuleCompiler::new(),
             scheduler: SchedulerMode::default(),
             kernel_cache: Some(Arc::new(KernelCache::new())),
-            fusion: Some(FusionOptions::default()),
+            fusion: Some(FusionStrategy::Existing(FusionOptions::default())),
         }
     }
 
@@ -268,10 +280,29 @@ impl GraphCompiler {
         self
     }
 
-    /// Overrides the kernel-fusion tunables. The pass runs with
+    /// Overrides the kernel-fusion tunables and selects the existing
+    /// fusion implementation (the default). The pass runs with
     /// [`FusionOptions::default`] unless disabled via [`Self::without_fusion`].
     pub fn fusion_options(mut self, opts: FusionOptions) -> Self {
-        self.fusion = Some(opts);
+        self.fusion = Some(FusionStrategy::Existing(opts));
+        self
+    }
+
+    /// Selects the opt-in fusion v2 pipeline
+    /// ([`fuse_graph_v2`](crate::passes::fusion_v2::fuse_graph_v2)) instead
+    /// of the existing pass. Symbol bindings registered via
+    /// [`Self::symbol`] are merged into `opts.graph_symbols` at fuse time,
+    /// overriding any caller-set bindings for the same symbol — the
+    /// compiler's `env` is authoritative because memory planning and size
+    /// evaluation already use it.
+    ///
+    /// Without the `planner-ortools` feature, v2 still enumerates and
+    /// cost-ranks candidates but extraction is limited to the brute-force
+    /// extractor (small graphs) or the original graph with
+    /// [`FallbackReason::SolverUnavailable`](crate::passes::fusion_v2::FallbackReason) —
+    /// it never silently runs the existing implementation.
+    pub fn fusion_v2_options(mut self, opts: FusionOptionsV2) -> Self {
+        self.fusion = Some(FusionStrategy::V2(Box::new(opts)));
         self
     }
 
@@ -547,16 +578,32 @@ impl GraphCompiler {
     /// fused outputs.
     ///
     /// Returns the [`FusionReport`] from `fuse_graph`, or `None` when
-    /// fusion is disabled.
+    /// fusion is disabled. When [`Self::fusion_v2_options`] selected the
+    /// v2 pipeline, the returned report carries only
+    /// `nodes_before`/`nodes_after` of the v1 fields and embeds the full
+    /// [`FusionReportV2`](crate::passes::fusion_v2::FusionReportV2) in
+    /// [`FusionReport::v2`] (plan §15).
     pub fn fuse(&self, g: &mut GraphBuilder) -> Result<Option<FusionReport>, CompileError> {
         self.lower_reduce(g)?;
         self.monomorphize(g)?;
         self.canonicalize(g)?;
-        let report = self
-            .fusion
-            .as_ref()
-            .map(|opts| fuse_graph(g, opts))
-            .transpose()?;
+        let report = match &self.fusion {
+            None => None,
+            Some(FusionStrategy::Existing(opts)) => Some(fuse_graph(g, opts)?),
+            Some(FusionStrategy::V2(opts)) => {
+                let mut opts = opts.as_ref().clone();
+                opts.graph_symbols
+                    .extend(self.env.iter().map(|(k, v)| (*k, *v)));
+                let v2 = fuse_graph_v2(g, &opts)
+                    .map_err(|e| CompileError::Verify(format!("fusion v2: {e}")))?;
+                Some(FusionReport {
+                    nodes_before: v2.nodes_before,
+                    nodes_after: v2.nodes_after,
+                    v2: Some(v2),
+                    ..FusionReport::default()
+                })
+            }
+        };
 
         self.canonicalize(g)?;
         self.monomorphize(g)?;
@@ -630,12 +677,14 @@ impl GraphCompiler {
     /// is read but never written is an error.
     pub fn compile(self, mut graph: GraphBuilder) -> Result<GraphExe, CompileError> {
         validate_interface(&graph, self.device)?;
+        let nodes_before = graph.nodes.len();
 
         // Stage 1: normalize the graph. Post-passes every Kernel node's
         // module is a canonical, monomorphized, single-kernel residual
         // with `hash` set; `kernel_dedup` has collapsed structurally
         // identical modules onto one `Arc<ir::Module>`, so the compile
         // stage below can dedup by Arc pointer alone.
+        let t_passes = std::time::Instant::now();
         let fusion_report = match &self.fusion {
             Some(_) => self.fuse(&mut graph)?,
             None => {
@@ -646,22 +695,42 @@ impl GraphCompiler {
             }
         };
         self.dce(&mut graph);
+        eprintln!(
+            "[compile] passes: {:.1} ms ({nodes_before} -> {} nodes)",
+            t_passes.elapsed().as_secs_f64() * 1e3,
+            graph.nodes.len(),
+        );
 
         // Stage 2: compile every unique kernel module in parallel.
+        let t_kernels = std::time::Instant::now();
         let CompiledKernels {
             mut kernels,
             kernel_of_ptr,
             num_unique_modules,
             num_cached_modules,
         } = self.compile_unique_kernels(&graph)?;
+        eprintln!(
+            "[compile] kernels: {:.1} ms ({num_unique_modules} unique modules, \
+             {num_cached_modules} from cache)",
+            t_kernels.elapsed().as_secs_f64() * 1e3,
+        );
 
         // Stage 3: plan graph memory.
+        let t_plan = std::time::Instant::now();
         self.plan_memory(&mut graph)?;
         let plan = graph.plan.take().expect("plan_memory populated g.plan");
         let sizes = evaluate_sizes_bufs(&graph.bufs, &self.env)?;
+        eprintln!(
+            "[compile] memory plan: {:.1} ms ({} stream(s), {} event(s), peak pool {} bytes)",
+            t_plan.elapsed().as_secs_f64() * 1e3,
+            plan.num_streams,
+            plan.num_events,
+            plan.peak_bytes,
+        );
 
         // Stage 4: derive `ExeNode`s in the graph's insertion order.
         // Execution order comes from `plan.order` at runtime.
+        let t_assemble = std::time::Instant::now();
         let input_bufs = graph.input_bufs().to_vec();
         let output_bufs = graph.output_bufs().to_vec();
         let bufs = graph.bufs.clone();
@@ -677,6 +746,11 @@ impl GraphCompiler {
                 stream,
             )?);
         }
+        eprintln!(
+            "[compile] assemble: {:.1} ms ({} exe nodes)",
+            t_assemble.elapsed().as_secs_f64() * 1e3,
+            exe_nodes.len(),
+        );
 
         Ok(GraphExe {
             plan,
@@ -935,9 +1009,7 @@ fn build_exe_node(
                 stream,
             })
         }
-        GraphNode::BlackboxKernel(k) => {
-            ExeNode::Blackbox(ExeBlackbox { kernel: k, stream })
-        }
+        GraphNode::BlackboxKernel(k) => ExeNode::Blackbox(ExeBlackbox { kernel: k, stream }),
         GraphNode::Const(c) => ExeNode::Const(c),
         GraphNode::Memcpy(m) => {
             let src_offset = eval_nonneg(&m.src_offset, env, "memcpy src_offset")?;
@@ -1574,6 +1646,43 @@ impl GraphExe {
         Ok(())
     }
 
+    /// Returns the device pointer to input `i`'s pool slot, allocating
+    /// the pool if it hasn't been yet, and marks the input as bound.
+    ///
+    /// The caller is expected to write exactly [`Self::input_size`] bytes
+    /// to this pointer — typically via `cudaMemcpyAsync` from a host or
+    /// device source. Use this when the source lives on the host and you
+    /// want to avoid the staging [`DeviceBuffer`] that [`Self::set_input`]
+    /// requires: uploading directly into the pool slot saves peak device
+    /// memory equal to `input_size(i)`. For device-side sources, prefer
+    /// [`Self::set_input`].
+    ///
+    /// The returned pointer is stable for the lifetime of the pool (i.e.
+    /// until the exe is dropped or [`Self::set_scratch`] replaces the
+    /// pool, which is disallowed after the first alloc), so it stays
+    /// valid across future `run` / `launch_graph` calls.
+    pub fn get_input_ptr(
+        &mut self,
+        ctx: &GpuDeviceCtx,
+        i: usize,
+    ) -> Result<*mut c_void, CompileError> {
+        if i >= self.num_inputs() {
+            return Err(CompileError::Runtime(format!(
+                "graph exe: get_input_ptr({i}) out of range, graph has {} inputs",
+                self.num_inputs()
+            )));
+        }
+        self.ensure_pool(ctx);
+        let dst = resolve_ptr(
+            self.pool.as_ref().unwrap(),
+            &self.plan.offsets,
+            self.device,
+            self.input_bufs[i],
+        )?;
+        self.inputs_bound[i] = true;
+        Ok(dst as *mut c_void)
+    }
+
     /// Returns a view of graph output `i`'s pool slot. Meaningful after
     /// [`Self::run`]; the view borrows the exe, so the pool cannot be
     /// dropped while it is alive.
@@ -1652,16 +1761,13 @@ impl GraphExe {
         // work still in flight on ctx.stream.
         let multi_stream = plan.num_streams > 1;
         let start_event = if multi_stream {
-            let ev = openvm_cuda_common::stream::CudaEvent::new().map_err(|e| {
-                CompileError::Runtime(format!("start event alloc failed: {e:?}"))
-            })?;
-            ev.record_on(&ctx.stream).map_err(|e| {
-                CompileError::Runtime(format!("start event record failed: {e:?}"))
-            })?;
+            let ev = openvm_cuda_common::stream::CudaEvent::new()
+                .map_err(|e| CompileError::Runtime(format!("start event alloc failed: {e:?}")))?;
+            ev.record_on(&ctx.stream)
+                .map_err(|e| CompileError::Runtime(format!("start event record failed: {e:?}")))?;
             for aux in streams.iter().skip(1).filter_map(|s| s.as_ref()) {
-                aux.wait(&ev).map_err(|e| {
-                    CompileError::Runtime(format!("aux fork wait failed: {e:?}"))
-                })?;
+                aux.wait(&ev)
+                    .map_err(|e| CompileError::Runtime(format!("aux fork wait failed: {e:?}")))?;
             }
             Some(ev)
         } else {
@@ -1684,9 +1790,7 @@ impl GraphExe {
             if idx == 0 {
                 &ctx.stream
             } else {
-                streams[idx as usize]
-                    .as_ref()
-                    .expect("aux stream ensured")
+                streams[idx as usize].as_ref().expect("aux stream ensured")
             }
         };
 
@@ -1878,9 +1982,10 @@ impl GraphExe {
             let mut new = Vec::with_capacity(self.plan.num_streams as usize);
             new.push(None);
             for _ in 1..self.plan.num_streams {
-                let s = openvm_cuda_common::stream::CudaStream::new_non_blocking().map_err(
-                    |e| CompileError::Runtime(format!("aux stream alloc failed: {e:?}")),
-                )?;
+                let s =
+                    openvm_cuda_common::stream::CudaStream::new_non_blocking().map_err(|e| {
+                        CompileError::Runtime(format!("aux stream alloc failed: {e:?}"))
+                    })?;
                 new.push(Some(Arc::new(s)));
             }
             self.streams = new;
@@ -1888,9 +1993,10 @@ impl GraphExe {
         if self.events.len() != self.plan.num_events as usize {
             let mut evs = Vec::with_capacity(self.plan.num_events as usize);
             for _ in 0..self.plan.num_events {
-                evs.push(openvm_cuda_common::stream::CudaEvent::new().map_err(|e| {
-                    CompileError::Runtime(format!("event alloc failed: {e:?}"))
-                })?);
+                evs.push(
+                    openvm_cuda_common::stream::CudaEvent::new()
+                        .map_err(|e| CompileError::Runtime(format!("event alloc failed: {e:?}")))?,
+                );
             }
             self.events = evs;
         }
@@ -1913,6 +2019,7 @@ impl GraphExe {
         ctx.stream.synchronize().map_err(|e| {
             CompileError::Runtime(format!("stream sync before capture failed: {e:?}"))
         })?;
+        let t_trace = std::time::Instant::now();
         let code = unsafe { cudaStreamBeginCapture(stream, CUDA_STREAM_CAPTURE_MODE_THREAD_LOCAL) };
         if code != 0 {
             return Err(CompileError::Runtime(format!(
@@ -1930,6 +2037,8 @@ impl GraphExe {
                 "cudaStreamEndCapture failed with code {end_code}"
             )));
         }
+        let trace_ms = t_trace.elapsed().as_secs_f64() * 1e3;
+        let t_inst = std::time::Instant::now();
         let mut graph_exec: cudaGraphExec_t = std::ptr::null_mut();
         let inst_code = unsafe { cudaGraphInstantiateWithFlags(&mut graph_exec, graph, 0) };
         if inst_code != 0 {
@@ -1940,6 +2049,13 @@ impl GraphExe {
                 "cudaGraphInstantiateWithFlags failed with code {inst_code}"
             )));
         }
+        eprintln!(
+            "[capture] traced {} node(s) on {} stream(s) in {trace_ms:.1} ms, \
+             instantiated in {:.1} ms",
+            self.nodes.len(),
+            self.plan.num_streams,
+            t_inst.elapsed().as_secs_f64() * 1e3,
+        );
         // Drop any previously-cached graph before overwriting.
         self.captured = Some(CapturedGraph { graph, graph_exec });
         Ok(())

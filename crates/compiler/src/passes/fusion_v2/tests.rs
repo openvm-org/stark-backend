@@ -1527,7 +1527,11 @@ mod driver_tests {
         g.insert_kernel(scale_by(n, 2), vec![x], vec![y], &[]);
         g.insert_kernel(scale_by(n, 3), vec![y], vec![z], &[]);
 
-        let report = fuse_graph_v2(&mut g, &FusionOptionsV2::default()).unwrap();
+        let options = FusionOptionsV2 {
+            enable_small_kernel: false, // isolate producer-consumer counting
+            ..FusionOptionsV2::default()
+        };
+        let report = fuse_graph_v2(&mut g, &options).unwrap();
         assert_eq!(report.nodes_before, 2);
         assert_eq!(report.candidates_generated, 1);
         assert_eq!(report.candidates_inserted, 1);
@@ -1558,6 +1562,8 @@ mod driver_tests {
     #[test]
     fn driver_leaves_disjoint_kernels_unfused() {
         // Two independent kernels with no producer-consumer edge.
+        // Horizontal (M9) is disabled — it targets exactly this shape;
+        // the dataflow-driven passes must all leave it alone.
         let n = 8;
         let mut g = crate::graph_ir::GraphBuilder::new();
         let x1 = sized_buf(&mut g, "x1", (n * 4) as i64);
@@ -1571,7 +1577,11 @@ mod driver_tests {
         g.insert_kernel(scale_by(n, 2), vec![x1], vec![y1], &[]);
         g.insert_kernel(scale_by(n, 3), vec![x2], vec![y2], &[]);
 
-        let report = fuse_graph_v2(&mut g, &FusionOptionsV2::default()).unwrap();
+        let options = FusionOptionsV2 {
+            enable_horizontal: false,
+            ..FusionOptionsV2::default()
+        };
+        let report = fuse_graph_v2(&mut g, &options).unwrap();
         assert_eq!(report.candidates_generated, 0);
         assert_eq!(report.nodes_after, 2);
     }
@@ -1632,7 +1642,15 @@ mod driver_tests {
         g.insert_kernel(scale_by(n, 3), vec![y], vec![z1], &[]);
         g.insert_kernel(scale_by(n, 5), vec![y], vec![z2], &[]);
 
-        let report = fuse_graph_v2(&mut g, &FusionOptionsV2::default()).unwrap();
+        // Isolate producer-consumer counts by turning off M7 fanout
+        // and M9 horizontal (the two consumers are dataflow-independent
+        // and would horizontally fuse).
+        let options = FusionOptionsV2 {
+            enable_fanout: false,
+            enable_horizontal: false,
+            ..FusionOptionsV2::default()
+        };
+        let report = fuse_graph_v2(&mut g, &options).unwrap();
         // Two drop candidates (one per consumer) plus two keep
         // candidates (seam has another consumer): 4 total.
         assert_eq!(report.candidates_generated, 4);
@@ -1653,6 +1671,7 @@ mod driver_tests {
         g.insert_kernel(scale_by(n, 3), vec![y], vec![z], &[]);
         let options = FusionOptionsV2 {
             max_total_alternatives: 0,
+            enable_small_kernel: false, // isolate producer-consumer counting
             ..FusionOptionsV2::default()
         };
         let report = fuse_graph_v2(&mut g, &options).unwrap();
@@ -1675,6 +1694,9 @@ mod driver_tests {
         g.insert_kernel(scale_by(n, 3), vec![y], vec![z], &[]);
         let options = FusionOptionsV2 {
             enable_producer_consumer: false,
+            enable_fanout: false,
+            enable_small_kernel: false,
+            enable_horizontal: false,
             ..FusionOptionsV2::default()
         };
         let report = fuse_graph_v2(&mut g, &options).unwrap();
@@ -1702,7 +1724,11 @@ mod driver_tests {
         g.insert_kernel(scale_by(n, 2), vec![x], vec![y], &[]);
         g.insert_kernel(scale_by(n, 3), vec![y], vec![z], &[]);
 
-        let report = fuse_graph_v2(&mut g, &FusionOptionsV2::default()).unwrap();
+        let options = FusionOptionsV2 {
+            enable_small_kernel: false, // isolate producer-consumer counting
+            ..FusionOptionsV2::default()
+        };
+        let report = fuse_graph_v2(&mut g, &options).unwrap();
         // Drop candidate + keep candidate (seam-is-graph-output trigger).
         assert_eq!(report.candidates_generated, 2);
         assert_eq!(g.output_bufs(), &[y, z]);
@@ -1737,6 +1763,8 @@ mod driver_tests {
         g.insert_kernel(scale_by(n, 5), vec![y], vec![z2], &[]);
         let options = FusionOptionsV2 {
             enable_keep_variants: false,
+            enable_fanout: false,     // isolate producer-consumer
+            enable_horizontal: false, // the two consumers would fuse horizontally
             ..FusionOptionsV2::default()
         };
         let report = fuse_graph_v2(&mut g, &options).unwrap();
@@ -1866,19 +1894,23 @@ mod saturation_tests {
     fn max_rounds_one_prevents_chain_composition() {
         let n = 8;
         let (mut g, _x, _z) = three_chain(n);
+        // Disable M8 small_kernel so this test isolates the
+        // producer-consumer + chain-composition behavior. With M8 on,
+        // a single round emits a 3-kernel chain candidate that
+        // collapses the whole chain in round 1.
         let options = FusionOptionsV2 {
             max_rounds: 1,
+            enable_small_kernel: false,
             ..FusionOptionsV2::default()
         };
         let report = fuse_graph_v2(&mut g, &options).unwrap();
         assert_eq!(report.rounds_run, 1);
         assert!(report.max_rounds_hit);
-        // Round 1 can fuse adjacent pairs but not the full chain, so
-        // at best we end up with 2 nodes (one of the drops chose to
-        // absorb an adjacent pair).
+        // Round 1 producer-consumer can fuse adjacent pairs but not
+        // the full chain, so at best we end up with 2 nodes.
         assert!(
             g.nodes.len() >= 2,
-            "single round cannot collapse a 3-kernel chain to one node"
+            "single round cannot collapse a 3-kernel chain to one node without M8"
         );
     }
 
@@ -1912,8 +1944,11 @@ mod saturation_tests {
 
     #[test]
     fn per_pass_cap_truncates_and_reports() {
-        // A fanout has 2 drop candidates + 2 keep candidates = 4 in
-        // round 1. Capping to 1 leaves 3 rejected on the pass cap.
+        // Round 1 enumeration produces 2 producer-consumer drops +
+        // 2 keep-variants + 1 fanout drop = 5 candidates. (The fanout
+        // keep does NOT fire here because the seam `y` has no
+        // consumer outside the two fanout arms and is not a graph
+        // output.) Capping to 1 leaves 4 rejected on the pass cap.
         let n = 8;
         let mut g = crate::graph_ir::GraphBuilder::new();
         let x = sized_buf(&mut g, "x", (n * 4) as i64);
@@ -1929,12 +1964,13 @@ mod saturation_tests {
         let options = FusionOptionsV2 {
             max_alternatives_per_pass_per_round: 1,
             max_rounds: 1,
+            enable_horizontal: false, // would add a 6th candidate (the two arms)
             ..FusionOptionsV2::default()
         };
         let report = fuse_graph_v2(&mut g, &options).unwrap();
-        assert_eq!(report.candidates_generated, 4);
-        // 3 excess candidates rejected by the per-pass cap.
-        assert_eq!(report.candidates_rejected_pass_cap, 3);
+        assert_eq!(report.candidates_generated, 5);
+        // 4 excess candidates rejected by the per-pass cap.
+        assert_eq!(report.candidates_rejected_pass_cap, 4);
         assert!(report.candidates_inserted <= 1);
     }
 
@@ -1953,9 +1989,16 @@ mod saturation_tests {
         // but rejects them because {A,B} ∩ {B,C} = {B}. Verify no
         // candidate that consumes both fused(A,B) and fused(B,C)
         // makes it into the alternative graph.
+        //
+        // Disable M8 small_kernel to isolate origin-filter behavior
+        // (M8 emits chain candidates that also collapse the chain).
         let n = 8;
         let (mut g, _x, _z) = three_chain(n);
-        let report = fuse_graph_v2(&mut g, &FusionOptionsV2::default()).unwrap();
+        let options = FusionOptionsV2 {
+            enable_small_kernel: false,
+            ..FusionOptionsV2::default()
+        };
+        let report = fuse_graph_v2(&mut g, &options).unwrap();
         // Chain composition still succeeds via (fused(A,B), C) or
         // (A, fused(B,C)), so we end with one node.
         assert_eq!(report.nodes_after, 1);
@@ -1967,6 +2010,1648 @@ mod saturation_tests {
             "candidates_inserted={} — origin filter should keep this bounded",
             report.candidates_inserted,
         );
+    }
+}
+
+// -------------------------------------------------------------------------
+// M7: fanout tests.
+// -------------------------------------------------------------------------
+
+mod fanout_tests {
+    use super::*;
+    use crate::{
+        module_hash::module_hash,
+        passes::fusion_v2::{
+            apply_solution,
+            extract::{brute, ExtractOptions, ExtractionData},
+            fuse_graph_v2,
+            fusions::{fanout, producer_consumer},
+            take_graph, FusionOptionsV2, GraphFuser,
+        },
+    };
+
+    fn scale_by(n: usize, c: u32) -> Arc<crate::ir::Module> {
+        let mut b = IRBuilder::new();
+        let a = b.input("a", ScalarType::BabyBear, vec![n]);
+        let body = b.compute(n, |b, i| {
+            let ai = b.index(a, &[i]);
+            let cst = b.const_field(c);
+            b.mul(ai, cst)
+        });
+        Arc::new(b.finish("scale_by", body))
+    }
+
+    /// Fanout fixture: `y = 2*x`, `z1 = 3*y`, `z2 = 5*y`.
+    fn fanout_two(
+        n: usize,
+    ) -> (
+        crate::graph_ir::GraphBuilder,
+        crate::graph_ir::BufId,
+        crate::graph_ir::BufId,
+        crate::graph_ir::BufId,
+    ) {
+        let mut g = crate::graph_ir::GraphBuilder::new();
+        let x = sized_buf(&mut g, "x", (n * 4) as i64);
+        let y = sized_buf(&mut g, "y", (n * 4) as i64);
+        let z1 = sized_buf(&mut g, "z1", (n * 4) as i64);
+        let z2 = sized_buf(&mut g, "z2", (n * 4) as i64);
+        g.register_input(x);
+        g.register_output(z1);
+        g.register_output(z2);
+        g.insert_kernel(scale_by(n, 2), vec![x], vec![y], &[]);
+        g.insert_kernel(scale_by(n, 3), vec![y], vec![z1], &[]);
+        g.insert_kernel(scale_by(n, 5), vec![y], vec![z2], &[]);
+        (g, x, z1, z2)
+    }
+
+    /// Fanout fixture: three-consumer fan.
+    fn fanout_three(
+        n: usize,
+    ) -> (
+        crate::graph_ir::GraphBuilder,
+        crate::graph_ir::BufId,
+        crate::graph_ir::BufId,
+        crate::graph_ir::BufId,
+    ) {
+        let mut g = crate::graph_ir::GraphBuilder::new();
+        let x = sized_buf(&mut g, "x", (n * 4) as i64);
+        let y = sized_buf(&mut g, "y", (n * 4) as i64);
+        let z1 = sized_buf(&mut g, "z1", (n * 4) as i64);
+        let z2 = sized_buf(&mut g, "z2", (n * 4) as i64);
+        let z3 = sized_buf(&mut g, "z3", (n * 4) as i64);
+        g.register_input(x);
+        g.register_output(z1);
+        g.register_output(z2);
+        g.register_output(z3);
+        g.insert_kernel(scale_by(n, 2), vec![x], vec![y], &[]);
+        g.insert_kernel(scale_by(n, 3), vec![y], vec![z1], &[]);
+        g.insert_kernel(scale_by(n, 5), vec![y], vec![z2], &[]);
+        g.insert_kernel(scale_by(n, 7), vec![y], vec![z3], &[]);
+        (g, z1, z2, z3)
+    }
+
+    fn take(g: &mut crate::graph_ir::GraphBuilder) -> GraphFuser {
+        take_graph(g).unwrap()
+    }
+
+    fn seed_ctx(gf: &GraphFuser) -> producer_consumer::OwnedEnumerateContext {
+        producer_consumer::OwnedEnumerateContext::all_seed(
+            gf,
+            producer_consumer::EnumerateOptions::default(),
+        )
+    }
+
+    // -------------------------------------------------------------
+    // Enumeration: k = 2 fanout emits exactly one drop candidate.
+    // -------------------------------------------------------------
+
+    #[test]
+    fn fanout_k_equals_2_emits_one_drop_candidate() {
+        let (mut g, _x, _z1, _z2) = fanout_two(8);
+        let gf = take(&mut g);
+        let ctx = seed_ctx(&gf);
+        let drafts = fanout::enumerate(&gf, &ctx.as_ref());
+        // Seam has no other user, so only the drop variant.
+        assert_eq!(drafts.len(), 1);
+        assert_eq!(drafts[0].variant, producer_consumer::FusionVariant::Drop);
+        // Producer + 2 consumers = 3 parents.
+        assert_eq!(drafts[0].parents.len(), 3);
+    }
+
+    // -------------------------------------------------------------
+    // k = 3 fanout also emits one drop candidate with 4 parents.
+    // -------------------------------------------------------------
+
+    #[test]
+    fn fanout_k_equals_3_emits_one_drop_candidate() {
+        let (mut g, _z1, _z2, _z3) = fanout_three(8);
+        let gf = take(&mut g);
+        let ctx = seed_ctx(&gf);
+        let drafts = fanout::enumerate(&gf, &ctx.as_ref());
+        assert_eq!(drafts.len(), 1);
+        assert_eq!(drafts[0].parents.len(), 4);
+    }
+
+    // -------------------------------------------------------------
+    // Fanout HIR matches a hand-authored dual-output module: the
+    // producer expression appears exactly once, hoisted into a Let.
+    // -------------------------------------------------------------
+
+    #[test]
+    fn fanout_module_hash_matches_hand_authored_reference() {
+        let n = 8;
+        let (mut g, _x, _z1, _z2) = fanout_two(n);
+        let gf = take(&mut g);
+        let ctx = seed_ctx(&gf);
+        let drafts = fanout::enumerate(&gf, &ctx.as_ref());
+        assert_eq!(drafts.len(), 1);
+        let fused = match &drafts[0].alt.node {
+            GraphNode::Kernel(k) => k.module.clone(),
+            _ => panic!("expected Kernel"),
+        };
+        let reference = {
+            let mut b = IRBuilder::new();
+            let a = b.input("a", ScalarType::BabyBear, vec![n]);
+            let body = b.compute(n, |b, i| {
+                let ai = b.index(a, &[i]);
+                let two = b.const_field(2);
+                let seam = b.mul(ai, two);
+                let three = b.const_field(3);
+                let z1 = b.mul(seam, three);
+                let five = b.const_field(5);
+                let z2 = b.mul(seam, five);
+                b.tuple(&[z1, z2])
+            });
+            b.finish(fused.name.clone(), body)
+        };
+        assert_eq!(
+            module_hash(&fused),
+            module_hash(&reference),
+            "fanout body should match hand-authored dual-consumer reference"
+        );
+    }
+
+    // -------------------------------------------------------------
+    // Type check.
+    // -------------------------------------------------------------
+
+    #[test]
+    fn fanout_module_type_checks() {
+        let (mut g, _x, _z1, _z2) = fanout_two(8);
+        let gf = take(&mut g);
+        let ctx = seed_ctx(&gf);
+        let drafts = fanout::enumerate(&gf, &ctx.as_ref());
+        for d in &drafts {
+            match &d.alt.node {
+                GraphNode::Kernel(k) => {
+                    crate::passes::type_infer(&k.module).expect("fanout module type-checks");
+                }
+                _ => panic!("expected Kernel"),
+            }
+        }
+    }
+
+    // -------------------------------------------------------------
+    // §10.5 anti-pattern rejection: the module_hash equality with the
+    // hand-authored `let seam = 2*a[i]; Tuple([3*seam, 5*seam])`
+    // reference above already proves single-instance producer
+    // sharing — hash-consing collapses the shared sub-expression to
+    // one NodeId, and the reference builds the same structure via
+    // Rust bindings that share `b.mul(ai, two)` at both call sites.
+    // This test additionally verifies the outer shape: a single
+    // Compute whose body is a Tuple over the consumers.
+    // -------------------------------------------------------------
+
+    #[test]
+    fn fanout_body_is_a_tuple_at_the_compute_root() {
+        let n = 8;
+        let (mut g, _x, _z1, _z2) = fanout_two(n);
+        let gf = take(&mut g);
+        let ctx = seed_ctx(&gf);
+        let drafts = fanout::enumerate(&gf, &ctx.as_ref());
+        let module = match &drafts[0].alt.node {
+            GraphNode::Kernel(k) => k.module.clone(),
+            _ => panic!("expected Kernel"),
+        };
+        let body_root = match module.builder.node(module.body) {
+            crate::ir::Node::Compute { body, .. } => *body,
+            _ => panic!("expected outer Compute"),
+        };
+        match module.builder.node(body_root) {
+            crate::ir::Node::Tuple(elems) => {
+                assert_eq!(elems.len(), 2, "two consumers => two tuple elements");
+            }
+            other => panic!("fanout compute body should be a Tuple, got {other:?}"),
+        }
+    }
+
+    // -------------------------------------------------------------
+    // Extractor picks fanout over producer_consumer drop+drop+
+    // materialize-original.
+    // -------------------------------------------------------------
+
+    #[test]
+    fn extractor_prefers_fanout_over_duplicated_producer_consumer_candidates() {
+        // Under uniform cost, brute-force picks the plan with the
+        // fewest selected nodes. Fanout gives 1 node; drop+drop+
+        // original gives 3.
+        let n = 8;
+        let (mut g, _x, z1, z2) = fanout_two(n);
+        let report = fuse_graph_v2(&mut g, &FusionOptionsV2::default()).unwrap();
+        // Fanout drop + producer_consumer drops+keeps all enumerated.
+        // Solver should pick the fanout candidate (1 node covers both
+        // z1 and z2).
+        assert_eq!(
+            g.nodes.len(),
+            1,
+            "expected fanout to be selected; {report:?}"
+        );
+        assert_eq!(g.output_bufs(), &[z1, z2]);
+    }
+
+    // -------------------------------------------------------------
+    // A consumer whose module is unsupported (e.g., contains a
+    // #[grid(threads = N)] hint) makes identify_kernel_shape return
+    // None and fanout rejects the whole group.
+    // -------------------------------------------------------------
+
+    #[test]
+    fn fanout_rejects_when_a_consumer_shape_is_unsupported() {
+        // Build the same fanout_two but with one consumer whose
+        // module contains a `threads` hint (unsupported by
+        // identify_kernel_shape). The whole fanout group is
+        // rejected because one consumer fails the shape check.
+        let n = 8;
+        let mut g = crate::graph_ir::GraphBuilder::new();
+        let x = sized_buf(&mut g, "x", (n * 4) as i64);
+        let y = sized_buf(&mut g, "y", (n * 4) as i64);
+        let z1 = sized_buf(&mut g, "z1", (n * 4) as i64);
+        let z2 = sized_buf(&mut g, "z2", (n * 4) as i64);
+        g.register_input(x);
+        g.register_output(z1);
+        g.register_output(z2);
+        g.insert_kernel(scale_by(n, 2), vec![x], vec![y], &[]);
+        g.insert_kernel(scale_by(n, 3), vec![y], vec![z1], &[]);
+
+        // Second consumer with a threads hint.
+        let threaded = {
+            let mut b = IRBuilder::new();
+            let a = b.input("a", ScalarType::BabyBear, vec![n]);
+            let body = b.compute_with(n, None, None, Some(32), |b, i| {
+                let ai = b.index(a, &[i]);
+                let five = b.const_field(5);
+                b.mul(ai, five)
+            });
+            Arc::new(b.finish("threaded_scale", body))
+        };
+        g.insert_kernel(threaded, vec![y], vec![z2], &[]);
+
+        let gf = take(&mut g);
+        let ctx = seed_ctx(&gf);
+        let drafts = fanout::enumerate(&gf, &ctx.as_ref());
+        // synthesize_fanout returns UnsupportedShape for the threaded
+        // consumer, so the group is dropped.
+        assert_eq!(drafts.len(), 0);
+    }
+
+    // -------------------------------------------------------------
+    // Consumer-to-consumer dataflow blocks fanout.
+    // -------------------------------------------------------------
+
+    #[test]
+    fn fanout_rejects_consumer_reads_another_consumer_output() {
+        // y = 2*x; z1 = 3*y; z2 = 4*z1. z2 reads z1's output → z2 is
+        // NOT a fanout consumer of y with z1 (they're not
+        // independent). Enumerate should not group them.
+        let n = 8;
+        let mut g = crate::graph_ir::GraphBuilder::new();
+        let x = sized_buf(&mut g, "x", (n * 4) as i64);
+        let y = sized_buf(&mut g, "y", (n * 4) as i64);
+        let z1 = sized_buf(&mut g, "z1", (n * 4) as i64);
+        let z2 = sized_buf(&mut g, "z2", (n * 4) as i64);
+        g.register_input(x);
+        g.register_output(z1);
+        g.register_output(z2);
+        g.insert_kernel(scale_by(n, 2), vec![x], vec![y], &[]);
+        g.insert_kernel(scale_by(n, 3), vec![y], vec![z1], &[]);
+        // z2 reads z1, not y — so z2 is NOT a fanout consumer of y.
+        g.insert_kernel(scale_by(n, 4), vec![z1], vec![z2], &[]);
+        let gf = take(&mut g);
+        let ctx = seed_ctx(&gf);
+        let drafts = fanout::enumerate(&gf, &ctx.as_ref());
+        // Only 1 consumer of y (z1), so fanout skips.
+        assert_eq!(drafts.len(), 0);
+    }
+
+    // -------------------------------------------------------------
+    // Fanout drop apply produces a single-node graph.
+    // -------------------------------------------------------------
+
+    #[test]
+    fn fanout_drop_apply_produces_single_node_graph() {
+        let (mut g, x, z1, z2) = fanout_two(8);
+        let mut gf = take(&mut g);
+        let ctx = seed_ctx(&gf);
+        let drafts = fanout::enumerate(&gf, &ctx.as_ref());
+        for d in drafts {
+            gf.insert_candidate(d.alt);
+        }
+        let data = ExtractionData::uniform(&gf);
+        let solution = brute::extract(&gf, &data, &ExtractOptions::default()).unwrap();
+        assert_eq!(solution.nodes.len(), 1);
+        apply_solution(&mut g, gf, &solution).unwrap();
+        assert_eq!(g.nodes.len(), 1);
+        assert_eq!(g.input_bufs(), &[x]);
+        assert_eq!(g.output_bufs(), &[z1, z2]);
+    }
+
+    // -------------------------------------------------------------
+    // Disable fanout via the driver flag.
+    // -------------------------------------------------------------
+
+    #[test]
+    fn disable_fanout_flag_suppresses_fanout_candidates() {
+        let (mut g, _x, _z1, _z2) = fanout_two(8);
+        let options = FusionOptionsV2 {
+            enable_fanout: false,
+            enable_keep_variants: false,
+            enable_horizontal: false, // the two arms would fuse horizontally
+            ..FusionOptionsV2::default()
+        };
+        let report = fuse_graph_v2(&mut g, &options).unwrap();
+        // Without fanout and keep, only drop candidates: 2 per fanout.
+        assert_eq!(report.candidates_generated, 2);
+    }
+}
+
+// -------------------------------------------------------------------------
+// M8: small-kernel block fusion tests.
+// -------------------------------------------------------------------------
+
+mod small_kernel_tests {
+    use super::*;
+    use crate::{
+        ir::SizeExpr,
+        passes::fusion_v2::{
+            fuse_graph_v2,
+            fusions::{producer_consumer, small_kernel},
+            take_graph, FusionOptionsV2, GraphFuser,
+        },
+    };
+
+    fn scale_by(n: usize, c: u32) -> Arc<crate::ir::Module> {
+        let mut b = IRBuilder::new();
+        let a = b.input("a", ScalarType::BabyBear, vec![n]);
+        let body = b.compute(n, |b, i| {
+            let ai = b.index(a, &[i]);
+            let cst = b.const_field(c);
+            b.mul(ai, cst)
+        });
+        Arc::new(b.finish("scale_by", body))
+    }
+
+    /// Sum-reduce a length-N tensor down to a length-M by grouping.
+    /// Used to build different-domain chains.
+    fn take_half(n: usize) -> Arc<crate::ir::Module> {
+        // a: length N; produce length N/2 by dropping half.
+        let m = n / 2;
+        let mut b = IRBuilder::new();
+        let a = b.input("a", ScalarType::BabyBear, vec![n]);
+        let body = b.compute(m, |b, i| b.index(a, &[i]));
+        Arc::new(b.finish("take_half", body))
+    }
+
+    fn take(g: &mut crate::graph_ir::GraphBuilder) -> GraphFuser {
+        take_graph(g).unwrap()
+    }
+
+    fn seed_ctx(gf: &GraphFuser) -> producer_consumer::OwnedEnumerateContext {
+        producer_consumer::OwnedEnumerateContext::all_seed(
+            gf,
+            producer_consumer::EnumerateOptions::default(),
+        )
+    }
+
+    // -------------------------------------------------------------
+    // A 2-kernel chain of SAME domain fuses.
+    // -------------------------------------------------------------
+
+    #[test]
+    fn two_kernel_same_domain_chain_fuses() {
+        let n = 8;
+        let mut g = crate::graph_ir::GraphBuilder::new();
+        let x = sized_buf(&mut g, "x", (n * 4) as i64);
+        let y = sized_buf(&mut g, "y", (n * 4) as i64);
+        let z = sized_buf(&mut g, "z", (n * 4) as i64);
+        g.register_input(x);
+        g.register_output(z);
+        g.insert_kernel(scale_by(n, 2), vec![x], vec![y], &[]);
+        g.insert_kernel(scale_by(n, 3), vec![y], vec![z], &[]);
+        let gf = take(&mut g);
+        let ctx = seed_ctx(&gf);
+        let drafts = small_kernel::enumerate(&gf, &ctx.as_ref(), Default::default());
+        assert_eq!(drafts.len(), 1);
+        assert_eq!(drafts[0].parents.len(), 2);
+        assert_eq!(drafts[0].alt.inputs.len(), 1);
+        assert_eq!(drafts[0].alt.outputs.len(), 1);
+    }
+
+    // -------------------------------------------------------------
+    // A 2-kernel chain of DIFFERENT domain sizes fuses. This is
+    // M8's headline capability vs M3/M7.
+    // -------------------------------------------------------------
+
+    #[test]
+    fn two_kernel_different_domain_chain_fuses() {
+        // a = scale(x, 2), size 16.
+        // b = take_half(a), size 8.
+        let n_a = 16;
+        let n_b = n_a / 2;
+        let mut g = crate::graph_ir::GraphBuilder::new();
+        let x = sized_buf(&mut g, "x", (n_a * 4) as i64);
+        let y = sized_buf(&mut g, "y", (n_a * 4) as i64);
+        let z = sized_buf(&mut g, "z", (n_b * 4) as i64);
+        g.register_input(x);
+        g.register_output(z);
+        g.insert_kernel(scale_by(n_a, 2), vec![x], vec![y], &[]);
+        g.insert_kernel(take_half(n_a), vec![y], vec![z], &[]);
+        let gf = take(&mut g);
+        let ctx = seed_ctx(&gf);
+        let drafts = small_kernel::enumerate(&gf, &ctx.as_ref(), Default::default());
+        assert_eq!(drafts.len(), 1, "expected one small-kernel candidate");
+        // Fused module should still type-check with different domains.
+        match &drafts[0].alt.node {
+            GraphNode::Kernel(k) => {
+                crate::passes::type_infer(&k.module).expect("type-checks");
+            }
+            _ => panic!("expected Kernel"),
+        }
+    }
+
+    // -------------------------------------------------------------
+    // Chain of 3 kernels fuses (linear chain length ≥ 2).
+    // -------------------------------------------------------------
+
+    #[test]
+    fn three_kernel_chain_fuses() {
+        let n = 8;
+        let mut g = crate::graph_ir::GraphBuilder::new();
+        let x = sized_buf(&mut g, "x", (n * 4) as i64);
+        let y1 = sized_buf(&mut g, "y1", (n * 4) as i64);
+        let y2 = sized_buf(&mut g, "y2", (n * 4) as i64);
+        let z = sized_buf(&mut g, "z", (n * 4) as i64);
+        g.register_input(x);
+        g.register_output(z);
+        g.insert_kernel(scale_by(n, 2), vec![x], vec![y1], &[]);
+        g.insert_kernel(scale_by(n, 3), vec![y1], vec![y2], &[]);
+        g.insert_kernel(scale_by(n, 5), vec![y2], vec![z], &[]);
+        let gf = take(&mut g);
+        let ctx = seed_ctx(&gf);
+        let drafts = small_kernel::enumerate(&gf, &ctx.as_ref(), Default::default());
+        assert!(!drafts.is_empty(), "expected at least one candidate");
+        // The longest chain [k0, k1, k2] should be emitted with 3 parents.
+        let full_chain = drafts.iter().find(|d| d.parents.len() == 3);
+        assert!(full_chain.is_some(), "expected a 3-kernel chain candidate");
+    }
+
+    // -------------------------------------------------------------
+    // Fused module HIR matches a hand-authored reference where each
+    // producer is a let-bound inner compute.
+    // -------------------------------------------------------------
+
+    #[test]
+    fn fused_module_type_checks_and_lowers() {
+        let n = 8;
+        let mut g = crate::graph_ir::GraphBuilder::new();
+        let x = sized_buf(&mut g, "x", (n * 4) as i64);
+        let y = sized_buf(&mut g, "y", (n * 4) as i64);
+        let z = sized_buf(&mut g, "z", (n * 4) as i64);
+        g.register_input(x);
+        g.register_output(z);
+        g.insert_kernel(scale_by(n, 2), vec![x], vec![y], &[]);
+        g.insert_kernel(scale_by(n, 3), vec![y], vec![z], &[]);
+        let gf = take(&mut g);
+        let ctx = seed_ctx(&gf);
+        let drafts = small_kernel::enumerate(&gf, &ctx.as_ref(), Default::default());
+        assert_eq!(drafts.len(), 1);
+        let module = match &drafts[0].alt.node {
+            GraphNode::Kernel(k) => k.module.clone(),
+            _ => panic!("expected Kernel"),
+        };
+        // Type inference should succeed on the fused HIR.
+        crate::passes::type_infer(&module).expect("type-checks");
+        // Full lower-to-KIR is exercised by the M4 estimator; skip
+        // here to keep the check narrow.
+    }
+
+    // -------------------------------------------------------------
+    // Symbolic-bound kernels are rejected (M8 requires all bounds
+    // constant per the user's explicit request).
+    // -------------------------------------------------------------
+
+    #[test]
+    fn rejects_symbolic_bounds() {
+        // Build a module with a symbolic bound.
+        let module = {
+            let mut b = IRBuilder::new();
+            let n_sym = b.symbol("N");
+            let a = b.input("a", ScalarType::BabyBear, vec![SizeExpr::from(n_sym)]);
+            let body = b.compute(n_sym, |b, i| {
+                let ai = b.index(a, &[i]);
+                let two = b.const_field(2);
+                b.mul(ai, two)
+            });
+            Arc::new(b.finish("sym_scale", body))
+        };
+        let mut g = crate::graph_ir::GraphBuilder::new();
+        let x = sized_buf(&mut g, "x", 32);
+        let y = sized_buf(&mut g, "y", 32);
+        let z = sized_buf(&mut g, "z", 32);
+        g.register_input(x);
+        g.register_output(z);
+        g.insert_kernel(module.clone(), vec![x], vec![y], &[("N", 8)]);
+        g.insert_kernel(module, vec![y], vec![z], &[("N", 8)]);
+        let gf = take(&mut g);
+        let ctx = seed_ctx(&gf);
+        let drafts = small_kernel::enumerate(&gf, &ctx.as_ref(), Default::default());
+        // Symbolic outer_bound → identify_chain rejects both kernels.
+        assert_eq!(drafts.len(), 0);
+    }
+
+    // -------------------------------------------------------------
+    // Chain with a branching intermediate is not a linear chain and
+    // is rejected. (Intermediate has 2 downstream consumers.)
+    // -------------------------------------------------------------
+
+    #[test]
+    fn rejects_branching_intermediate() {
+        let n = 8;
+        let mut g = crate::graph_ir::GraphBuilder::new();
+        let x = sized_buf(&mut g, "x", (n * 4) as i64);
+        let y = sized_buf(&mut g, "y", (n * 4) as i64);
+        let z1 = sized_buf(&mut g, "z1", (n * 4) as i64);
+        let z2 = sized_buf(&mut g, "z2", (n * 4) as i64);
+        g.register_input(x);
+        g.register_output(z1);
+        g.register_output(z2);
+        g.insert_kernel(scale_by(n, 2), vec![x], vec![y], &[]);
+        // y feeds both z1 and z2 (fanout).
+        g.insert_kernel(scale_by(n, 3), vec![y], vec![z1], &[]);
+        g.insert_kernel(scale_by(n, 5), vec![y], vec![z2], &[]);
+        let gf = take(&mut g);
+        let ctx = seed_ctx(&gf);
+        let drafts = small_kernel::enumerate(&gf, &ctx.as_ref(), Default::default());
+        // The head kernel has 2 consumers => chain length stops at 1.
+        // Individual chains z1..? and z2..? have length 1 too.
+        // No chain of length ≥ 2 => zero candidates.
+        assert_eq!(drafts.len(), 0);
+    }
+
+    // -------------------------------------------------------------
+    // Shared-mem budget: a chain whose combined tile bytes exceed
+    // the budget is rejected.
+    // -------------------------------------------------------------
+
+    #[test]
+    fn rejects_when_shared_mem_budget_exceeded() {
+        let n = 8;
+        let mut g = crate::graph_ir::GraphBuilder::new();
+        let x = sized_buf(&mut g, "x", (n * 4) as i64);
+        let y = sized_buf(&mut g, "y", (n * 4) as i64);
+        let z = sized_buf(&mut g, "z", (n * 4) as i64);
+        g.register_input(x);
+        g.register_output(z);
+        g.insert_kernel(scale_by(n, 2), vec![x], vec![y], &[]);
+        g.insert_kernel(scale_by(n, 3), vec![y], vec![z], &[]);
+        let gf = take(&mut g);
+        let ctx = seed_ctx(&gf);
+        // Set a byte budget below one tile's size (8 * 4 = 32 bytes).
+        let sk_opts = small_kernel::SmallKernelOptions {
+            max_shared_bytes: 16,
+            max_chain_length: 6,
+        };
+        let drafts = small_kernel::enumerate(&gf, &ctx.as_ref(), sk_opts);
+        assert_eq!(drafts.len(), 0);
+    }
+
+    // -------------------------------------------------------------
+    // End-to-end: enabling small_kernel via the driver produces the
+    // fused candidate and applies it.
+    // -------------------------------------------------------------
+
+    #[test]
+    fn driver_end_to_end_fuses_two_kernel_chain() {
+        let n = 8;
+        let mut g = crate::graph_ir::GraphBuilder::new();
+        let x = sized_buf(&mut g, "x", (n * 4) as i64);
+        let y = sized_buf(&mut g, "y", (n * 4) as i64);
+        let z = sized_buf(&mut g, "z", (n * 4) as i64);
+        g.register_input(x);
+        g.register_output(z);
+        g.insert_kernel(scale_by(n, 2), vec![x], vec![y], &[]);
+        g.insert_kernel(scale_by(n, 3), vec![y], vec![z], &[]);
+        // Turn off producer-consumer so the small_kernel candidate
+        // is the only fusion in play.
+        let options = FusionOptionsV2 {
+            enable_producer_consumer: false,
+            enable_fanout: false,
+            enable_small_kernel: true,
+            ..FusionOptionsV2::default()
+        };
+        let report = fuse_graph_v2(&mut g, &options).unwrap();
+        assert_eq!(report.candidates_generated, 1);
+        assert!(matches!(&g.nodes[0], GraphNode::Kernel(_)));
+        assert_eq!(g.output_bufs(), &[z]);
+    }
+
+    // -------------------------------------------------------------
+    // Enabling small_kernel alongside producer_consumer works — the
+    // estimator lowers both candidates without panicking.
+    // -------------------------------------------------------------
+
+    #[test]
+    fn small_kernel_and_producer_consumer_coexist() {
+        let n = 8;
+        let mut g = crate::graph_ir::GraphBuilder::new();
+        let x = sized_buf(&mut g, "x", (n * 4) as i64);
+        let y = sized_buf(&mut g, "y", (n * 4) as i64);
+        let z = sized_buf(&mut g, "z", (n * 4) as i64);
+        g.register_input(x);
+        g.register_output(z);
+        g.insert_kernel(scale_by(n, 2), vec![x], vec![y], &[]);
+        g.insert_kernel(scale_by(n, 3), vec![y], vec![z], &[]);
+        let options = FusionOptionsV2 {
+            enable_small_kernel: true,
+            ..FusionOptionsV2::default()
+        };
+        let report = fuse_graph_v2(&mut g, &options).unwrap();
+        // producer_consumer drop + small_kernel = 2 candidates.
+        assert_eq!(report.candidates_generated, 2);
+        assert_eq!(g.nodes.len(), 1);
+    }
+
+    // -------------------------------------------------------------
+    // Three-kernel chain with small_kernel + producer_consumer +
+    // multi-round saturation. Regression guard: earlier synthesis
+    // versions produced a module that couldn't lower on a specific
+    // interaction path.
+    // -------------------------------------------------------------
+
+    #[test]
+    fn three_kernel_chain_with_small_kernel_and_producer_consumer() {
+        let n = 8;
+        let mut g = crate::graph_ir::GraphBuilder::new();
+        let x = sized_buf(&mut g, "x", (n * 4) as i64);
+        let y1 = sized_buf(&mut g, "y1", (n * 4) as i64);
+        let y2 = sized_buf(&mut g, "y2", (n * 4) as i64);
+        let z = sized_buf(&mut g, "z", (n * 4) as i64);
+        g.register_input(x);
+        g.register_output(z);
+        g.insert_kernel(scale_by(n, 2), vec![x], vec![y1], &[]);
+        g.insert_kernel(scale_by(n, 3), vec![y1], vec![y2], &[]);
+        g.insert_kernel(scale_by(n, 5), vec![y2], vec![z], &[]);
+        let options = FusionOptionsV2 {
+            enable_small_kernel: true,
+            ..FusionOptionsV2::default()
+        };
+        let report = fuse_graph_v2(&mut g, &options).unwrap();
+        // No panic in the estimator; at least one candidate was
+        // generated and the graph collapsed to a single node.
+        assert!(report.candidates_generated > 0);
+        assert_eq!(g.nodes.len(), 1);
+    }
+}
+
+// -------------------------------------------------------------------------
+// M9: same-domain horizontal fusion tests.
+// -------------------------------------------------------------------------
+
+mod horizontal_tests {
+    use super::*;
+    use crate::{
+        ir::SizeExpr,
+        module_hash::module_hash,
+        passes::fusion_v2::{
+            fuse_graph_v2,
+            fusions::{
+                horizontal::{self, HorizontalFailure},
+                producer_consumer,
+            },
+            take_graph, FusionOptionsV2, GraphFuser,
+        },
+    };
+
+    fn scale_named(n: usize, c: u32, name: &str) -> Arc<crate::ir::Module> {
+        let mut b = IRBuilder::new();
+        let a = b.input(name, ScalarType::BabyBear, vec![n]);
+        let body = b.compute(n, |b, i| {
+            let ai = b.index(a, &[i]);
+            let cst = b.const_field(c);
+            b.mul(ai, cst)
+        });
+        Arc::new(b.finish("scale_by", body))
+    }
+
+    fn scale_by(n: usize, c: u32) -> Arc<crate::ir::Module> {
+        scale_named(n, c, "a")
+    }
+
+    fn scale_hinted(n: usize, c: u32, hint: usize) -> Arc<crate::ir::Module> {
+        let mut b = IRBuilder::new();
+        b.set_block_hint(hint);
+        let a = b.input("a", ScalarType::BabyBear, vec![n]);
+        let body = b.compute(n, |b, i| {
+            let ai = b.index(a, &[i]);
+            let cst = b.const_field(c);
+            b.mul(ai, cst)
+        });
+        Arc::new(b.finish("scale_hinted", body))
+    }
+
+    fn take(g: &mut crate::graph_ir::GraphBuilder) -> GraphFuser {
+        take_graph(g).unwrap()
+    }
+
+    fn seed_ctx(gf: &GraphFuser) -> producer_consumer::OwnedEnumerateContext {
+        producer_consumer::OwnedEnumerateContext::all_seed(
+            gf,
+            producer_consumer::EnumerateOptions::default(),
+        )
+    }
+
+    /// Two dataflow-independent kernels on the same domain:
+    /// `y1 = 2*x1`, `y2 = 3*x2`.
+    fn independent_pair(n: usize) -> (crate::graph_ir::GraphBuilder, BufId, BufId) {
+        let mut g = crate::graph_ir::GraphBuilder::new();
+        let x1 = sized_buf(&mut g, "x1", (n * 4) as i64);
+        let x2 = sized_buf(&mut g, "x2", (n * 4) as i64);
+        let y1 = sized_buf(&mut g, "y1", (n * 4) as i64);
+        let y2 = sized_buf(&mut g, "y2", (n * 4) as i64);
+        g.register_input(x1);
+        g.register_input(x2);
+        g.register_output(y1);
+        g.register_output(y2);
+        g.insert_kernel(scale_named(n, 2, "a"), vec![x1], vec![y1], &[]);
+        g.insert_kernel(scale_named(n, 3, "b"), vec![x2], vec![y2], &[]);
+        (g, y1, y2)
+    }
+
+    /// Three dataflow-independent kernels reading the SAME input:
+    /// `z1 = 2*x`, `z2 = 3*x`, `z3 = 5*x`.
+    fn shared_input_triple(n: usize) -> (crate::graph_ir::GraphBuilder, BufId, BufId, BufId) {
+        let mut g = crate::graph_ir::GraphBuilder::new();
+        let x = sized_buf(&mut g, "x", (n * 4) as i64);
+        let z1 = sized_buf(&mut g, "z1", (n * 4) as i64);
+        let z2 = sized_buf(&mut g, "z2", (n * 4) as i64);
+        let z3 = sized_buf(&mut g, "z3", (n * 4) as i64);
+        g.register_input(x);
+        g.register_output(z1);
+        g.register_output(z2);
+        g.register_output(z3);
+        g.insert_kernel(scale_by(n, 2), vec![x], vec![z1], &[]);
+        g.insert_kernel(scale_by(n, 3), vec![x], vec![z2], &[]);
+        g.insert_kernel(scale_by(n, 5), vec![x], vec![z3], &[]);
+        (g, z1, z2, z3)
+    }
+
+    // -------------------------------------------------------------
+    // Two independent same-domain kernels emit one candidate with
+    // concatenated boundaries.
+    // -------------------------------------------------------------
+
+    #[test]
+    fn two_independent_kernels_fuse() {
+        let (mut g, _y1, _y2) = independent_pair(8);
+        let gf = take(&mut g);
+        let ctx = seed_ctx(&gf);
+        let drafts = horizontal::enumerate(&gf, &ctx.as_ref());
+        assert_eq!(drafts.len(), 1);
+        assert_eq!(drafts[0].parents, vec![NodeId(0), NodeId(1)]);
+        assert_eq!(drafts[0].alt.inputs.len(), 2);
+        assert_eq!(drafts[0].alt.outputs.len(), 2);
+        assert_eq!(
+            drafts[0].variant,
+            producer_consumer::FusionVariant::Drop,
+            "horizontal has no seam; Drop is the placeholder variant"
+        );
+        match &drafts[0].alt.node {
+            GraphNode::Kernel(k) => {
+                crate::passes::type_infer(&k.module).expect("fused module type-checks");
+            }
+            _ => panic!("expected Kernel"),
+        }
+    }
+
+    // -------------------------------------------------------------
+    // Shared input: the fused boundary dedups the value class and
+    // hash-consing shares the load. HIR matches a hand-authored
+    // reference reading `a` once.
+    // -------------------------------------------------------------
+
+    #[test]
+    fn shared_input_is_deduped_and_hash_consed() {
+        let n = 8;
+        let mut g = crate::graph_ir::GraphBuilder::new();
+        let x = sized_buf(&mut g, "x", (n * 4) as i64);
+        let y = sized_buf(&mut g, "y", (n * 4) as i64);
+        let z = sized_buf(&mut g, "z", (n * 4) as i64);
+        g.register_input(x);
+        g.register_output(y);
+        g.register_output(z);
+        g.insert_kernel(scale_by(n, 2), vec![x], vec![y], &[]);
+        g.insert_kernel(scale_by(n, 3), vec![x], vec![z], &[]);
+        let gf = take(&mut g);
+        let ctx = seed_ctx(&gf);
+        let drafts = horizontal::enumerate(&gf, &ctx.as_ref());
+        assert_eq!(drafts.len(), 1);
+        assert_eq!(drafts[0].alt.inputs.len(), 1, "shared input dedups");
+        assert_eq!(drafts[0].alt.outputs.len(), 2);
+        let fused = match &drafts[0].alt.node {
+            GraphNode::Kernel(k) => k.module.clone(),
+            _ => panic!("expected Kernel"),
+        };
+        let reference = {
+            let mut b = IRBuilder::new();
+            let a = b.input("a", ScalarType::BabyBear, vec![n]);
+            let body = b.compute(n, |b, k| {
+                let ak = b.index(a, &[k]);
+                let two = b.const_field(2);
+                let e1 = b.mul(ak, two);
+                let three = b.const_field(3);
+                let e2 = b.mul(ak, three);
+                b.tuple(&[e1, e2])
+            });
+            b.finish(fused.name.clone(), body)
+        };
+        assert_eq!(
+            module_hash(&fused),
+            module_hash(&reference),
+            "shared load should be hash-consed into one Index node"
+        );
+    }
+
+    // -------------------------------------------------------------
+    // Dataflow path in either direction rejects the pair — both a
+    // direct producer→consumer edge and a transitive path.
+    // -------------------------------------------------------------
+
+    #[test]
+    fn rejects_dataflow_pair() {
+        let n = 8;
+        let mut g = crate::graph_ir::GraphBuilder::new();
+        let x = sized_buf(&mut g, "x", (n * 4) as i64);
+        let y = sized_buf(&mut g, "y", (n * 4) as i64);
+        let z = sized_buf(&mut g, "z", (n * 4) as i64);
+        g.register_input(x);
+        g.register_output(z);
+        g.insert_kernel(scale_by(n, 2), vec![x], vec![y], &[]);
+        g.insert_kernel(scale_by(n, 3), vec![y], vec![z], &[]);
+        let gf = take(&mut g);
+        let ctx = seed_ctx(&gf);
+        assert_eq!(horizontal::enumerate(&gf, &ctx.as_ref()).len(), 0);
+        assert!(matches!(
+            horizontal::synthesize_horizontal(&gf, NodeId(0), NodeId(1)),
+            Err(HorizontalFailure::DataflowPath)
+        ));
+    }
+
+    #[test]
+    fn rejects_transitive_dataflow_pair() {
+        let n = 8;
+        let mut g = crate::graph_ir::GraphBuilder::new();
+        let x = sized_buf(&mut g, "x", (n * 4) as i64);
+        let y1 = sized_buf(&mut g, "y1", (n * 4) as i64);
+        let y2 = sized_buf(&mut g, "y2", (n * 4) as i64);
+        let z = sized_buf(&mut g, "z", (n * 4) as i64);
+        g.register_input(x);
+        g.register_output(z);
+        g.insert_kernel(scale_by(n, 2), vec![x], vec![y1], &[]);
+        g.insert_kernel(scale_by(n, 3), vec![y1], vec![y2], &[]);
+        g.insert_kernel(scale_by(n, 5), vec![y2], vec![z], &[]);
+        let gf = take(&mut g);
+        let ctx = seed_ctx(&gf);
+        assert_eq!(horizontal::enumerate(&gf, &ctx.as_ref()).len(), 0);
+        // (0, 2) has no direct edge but a path through node 1.
+        assert!(matches!(
+            horizontal::synthesize_horizontal(&gf, NodeId(0), NodeId(2)),
+            Err(HorizontalFailure::DataflowPath)
+        ));
+    }
+
+    // -------------------------------------------------------------
+    // Domain legality: unequal bounds and symbolic bounds reject.
+    // No compute[max(Na, Nb)] masking (§10.6).
+    // -------------------------------------------------------------
+
+    #[test]
+    fn rejects_different_domains() {
+        let mut g = crate::graph_ir::GraphBuilder::new();
+        let x1 = sized_buf(&mut g, "x1", 32);
+        let x2 = sized_buf(&mut g, "x2", 64);
+        let y1 = sized_buf(&mut g, "y1", 32);
+        let y2 = sized_buf(&mut g, "y2", 64);
+        g.register_input(x1);
+        g.register_input(x2);
+        g.register_output(y1);
+        g.register_output(y2);
+        g.insert_kernel(scale_named(8, 2, "a"), vec![x1], vec![y1], &[]);
+        g.insert_kernel(scale_named(16, 3, "b"), vec![x2], vec![y2], &[]);
+        let gf = take(&mut g);
+        let ctx = seed_ctx(&gf);
+        assert_eq!(horizontal::enumerate(&gf, &ctx.as_ref()).len(), 0);
+        assert!(matches!(
+            horizontal::synthesize_horizontal(&gf, NodeId(0), NodeId(1)),
+            Err(HorizontalFailure::OuterBoundMismatch)
+        ));
+    }
+
+    #[test]
+    fn rejects_symbolic_bounds() {
+        let module = {
+            let mut b = IRBuilder::new();
+            let n_sym = b.symbol("N");
+            let a = b.input("a", ScalarType::BabyBear, vec![SizeExpr::from(n_sym)]);
+            let body = b.compute(n_sym, |b, i| {
+                let ai = b.index(a, &[i]);
+                let two = b.const_field(2);
+                b.mul(ai, two)
+            });
+            Arc::new(b.finish("sym_scale", body))
+        };
+        let mut g = crate::graph_ir::GraphBuilder::new();
+        let x1 = sized_buf(&mut g, "x1", 32);
+        let x2 = sized_buf(&mut g, "x2", 32);
+        let y1 = sized_buf(&mut g, "y1", 32);
+        let y2 = sized_buf(&mut g, "y2", 32);
+        g.register_input(x1);
+        g.register_input(x2);
+        g.register_output(y1);
+        g.register_output(y2);
+        g.insert_kernel(module.clone(), vec![x1], vec![y1], &[("N", 8)]);
+        g.insert_kernel(module, vec![x2], vec![y2], &[("N", 8)]);
+        let gf = take(&mut g);
+        let ctx = seed_ctx(&gf);
+        assert_eq!(horizontal::enumerate(&gf, &ctx.as_ref()).len(), 0);
+        assert!(matches!(
+            horizontal::synthesize_horizontal(&gf, NodeId(0), NodeId(1)),
+            Err(HorizontalFailure::NonConstantBound)
+        ));
+    }
+
+    // -------------------------------------------------------------
+    // Non-flat kernels (inner Reduce) are rejected: §10.6 requires
+    // flat structured kernels.
+    // -------------------------------------------------------------
+
+    #[test]
+    fn rejects_non_flat_kernels() {
+        let n = 8;
+        let reducer = {
+            let mut b = IRBuilder::new();
+            let a = b.input("b", ScalarType::BabyBear, vec![n]);
+            let body = b.compute(n, |b, _i| b.reduce_add(n, |b, j| b.index(a, &[j])));
+            Arc::new(b.finish("row_sum", body))
+        };
+        let mut g = crate::graph_ir::GraphBuilder::new();
+        let x1 = sized_buf(&mut g, "x1", (n * 4) as i64);
+        let x2 = sized_buf(&mut g, "x2", (n * 4) as i64);
+        let y1 = sized_buf(&mut g, "y1", (n * 4) as i64);
+        let y2 = sized_buf(&mut g, "y2", (n * 4) as i64);
+        g.register_input(x1);
+        g.register_input(x2);
+        g.register_output(y1);
+        g.register_output(y2);
+        g.insert_kernel(scale_by(n, 2), vec![x1], vec![y1], &[]);
+        g.insert_kernel(reducer, vec![x2], vec![y2], &[]);
+        let gf = take(&mut g);
+        let ctx = seed_ctx(&gf);
+        assert_eq!(horizontal::enumerate(&gf, &ctx.as_ref()).len(), 0);
+        assert!(matches!(
+            horizontal::synthesize_horizontal(&gf, NodeId(0), NodeId(1)),
+            Err(HorizontalFailure::NotFlat)
+        ));
+    }
+
+    // -------------------------------------------------------------
+    // Storage hazards on physical BufIds: WAW and WAR both reject.
+    // -------------------------------------------------------------
+
+    #[test]
+    fn rejects_waw_hazard() {
+        // Both kernels write the same physical buffer y (an overwrite
+        // pattern); fusing them would run the writes concurrently.
+        let n = 8;
+        let mut g = crate::graph_ir::GraphBuilder::new();
+        let x = sized_buf(&mut g, "x", (n * 4) as i64);
+        let y = sized_buf(&mut g, "y", (n * 4) as i64);
+        g.register_input(x);
+        g.register_output(y);
+        g.insert_kernel(scale_by(n, 2), vec![x], vec![y], &[]);
+        g.insert_kernel(scale_by(n, 3), vec![x], vec![y], &[]);
+        let gf = take(&mut g);
+        let ctx = seed_ctx(&gf);
+        assert_eq!(horizontal::enumerate(&gf, &ctx.as_ref()).len(), 0);
+        assert!(matches!(
+            horizontal::synthesize_horizontal(&gf, NodeId(0), NodeId(1)),
+            Err(HorizontalFailure::StorageHazard)
+        ));
+    }
+
+    #[test]
+    fn rejects_war_hazard() {
+        // k0 reads graph input y (old version); k1 overwrites y. No
+        // dataflow path connects them, but fusing loses the k0-before-
+        // k1 ordering the §7 hazard sort would otherwise enforce.
+        let n = 8;
+        let mut g = crate::graph_ir::GraphBuilder::new();
+        let x = sized_buf(&mut g, "x", (n * 4) as i64);
+        let y = sized_buf(&mut g, "y", (n * 4) as i64);
+        let w = sized_buf(&mut g, "w", (n * 4) as i64);
+        g.register_input(x);
+        g.register_input(y);
+        g.register_output(w);
+        g.register_output(y);
+        g.insert_kernel(scale_named(n, 2, "a"), vec![y], vec![w], &[]);
+        g.insert_kernel(scale_named(n, 3, "b"), vec![x], vec![y], &[]);
+        let gf = take(&mut g);
+        let ctx = seed_ctx(&gf);
+        assert_eq!(horizontal::enumerate(&gf, &ctx.as_ref()).len(), 0);
+        assert!(matches!(
+            horizontal::synthesize_horizontal(&gf, NodeId(0), NodeId(1)),
+            Err(HorizontalFailure::StorageHazard)
+        ));
+    }
+
+    // -------------------------------------------------------------
+    // Block hints: mismatch rejects; matching hints propagate to the
+    // fused module.
+    // -------------------------------------------------------------
+
+    #[test]
+    fn rejects_block_hint_mismatch() {
+        let n = 8;
+        let mut g = crate::graph_ir::GraphBuilder::new();
+        let x1 = sized_buf(&mut g, "x1", (n * 4) as i64);
+        let x2 = sized_buf(&mut g, "x2", (n * 4) as i64);
+        let y1 = sized_buf(&mut g, "y1", (n * 4) as i64);
+        let y2 = sized_buf(&mut g, "y2", (n * 4) as i64);
+        g.register_input(x1);
+        g.register_input(x2);
+        g.register_output(y1);
+        g.register_output(y2);
+        g.insert_kernel(scale_hinted(n, 2, 128), vec![x1], vec![y1], &[]);
+        g.insert_kernel(scale_named(n, 3, "b"), vec![x2], vec![y2], &[]);
+        let gf = take(&mut g);
+        let ctx = seed_ctx(&gf);
+        assert_eq!(horizontal::enumerate(&gf, &ctx.as_ref()).len(), 0);
+        assert!(matches!(
+            horizontal::synthesize_horizontal(&gf, NodeId(0), NodeId(1)),
+            Err(HorizontalFailure::BlockHintMismatch)
+        ));
+    }
+
+    #[test]
+    fn matching_block_hint_propagates() {
+        let n = 8;
+        let mut g = crate::graph_ir::GraphBuilder::new();
+        let x1 = sized_buf(&mut g, "x1", (n * 4) as i64);
+        let x2 = sized_buf(&mut g, "x2", (n * 4) as i64);
+        let y1 = sized_buf(&mut g, "y1", (n * 4) as i64);
+        let y2 = sized_buf(&mut g, "y2", (n * 4) as i64);
+        g.register_input(x1);
+        g.register_input(x2);
+        g.register_output(y1);
+        g.register_output(y2);
+        g.insert_kernel(scale_hinted(n, 2, 128), vec![x1], vec![y1], &[]);
+        g.insert_kernel(scale_hinted(n, 3, 128), vec![x2], vec![y2], &[]);
+        let gf = take(&mut g);
+        let ctx = seed_ctx(&gf);
+        let drafts = horizontal::enumerate(&gf, &ctx.as_ref());
+        assert_eq!(drafts.len(), 1);
+        match &drafts[0].alt.node {
+            GraphNode::Kernel(k) => {
+                assert_eq!(k.module.builder.block_hint(), Some(128));
+            }
+            _ => panic!("expected Kernel"),
+        }
+    }
+
+    // -------------------------------------------------------------
+    // Multi-output parents splice their Tuple elements positionally,
+    // enabling three-way merges across saturation rounds.
+    // -------------------------------------------------------------
+
+    #[test]
+    fn multi_output_parent_splices_tuple_elements() {
+        let n = 8;
+        let (mut g, _z1, _z2, _z3) = shared_input_triple(n);
+        let mut gf = take(&mut g);
+        let ctx = seed_ctx(&gf);
+        let drafts = horizontal::enumerate(&gf, &ctx.as_ref());
+        // Pairs (0,1), (0,2), (1,2).
+        assert_eq!(drafts.len(), 3);
+        let pos = drafts
+            .iter()
+            .position(|d| d.parents == vec![NodeId(0), NodeId(1)])
+            .expect("pair (0,1) enumerated");
+        let d01 = drafts.into_iter().nth(pos).unwrap();
+        let pair_node = gf.insert_candidate(d01.alt);
+        // Fuse the 2-output pair with the remaining single-output kernel.
+        let d = horizontal::synthesize_horizontal(&gf, pair_node, NodeId(2))
+            .expect("multi-output parent fuses");
+        assert_eq!(d.alt.inputs.len(), 1, "all three read the same x");
+        assert_eq!(d.alt.outputs.len(), 3);
+        let fused = match &d.alt.node {
+            GraphNode::Kernel(k) => k.module.clone(),
+            _ => panic!("expected Kernel"),
+        };
+        let reference = {
+            let mut b = IRBuilder::new();
+            let a = b.input("a", ScalarType::BabyBear, vec![n]);
+            let body = b.compute(n, |b, k| {
+                let ak = b.index(a, &[k]);
+                let two = b.const_field(2);
+                let e1 = b.mul(ak, two);
+                let three = b.const_field(3);
+                let e2 = b.mul(ak, three);
+                let five = b.const_field(5);
+                let e3 = b.mul(ak, five);
+                b.tuple(&[e1, e2, e3])
+            });
+            b.finish(fused.name.clone(), body)
+        };
+        assert_eq!(
+            module_hash(&fused),
+            module_hash(&reference),
+            "pair Tuple elements should be spliced, not nested"
+        );
+    }
+
+    // -------------------------------------------------------------
+    // Driver end-to-end: horizontal alone collapses independent
+    // kernels; saturation composes three-way merges across rounds.
+    // -------------------------------------------------------------
+
+    #[test]
+    fn driver_end_to_end_fuses_independent_kernels() {
+        let (mut g, y1, y2) = independent_pair(8);
+        let options = FusionOptionsV2 {
+            enable_producer_consumer: false,
+            enable_fanout: false,
+            enable_small_kernel: false,
+            ..FusionOptionsV2::default()
+        };
+        let report = fuse_graph_v2(&mut g, &options).unwrap();
+        assert_eq!(report.candidates_generated, 1);
+        assert_eq!(g.nodes.len(), 1);
+        assert!(matches!(&g.nodes[0], GraphNode::Kernel(_)));
+        assert_eq!(g.output_bufs(), &[y1, y2]);
+    }
+
+    #[test]
+    fn horizontal_composes_across_rounds() {
+        let (mut g, z1, z2, z3) = shared_input_triple(8);
+        let options = FusionOptionsV2 {
+            enable_producer_consumer: false,
+            enable_fanout: false,
+            enable_small_kernel: false,
+            ..FusionOptionsV2::default()
+        };
+        let report = fuse_graph_v2(&mut g, &options).unwrap();
+        // Round 1: three pairs. Round 2: pair ∪ remaining kernel
+        // (disjoint origins) — the three-way merges.
+        assert!(
+            report.candidates_generated >= 4,
+            "expected multi-round composition; {report:?}"
+        );
+        assert_eq!(g.nodes.len(), 1, "all three kernels merge; {report:?}");
+        assert_eq!(g.output_bufs(), &[z1, z2, z3]);
+    }
+}
+
+// -------------------------------------------------------------------------
+// M10: epilogue fusion (§10.4).
+// -------------------------------------------------------------------------
+
+mod epilogue_tests {
+    use super::*;
+    use crate::{
+        ir::Node,
+        module_hash::module_hash,
+        passes::fusion_v2::{
+            fuse_graph_v2,
+            fusions::{
+                epilogue::{self, EpilogueFailure},
+                producer_consumer,
+            },
+            take_graph, FusionOptionsV2, GraphFuser,
+        },
+    };
+
+    fn scale_by(n: usize, c: u32) -> Arc<crate::ir::Module> {
+        let mut b = IRBuilder::new();
+        let a = b.input("a", ScalarType::BabyBear, vec![n]);
+        let body = b.compute(n, |b, i| {
+            let ai = b.index(a, &[i]);
+            let cst = b.const_field(c);
+            b.mul(ai, cst)
+        });
+        Arc::new(b.finish("scale_by", body))
+    }
+
+    fn scale_hinted(n: usize, c: u32, hint: usize) -> Arc<crate::ir::Module> {
+        let mut b = IRBuilder::new();
+        b.set_block_hint(hint);
+        let a = b.input("a", ScalarType::BabyBear, vec![n]);
+        let body = b.compute(n, |b, i| {
+            let ai = b.index(a, &[i]);
+            let cst = b.const_field(c);
+            b.mul(ai, cst)
+        });
+        Arc::new(b.finish("scale_hinted", body))
+    }
+
+    /// Block-hinted reduction producer: `y[i] = sum_{j<m} x[i*m + j]`.
+    /// The block hint keeps it out of producer-consumer's coverage.
+    fn row_sum_hinted(n: usize, m: usize, hint: usize) -> Arc<crate::ir::Module> {
+        let mut b = IRBuilder::new();
+        b.set_block_hint(hint);
+        let x = b.input("x", ScalarType::BabyBear, vec![n * m]);
+        let body = b.compute(n, |b, i| {
+            b.reduce_add(m, |b, j| {
+                let mc = b.const_u32(m as u32);
+                let base = b.mul(i, mc);
+                let idx = b.add(base, j);
+                b.index(x, &[idx])
+            })
+        });
+        Arc::new(b.finish("row_sum_hinted", body))
+    }
+
+    /// Producer with a `#[grid(threads = t)]` override — rejected by
+    /// `identify_kernel_shape`, so epilogue territory.
+    fn scale_threads(n: usize, c: u32, threads: usize) -> Arc<crate::ir::Module> {
+        let mut b = IRBuilder::new();
+        let a = b.input("a", ScalarType::BabyBear, vec![n]);
+        let body = b.compute_with(n, None, None, Some(threads), |b, i| {
+            let ai = b.index(a, &[i]);
+            let cst = b.const_field(c);
+            b.mul(ai, cst)
+        });
+        Arc::new(b.finish("scale_threads", body))
+    }
+
+    /// Producer with an explicit `par` compute layout.
+    fn scale_par(n: usize, c: u32) -> Arc<crate::ir::Module> {
+        let mut b = IRBuilder::new();
+        let par = b.par_map(|t, s, _c| t.mul_c(4).add(s));
+        let a = b.input("a", ScalarType::BabyBear, vec![n]);
+        let body = b.compute_with(n, None, Some(par), None, |b, i| {
+            let ai = b.index(a, &[i]);
+            let cst = b.const_field(c);
+            b.mul(ai, cst)
+        });
+        Arc::new(b.finish("scale_par", body))
+    }
+
+    fn take(g: &mut crate::graph_ir::GraphBuilder) -> GraphFuser {
+        take_graph(g).unwrap()
+    }
+
+    fn seed_ctx(gf: &GraphFuser) -> producer_consumer::OwnedEnumerateContext {
+        producer_consumer::OwnedEnumerateContext::all_seed(
+            gf,
+            producer_consumer::EnumerateOptions::default(),
+        )
+    }
+
+    /// `x → producer → y → consumer → z`; registers `x` input, `z`
+    /// output. Returns `(g, y, z)`.
+    fn chain(
+        producer: Arc<crate::ir::Module>,
+        consumer: Arc<crate::ir::Module>,
+        x_bytes: i64,
+        n: usize,
+    ) -> (crate::graph_ir::GraphBuilder, BufId, BufId) {
+        let mut g = crate::graph_ir::GraphBuilder::new();
+        let x = sized_buf(&mut g, "x", x_bytes);
+        let y = sized_buf(&mut g, "y", (n * 4) as i64);
+        let z = sized_buf(&mut g, "z", (n * 4) as i64);
+        g.register_input(x);
+        g.register_output(z);
+        g.insert_kernel(producer, vec![x], vec![y], &[]);
+        g.insert_kernel(consumer, vec![y], vec![z], &[]);
+        (g, y, z)
+    }
+
+    // -------------------------------------------------------------
+    // M10 exit gate: a reduction followed by pointwise work retains
+    // the producer's schedule end-to-end through the driver.
+    // -------------------------------------------------------------
+
+    #[test]
+    fn driver_end_to_end_retains_producer_schedule() {
+        let (n, m) = (8, 4);
+        let (mut g, _y, z) = chain(
+            row_sum_hinted(n, m, 128),
+            scale_by(n, 3),
+            (n * m * 4) as i64,
+            n,
+        );
+        let options = FusionOptionsV2 {
+            enable_producer_consumer: false,
+            enable_fanout: false,
+            enable_small_kernel: false,
+            enable_horizontal: false,
+            ..FusionOptionsV2::default()
+        };
+        let report = fuse_graph_v2(&mut g, &options).unwrap();
+        assert_eq!(report.candidates_generated, 1, "{report:?}");
+        assert_eq!(g.nodes.len(), 1, "{report:?}");
+        let GraphNode::Kernel(k) = &g.nodes[0] else {
+            panic!("expected Kernel");
+        };
+        assert_eq!(k.module.name, "epilogue_drop");
+        assert_eq!(
+            k.module.builder.block_hint(),
+            Some(128),
+            "producer block hint must be retained"
+        );
+        assert_eq!(g.output_bufs(), &[z]);
+    }
+
+    // -------------------------------------------------------------
+    // Synthesized HIR: consumer expression substituted into the
+    // producer's result path, hint retained. Hash-checked against a
+    // hand-authored reference.
+    // -------------------------------------------------------------
+
+    #[test]
+    fn hinted_flat_producer_matches_reference() {
+        let n = 8;
+        let (mut g, _y, _z) = chain(scale_hinted(n, 2, 128), scale_by(n, 3), (n * 4) as i64, n);
+        let gf = take(&mut g);
+        let ctx = seed_ctx(&gf);
+        let drafts = epilogue::enumerate(&gf, &ctx.as_ref());
+        assert_eq!(drafts.len(), 1);
+        assert_eq!(drafts[0].parents, vec![NodeId(0), NodeId(1)]);
+        let fused = match &drafts[0].alt.node {
+            GraphNode::Kernel(k) => k.module.clone(),
+            _ => panic!("expected Kernel"),
+        };
+        assert_eq!(fused.builder.block_hint(), Some(128));
+        let reference = {
+            let mut b = IRBuilder::new();
+            b.set_block_hint(128);
+            let a = b.input("a", ScalarType::BabyBear, vec![n]);
+            let body = b.compute(n, |b, k| {
+                let ak = b.index(a, &[k]);
+                let two = b.const_field(2);
+                let p = b.mul(ak, two);
+                let three = b.const_field(3);
+                b.mul(p, three)
+            });
+            b.finish(fused.name.clone(), body)
+        };
+        assert_eq!(
+            module_hash(&fused),
+            module_hash(&reference),
+            "consumer expression should wrap the producer body at the identity index"
+        );
+    }
+
+    // -------------------------------------------------------------
+    // Schedule retention: `threads` and `par` carry over verbatim.
+    // -------------------------------------------------------------
+
+    #[test]
+    fn threads_producer_retains_threads() {
+        let n = 8;
+        let (mut g, _y, _z) = chain(scale_threads(n, 2, 64), scale_by(n, 3), (n * 4) as i64, n);
+        let gf = take(&mut g);
+        let ctx = seed_ctx(&gf);
+        let drafts = epilogue::enumerate(&gf, &ctx.as_ref());
+        assert_eq!(drafts.len(), 1);
+        let GraphNode::Kernel(k) = &drafts[0].alt.node else {
+            panic!("expected Kernel");
+        };
+        match k.module.builder.node(k.module.body) {
+            Node::Compute { threads, .. } => assert_eq!(*threads, Some(64)),
+            _ => panic!("expected top-level Compute"),
+        }
+    }
+
+    #[test]
+    fn par_producer_retains_par() {
+        let n = 8;
+        let p_module = scale_par(n, 2);
+        let p_par = match p_module.builder.node(p_module.body) {
+            Node::Compute { par, .. } => par.clone().expect("fixture has par"),
+            _ => panic!("expected top-level Compute"),
+        };
+        let (mut g, _y, _z) = chain(p_module, scale_by(n, 3), (n * 4) as i64, n);
+        let gf = take(&mut g);
+        let ctx = seed_ctx(&gf);
+        let drafts = epilogue::enumerate(&gf, &ctx.as_ref());
+        assert_eq!(drafts.len(), 1);
+        let GraphNode::Kernel(k) = &drafts[0].alt.node else {
+            panic!("expected Kernel");
+        };
+        match k.module.builder.node(k.module.body) {
+            Node::Compute { par, .. } => {
+                assert_eq!(par.as_deref(), Some(&*p_par), "ParSpec copied verbatim")
+            }
+            _ => panic!("expected top-level Compute"),
+        }
+    }
+
+    // -------------------------------------------------------------
+    // Keep variant: seam registered as a graph output triggers the
+    // §10.2 keep sibling with the seam as an extra Tuple output.
+    // -------------------------------------------------------------
+
+    #[test]
+    fn keep_variant_when_seam_is_output() {
+        let n = 8;
+        let (mut g, y, _z) = chain(scale_hinted(n, 2, 128), scale_by(n, 3), (n * 4) as i64, n);
+        g.register_output(y);
+        let gf = take(&mut g);
+        let ctx = seed_ctx(&gf);
+        let drafts = epilogue::enumerate(&gf, &ctx.as_ref());
+        assert_eq!(drafts.len(), 2, "drop + keep");
+        let keep = drafts
+            .iter()
+            .find(|d| d.variant == producer_consumer::FusionVariant::Keep)
+            .expect("keep variant emitted");
+        assert_eq!(keep.alt.outputs.len(), 2, "consumer output + seam");
+        let GraphNode::Kernel(k) = &keep.alt.node else {
+            panic!("expected Kernel");
+        };
+        assert_eq!(k.module.name, "epilogue_keep");
+        assert_eq!(k.module.builder.block_hint(), Some(128));
+    }
+
+    // -------------------------------------------------------------
+    // Producers covered by producer-consumer (flat shape, no hint)
+    // are skipped in enumeration — a dedup measure, not a legality
+    // constraint: direct synthesis still succeeds.
+    // -------------------------------------------------------------
+
+    #[test]
+    fn covered_producer_is_skipped() {
+        let n = 8;
+        let (mut g, _y, _z) = chain(scale_by(n, 2), scale_by(n, 3), (n * 4) as i64, n);
+        let gf = take(&mut g);
+        let ctx = seed_ctx(&gf);
+        assert_eq!(
+            epilogue::enumerate(&gf, &ctx.as_ref()).len(),
+            0,
+            "producer-consumer already emits this pair"
+        );
+        let seam = gf.nodes[0].outputs[0];
+        assert!(epilogue::synthesize_epilogue(
+            &gf,
+            NodeId(0),
+            NodeId(1),
+            seam,
+            producer_consumer::FusionVariant::Drop,
+        )
+        .is_ok());
+    }
+
+    // -------------------------------------------------------------
+    // Rejections.
+    // -------------------------------------------------------------
+
+    #[test]
+    fn rejects_non_identity_seam_read() {
+        let n = 8;
+        let reverse_scale = {
+            let mut b = IRBuilder::new();
+            let y = b.input("y", ScalarType::BabyBear, vec![n]);
+            let body = b.compute(n, |b, i| {
+                let nm1 = b.const_u32((n as u32) - 1);
+                let idx = b.sub(nm1, i);
+                let yi = b.index(y, &[idx]);
+                let three = b.const_field(3);
+                b.mul(yi, three)
+            });
+            Arc::new(b.finish("reverse_scale", body))
+        };
+        let (mut g, _y, _z) = chain(scale_hinted(n, 2, 128), reverse_scale, (n * 4) as i64, n);
+        let gf = take(&mut g);
+        let ctx = seed_ctx(&gf);
+        assert_eq!(epilogue::enumerate(&gf, &ctx.as_ref()).len(), 0);
+        let seam = gf.nodes[0].outputs[0];
+        assert!(matches!(
+            epilogue::synthesize_epilogue(
+                &gf,
+                NodeId(0),
+                NodeId(1),
+                seam,
+                producer_consumer::FusionVariant::Drop,
+            ),
+            Err(EpilogueFailure::SeamReadNotIdentity)
+        ));
+    }
+
+    #[test]
+    fn rejects_non_flat_consumer() {
+        let n = 8;
+        let sum_all = {
+            let mut b = IRBuilder::new();
+            let y = b.input("y", ScalarType::BabyBear, vec![n]);
+            let body = b.compute(n, |b, _i| b.reduce_add(n, |b, j| b.index(y, &[j])));
+            Arc::new(b.finish("sum_all", body))
+        };
+        let (mut g, _y, _z) = chain(scale_hinted(n, 2, 128), sum_all, (n * 4) as i64, n);
+        let gf = take(&mut g);
+        let ctx = seed_ctx(&gf);
+        assert_eq!(epilogue::enumerate(&gf, &ctx.as_ref()).len(), 0);
+        let seam = gf.nodes[0].outputs[0];
+        assert!(matches!(
+            epilogue::synthesize_epilogue(
+                &gf,
+                NodeId(0),
+                NodeId(1),
+                seam,
+                producer_consumer::FusionVariant::Drop,
+            ),
+            Err(EpilogueFailure::ConsumerNotPointwise)
+        ));
+    }
+
+    #[test]
+    fn rejects_bound_mismatch() {
+        let n = 8;
+        let (mut g, _y, _z) = chain(
+            scale_hinted(n, 2, 128),
+            scale_by(2 * n, 3),
+            (n * 4) as i64,
+            n,
+        );
+        let gf = take(&mut g);
+        let ctx = seed_ctx(&gf);
+        assert_eq!(epilogue::enumerate(&gf, &ctx.as_ref()).len(), 0);
+        let seam = gf.nodes[0].outputs[0];
+        assert!(matches!(
+            epilogue::synthesize_epilogue(
+                &gf,
+                NodeId(0),
+                NodeId(1),
+                seam,
+                producer_consumer::FusionVariant::Drop,
+            ),
+            Err(EpilogueFailure::OuterBoundMismatch)
+        ));
+    }
+
+    #[test]
+    fn rejects_hinted_consumer() {
+        let n = 8;
+        let (mut g, _y, _z) = chain(
+            scale_hinted(n, 2, 128),
+            scale_hinted(n, 3, 64),
+            (n * 4) as i64,
+            n,
+        );
+        let gf = take(&mut g);
+        let ctx = seed_ctx(&gf);
+        assert_eq!(epilogue::enumerate(&gf, &ctx.as_ref()).len(), 0);
+        let seam = gf.nodes[0].outputs[0];
+        assert!(matches!(
+            epilogue::synthesize_epilogue(
+                &gf,
+                NodeId(0),
+                NodeId(1),
+                seam,
+                producer_consumer::FusionVariant::Drop,
+            ),
+            Err(EpilogueFailure::ConsumerHasBlockHint)
+        ));
+    }
+
+    #[test]
+    fn rejects_tuple_body_producer() {
+        let n = 8;
+        let pair_producer = {
+            let mut b = IRBuilder::new();
+            b.set_block_hint(128);
+            let x = b.input("x", ScalarType::BabyBear, vec![n]);
+            let body = b.compute(n, |b, i| {
+                let xi = b.index(x, &[i]);
+                let two = b.const_field(2);
+                let e1 = b.mul(xi, two);
+                let three = b.const_field(3);
+                let e2 = b.mul(xi, three);
+                b.tuple(&[e1, e2])
+            });
+            Arc::new(b.finish("pair_producer", body))
+        };
+        let mut g = crate::graph_ir::GraphBuilder::new();
+        let x = sized_buf(&mut g, "x", (n * 4) as i64);
+        let y1 = sized_buf(&mut g, "y1", (n * 4) as i64);
+        let y2 = sized_buf(&mut g, "y2", (n * 4) as i64);
+        let z = sized_buf(&mut g, "z", (n * 4) as i64);
+        g.register_input(x);
+        g.register_output(y2);
+        g.register_output(z);
+        g.insert_kernel(pair_producer, vec![x], vec![y1, y2], &[]);
+        g.insert_kernel(scale_by(n, 5), vec![y1], vec![z], &[]);
+        let gf = take(&mut g);
+        let ctx = seed_ctx(&gf);
+        assert_eq!(epilogue::enumerate(&gf, &ctx.as_ref()).len(), 0);
+        let seam = gf.nodes[0].outputs[0];
+        assert!(matches!(
+            epilogue::synthesize_epilogue(
+                &gf,
+                NodeId(0),
+                NodeId(1),
+                seam,
+                producer_consumer::FusionVariant::Drop,
+            ),
+            Err(EpilogueFailure::ProducerUnsupportedShape)
+        ));
     }
 }
 
@@ -2034,6 +3719,37 @@ mod estimator_tests {
     // estimator on the same module produce bit-for-bit identical
     // breakdown values (§18.5 last bullet).
     // ---------------------------------------------------------------
+
+    // Kernels with a symbolic outer bound reach the estimator without a
+    // block hint (canonicalize strips monomorphize's stamp; synthesized
+    // candidates never had one). The estimator must stamp the policy
+    // hint from the caller's bindings instead of failing to lower.
+    #[test]
+    fn symbolic_outer_bound_is_costed_via_stamped_block_hint() {
+        let mut b = IRBuilder::new();
+        let q = b.symbol("q");
+        let a = b.input("a", ScalarType::BabyBear, vec![q]);
+        let body = b.compute(q, |b, i| {
+            let ai = b.index(a, &[i]);
+            let c = b.const_field(3);
+            b.mul(ai, c)
+        });
+        let m = b.finish("sym_scale", body);
+        let hash = crate::module_hash::module_hash(&m);
+        let cfg = synthetic_cfg();
+
+        // Unbound: no way to pick a block size — structured lowering error.
+        assert!(estimate_kernel(&m, hash, &EstimateContext::default(), &cfg, 1).is_err());
+
+        // Bound via param_bindings: policy hint stamped, finite cost.
+        let ctx = EstimateContext {
+            graph_symbols: BTreeMap::new(),
+            param_bindings: BTreeMap::from([("q".to_string(), 1024)]),
+        };
+        let (cost, _) = estimate_kernel(&m, hash, &ctx, &cfg, 1).unwrap();
+        assert!(cost.runtime_units > 0);
+        assert!(cost.runtime_units < i64::MAX / 4);
+    }
 
     #[test]
     fn estimator_is_deterministic_across_calls() {
@@ -2275,5 +3991,853 @@ mod estimator_tests {
         assert!(d.max_threads_per_sm >= 512);
         assert!(d.dram_bytes_per_cycle > 0.0);
         assert!(d.issue_weighted_ops_per_cycle > 0.0);
+    }
+}
+
+/// M11 exit-gate tests: opt-in `GraphCompiler` integration (plan §16).
+///
+/// These run the CPU-side `GraphCompiler::fuse` entry point — the same
+/// normalize prelude/postlude the full `compile` pipeline uses — with the
+/// v2 strategy selected, and check the strategy routing, the §15 report
+/// embedding, and the env → `graph_symbols` threading. Measured-runtime
+/// and compile-time comparisons on real workloads land with M12's
+/// `dsl_port_tests` replay.
+#[cfg(feature = "planner")]
+mod graph_compiler_tests {
+    use super::*;
+    use crate::{graph_exe::GraphCompiler, ir::VarId, passes::fusion_v2::FusionOptionsV2};
+
+    fn scale_by(n: usize, c: u32) -> Arc<crate::ir::Module> {
+        let mut b = IRBuilder::new();
+        let a = b.input("a", ScalarType::BabyBear, vec![n]);
+        let body = b.compute(n, |b, i| {
+            let ai = b.index(a, &[i]);
+            let cst = b.const_field(c);
+            b.mul(ai, cst)
+        });
+        Arc::new(b.finish("scale_by", body))
+    }
+
+    /// `x -> scale2 -> y -> scale3 -> z` with x/z registered.
+    fn two_chain(n: usize) -> GraphBuilder {
+        let mut g = GraphBuilder::new();
+        let x = sized_buf(&mut g, "x", (n * 4) as i64);
+        let y = sized_buf(&mut g, "y", (n * 4) as i64);
+        let z = sized_buf(&mut g, "z", (n * 4) as i64);
+        g.register_input(x);
+        g.register_output(z);
+        g.insert_kernel(scale_by(n, 2), vec![x], vec![y], &[]);
+        g.insert_kernel(scale_by(n, 3), vec![y], vec![z], &[]);
+        g
+    }
+
+    #[test]
+    fn v2_strategy_fuses_two_kernel_chain_and_embeds_report() {
+        let mut g = two_chain(8);
+        let report = GraphCompiler::new()
+            .fusion_v2_options(FusionOptionsV2::default())
+            .fuse(&mut g)
+            .expect("fuse")
+            .expect("fusion enabled");
+
+        // v1 wrapper fields carry only the node counts (plan §15).
+        assert_eq!(report.nodes_before, 2);
+        assert_eq!(report.nodes_after, 1);
+        assert!(report.fused.is_empty());
+        assert_eq!(report.rounds, 0);
+
+        let v2 = report.v2.as_ref().expect("v2 report embedded");
+        assert_eq!(v2.nodes_before, 2);
+        assert_eq!(v2.nodes_after, 1);
+        assert!(v2.candidates_inserted >= 1);
+        // Small graph: with `planner-ortools` CP-SAT solves it; without,
+        // the brute-force extractor does. Neither path may fall back.
+        assert_eq!(v2.fallback_reason, None);
+
+        assert_eq!(g.nodes.len(), 1);
+        assert!(matches!(&g.nodes[0], GraphNode::Kernel(_)));
+    }
+
+    #[test]
+    fn existing_strategy_stays_default_with_no_v2_report() {
+        let mut g = two_chain(8);
+        let report = GraphCompiler::new()
+            .fuse(&mut g)
+            .expect("fuse")
+            .expect("fusion enabled");
+        assert!(report.v2.is_none());
+        assert_eq!(g.nodes.len(), 1);
+    }
+
+    #[test]
+    fn without_fusion_disables_both_strategies() {
+        let mut g = two_chain(8);
+        let report = GraphCompiler::new()
+            .fusion_v2_options(FusionOptionsV2::default())
+            .without_fusion()
+            .fuse(&mut g)
+            .expect("fuse");
+        assert!(report.is_none());
+        assert_eq!(g.nodes.len(), 2);
+    }
+
+    /// Module-count golden comparison (M11): on a three-kernel chain the
+    /// v2 strategy must reach the same fused node count as the existing
+    /// pass, and both must improve on the unfused baseline.
+    #[test]
+    fn v2_matches_existing_node_count_on_three_chain() {
+        let three_chain = |n: usize| {
+            let mut g = GraphBuilder::new();
+            let x = sized_buf(&mut g, "x", (n * 4) as i64);
+            let y = sized_buf(&mut g, "y", (n * 4) as i64);
+            let z = sized_buf(&mut g, "z", (n * 4) as i64);
+            let w = sized_buf(&mut g, "w", (n * 4) as i64);
+            g.register_input(x);
+            g.register_output(w);
+            g.insert_kernel(scale_by(n, 2), vec![x], vec![y], &[]);
+            g.insert_kernel(scale_by(n, 3), vec![y], vec![z], &[]);
+            g.insert_kernel(scale_by(n, 5), vec![z], vec![w], &[]);
+            g
+        };
+        let unfused_nodes = three_chain(8).nodes.len();
+
+        let mut g_v1 = three_chain(8);
+        GraphCompiler::new()
+            .fuse(&mut g_v1)
+            .expect("v1 fuse")
+            .expect("fusion enabled");
+
+        let mut g_v2 = three_chain(8);
+        GraphCompiler::new()
+            .fusion_v2_options(FusionOptionsV2::default())
+            .fuse(&mut g_v2)
+            .expect("v2 fuse")
+            .expect("fusion enabled");
+
+        assert_eq!(unfused_nodes, 3);
+        assert_eq!(g_v1.nodes.len(), 1);
+        assert_eq!(g_v2.nodes.len(), g_v1.nodes.len());
+    }
+
+    /// `GraphCompiler::symbol` bindings must reach the v2 estimator
+    /// (`FusionOptionsV2::graph_symbols`): an unbound symbolic memcpy
+    /// size falls back to a 1 KiB estimate, so binding the symbol to a
+    /// large value must strictly raise the estimated total runtime.
+    #[test]
+    fn env_symbols_thread_into_v2_estimator() {
+        let build = || {
+            let nsym = VarId(7);
+            let mut g = GraphBuilder::new();
+            let x = g.add_buf(BufInfo {
+                name: Some("x".into()),
+                device_type: DeviceType::Cuda(0),
+                size: Quast::sym(nsym),
+                elem_size: 4,
+            });
+            let y = g.add_buf(BufInfo {
+                name: Some("y".into()),
+                device_type: DeviceType::Cuda(0),
+                size: Quast::sym(nsym),
+                elem_size: 4,
+            });
+            g.register_input(x);
+            g.register_output(y);
+            g.insert_memcpy(x, y);
+            (nsym, g)
+        };
+
+        let (_, mut g_unbound) = build();
+        let unbound = GraphCompiler::new()
+            .fusion_v2_options(FusionOptionsV2::default())
+            .fuse(&mut g_unbound)
+            .expect("fuse")
+            .expect("fusion enabled");
+
+        let (nsym, mut g_bound) = build();
+        let bound = GraphCompiler::new()
+            .symbol(nsym, 1 << 26)
+            .fusion_v2_options(FusionOptionsV2::default())
+            .fuse(&mut g_bound)
+            .expect("fuse")
+            .expect("fusion enabled");
+
+        let unbound_units = unbound.v2.expect("v2 report").total_runtime_units;
+        let bound_units = bound.v2.expect("v2 report").total_runtime_units;
+        assert!(
+            bound_units > unbound_units,
+            "bound symbol must raise the memcpy estimate: {bound_units} vs {unbound_units}"
+        );
+    }
+
+    /// Without `planner-ortools`, graphs beyond the brute-force cap must
+    /// fall back to the original extraction and say so — never silently
+    /// run the existing pass (plan §16).
+    #[cfg(not(feature = "planner-ortools"))]
+    #[test]
+    fn no_solver_large_graph_reports_solver_unavailable() {
+        use crate::passes::fusion_v2::FallbackReason;
+        // 34 disjoint kernels exceed BRUTE_FORCE_LIMIT (32) with zero
+        // fusion candidates, so extraction must fall back to original.
+        let n = 8;
+        let mut g = GraphBuilder::new();
+        for i in 0..34 {
+            let x = sized_buf(&mut g, &format!("x{i}"), (n * 4) as i64);
+            let y = sized_buf(&mut g, &format!("y{i}"), (n * 4) as i64);
+            g.register_input(x);
+            g.register_output(y);
+            g.insert_kernel(scale_by(n, 2), vec![x], vec![y], &[]);
+        }
+        let report = GraphCompiler::new()
+            .fusion_v2_options(FusionOptionsV2 {
+                enable_horizontal: false,
+                ..FusionOptionsV2::default()
+            })
+            .fuse(&mut g)
+            .expect("fuse")
+            .expect("fusion enabled");
+        let v2 = report.v2.expect("v2 report");
+        assert_eq!(v2.fallback_reason, Some(FallbackReason::SolverUnavailable));
+        assert_eq!(g.nodes.len(), 34);
+    }
+}
+
+/// General producer-consumer fusion (symbolic SExpr pipeline): rank-k
+/// seam reads, arbitrary producer write maps via trusted scatter
+/// inverses, symbolic-parameter normalization (unify equal bindings,
+/// split different bindings as `name#k`), and the two-tier
+/// (symbolic-first, concrete-fallback) seam-shape gates.
+mod general_pc_tests {
+    use std::collections::BTreeMap;
+
+    use super::*;
+    use crate::{
+        ir::SizeExpr,
+        module_hash::module_hash,
+        passes::fusion_v2::{
+            fusions::producer_consumer::{
+                self, EnumerateOptions, FusionVariant, OwnedEnumerateContext,
+            },
+            take_graph, GraphFuser,
+        },
+    };
+
+    fn enum_all(gf: &GraphFuser) -> Vec<producer_consumer::CandidateDraft> {
+        producer_consumer::enumerate(
+            gf,
+            &OwnedEnumerateContext::all_seed(gf, EnumerateOptions::default()).as_ref(),
+        )
+    }
+
+    fn draft_module(d: &producer_consumer::CandidateDraft) -> Arc<crate::ir::Module> {
+        match &d.alt.node {
+            GraphNode::Kernel(k) => k.module.clone(),
+            _ => panic!("expected Kernel"),
+        }
+    }
+
+    fn draft_bindings(d: &producer_consumer::CandidateDraft) -> BTreeMap<String, i64> {
+        match &d.alt.node {
+            GraphNode::Kernel(k) => k.param_bindings.clone(),
+            _ => panic!("expected Kernel"),
+        }
+    }
+
+    fn bindings(pairs: &[(&str, i64)]) -> BTreeMap<String, i64> {
+        pairs.iter().map(|(k, v)| (k.to_string(), *v)).collect()
+    }
+
+    // -----------------------------------------------------------------
+    // 1. Shared symbol: `a = compute [q] |i| x[i] + x[i+q]` feeding `compute [q/2] |i| a[i] +
+    //    a[i+q/2]`, both instantiated at the same q. Params unify by name; the fused module stays
+    //    fully symbolic (tier-1 symbolic gate), so ONE artifact serves every q.
+    // -----------------------------------------------------------------
+
+    fn fold_q_producer() -> Arc<crate::ir::Module> {
+        let mut b = IRBuilder::new();
+        let q = b.symbol("q");
+        let x = b.input("x", ScalarType::BabyBear, vec![SizeExpr::from(q * 2)]);
+        let body = b.compute(q, |b, i| {
+            let xi = b.index(x, &[i]);
+            let cq = b.const_sym(q);
+            let iq = b.add(i, cq);
+            let xiq = b.index(x, &[iq]);
+            b.add(xi, xiq)
+        });
+        Arc::new(b.finish("fold_q", body))
+    }
+
+    fn half_q_consumer() -> Arc<crate::ir::Module> {
+        let mut b = IRBuilder::new();
+        let q = b.symbol("q");
+        let a = b.input("a", ScalarType::BabyBear, vec![SizeExpr::from(q)]);
+        let body = b.compute(q / 2, |b, i| {
+            let ai = b.index(a, &[i]);
+            let ch = b.const_sym(q / 2);
+            let ih = b.add(i, ch);
+            let aih = b.index(a, &[ih]);
+            b.add(ai, aih)
+        });
+        Arc::new(b.finish("half_q", body))
+    }
+
+    #[test]
+    fn shared_symbol_fuses_symbolically() {
+        let mut g = GraphBuilder::new();
+        let x = sized_buf(&mut g, "x", 16 * 4); // q = 8
+        let y = sized_buf(&mut g, "y", 8 * 4);
+        let z = sized_buf(&mut g, "z", 4 * 4);
+        g.register_input(x);
+        g.register_output(z);
+        g.insert_kernel(fold_q_producer(), vec![x], vec![y], &[]);
+        g.insert_kernel(half_q_consumer(), vec![y], vec![z], &[]);
+        let gf = take_graph(&mut g).unwrap();
+
+        let drafts = enum_all(&gf);
+        assert_eq!(drafts.len(), 1, "shared-symbol chain should fuse");
+        let fused = draft_module(&drafts[0]);
+        crate::passes::type_infer(&fused).unwrap();
+        assert_eq!(draft_bindings(&drafts[0]), bindings(&[("q", 8)]));
+
+        // compute [q/2] |i| (x[i] + x[i+q]) + (x[i+q/2] + x[i+q/2+q]),
+        // with a single unified `q` and the producer's input decl.
+        let reference = {
+            let mut b = IRBuilder::new();
+            let q = b.symbol("q");
+            let x = b.input("x", ScalarType::BabyBear, vec![SizeExpr::from(q * 2)]);
+            let body = b.compute(q / 2, |b, i| {
+                let cq = b.const_sym(q);
+                let xi = b.index(x, &[i]);
+                let iq = b.add(i, cq);
+                let xiq = b.index(x, &[iq]);
+                let p0 = b.add(xi, xiq);
+                let ch = b.const_sym(q / 2);
+                let ih = b.add(i, ch);
+                let xh = b.index(x, &[ih]);
+                let ihq = b.add(ih, cq);
+                let xhq = b.index(x, &[ihq]);
+                let p1 = b.add(xh, xhq);
+                b.add(p0, p1)
+            });
+            b.finish(fused.name.clone(), body)
+        };
+        assert_eq!(module_hash(&fused), module_hash(&reference));
+    }
+
+    // -----------------------------------------------------------------
+    // 2./3. Chain of the SAME Arc'd module `compute [n] |i| x[i]+x[i+n]`
+    //    with halving bindings (n=8, n=4, n=2). Same name + different
+    //    binding splits into independent fused params `n` / `n#1`; the
+    //    binding relation lives in `param_bindings` and is certified by
+    //    the tier-2 concrete gate, never written into the module text —
+    //    so every level of the chain shares ONE fused artifact.
+    // -----------------------------------------------------------------
+
+    fn fold_n_module() -> Arc<crate::ir::Module> {
+        let mut b = IRBuilder::new();
+        let n = b.symbol("n");
+        let x = b.input("x", ScalarType::BabyBear, vec![SizeExpr::from(n * 2)]);
+        let body = b.compute(n, |b, i| {
+            let xi = b.index(x, &[i]);
+            let cn = b.const_sym(n);
+            let ixn = b.add(i, cn);
+            let xin = b.index(x, &[ixn]);
+            b.add(xi, xin)
+        });
+        Arc::new(b.finish("fold_n", body))
+    }
+
+    /// x --f--> y --f--> z --f--> w with one shared module Arc; inferred
+    /// bindings n=8, n=4, n=2.
+    fn fold_chain3() -> GraphFuser {
+        let m = fold_n_module();
+        let mut g = GraphBuilder::new();
+        let x = sized_buf(&mut g, "x", 16 * 4);
+        let y = sized_buf(&mut g, "y", 8 * 4);
+        let z = sized_buf(&mut g, "z", 4 * 4);
+        let w = sized_buf(&mut g, "w", 2 * 4);
+        g.register_input(x);
+        g.register_output(w);
+        g.insert_kernel(m.clone(), vec![x], vec![y], &[]);
+        g.insert_kernel(m.clone(), vec![y], vec![z], &[]);
+        g.insert_kernel(m, vec![z], vec![w], &[]);
+        take_graph(&mut g).unwrap()
+    }
+
+    #[test]
+    fn same_module_chain_splits_params() {
+        let gf = fold_chain3();
+        let seam = gf.nodes[0].outputs[0];
+        let d = producer_consumer::synthesize_producer_consumer(
+            &gf,
+            NodeId(0),
+            NodeId(1),
+            seam,
+            FusionVariant::Drop,
+        )
+        .expect("halving fold chain should fuse via param split");
+        let fused = draft_module(&d);
+        crate::passes::type_infer(&fused).unwrap();
+        assert_eq!(draft_bindings(&d), bindings(&[("n", 8), ("n#1", 4)]));
+
+        // compute [n#1] |i| (x[i] + x[i+n]) + (x[i+n#1] + x[i+n#1+n]),
+        // producer params first, consumer's `n` split to `n#1`.
+        let reference = {
+            let mut b = IRBuilder::new();
+            let n = b.symbol("n");
+            let n1 = b.symbol("n#1");
+            let x = b.input("x", ScalarType::BabyBear, vec![SizeExpr::from(n * 2)]);
+            let body = b.compute(n1, |b, i| {
+                let cn = b.const_sym(n);
+                let xi = b.index(x, &[i]);
+                let ixn = b.add(i, cn);
+                let xin = b.index(x, &[ixn]);
+                let p0 = b.add(xi, xin);
+                let cn1 = b.const_sym(n1);
+                let ih = b.add(i, cn1);
+                let xh = b.index(x, &[ih]);
+                let ihn = b.add(ih, cn);
+                let xhn = b.index(x, &[ihn]);
+                let p1 = b.add(xh, xhn);
+                b.add(p0, p1)
+            });
+            b.finish(fused.name.clone(), body)
+        };
+        assert_eq!(module_hash(&fused), module_hash(&reference));
+    }
+
+    #[test]
+    fn chain_levels_share_one_artifact() {
+        let gf = fold_chain3();
+        let d01 = producer_consumer::synthesize_producer_consumer(
+            &gf,
+            NodeId(0),
+            NodeId(1),
+            gf.nodes[0].outputs[0],
+            FusionVariant::Drop,
+        )
+        .unwrap();
+        let d12 = producer_consumer::synthesize_producer_consumer(
+            &gf,
+            NodeId(1),
+            NodeId(2),
+            gf.nodes[1].outputs[0],
+            FusionVariant::Drop,
+        )
+        .unwrap();
+        // Same module text (one compiled artifact), different bindings.
+        assert_eq!(
+            module_hash(&draft_module(&d01)),
+            module_hash(&draft_module(&d12))
+        );
+        assert_eq!(draft_bindings(&d01), bindings(&[("n", 8), ("n#1", 4)]));
+        assert_eq!(draft_bindings(&d12), bindings(&[("n", 4), ("n#1", 2)]));
+    }
+
+    #[test]
+    fn chain_association_orders_hash_identically() {
+        // fuse(fuse(f0,f1),f2) and fuse(f0,fuse(f1,f2)) must produce the
+        // same module text: first-appearance producer-first param
+        // naming makes both land on n=8, n#1=4, n#2=2.
+        let mut gf_a = fold_chain3();
+        let seam01 = gf_a.nodes[0].outputs[0];
+        let seam12 = gf_a.nodes[1].outputs[0];
+        let d01 = producer_consumer::synthesize_producer_consumer(
+            &gf_a,
+            NodeId(0),
+            NodeId(1),
+            seam01,
+            FusionVariant::Drop,
+        )
+        .unwrap();
+        let id01 = gf_a.insert_candidate(d01.alt);
+        let d_a = producer_consumer::synthesize_producer_consumer(
+            &gf_a,
+            id01,
+            NodeId(2),
+            seam12,
+            FusionVariant::Drop,
+        )
+        .unwrap();
+
+        let mut gf_b = fold_chain3();
+        let d12 = producer_consumer::synthesize_producer_consumer(
+            &gf_b,
+            NodeId(1),
+            NodeId(2),
+            seam12,
+            FusionVariant::Drop,
+        )
+        .unwrap();
+        let id12 = gf_b.insert_candidate(d12.alt);
+        let d_b = producer_consumer::synthesize_producer_consumer(
+            &gf_b,
+            NodeId(0),
+            id12,
+            seam01,
+            FusionVariant::Drop,
+        )
+        .unwrap();
+
+        assert_eq!(
+            module_hash(&draft_module(&d_a)),
+            module_hash(&draft_module(&d_b))
+        );
+        let expected = bindings(&[("n", 8), ("n#1", 4), ("n#2", 2)]);
+        assert_eq!(draft_bindings(&d_a), expected);
+        assert_eq!(draft_bindings(&d_b), expected);
+    }
+
+    // -----------------------------------------------------------------
+    // 4. Rank-2 seam: producer writes rows via `Pack`, consumer reads `(row, const)` components.
+    //    Drill inlines the selected element.
+    // -----------------------------------------------------------------
+
+    fn pack_producer(n: usize) -> Arc<crate::ir::Module> {
+        let mut b = IRBuilder::new();
+        let x = b.input("x", ScalarType::BabyBear, vec![n]);
+        let body = b.compute(n, |b, i| {
+            let xi = b.index(x, &[i]);
+            let f2 = b.const_field(2);
+            let e0 = b.mul(xi, f2);
+            let f3 = b.const_field(3);
+            let e1 = b.mul(xi, f3);
+            b.pack(&[e0, e1])
+        });
+        Arc::new(b.finish("pack_producer", body))
+    }
+
+    #[test]
+    fn rank2_pack_producer_component_reads_fuse() {
+        let n = 8;
+        let consumer = {
+            let mut b = IRBuilder::new();
+            let y = b.input("y", ScalarType::BabyBear, vec![n, 2]);
+            let body = b.compute(n, |b, i| {
+                let c0 = b.const_u32(0);
+                let c1 = b.const_u32(1);
+                let a = b.index(y, &[i, c0]);
+                let bb = b.index(y, &[i, c1]);
+                b.add(a, bb)
+            });
+            Arc::new(b.finish("row_sum", body))
+        };
+        let mut g = GraphBuilder::new();
+        let x = sized_buf(&mut g, "x", (n * 4) as i64);
+        let y = sized_buf(&mut g, "y", (n * 2 * 4) as i64);
+        let z = sized_buf(&mut g, "z", (n * 4) as i64);
+        g.register_input(x);
+        g.register_output(z);
+        g.insert_kernel(pack_producer(n), vec![x], vec![y], &[]);
+        g.insert_kernel(consumer, vec![y], vec![z], &[]);
+        let gf = take_graph(&mut g).unwrap();
+
+        let drafts = enum_all(&gf);
+        assert_eq!(drafts.len(), 1, "pack producer + (row, const) reads");
+        let fused = draft_module(&drafts[0]);
+        crate::passes::type_infer(&fused).unwrap();
+
+        // compute [8] |i| 2*x[i] + 3*x[i].
+        let reference = {
+            let mut b = IRBuilder::new();
+            let x = b.input("x", ScalarType::BabyBear, vec![n]);
+            let body = b.compute(n, |b, i| {
+                let xi = b.index(x, &[i]);
+                let f2 = b.const_field(2);
+                let e0 = b.mul(xi, f2);
+                let f3 = b.const_field(3);
+                let e1 = b.mul(xi, f3);
+                b.add(e0, e1)
+            });
+            b.finish(fused.name.clone(), body)
+        };
+        assert_eq!(module_hash(&fused), module_hash(&reference));
+    }
+
+    // -----------------------------------------------------------------
+    // 5./9. Reshape-view seam: producer writes flat [8], consumer reads
+    //    it as [4, 2] under a different outer bound. The drop variant
+    //    fuses through linearize/delinearize; keep still requires equal
+    //    domains and must NOT be emitted.
+    // -----------------------------------------------------------------
+
+    fn scale_flat8() -> Arc<crate::ir::Module> {
+        let mut b = IRBuilder::new();
+        let x = b.input("x", ScalarType::BabyBear, vec![8]);
+        let body = b.compute(8, |b, i| {
+            let xi = b.index(x, &[i]);
+            let f2 = b.const_field(2);
+            b.mul(xi, f2)
+        });
+        Arc::new(b.finish("scale_flat8", body))
+    }
+
+    fn reshape_graph() -> GraphFuser {
+        let consumer = {
+            let mut b = IRBuilder::new();
+            let y = b.input("y", ScalarType::BabyBear, vec![4, 2]);
+            let body = b.compute(4, |b, i| {
+                let c0 = b.const_u32(0);
+                let c1 = b.const_u32(1);
+                let a = b.index(y, &[i, c0]);
+                let bb = b.index(y, &[i, c1]);
+                b.add(a, bb)
+            });
+            Arc::new(b.finish("pair_sum", body))
+        };
+        let mut g = GraphBuilder::new();
+        let x = sized_buf(&mut g, "x", 8 * 4);
+        let y = sized_buf(&mut g, "y", 8 * 4);
+        let z = sized_buf(&mut g, "z", 4 * 4);
+        g.register_input(x);
+        g.register_output(z);
+        g.insert_kernel(scale_flat8(), vec![x], vec![y], &[]);
+        g.insert_kernel(consumer, vec![y], vec![z], &[]);
+        take_graph(&mut g).unwrap()
+    }
+
+    #[test]
+    fn reshape_view_seam_fuses_via_linearize() {
+        let gf = reshape_graph();
+        let drafts = enum_all(&gf);
+        assert_eq!(drafts.len(), 1, "flat [8] seam read as [4,2]");
+        let fused = draft_module(&drafts[0]);
+        crate::passes::type_infer(&fused).unwrap();
+
+        // compute [4] |i| 2*x[i*2] + 2*x[i*2+1].
+        let reference = {
+            let mut b = IRBuilder::new();
+            let x = b.input("x", ScalarType::BabyBear, vec![8]);
+            let body = b.compute(4, |b, i| {
+                let c2 = b.const_u32(2);
+                let i2 = b.mul(i, c2);
+                let x0 = b.index(x, &[i2]);
+                let f2 = b.const_field(2);
+                let e0 = b.mul(x0, f2);
+                let c1 = b.const_u32(1);
+                let i21 = b.add(i2, c1);
+                let x1 = b.index(x, &[i21]);
+                let e1 = b.mul(x1, f2);
+                b.add(e0, e1)
+            });
+            b.finish(fused.name.clone(), body)
+        };
+        assert_eq!(module_hash(&fused), module_hash(&reference));
+    }
+
+    #[test]
+    fn keep_variant_still_requires_equal_domains() {
+        let gf = reshape_graph();
+        let drafts = producer_consumer::enumerate(
+            &gf,
+            &OwnedEnumerateContext::all_seed(
+                &gf,
+                EnumerateOptions {
+                    enable_all_keep_variants: true,
+                },
+            )
+            .as_ref(),
+        );
+        assert_eq!(drafts.len(), 1, "only the drop variant is legal");
+        assert_eq!(drafts[0].variant, FusionVariant::Drop);
+    }
+
+    // -----------------------------------------------------------------
+    // 6. Scattered producer: the write map is arbitrary because its inverse is provided (and
+    //    trusted). σ composes the consumer's read coordinate through the inverse.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn scattered_producer_uses_provided_inverse() {
+        let producer = {
+            let mut b = IRBuilder::new();
+            let x = b.input("x", ScalarType::BabyBear, vec![8]);
+            let sc = b.scatter_map(
+                1,
+                None,
+                |p, cst| vec![cst(7).sub(&p[0])],
+                |p, cst| vec![cst(7).sub(&p[0])],
+            );
+            let body = b.compute_scatter(8, sc, |b, i| {
+                let xi = b.index(x, &[i]);
+                let f2 = b.const_field(2);
+                b.mul(xi, f2)
+            });
+            Arc::new(b.finish("rev_scale", body))
+        };
+        let consumer = {
+            let mut b = IRBuilder::new();
+            let y = b.input("y", ScalarType::BabyBear, vec![8]);
+            let body = b.compute(8, |b, i| {
+                let yi = b.index(y, &[i]);
+                let f3 = b.const_field(3);
+                b.mul(yi, f3)
+            });
+            Arc::new(b.finish("scale3", body))
+        };
+        let mut g = GraphBuilder::new();
+        let x = sized_buf(&mut g, "x", 8 * 4);
+        let y = sized_buf(&mut g, "y", 8 * 4);
+        let z = sized_buf(&mut g, "z", 8 * 4);
+        g.register_input(x);
+        g.register_output(z);
+        g.insert_kernel(producer, vec![x], vec![y], &[]);
+        g.insert_kernel(consumer, vec![y], vec![z], &[]);
+        let gf = take_graph(&mut g).unwrap();
+
+        let drafts = enum_all(&gf);
+        assert_eq!(drafts.len(), 1, "scattered producer with inverse");
+        let fused = draft_module(&drafts[0]);
+        crate::passes::type_infer(&fused).unwrap();
+
+        // y[p] = 2*x[7-p], so the fused body is 3 * (2 * x[7-i]); the
+        // producer's scatter is dropped, the consumer had none.
+        let reference = {
+            let mut b = IRBuilder::new();
+            let x = b.input("x", ScalarType::BabyBear, vec![8]);
+            let body = b.compute(8, |b, i| {
+                let c7 = b.const_u32(7);
+                let idx = b.sub(c7, i);
+                let xi = b.index(x, &[idx]);
+                let f2 = b.const_field(2);
+                let m = b.mul(xi, f2);
+                let f3 = b.const_field(3);
+                b.mul(m, f3)
+            });
+            b.finish(fused.name.clone(), body)
+        };
+        assert_eq!(module_hash(&fused), module_hash(&reference));
+    }
+
+    // -----------------------------------------------------------------
+    // 7./10. Negatives: a Pack component selected by a non-constant
+    //    coordinate has no scalar inline (select-chains are deferred).
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn pack_component_must_be_const() {
+        let n = 8;
+        let consumer = {
+            let mut b = IRBuilder::new();
+            let y = b.input("y", ScalarType::BabyBear, vec![n, 2]);
+            let body = b.compute(n, |b, i| b.reduce_add(2, |b, j| b.index(y, &[i, j])));
+            Arc::new(b.finish("reduce_components", body))
+        };
+        let mut g = GraphBuilder::new();
+        let x = sized_buf(&mut g, "x", (n * 4) as i64);
+        let y = sized_buf(&mut g, "y", (n * 2 * 4) as i64);
+        let z = sized_buf(&mut g, "z", (n * 4) as i64);
+        g.register_input(x);
+        g.register_output(z);
+        g.insert_kernel(pack_producer(n), vec![x], vec![y], &[]);
+        g.insert_kernel(consumer, vec![y], vec![z], &[]);
+        let gf = take_graph(&mut g).unwrap();
+        assert!(
+            enum_all(&gf).is_empty(),
+            "reduce-var component select must not fuse"
+        );
+    }
+
+    #[test]
+    fn flat_read_of_pack_producer_is_rejected() {
+        // Producer writes [8,2] rows; consumer reads the same buffer
+        // flat as [16]. Delinearizing k into [8,2] yields component
+        // k%2, which is not constant -> no scalar inline.
+        let n = 8;
+        let consumer = {
+            let mut b = IRBuilder::new();
+            let y = b.input("y", ScalarType::BabyBear, vec![2 * n]);
+            let body = b.compute(2 * n, |b, k| {
+                let yk = b.index(y, &[k]);
+                let f5 = b.const_field(5);
+                b.mul(yk, f5)
+            });
+            Arc::new(b.finish("flat_scale", body))
+        };
+        let mut g = GraphBuilder::new();
+        let x = sized_buf(&mut g, "x", (n * 4) as i64);
+        let y = sized_buf(&mut g, "y", (n * 2 * 4) as i64);
+        let z = sized_buf(&mut g, "z", (n * 2 * 4) as i64);
+        g.register_input(x);
+        g.register_output(z);
+        g.insert_kernel(pack_producer(n), vec![x], vec![y], &[]);
+        g.insert_kernel(consumer, vec![y], vec![z], &[]);
+        let gf = take_graph(&mut g).unwrap();
+        assert!(
+            enum_all(&gf).is_empty(),
+            "non-const pack component via delinearize must not fuse"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // 8. Frac-fold-shaped chain: rank-2 reads, Pack rows, symbolic divisor `i + (i/q)*q`, same
+    //    Arc'd module with halving bindings. The CPU-level proxy for the GPU fold->fold spine
+    //    fusion.
+    // -----------------------------------------------------------------
+
+    fn frac_fold_like() -> Arc<crate::ir::Module> {
+        let mut b = IRBuilder::new();
+        let q = b.symbol("q");
+        let src = b.input(
+            "src",
+            ScalarType::BabyBear,
+            vec![SizeExpr::from(q * 4), SizeExpr::from(2usize)],
+        );
+        let body = b.compute(q * 2, |b, i| {
+            let cq = b.const_sym(q);
+            let d = b.div(i, cq);
+            let dq = b.mul(d, cq);
+            let a = b.add(i, dq); // a = i + (i/q)*q
+            let bx = b.add(a, cq); // b = a + q
+            let c0 = b.const_u32(0);
+            let c1 = b.const_u32(1);
+            let a0 = b.index(src, &[a, c0]);
+            let b0 = b.index(src, &[bx, c0]);
+            let s0 = b.add(a0, b0);
+            let a1 = b.index(src, &[a, c1]);
+            let b1 = b.index(src, &[bx, c1]);
+            let s1 = b.add(a1, b1);
+            b.pack(&[s0, s1])
+        });
+        Arc::new(b.finish("frac_fold_like", body))
+    }
+
+    #[test]
+    fn frac_fold_like_chain_fuses_and_shares_artifact() {
+        let m = frac_fold_like();
+        let mut g = GraphBuilder::new();
+        let b0 = sized_buf(&mut g, "b0", 32 * 4); // q=4: src [16,2]
+        let b1 = sized_buf(&mut g, "b1", 16 * 4); // out [8,2]; next q=2
+        let b2 = sized_buf(&mut g, "b2", 8 * 4); // out [4,2]; next q=1
+        let b3 = sized_buf(&mut g, "b3", 4 * 4); // out [2,2]
+        g.register_input(b0);
+        g.register_output(b3);
+        g.insert_kernel(m.clone(), vec![b0], vec![b1], &[]);
+        g.insert_kernel(m.clone(), vec![b1], vec![b2], &[]);
+        g.insert_kernel(m, vec![b2], vec![b3], &[]);
+        let gf = take_graph(&mut g).unwrap();
+
+        let d01 = producer_consumer::synthesize_producer_consumer(
+            &gf,
+            NodeId(0),
+            NodeId(1),
+            gf.nodes[0].outputs[0],
+            FusionVariant::Drop,
+        )
+        .expect("frac-fold pair should fuse");
+        let d12 = producer_consumer::synthesize_producer_consumer(
+            &gf,
+            NodeId(1),
+            NodeId(2),
+            gf.nodes[1].outputs[0],
+            FusionVariant::Drop,
+        )
+        .expect("frac-fold pair should fuse at the next level");
+
+        let m01 = draft_module(&d01);
+        crate::passes::type_infer(&m01).unwrap();
+        assert_eq!(draft_bindings(&d01), bindings(&[("q", 4), ("q#1", 2)]));
+        assert_eq!(draft_bindings(&d12), bindings(&[("q", 2), ("q#1", 1)]));
+        // One artifact for every level of the chain.
+        assert_eq!(module_hash(&m01), module_hash(&draft_module(&d12)));
     }
 }

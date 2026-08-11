@@ -1,0 +1,15 @@
+--- fractional sumcheck v2: n = 2^24 = 16777216 leaves ---
+eager (median):          34.92 ms   raw: [37.59, 34.92, 25.67, 30.13, 51.28]
+v2 build: 52.04 ms (5965 nodes pre-fusion -> 3245 post-fusion, 14208 fusions in 20 rounds, 877 unique modules); compile: 192316.93 ms; capture: 198.28 ms
+v2 peak memory:          1073891456 bytes (1024.14 MiB)
+v2 exec (median):        105.17 ms   raw: [103.00, 106.38, 105.17, 105.33, 101.18]   ratio: 3.012× eager
+v2 capture (median):     24.09 ms   raw: [24.09, 24.09, 24.18, 24.08, 24.06]   ratio: 0.690× eager, 0.229× graph
+test logup_zerocheck::fractional_sumcheck_gpu_irv2::tests::bench_fractional_sumcheck_eager_vs_irv2 ... ok
+
+--- fractional sumcheck v2: n = 2^24 = 16777216 leaves ---
+eager (median):          16.50 ms   raw: [27.54, 14.19, 14.21, 16.50, 16.66]
+v2 build: 50.47 ms (5965 nodes pre-fusion -> 5965 post-fusion, 0 fusions in 0 rounds, 46 unique modules); compile: 30506.43 ms; capture: 57.28 ms
+v2 peak memory:          1610613760 bytes (1536.00 MiB)
+v2 exec (median):        38.53 ms   raw: [95.65, 38.46, 37.54, 38.53, 52.46]   ratio: 2.335× eager
+v2 capture (median):     18.13 ms   raw: [18.15, 18.13, 18.12, 18.13, 18.13]   ratio: 1.098× eager, 0.470× graph
+test logup_zerocheck::fractional_sumcheck_gpu_irv2::tests::bench_fractional_sumcheck_eager_vs_irv2 ... ok

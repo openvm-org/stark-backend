@@ -84,6 +84,12 @@ fn splitmix(mut x: u64) -> u64 {
 pub struct CostManagerStats {
     pub hits: u64,
     pub misses: u64,
+    /// Lookups whose estimator run failed (lowering error or panic).
+    /// Not counted in `misses`; failed lookups are not cached.
+    pub failures: u64,
+    /// Wall time spent inside [`estimate_kernel`] (HIR→KIR lowering +
+    /// KIR analysis), summed over misses and failures.
+    pub estimate_time: std::time::Duration,
 }
 
 /// A cost error thrown when lowering or analysis fails on a candidate.
@@ -91,6 +97,13 @@ pub struct CostManagerStats {
 pub enum CostError {
     #[error(transparent)]
     Compile(#[from] CompileError),
+    /// The kernel-lowering pipeline panicked inside a `debug_assert!`
+    /// (e.g. `is_canonicalized(program)` in `lower_to_kir`). This is
+    /// a synthesis bug rather than a legitimate cost error; the pass
+    /// treats it as an infinite-cost candidate so the ILP never picks
+    /// it.
+    #[error("kernel lowering panicked on a synthesized module")]
+    LoweringPanicked,
 }
 
 /// Memoizing wrapper around [`estimate_kernel`] (§12.10).
@@ -134,6 +147,14 @@ impl KernelCostManager {
     /// [`ArtifactKey::module_hash`](super::ArtifactKey); passing it in
     /// (instead of recomputing from `module`) lets a cache hit avoid
     /// rehashing the HIR.
+    ///
+    /// If the underlying `ModuleCompiler::lower` fails (structured
+    /// error) or panics (debug-only `is_canonicalized` assertion on
+    /// synthesized modules that don't match the canonicalize
+    /// contract), a fallback high cost is returned instead of
+    /// propagating. Callers that need to know about lowering failures
+    /// should verify their synthesized modules via
+    /// `passes::canonicalize` at construction time.
     pub fn cost_of(
         &mut self,
         module_hash: [u8; 32],
@@ -149,13 +170,30 @@ impl KernelCostManager {
             graph_symbols: self.graph_symbols.clone(),
             param_bindings: param_bindings.clone(),
         };
-        let (cost, breakdown) = estimate_kernel(
-            module,
-            module_hash,
-            &ctx,
-            &self.cfg_owned,
-            self.cycle_quantum,
-        )?;
+        // Wrap in `catch_unwind` so a debug-assertion failure inside
+        // `lower_to_kir` on a mis-synthesized candidate doesn't tank
+        // the whole pass. The caller sees a high-cost fallback (via
+        // `CostError::LoweringPanicked`) and the ILP simply refuses to
+        // pick the broken candidate.
+        let module_c = module.clone();
+        let cfg = self.cfg_owned.clone();
+        let quantum = self.cycle_quantum;
+        let t0 = std::time::Instant::now();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            estimate_kernel(&module_c, module_hash, &ctx, &cfg, quantum)
+        }));
+        self.stats.estimate_time += t0.elapsed();
+        let (cost, breakdown) = match result {
+            Ok(Ok(v)) => v,
+            Ok(Err(e)) => {
+                self.stats.failures += 1;
+                return Err(CostError::from(e));
+            }
+            Err(_) => {
+                self.stats.failures += 1;
+                return Err(CostError::LoweringPanicked);
+            }
+        };
         self.cache.insert(key, cost);
         self.breakdowns.insert(key, breakdown);
         self.stats.misses += 1;

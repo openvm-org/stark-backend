@@ -1,0 +1,828 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Kernel Fusion V2 — Architecture</title>
+<script>
+  window.MathJax = {
+    tex: { inlineMath: [['$', '$'], ['\\(', '\\)']], displayMath: [['$$', '$$'], ['\\[', '\\]']] },
+    svg: { fontCache: 'global' }
+  };
+</script>
+<script async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js"></script>
+<style>
+  @page { size: letter; margin: 0.5in; }
+
+  :root {
+    --bg: #ffffff;
+    --fg: #1c2027;
+    --muted: #5b6472;
+    --line: #d5dae0;
+    --panel: #f6f7f9;
+    --accent-1: #3d6bd8;   /* blue — build */
+    --accent-2: #b74a89;   /* magenta — score */
+    --accent-3: #4a9169;   /* green — pick */
+    --accent-1-bg: #e8efff;
+    --accent-2-bg: #fbe9f2;
+    --accent-3-bg: #e5f2ea;
+    --tag: #eef1f5;
+  }
+  html, body {
+    margin: 0; padding: 0;
+    background: var(--bg); color: var(--fg);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    font-size: 13px; line-height: 1.45;
+  }
+  .page {
+    max-width: 900px;
+    margin: 0 auto;
+    padding: 20px 28px 30px;
+  }
+  header { margin-bottom: 12px; }
+  header h1 { margin: 0 0 2px; font-size: 20px; letter-spacing: 0.2px; }
+  header .sub { color: var(--muted); font-size: 12px; }
+
+  h2 {
+    font-size: 13px; letter-spacing: 0.06em; text-transform: uppercase;
+    color: var(--muted); margin: 14px 0 6px;
+    border-bottom: 1px solid var(--line); padding-bottom: 3px;
+  }
+
+  code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-size: 12px; background: var(--tag); padding: 0 4px; border-radius: 3px;
+  }
+
+  /* ---------- Main architecture diagram ---------- */
+  .arch {
+    display: grid;
+    grid-template-columns: 90px 1fr 1fr 1fr 90px;
+    gap: 10px;
+    align-items: stretch;
+    margin: 6px 0 4px;
+  }
+  .endpoint {
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    text-align: center;
+    padding: 10px 6px;
+    border: 1.5px dashed var(--line);
+    border-radius: 8px;
+    color: var(--muted);
+    font-size: 11.5px;
+  }
+  .endpoint .big { font-size: 13px; color: var(--fg); font-weight: 600; margin-bottom: 4px; }
+
+  .stage {
+    position: relative;
+    border: 1.5px solid var(--line);
+    border-radius: 10px;
+    padding: 12px 14px 14px;
+    background: var(--panel);
+  }
+  .stage .badge {
+    position: absolute; top: -10px; left: 12px;
+    background: var(--bg); padding: 0 8px;
+    font-size: 10.5px; font-weight: 700; letter-spacing: 0.08em; color: var(--muted);
+  }
+  .stage h3 { margin: 4px 0 3px; font-size: 15px; }
+  .stage .role { font-size: 11.5px; color: var(--muted); margin-bottom: 8px; }
+  .stage ul { margin: 0; padding-left: 16px; }
+  .stage li { margin: 2px 0; font-size: 12px; }
+
+  .stage.build   { border-color: var(--accent-1); background: var(--accent-1-bg); }
+  .stage.score   { border-color: var(--accent-2); background: var(--accent-2-bg); }
+  .stage.pick    { border-color: var(--accent-3); background: var(--accent-3-bg); }
+  .stage.build   .badge { color: var(--accent-1); }
+  .stage.score   .badge { color: var(--accent-2); }
+  .stage.pick    .badge { color: var(--accent-3); }
+
+  .arrow {
+    display: flex; align-items: center; justify-content: center;
+    color: var(--muted); font-size: 20px;
+  }
+
+  /* ---------- Alt graph illustration + fusion catalog side-by-side ---------- */
+  .row {
+    display: grid;
+    grid-template-columns: 1.05fr 1fr;
+    gap: 18px;
+    margin-top: 6px;
+  }
+  .card {
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 10px 12px 12px;
+    background: var(--panel);
+  }
+  .card h3 { margin: 0 0 4px; font-size: 13px; }
+  .card .sub { color: var(--muted); font-size: 11.5px; margin-bottom: 6px; }
+
+  svg { display: block; }
+  .lbl { font: 11px -apple-system, "Segoe UI", Roboto, sans-serif; fill: var(--fg); }
+  .lbl-muted { font: 10.5px -apple-system, "Segoe UI", Roboto, sans-serif; fill: var(--muted); }
+
+  .patterns {
+    display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px;
+  }
+  .pat { text-align: center; }
+  .pat .name { font-size: 11.5px; font-weight: 600; margin-top: 2px; }
+  .pat .desc { font-size: 10.5px; color: var(--muted); }
+
+  /* ---------- Key ideas ---------- */
+  .ideas {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 6px 22px;
+    margin-top: 4px;
+  }
+  .ideas div { font-size: 12px; }
+  .ideas b { color: var(--fg); }
+
+  .legend { font-size: 11px; color: var(--muted); margin-top: 4px; }
+  .legend span.k { display: inline-block; width: 10px; height: 10px; border-radius: 2px; vertical-align: middle; margin: 0 4px 0 8px; }
+
+  /* ---------- Cost model ---------- */
+  .sub-lead { color: var(--muted); font-size: 12px; margin: 2px 0 8px; }
+  .cost-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+    margin-top: 4px;
+  }
+  .cost {
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: var(--panel);
+    padding: 10px 12px 12px;
+  }
+  .cost h3 { margin: 0 0 3px; font-size: 13px; color: var(--accent-2); }
+  .cost .cost-desc { font-size: 11.5px; color: var(--muted); margin: 0 0 6px; }
+  .cost .cost-note { font-size: 11px; color: var(--muted); margin: 6px 0 0; }
+  .cost ul.tight { margin: 4px 0 6px; padding-left: 16px; }
+  .cost ul.tight li { font-size: 11.5px; margin: 2px 0; }
+  pre.math {
+    margin: 4px 0;
+    padding: 8px 10px;
+    background: #ffffff;
+    border: 1px solid var(--line);
+    border-radius: 5px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-size: 11px;
+    line-height: 1.45;
+    color: #1c2027;
+    white-space: pre;
+    overflow-x: auto;
+  }
+  .math-tex {
+    margin: 6px 0 2px;
+    padding: 6px 8px;
+    background: #ffffff;
+    border: 1px solid var(--line);
+    border-radius: 5px;
+    font-size: 12.5px;
+    overflow-x: auto;
+  }
+  .math-tex mjx-container { margin: 2px 0 !important; }
+  .cost ul.tight { list-style-type: disc; }
+  .ilp-block ul.tight { padding-left: 16px; margin: 4px 0 0; }
+  .ilp-block ul.tight li { font-size: 12px; margin: 1px 0; }
+
+  ol.constraint-list {
+    list-style: none;
+    counter-reset: cst;
+    padding: 0;
+    margin: 8px 0 0;
+  }
+  ol.constraint-list li {
+    counter-increment: cst;
+    position: relative;
+    padding: 3px 0 3px 34px;
+    font-size: 12px;
+    border-top: 1px dashed var(--line);
+  }
+  ol.constraint-list li:first-child { border-top: none; }
+  ol.constraint-list li::before {
+    content: "(" counter(cst) ")";
+    position: absolute;
+    left: 0;
+    top: 3px;
+    color: var(--accent-3);
+    font-weight: 700;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  ol.constraint-list li em { color: var(--fg); font-style: italic; }
+
+  .stage-list { display: flex; flex-direction: column; gap: 6px; margin-top: 4px; }
+  .stage-row {
+    display: grid;
+    grid-template-columns: 72px 1fr;
+    gap: 8px;
+    align-items: start;
+    border-top: 1px dashed var(--line);
+    padding-top: 6px;
+  }
+  .stage-row:first-child { border-top: none; padding-top: 0; }
+  .stage-tag {
+    display: inline-block;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    color: var(--accent-3);
+    padding-top: 6px;
+  }
+  .stage-body .math-tex { margin: 0 0 2px; }
+  .stage-cap { font-size: 11.5px; color: var(--muted); }
+
+  /* ---------- ILP ---------- */
+  .ilp {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+    margin-top: 4px;
+  }
+  .ilp-block {
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: var(--panel);
+    padding: 8px 12px 10px;
+  }
+  .ilp-block b { color: var(--accent-3); font-size: 12px; letter-spacing: 0.03em; }
+  .ilp-block pre.math { margin-top: 4px; }
+  .ilp-note {
+    grid-column: 1 / -1;
+    font-size: 11.5px;
+    color: var(--muted);
+    padding: 6px 4px 0;
+  }
+  .ilp-note b { color: var(--fg); }
+
+  @media print {
+    .page { padding: 0; }
+    h2 { page-break-after: avoid; }
+    .cost, .ilp-block, .stage, .card { page-break-inside: avoid; }
+  }
+</style>
+</head>
+<body>
+
+<div class="page">
+<header>
+  <h1>Kernel Fusion V2 — Architecture</h1>
+  <div class="sub">A GPU kernel fusion optimizer that <b>enumerates fusion possibilities</b>, <b>scores them statically</b>, and <b>picks the best subset</b> with a solver.</div>
+</header>
+
+<!-- =========== MAIN ARCHITECTURE =========== -->
+<h2>The three pieces</h2>
+<div class="arch">
+  <div class="endpoint">
+    <div class="big">Input</div>
+    A DAG of GPU kernels the user wants to run
+  </div>
+
+  <div class="stage build">
+    <div class="badge">1 · BUILD</div>
+    <h3>Alternative Graph</h3>
+    <div class="role">All fusion possibilities in one DAG.</div>
+    <ul>
+      <li>Wraps the original kernels</li>
+      <li>Fusion passes propose fused alternatives</li>
+      <li>Multiple producers per value ⇒ alternatives</li>
+      <li>Bounded &ldquo;saturation&rdquo; adds more each round</li>
+    </ul>
+  </div>
+
+  <div class="stage score">
+    <div class="badge">2 · SCORE</div>
+    <h3>Static Cost Model</h3>
+    <div class="role">Predicts runtime without compiling.</div>
+    <ul>
+      <li>Lowers each candidate to KIR</li>
+      <li>Estimates registers, occupancy, DRAM traffic, critical path</li>
+      <li>Memoized by module hash</li>
+      <li>No <code>nvcc</code>, no GPU profiling</li>
+    </ul>
+  </div>
+
+  <div class="stage pick">
+    <div class="badge">3 · PICK</div>
+    <h3>CP-SAT Solver</h3>
+    <div class="role">Globally optimal closed subgraph.</div>
+    <ul>
+      <li>Integer program over <code>select-alt</code>, <code>need-value</code>, <code>compile-module</code></li>
+      <li>Minimize runtime, then compile cost</li>
+      <li>Original graph is always a feasible fallback</li>
+    </ul>
+  </div>
+
+  <div class="endpoint">
+    <div class="big">Output</div>
+    Chosen subgraph &rarr; compile &rarr; run
+  </div>
+</div>
+
+<!-- =========== ALT GRAPH + PATTERNS =========== -->
+<div class="row">
+
+  <!-- Alt graph shape -->
+  <div class="card">
+    <h3>What's in the Alternative Graph</h3>
+    <div class="sub">Bipartite: <b>values</b> (circles) and <b>kernels</b> (boxes). Two boxes producing the same circle are <b>alternatives</b>. Picking one closed set = picking one execution plan.</div>
+    <svg viewBox="0 0 460 200" width="100%" height="200">
+      <!-- Original path -->
+      <!-- values -->
+      <circle cx="30" cy="40" r="12" fill="#fff" stroke="#3d6bd8" stroke-width="1.5"/>
+      <text class="lbl" x="30" y="44" text-anchor="middle">a</text>
+      <circle cx="30" cy="150" r="12" fill="#fff" stroke="#3d6bd8" stroke-width="1.5"/>
+      <text class="lbl" x="30" y="154" text-anchor="middle">b</text>
+
+      <!-- producer P -->
+      <rect x="110" y="20" width="70" height="36" rx="4" fill="#e8efff" stroke="#3d6bd8"/>
+      <text class="lbl" x="145" y="42" text-anchor="middle">producer</text>
+
+      <!-- consumer C -->
+      <rect x="240" y="20" width="70" height="36" rx="4" fill="#e8efff" stroke="#3d6bd8"/>
+      <text class="lbl" x="275" y="42" text-anchor="middle">consumer</text>
+
+      <!-- intermediate -->
+      <circle cx="215" cy="38" r="12" fill="#fff" stroke="#3d6bd8" stroke-width="1.5"/>
+      <text class="lbl" x="215" y="42" text-anchor="middle">m</text>
+
+      <!-- output -->
+      <circle cx="350" cy="38" r="12" fill="#fff" stroke="#3d6bd8" stroke-width="1.5"/>
+      <text class="lbl" x="350" y="42" text-anchor="middle">y</text>
+
+      <!-- fused alt -->
+      <rect x="150" y="120" width="130" height="42" rx="4" fill="#e5f2ea" stroke="#4a9169" stroke-dasharray="3 2"/>
+      <text class="lbl" x="215" y="140" text-anchor="middle">fused P+C</text>
+      <text class="lbl-muted" x="215" y="153" text-anchor="middle">(alternative for y)</text>
+
+      <!-- edges original -->
+      <line x1="42" y1="40" x2="110" y2="38" stroke="#3d6bd8" stroke-width="1.2"/>
+      <line x1="180" y1="38" x2="203" y2="38" stroke="#3d6bd8" stroke-width="1.2"/>
+      <line x1="227" y1="38" x2="240" y2="38" stroke="#3d6bd8" stroke-width="1.2"/>
+      <line x1="310" y1="38" x2="338" y2="38" stroke="#3d6bd8" stroke-width="1.2"/>
+      <line x1="42" y1="150" x2="240" y2="55" stroke="#3d6bd8" stroke-width="1.2"/>
+
+      <!-- edges fused -->
+      <line x1="42" y1="40" x2="150" y2="141" stroke="#4a9169" stroke-width="1.4" stroke-dasharray="3 2"/>
+      <line x1="42" y1="150" x2="150" y2="141" stroke="#4a9169" stroke-width="1.4" stroke-dasharray="3 2"/>
+      <line x1="280" y1="141" x2="350" y2="50" stroke="#4a9169" stroke-width="1.4" stroke-dasharray="3 2"/>
+
+      <!-- Callout arrow -->
+      <text class="lbl-muted" x="350" y="80" text-anchor="middle">two producers of y</text>
+      <text class="lbl-muted" x="350" y="94" text-anchor="middle">= alternatives</text>
+
+      <!-- Left/right labels -->
+      <text class="lbl-muted" x="30" y="14" text-anchor="middle">inputs</text>
+      <text class="lbl-muted" x="350" y="14" text-anchor="middle">outputs</text>
+    </svg>
+    <div class="legend">
+      <span class="k" style="background:#e8efff;border:1px solid #3d6bd8"></span>original
+      <span class="k" style="background:#e5f2ea;border:1px solid #4a9169"></span>synthesized alternative
+    </div>
+  </div>
+
+  <!-- Fusion pattern catalog -->
+  <div class="card">
+    <h3>Fusion patterns the passes generate</h3>
+    <div class="sub">Each pass proposes candidates against a shared graph; a candidate is one atomic fused kernel.</div>
+    <div class="patterns">
+      <!-- Producer-consumer -->
+      <div class="pat">
+        <svg viewBox="0 0 120 90" width="100%" height="80">
+          <rect x="6" y="20" width="34" height="20" rx="3" fill="#e8efff" stroke="#3d6bd8"/>
+          <rect x="60" y="20" width="34" height="20" rx="3" fill="#e8efff" stroke="#3d6bd8"/>
+          <line x1="40" y1="30" x2="60" y2="30" stroke="#3d6bd8"/>
+          <text class="lbl-muted" x="60" y="52" text-anchor="middle">↓</text>
+          <rect x="20" y="60" width="80" height="22" rx="3" fill="#e5f2ea" stroke="#4a9169"/>
+          <text class="lbl" x="60" y="75" text-anchor="middle">P → C fused</text>
+        </svg>
+        <div class="name">Producer → Consumer</div>
+        <div class="desc">Eliminate a store/load</div>
+      </div>
+      <!-- Fanout -->
+      <div class="pat">
+        <svg viewBox="0 0 120 90" width="100%" height="80">
+          <rect x="43" y="6" width="34" height="20" rx="3" fill="#e8efff" stroke="#3d6bd8"/>
+          <line x1="60" y1="26" x2="20" y2="40" stroke="#3d6bd8"/>
+          <line x1="60" y1="26" x2="60" y2="40" stroke="#3d6bd8"/>
+          <line x1="60" y1="26" x2="100" y2="40" stroke="#3d6bd8"/>
+          <rect x="4" y="40" width="32" height="16" rx="3" fill="#e8efff" stroke="#3d6bd8"/>
+          <rect x="44" y="40" width="32" height="16" rx="3" fill="#e8efff" stroke="#3d6bd8"/>
+          <rect x="84" y="40" width="32" height="16" rx="3" fill="#e8efff" stroke="#3d6bd8"/>
+          <rect x="20" y="66" width="80" height="18" rx="3" fill="#e5f2ea" stroke="#4a9169"/>
+          <text class="lbl" x="60" y="79" text-anchor="middle">1 launch, share P</text>
+        </svg>
+        <div class="name">Fanout</div>
+        <div class="desc">Compute P once, feed many</div>
+      </div>
+      <!-- Small kernel -->
+      <div class="pat">
+        <svg viewBox="0 0 120 90" width="100%" height="80">
+          <rect x="6"  y="6"  width="26" height="14" rx="3" fill="#e8efff" stroke="#3d6bd8"/>
+          <rect x="44" y="6"  width="26" height="14" rx="3" fill="#e8efff" stroke="#3d6bd8"/>
+          <rect x="82" y="6"  width="26" height="14" rx="3" fill="#e8efff" stroke="#3d6bd8"/>
+          <rect x="24" y="28" width="26" height="14" rx="3" fill="#e8efff" stroke="#3d6bd8"/>
+          <rect x="66" y="28" width="26" height="14" rx="3" fill="#e8efff" stroke="#3d6bd8"/>
+          <text class="lbl-muted" x="60" y="54" text-anchor="middle">↓</text>
+          <rect x="10" y="62" width="100" height="20" rx="3" fill="#e5f2ea" stroke="#4a9169"/>
+          <text class="lbl" x="60" y="76" text-anchor="middle">1 launch, all bodies</text>
+        </svg>
+        <div class="name">Small kernel batch</div>
+        <div class="desc">Kill many launches</div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<!-- =========== STATIC COST MODEL =========== -->
+<h2>Static cost model</h2>
+<div class="sub-lead">
+  Each candidate is lowered through the ordinary compile path <i>up to the point right before <code>nvcc</code></i>: HIR → KIR → layout inference → sync insertion → shared-memory planning. From that KIR we derive four numbers, take their max as the throughput cost, and add a launch overhead.
+</div>
+
+<div class="cost-grid">
+
+  <!-- Occupancy -->
+  <div class="cost">
+    <h3>Occupancy</h3>
+    <p class="cost-desc">How many blocks fit on an SM at once. Four independent budgets (threads, warps, registers, shared memory) each cap it; the min wins.</p>
+
+    <svg viewBox="0 0 380 130" width="100%" height="130">
+      <!-- SM box -->
+      <rect x="8" y="14" width="180" height="102" rx="8" fill="#f6f7f9" stroke="#b74a89" stroke-width="1.5"/>
+      <text class="lbl-muted" x="98" y="28" text-anchor="middle">one SM</text>
+      <!-- Blocks -->
+      <rect x="18" y="38" width="34" height="20" rx="3" fill="#fbe9f2" stroke="#b74a89"/>
+      <rect x="58" y="38" width="34" height="20" rx="3" fill="#fbe9f2" stroke="#b74a89"/>
+      <rect x="98" y="38" width="34" height="20" rx="3" fill="#fbe9f2" stroke="#b74a89"/>
+      <rect x="138" y="38" width="34" height="20" rx="3" fill="#fbe9f2" stroke="#b74a89"/>
+      <rect x="18" y="64" width="34" height="20" rx="3" fill="#fbe9f2" stroke="#b74a89"/>
+      <rect x="58" y="64" width="34" height="20" rx="3" fill="#fbe9f2" stroke="#b74a89"/>
+      <rect x="98" y="64" width="34" height="20" rx="3" fill="#fbe9f2" stroke="#b74a89"/>
+      <rect x="138" y="64" width="34" height="20" rx="3" fill="#fbe9f2" stroke="#b74a89"/>
+      <text class="lbl-muted" x="98" y="105" text-anchor="middle">blocks_per_sm resident</text>
+
+      <!-- Budget arrows -->
+      <text class="lbl" x="220" y="28">threads · $T$</text>
+      <text class="lbl" x="220" y="52">warps · $\lceil T/32 \rceil$</text>
+      <text class="lbl" x="220" y="76">regs · $R \cdot T$</text>
+      <text class="lbl" x="220" y="100">smem · $S$</text>
+      <line x1="188" y1="24" x2="215" y2="24" stroke="#b74a89"/>
+      <line x1="188" y1="48" x2="215" y2="48" stroke="#b74a89"/>
+      <line x1="188" y1="72" x2="215" y2="72" stroke="#b74a89"/>
+      <line x1="188" y1="96" x2="215" y2="96" stroke="#b74a89"/>
+      <text class="lbl-muted" x="330" y="120" text-anchor="end">→ each budget → cap → take min</text>
+    </svg>
+
+    <p class="cost-desc" style="margin-top:2px"><b>$R$</b> comes from KIR SSA liveness (peak live scalars × cost per word). <b>$S$</b> is the static shared-memory plan. If min = 0, the candidate is rejected.</p>
+
+    <div class="math-tex">
+$$b_{\mathrm{SM}} \;=\; \min\!\Bigl(\, \tfrac{T_{\mathrm{SM}}}{T},\ \tfrac{W_{\mathrm{SM}}}{\lceil T/32\rceil},\ \tfrac{R_{\mathrm{SM}}}{R\,T},\ \tfrac{S_{\mathrm{SM}}}{S} \,\Bigr)$$
+    </div>
+    <p class="cost-note" style="margin-top:2px">
+      $T,R,S$: per-block threads / registers-per-thread / shared bytes. $T_{\mathrm{SM}}, W_{\mathrm{SM}}, R_{\mathrm{SM}}, S_{\mathrm{SM}}$: the SM's hardware caps on threads / warps / registers / shared memory.
+    </p>
+  </div>
+
+  <!-- Memory access cost — visual first -->
+  <div class="cost">
+    <h3>Memory access: sample warps, count sectors</h3>
+    <p class="cost-desc">Coalescing depends on the actual index expression. At each load/store site we <b>evaluate the index for each of 32 warp lanes</b>, then count how many distinct 32-byte DRAM sectors those addresses fall into.</p>
+
+    <svg viewBox="0 0 440 175" width="100%" height="175">
+      <!-- lanes -->
+      <text class="lbl-muted" x="8" y="20">32 warp lanes</text>
+      <g>
+        <!-- lane row -->
+        <g transform="translate(8,26)">
+          <rect width="240" height="16" fill="#fbe9f2" stroke="#b74a89"/>
+          <!-- 32 lane ticks -->
+          <g stroke="#b74a89" stroke-width="0.5">
+            <line x1="7.5" y1="0" x2="7.5" y2="16"/>
+            <line x1="15" y1="0" x2="15" y2="16"/>
+            <line x1="22.5" y1="0" x2="22.5" y2="16"/>
+            <line x1="30" y1="0" x2="30" y2="16"/>
+            <line x1="37.5" y1="0" x2="37.5" y2="16"/>
+            <line x1="45" y1="0" x2="45" y2="16"/>
+            <line x1="52.5" y1="0" x2="52.5" y2="16"/>
+            <line x1="60" y1="0" x2="60" y2="16"/>
+            <line x1="67.5" y1="0" x2="67.5" y2="16"/>
+            <line x1="75" y1="0" x2="75" y2="16"/>
+            <line x1="82.5" y1="0" x2="82.5" y2="16"/>
+            <line x1="90" y1="0" x2="90" y2="16"/>
+            <line x1="97.5" y1="0" x2="97.5" y2="16"/>
+            <line x1="105" y1="0" x2="105" y2="16"/>
+            <line x1="112.5" y1="0" x2="112.5" y2="16"/>
+            <line x1="120" y1="0" x2="120" y2="16"/>
+            <line x1="127.5" y1="0" x2="127.5" y2="16"/>
+            <line x1="135" y1="0" x2="135" y2="16"/>
+            <line x1="142.5" y1="0" x2="142.5" y2="16"/>
+            <line x1="150" y1="0" x2="150" y2="16"/>
+            <line x1="157.5" y1="0" x2="157.5" y2="16"/>
+            <line x1="165" y1="0" x2="165" y2="16"/>
+            <line x1="172.5" y1="0" x2="172.5" y2="16"/>
+            <line x1="180" y1="0" x2="180" y2="16"/>
+            <line x1="187.5" y1="0" x2="187.5" y2="16"/>
+            <line x1="195" y1="0" x2="195" y2="16"/>
+            <line x1="202.5" y1="0" x2="202.5" y2="16"/>
+            <line x1="210" y1="0" x2="210" y2="16"/>
+            <line x1="217.5" y1="0" x2="217.5" y2="16"/>
+            <line x1="225" y1="0" x2="225" y2="16"/>
+            <line x1="232.5" y1="0" x2="232.5" y2="16"/>
+          </g>
+        </g>
+      </g>
+
+      <text class="lbl-muted" x="300" y="38" text-anchor="middle">eval index(lane)</text>
+      <text class="lbl-muted" x="300" y="52" text-anchor="middle">↓ ↓ ↓ …</text>
+
+      <!-- Coalesced -->
+      <text class="lbl" x="8" y="82">coalesced load</text>
+      <g transform="translate(8,88)">
+        <rect width="120" height="16" fill="#e5f2ea" stroke="#4a9169"/>
+        <line x1="120" y1="0" x2="120" y2="16" stroke="#4a9169"/>
+        <text class="lbl" x="60" y="12" text-anchor="middle">1 sector</text>
+      </g>
+      <text class="lbl-muted" x="140" y="100">32 lanes → 1×32B</text>
+
+      <!-- Strided -->
+      <text class="lbl" x="8" y="130">strided load</text>
+      <g transform="translate(8,136)" stroke="#b74a89" fill="#fbe9f2">
+        <rect x="0"   width="14" height="16"/>
+        <rect x="24"  width="14" height="16"/>
+        <rect x="48"  width="14" height="16"/>
+        <rect x="72"  width="14" height="16"/>
+        <rect x="96"  width="14" height="16"/>
+        <rect x="120" width="14" height="16"/>
+        <rect x="144" width="14" height="16"/>
+        <rect x="168" width="14" height="16"/>
+      </g>
+      <text class="lbl-muted" x="200" y="148">8+ sectors → 8×32B</text>
+
+      <text class="lbl-muted" x="8" y="170"><tspan font-style="italic">Same 32 threads, very different bytes moved.</tspan></text>
+    </svg>
+
+    <div class="math-tex">
+$$\sigma \;=\; \bigl|\,\{\lfloor a(\ell)/32 \rfloor \,:\, \ell = 0,\dots,31\}\,\bigr|
+\qquad
+B_{\mathrm{txn}} \;=\; \overline{\sigma}\cdot 32\mathrm{B}\cdot N_w$$
+    </div>
+    <p class="cost-note" style="margin-top:2px">
+      $\sigma$: distinct 32B sectors touched by one sampled warp. $a(\ell)$: byte address of lane $\ell$. $\overline{\sigma}$: mean across sampled warps. $N_w$: exact dynamic warp-site count from the enclosing loops and grid.
+    </p>
+    <p class="cost-note">Warps are sampled deterministically (seeded by module hash + site) so the estimate is repeatable. Non-analyzable index expressions get a configured worst-case sector count.</p>
+  </div>
+
+  <!-- Compute cost — visual first -->
+  <div class="cost">
+    <h3>Compute: interpret the SSA graph</h3>
+    <p class="cost-desc">Two numbers come from one walk over the KIR SSA. <b>Critical path</b> — the longest dependency chain, in cycles — bounds latency. <b>Weighted op count</b> — sum of every dynamic op's issue weight — bounds throughput.</p>
+
+    <svg viewBox="0 0 440 165" width="100%" height="165">
+      <!-- Legend -->
+      <text class="lbl-muted" x="8" y="14">load a</text>
+      <text class="lbl-muted" x="8" y="30">load b</text>
+
+      <!-- Nodes -->
+      <g font-family="ui-monospace, Menlo, monospace" font-size="10">
+        <!-- load a -->
+        <rect x="60" y="4" width="52" height="20" rx="3" fill="#fbe9f2" stroke="#b74a89"/>
+        <text x="86" y="18" text-anchor="middle">load 400</text>
+        <!-- load b -->
+        <rect x="60" y="30" width="52" height="20" rx="3" fill="#fbe9f2" stroke="#b74a89"/>
+        <text x="86" y="44" text-anchor="middle">load 400</text>
+        <!-- mul -->
+        <rect x="150" y="4" width="52" height="20" rx="3" fill="#e8efff" stroke="#3d6bd8" stroke-width="2"/>
+        <text x="176" y="18" text-anchor="middle">mul 6</text>
+        <!-- add -->
+        <rect x="240" y="4" width="52" height="20" rx="3" fill="#e8efff" stroke="#3d6bd8" stroke-width="2"/>
+        <text x="266" y="18" text-anchor="middle">add 4</text>
+        <!-- const -->
+        <rect x="150" y="52" width="52" height="20" rx="3" fill="#f6f7f9" stroke="#b74a89"/>
+        <text x="176" y="66" text-anchor="middle">const 1</text>
+        <!-- store -->
+        <rect x="330" y="4" width="60" height="20" rx="3" fill="#e8efff" stroke="#3d6bd8" stroke-width="2"/>
+        <text x="360" y="18" text-anchor="middle">store 4</text>
+
+        <!-- Edges (critical path in blue thick) -->
+        <line x1="112" y1="14" x2="150" y2="14" stroke="#3d6bd8" stroke-width="2"/>
+        <line x1="112" y1="40" x2="150" y2="20" stroke="#b74a89" stroke-width="1"/>
+        <line x1="202" y1="14" x2="240" y2="14" stroke="#3d6bd8" stroke-width="2"/>
+        <line x1="202" y1="62" x2="240" y2="20" stroke="#b74a89" stroke-width="1"/>
+        <line x1="292" y1="14" x2="330" y2="14" stroke="#3d6bd8" stroke-width="2"/>
+      </g>
+
+      <!-- Ready cycles -->
+      <text class="lbl-muted" x="86" y="82" text-anchor="middle">ready @ 400</text>
+      <text class="lbl-muted" x="176" y="82" text-anchor="middle">400 + 6 = 406</text>
+      <text class="lbl-muted" x="266" y="82" text-anchor="middle">406 + 4 = 410</text>
+      <text class="lbl-muted" x="360" y="82" text-anchor="middle">410 + 4 = 414</text>
+
+      <!-- Two derived quantities -->
+      <g transform="translate(0,100)">
+        <rect x="8" y="0" width="200" height="55" rx="5" fill="#fbe9f2" stroke="#b74a89"/>
+        <text class="lbl" x="108" y="16" text-anchor="middle" font-weight="700">critical path (latency)</text>
+        <text class="lbl-muted" x="108" y="32" text-anchor="middle">longest chain of blue arrows</text>
+        <text class="lbl-muted" x="108" y="48" text-anchor="middle">= 414 cycles</text>
+
+        <rect x="222" y="0" width="210" height="55" rx="5" fill="#fbe9f2" stroke="#b74a89"/>
+        <text class="lbl" x="327" y="16" text-anchor="middle" font-weight="700">weighted op count (issue)</text>
+        <text class="lbl-muted" x="327" y="32" text-anchor="middle">Σ each op's cycle-weight</text>
+        <text class="lbl-muted" x="327" y="48" text-anchor="middle">× dynamic instance count</text>
+      </g>
+    </svg>
+
+    <div class="math-tex">
+$$C_{L} \;=\; W \cdot \kappa
+\qquad
+C_{I} \;=\; \tfrac{\sum_i w_i\, n_i}{\rho}$$
+    </div>
+    <p class="cost-note" style="margin-top:2px">
+      $\kappa$: critical-path cycles for one block. $W$: number of block waves. $w_i, n_i$: per-op cycle-weight and dynamic instance count. $\rho$: GPU issue rate (ops/cycle). Loops multiply the body's chain by trip count; global loads divide their latency by the hiding factor $h = \min(a_w, s_w)$ (active vs. saturating warps); <code>sync</code> adds a sync latency.
+    </p>
+  </div>
+
+  <!-- Aggregate -->
+  <div class="cost">
+    <h3>Aggregate: roofline max + launch</h3>
+    <p class="cost-desc">Three independent bottlenecks: latency, DRAM bandwidth, issue rate. The kernel runs at whichever is tightest — the roofline max. Then we add a launch-overhead tier based on how much of the GPU the grid fills.</p>
+
+    <svg viewBox="0 0 440 130" width="100%" height="130">
+      <!-- Three bars -->
+      <g font-size="10">
+        <text class="lbl" x="8" y="20">latency</text>
+        <rect x="80" y="10" width="140" height="14" fill="#fbe9f2" stroke="#b74a89"/>
+        <text class="lbl-muted" x="226" y="20">$= W \cdot \kappa$</text>
+
+        <text class="lbl" x="8" y="44">bandwidth</text>
+        <rect x="80" y="34" width="220" height="14" fill="#fbe9f2" stroke="#b74a89"/>
+        <text class="lbl-muted" x="306" y="44">$= B_{\mathrm{txn}} / \beta$</text>
+
+        <text class="lbl" x="8" y="68">issue</text>
+        <rect x="80" y="58" width="100" height="14" fill="#fbe9f2" stroke="#b74a89"/>
+        <text class="lbl-muted" x="186" y="68">$= \sum w_i n_i / \rho$</text>
+      </g>
+
+      <!-- Roofline max -->
+      <line x1="300" y1="8" x2="300" y2="76" stroke="#4a9169" stroke-width="1.5" stroke-dasharray="3 3"/>
+      <text class="lbl" x="300" y="86" text-anchor="middle" fill="#4a9169">max = raw_cycles</text>
+
+      <!-- Launch -->
+      <g transform="translate(0,100)" font-size="10">
+        <rect x="8" y="0" width="60" height="14" fill="#e5f2ea" stroke="#4a9169"/>
+        <text class="lbl" x="38" y="10" text-anchor="middle">launch</text>
+        <rect x="68" y="0" width="140" height="14" fill="#fbe9f2" stroke="#b74a89"/>
+        <text class="lbl" x="138" y="10" text-anchor="middle">raw_cycles</text>
+        <text class="lbl-muted" x="220" y="10">= total_cycles(a)</text>
+      </g>
+    </svg>
+
+    <div class="math-tex">
+$$C(a) \;=\; L(G) \;+\; \max\bigl(C_{L},\ C_{B},\ C_{I}\bigr)$$
+    </div>
+
+    <p class="cost-note" style="margin-top:2px">
+      $C(a)$: total estimated cycles for candidate $a$. $G$: grid block count. $L(G)$: one of three launch-overhead tiers — fits-one-SM, fits-one-wave, or multi-wave. Results are memoized by $(\text{module hash},\ \text{param bindings hash})$; structurally identical candidates only cost estimator time once.
+    </p>
+  </div>
+
+</div>
+
+<!-- =========== CP-SAT PROGRAM =========== -->
+<h2>CP-SAT extraction program</h2>
+<div class="sub-lead">
+  Pick a closed subgraph of alternatives that minimizes predicted runtime. The problem is small (a few thousand binary variables) and hands to CP-SAT as a lexicographic sequence of four linear objectives.
+</div>
+
+<div class="ilp">
+
+<div class="ilp-block">
+<b>Sets</b>
+<div class="math-tex">
+\[
+\begin{aligned}
+A &: \text{candidate alternatives (nodes in the alt graph)} \\
+V &: \text{value classes (circles in the alt graph)} \\
+M &: \text{distinct compiled modules (ArtifactKeys)} \\
+S \subseteq V &: \text{graph inputs} \qquad D \subseteq V : \text{demanded outputs} \\
+P(v) &= \{\, a \in A : v \in \text{outputs}(a)\,\} \\
+R(a) &\subseteq V : \text{inputs required by } a \\
+K(a) &\in M : \text{module } a \text{ compiles to}
+\end{aligned}
+\]
+</div>
+</div>
+
+<div class="ilp-block">
+<b>Decision variables</b>
+<div class="math-tex">
+\[
+x_a, y_v, z_m \in \{0,1\}
+\]
+</div>
+<ul class="tight">
+  <li>$x_a$ — candidate $a$ selected</li>
+  <li>$y_v$ — value $v$ materialized</li>
+  <li>$z_m$ — module $m$ compiled</li>
+</ul>
+</div>
+
+<div class="ilp-block" style="grid-column: 1 / -1;">
+<b>Constraints</b>
+<div class="math-tex">
+\[
+\begin{array}{rl@{\qquad}l}
+(1) & y_v = 1 & \forall\, v \in S \cup D \\[2pt]
+(2) & \displaystyle\sum_{a \in P(v)} x_a \;=\; y_v & \forall\, v \in V \setminus S \\[10pt]
+(3) & x_a \;\le\; y_v & \forall\, a \in A,\ v \in R(a) \\[2pt]
+(4) & x_a \;\le\; z_{K(a)} & \forall\, a \in A \\[2pt]
+(5) & z_m \;\le\; \displaystyle\sum_{a : K(a)=m} x_a & \forall\, m \in M \\[10pt]
+(6) & \displaystyle\sum_{m \in M} z_m \;\le\; M_{\max} & \text{(optional)} \\[10pt]
+(7) & \displaystyle\sum_{m \in M \setminus M_{\mathrm{orig}}} z_m \;\le\; M_{\mathrm{new}} & \text{(optional)}
+\end{array}
+\]
+</div>
+<ol class="constraint-list">
+  <li>Graph inputs and demanded outputs are pinned on.</li>
+  <li>Each materialized value has <em>exactly one</em> selected producer. This also encodes &ldquo;pick a candidate and you get all its outputs&rdquo;: a multi-output $x_a$ appears in this sum for each of its outputs, so selecting it forces every $y_v$ in $\mathrm{outputs}(a)$ to 1.</li>
+  <li>A selected candidate needs all its inputs materialized.</li>
+  <li>Selecting a candidate forces its module to compile.</li>
+  <li>A module is compiled only if at least one candidate using it is selected — together with (4), $z_m$ is the OR of the $x_a$'s that compile to $m$.</li>
+  <li>Optional: cap total compiled modules.</li>
+  <li>Optional: cap new modules beyond what the original graph already needs.</li>
+</ol>
+<p class="cost-note" style="margin-top:6px">
+  No acyclicity constraint is needed: the alternative graph is a DAG by construction and every subgraph of a DAG is a DAG.
+</p>
+</div>
+
+<div class="ilp-block" style="grid-column: 1 / -1;">
+<b>Objective — solved as a sequence of four linear minimizations</b>
+<div class="math-tex">
+\[
+r(a) \;=\; \max\!\Bigl(\,1,\ \bigl\lfloor \tfrac{C(a)}{q} \bigr\rceil\Bigr)
+\qquad
+\text{($C(a)$ from the cost model, $q$ = cycle quantum)}
+\]
+</div>
+
+<div class="stage-list">
+  <div class="stage-row">
+    <span class="stage-tag">Stage 1</span>
+    <div class="stage-body">
+      <div class="math-tex">
+$$R^{\star} \;=\; \min \sum_{a \in A} r(a)\, x_a
+\qquad\text{then lock}\qquad
+\sum_{a} r(a)\, x_a \;\le\; R^{\star} + \bigl\lceil R^{\star}\, p / 10^{6} \bigr\rceil$$
+      </div>
+      <div class="stage-cap">Primary target: predicted runtime. The lock's slack $p$ is <code>runtime_tolerance_ppm</code> — allows a tiny runtime concession for a big compile-time saving next stage.</div>
+    </div>
+  </div>
+
+  <div class="stage-row">
+    <span class="stage-tag">Stage 2</span>
+    <div class="stage-body">
+      <div class="math-tex">
+$$Z^{\star} \;=\; \min \sum_{m \in M} z_m
+\qquad\text{then lock}\qquad
+\sum_{m} z_m \;\le\; Z^{\star}$$
+      </div>
+      <div class="stage-cap">Compile count: one $\mathrm{nvcc}$ invocation per selected module. Proxy for build time until per-module compile cost is calibrated.</div>
+    </div>
+  </div>
+
+  <div class="stage-row">
+    <span class="stage-tag">Stage 3</span>
+    <div class="stage-body">
+      <div class="math-tex">
+$$N^{\star} \;=\; \min \sum_{a \in A} x_a
+\qquad\text{then lock}\qquad
+\sum_{a} x_a \;\le\; N^{\star}$$
+      </div>
+      <div class="stage-cap">Graph size: fewer selected candidates means less launcher and planner work at runtime.</div>
+    </div>
+  </div>
+
+  <div class="stage-row">
+    <span class="stage-tag">Stage 4</span>
+    <div class="stage-body">
+      <div class="math-tex">
+$$Y^{\star} \;=\; \min \sum_{v \in V} y_v$$
+      </div>
+      <div class="stage-cap">Materialized-value count: a peak-memory proxy. Inputs and demanded outputs are pinned by (1), so this only prunes optional intermediates.</div>
+    </div>
+  </div>
+</div>
+
+<p class="cost-note" style="margin-top:6px">
+  Each stage is a separate CP-SAT solve; the previous stage's solution is passed to the next as a hint. If any stage returns <code>Unknown</code> or <code>Infeasible</code> within the wall-time limit, we fall back to the seed prefix (the unfused graph is always feasible) and report the reason.
+</p>
+</div>
+
+</div>
+
+</div>
+</body>
+</html>

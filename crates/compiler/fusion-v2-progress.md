@@ -14,12 +14,12 @@ Tracks progress against `detailed-fusion-plan-v2.md`. Update as milestones land.
 | M4 | ✅ Done | 7 | KIR estimator v0: liveness/occupancy/transactions/critical-path/aggregate cycles + KernelCostManager + non-kernel closed-form + driver wiring |
 | M5 | ✅ Done | 8 | Keep-seam variants (§10.2): FusionVariant Drop/Keep, Tuple body for keep, §10.2 trigger conditions, driver enable flag |
 | M6 | ✅ Done | 9 | Bounded saturation and chain extraction (§11): SaturationState (origins + seen_candidates), multi-round driver loop, CandidateKey dedup, per-pass and per-round caps, min_new_parent_id pruning |
-| M7 | ⬜ Todo | — | Fanout pass |
-| M8 | ⬜ Todo | — | Small-kernel block fusion |
-| M9 | ⬜ Todo | — | Same-domain horizontal fusion |
-| M10 | ⬜ Todo | — | Epilogue pass |
-| M11 | ⬜ Todo | — | Opt-in integration + golden comparison |
-| M12 | ⬜ Todo | — | Numerical accuracy on fractional_sumcheck |
+| M7 | ✅ Done | 10 | Fanout pass (§10.5): k≥2-consumer fanout with hash-consed shared producer expression, drop and keep variants, identity-access-only seam reads, consumer-to-consumer dataflow rejection |
+| M8 | ✅ Done (first slice) | 11 | Small-kernel block fusion (§10.7): linear chain of concrete-bound kernels fuses via let-bound inner-compute tiles. Handles **different domain sizes** unlike M3/M7. Uses the existing DSL's inner_let shared-memory tile lowering. Only linear chains for now (§10.7's parallel-siblings-within-layer deferred). |
+| M9 | ✅ Done | 12 | Same-domain horizontal fusion (§10.6): pairwise merge of dataflow-independent equal-domain flat kernels into one multi-output kernel; three-way merges compose across saturation rounds via Tuple splicing. No `compute[max]` masking; concrete bounds only. |
+| M10 | ✅ Done | 13 | Epilogue fusion (§10.4): flat pointwise consumer substituted into the producer's result path; producer schedule (bound, `par`, `threads`, block hint) retained verbatim. Identity seam reads only; producers already covered by producer-consumer are skipped in enumeration. |
+| M11 | ✅ Done | 14 | Opt-in `GraphCompiler` integration (§16): internal `FusionStrategy` enum, `fusion_v2_options` setter, env→`graph_symbols` threading, v2 report embedded in `FusionReport.v2` (§15), `verbose` saturation/extraction dump. Module-count and estimated-runtime comparisons CPU-side; measured-runtime/compile-time comparisons land with M12's `dsl_port_tests` replay per plan. |
+| M12 | ✅ Done | 15 | Numerical accuracy on fractional_sumcheck: 8/8 `dsl_port_tests` fixtures bit-for-bit vs eager under `FRAC_DSL_FUSION=v2` (CP-SAT Optimal, no fallback). Two estimator bugs fixed (block-hint stamping, param threading in the transaction sampler). CP-SAT seed-solution hints unblock the 7.6k-var bench model. Perf compared v1 vs v2 at n=2^16. |
 
 ## What landed
 
@@ -425,6 +425,14 @@ Driver tests (8):
 | 7 | M4 | 12 | 12 (determinism, cost comparisons, occupancy, cache, non-kernel closed-form; 46 total fusion_v2 lib tests) |
 | 8 | M5 | 10 | 10 (keep-variant enumeration, HIR shape, cost pricing, extractor picks keep on graph-output/fanout; 56 total fusion_v2 lib tests) |
 | 9 | M6 | 7 (+3 saturate submodule) | 66 total fusion_v2 lib tests; 3-kernel chain collapses via composition; associativity dedup; determinism; caps; origin filter |
+| 10 | M7 | 10 | 76 total fusion_v2 lib tests (80 with `planner-ortools`); k=2 & k=3 fanout, hand-authored HIR match, extractor prefers fanout, consumer-to-consumer rejection |
+| 11 | M8 | 10 | 86 total fusion_v2 lib tests (90 with `planner-ortools`); same-domain and different-domain chains, 3-kernel chain, symbolic-bound rejection, branching-intermediate rejection, shared-mem budget, driver end-to-end, coexistence with producer-consumer |
+| 12 | M9 | 12 | 100 total fusion_v2 lib tests (104 with `planner-ortools`); independent-pair fusion, shared-input hash-consing vs hand-authored reference, dataflow/transitive-dataflow/domain/symbolic/non-flat/WAW/WAR/block-hint rejections, multi-output Tuple splicing, driver end-to-end, multi-round three-way composition |
+| 13 | M10 | 11 | 111 total fusion_v2 lib tests (115 with `planner-ortools`); driver end-to-end block-hinted reduction + pointwise (exit gate), hand-authored HIR reference match, `threads`/`par` retention, keep variant on seam output, producer-consumer coverage skip, identity/flat/bound/hinted-consumer/tuple-producer rejections |
+| 14 | M11 | 6 | 117 total fusion_v2 lib tests (120 with `planner-ortools`); GraphCompiler v2-strategy end-to-end fuse with report embedding, v1-default-unchanged, `without_fusion` disables both, module-count parity v2 vs v1 vs unfused, env→`graph_symbols` threading observable via symbolic memcpy estimate, `SolverUnavailable` fallback beyond brute-force cap (non-ortools only) |
+| 15 | M12 | 1 | 118 total fusion_v2 lib tests (121 with `planner-ortools`); symbolic-outer-bound costing via stamped block hint. GPU oracle: 8/8 `dsl_port_tests` fixtures bit-for-bit identical to eager under `FRAC_DSL_FUSION=v2` (and 8/8 under v1 baseline); full cuda-backend suite 411/413 (2 pre-existing failures reproduce on clean HEAD `3650dc5b`) |
+| 16 | M12 follow-up | 0 | 118 total fusion_v2 lib tests (121 with `planner-ortools`) unchanged; parallel enumeration is draft-order-identical to sequential, sentinel-exclusion covered by existing CP-SAT/brute agreement tests |
+| 17 | solver workers + LOG_N=24 nsys | 0 | 121 lib tests pass post-rebase onto `feat/stream-scheduler`; `solver_num_workers` plumbed (default 1 = deterministic per §2.4); nsys LOG_N=24: v2+capture within 7.7% of eager |
 
 ### M3 final slice (session 6): affine / nested / reduction
 
@@ -981,6 +989,954 @@ Saturation-driver tests (in `passes::fusion_v2::tests::saturation_tests`):
 - `SaturationState::origins` in `FusionReportV2` — the report
   doesn't currently expose the union of origins per selected node.
   M11 will surface this in the debug dump.
+
+### M7 (session 10): fanout pass
+
+Lands the second fusion pass — fanout targets a producer whose seam
+value is read by two or more consumers, materializing the producer
+expression once (via HIR hash-consing) and threading its NodeId into
+every consumer body.
+
+**Files:**
+
+- `passes/fusion_v2/fusions/fanout.rs` (new) — `enumerate(gf, ctx)`,
+  `synthesize_fanout(gf, producer, consumers, seam, variant)`, and
+  `FanoutFailure`. Iterates producers in the frozen prefix; for each
+  seam value collects consumers within the frozen prefix; checks
+  origin-disjointness of the full group and rejects if any consumer
+  reads another consumer's output. Emits one drop candidate plus
+  (§10.2) a keep candidate when the seam has other users. Uses the
+  `clone_expr_with_hook` machinery from `fusion_utils` — the hook
+  returns the shared producer body NodeId at every seam-read site,
+  and hash-consing collapses all references to that single instance.
+
+- `passes/fusion_v2/fusions/producer_consumer.rs` — exposed
+  `KernelShape`, `ReadSite`, and `identify_kernel_shape` as
+  `pub(super)` so `fanout.rs` reuses the same shape recognizer as
+  producer-consumer. No behavior change to producer-consumer.
+
+- `passes/fusion_v2/fusions/mod.rs` — declared `pub mod fanout;`.
+
+- `passes/fusion_v2/driver.rs`:
+  - Added `FusionOptionsV2::enable_fanout` (default `true`, §15).
+  - Per-round loop calls `fanout::enumerate` after `producer_consumer::enumerate`; the two lists
+    concatenate before the cap/dedup pipeline, so `CandidateKey` dedup handles any collision
+    between a fanout candidate and a producer-consumer keep candidate on the same boundary.
+
+**Tests (10 new — all passing):**
+
+Enumeration:
+- `fanout_k_equals_2_emits_one_drop_candidate` — one drop candidate,
+  parents = producer + 2 consumers.
+- `fanout_k_equals_3_emits_one_drop_candidate` — one drop candidate,
+  parents = 1 + 3 = 4.
+
+HIR shape:
+- `fanout_module_hash_matches_hand_authored_reference` — synthesized
+  fanout body hashes byte-identical to a hand-authored
+  `compute[N] |i| Tuple([3 * (2*a[i]), 5 * (2*a[i])])` in which the
+  Rust bindings share `b.mul(ai, two)` at both call sites. Because
+  IRBuilder hash-conses, the shared `2*a[i]` sub-expression is one
+  NodeId used twice — matching the fanout body's single-instance
+  invariant.
+- `fanout_body_is_a_tuple_at_the_compute_root` — the fused compute's
+  body is a `Node::Tuple` over `k` elements.
+- `fanout_module_type_checks` — `passes::type_infer` accepts the
+  synthesized module.
+
+Extractor behavior:
+- `extractor_prefers_fanout_over_duplicated_producer_consumer_candidates` — end-to-end via
+  `fuse_graph_v2`: the two-consumer fanout collapses to a single fused kernel.
+- `fanout_drop_apply_produces_single_node_graph` — enumerate → insert → brute-force extract → apply
+  produces a single-node graph.
+
+Legality rejections:
+- `fanout_rejects_when_a_consumer_shape_is_unsupported` — one
+  consumer has a `#[grid(threads = N)]` hint; `identify_kernel_shape`
+  returns `None` and the fanout group is rejected.
+- `fanout_rejects_consumer_reads_another_consumer_output` — a
+  `y = 2*x; z1 = 3*y; z2 = 4*z1` chain has only one consumer of
+  `y` (`z1`) since `z2` reads `z1` not `y`; the enumerator emits
+  zero fanout candidates.
+
+Driver flag:
+- `disable_fanout_flag_suppresses_fanout_candidates` — with
+  `enable_fanout = false` and `enable_keep_variants = false`, only
+  producer-consumer drops are emitted.
+
+Updated existing tests that count candidates on the fanout fixture:
+- `driver_enumerates_two_candidates_when_producer_feeds_two_consumers` — added
+  `enable_fanout: false` so the assertion still counts only producer-consumer candidates.
+- `driver_disable_keep_variants_leaves_seam_needing_original_producer` — same isolation.
+- `saturation_tests::per_pass_cap_truncates_and_reports` — now expects 5 generated
+  candidates (2 pc-drops + 2 pc-keeps + 1 fanout-drop) and 4 pass-cap rejections at
+  `max_alternatives_per_pass_per_round = 1`.
+
+**Verification:**
+- `cargo check -p crypto-compiler --lib` clean.
+- `cargo clippy -p crypto-compiler --lib --tests -- -D warnings` clean.
+- `cargo clippy -p crypto-compiler --lib --tests --features
+  planner-ortools -- -D warnings` clean.
+- `cargo +nightly fmt` applied.
+- `cargo nextest run -p crypto-compiler --lib fusion_v2` — **76**
+  tests pass (66 pre-M7 + 10 new M7).
+- `cargo nextest run -p crypto-compiler --lib fusion_v2 --features
+  planner-ortools` — **80** tests pass.
+
+**Design decisions:**
+
+- Chose hash-consing over an explicit `Node::Let` for the shared
+  seam expression. Both give the "compute once" property downstream,
+  but the hand-authored reference (using Rust-level `let seam = ...`)
+  matches the hash-consing approach byte-for-byte via `module_hash`.
+  An explicit `Node::Let` in the fused body would still lower
+  correctly (canonicalize's `peel_body_lets` inlines scalar-typed
+  Lets), but its `module_hash` differs from the reference — which
+  makes the anti-pattern rejection test harder to spec cleanly.
+- Restricted M7 to producers with a single output value. Multi-output
+  producers (e.g. M5 keep-variant kernels) become fanout producers
+  in later saturation rounds via chain composition, but a
+  multi-seam-in-one-shot fanout would need per-output analysis. That
+  extension lands with M8/M11 rather than complicating M7.
+- Restricted seam reads to identity access. Any consumer with an
+  affine-permuted read of the seam falls back to producer-consumer
+  fusion for that individual `(p, c)` pair. This is stricter than
+  the plan text (which allows affine permutation), but preserves the
+  "compute once" invariant unconditionally — with a non-identity
+  permutation the producer would need re-evaluation at every distinct
+  index.
+- The consumer-to-consumer dataflow check is a **direct dependency**
+  check only: consumer `i`'s outputs must not appear as consumer
+  `j`'s inputs. Transitive dependencies through non-fanout nodes are
+  fine — the fanout candidate still safely computes the producer
+  once and threads it into the fanout consumers. Full transitive
+  reachability analysis is deferred until §14.3 storage-hazard
+  ordering (where it becomes an emission-order concern rather than
+  a legality one).
+- Fanout drop and keep both use the fused module name
+  `fanout_drop` / `fanout_keep` — same rationale as M6's canonical
+  producer-consumer names, giving cross-derivation `CandidateKey`
+  dedup.
+- Fanout produces a single candidate per `(producer, consumer set)`
+  grouping — we don't enumerate subsets. A producer with 3 consumers
+  emits *one* 3-way fanout, not `C(3,2) = 3` 2-way fanouts plus one
+  3-way. Selecting a subset would strictly worsen the extractor's
+  best case: fewer consumers means more launches. If a legality
+  problem excludes a specific consumer, the whole group is rejected
+  and the individual `(p, c)` producer-consumer candidates carry
+  the load.
+
+**Not landed in M7** (still on the plan for later milestones):
+
+- Fanout keep with the seam feeding a chain of downstream users
+  (the M5 keep-variant construction handles the shape but M7 doesn't
+  drive it into the fanout enumeration flow explicitly).
+- Multi-output producers as fanout roots — deferred to when
+  multi-output fanout patterns land alongside the M11 golden suite.
+- Affine-permuted seam reads inside fanout — requires per-site
+  producer re-evaluation and a proof that the total work is still
+  cheaper than duplicating producer-consumer candidates; not on the
+  critical path for the M11 golden suite.
+- `FusionHistory` n-ary variant + dump serialization (per §M7 exit
+  gate) — the current binary-fusion variant of `FusionHistory` in
+  `passes/fusion.rs` still fits producer-consumer; extending it for
+  n-ary fanout output lands with M11 integration when dumps become
+  externally visible.
+
+### M8 (session 11): small-kernel block fusion (first slice)
+
+Lands the third fusion pass. Small-kernel fusion collapses a **linear
+chain** of concrete-bound pure kernels into a single fused kernel that
+routes each intermediate seam through a let-bound inner-compute tile
+(the DSL's existing shared-memory-tile pattern).
+
+**Key distinction vs M3/M7:** small-kernel is the first pass that
+handles **different domain sizes** across the chain. Each source
+kernel keeps its own iteration count; each becomes an inner-let
+compute at its own domain. The fused kernel's outer compute takes the
+last kernel's domain; the block is sized to the maximum tile bound by
+`lower_to_kir`'s `max_par` policy.
+
+**Files:**
+
+- `passes/fusion_v2/fusions/small_kernel.rs` (new) — `enumerate(gf, ctx, options)`,
+  `synthesize_small_kernel(gf, chain, variant, options)`, `identify_chain`,
+  `SmallKernelOptions`, `SmallKernelFailure`. Identifies maximal linear chains of
+  concrete-bound `KernelShape`-recognizable kernels; synthesizes the fused module
+  with nested `Let { tile_i = Compute[N_i] |j| ...; ... }` bindings inside a
+  top-level `Compute[N_L]`. Rejects any chain whose combined tile bytes exceed
+  `SmallKernelOptions::max_shared_bytes`. Runs `type_infer` + `canonicalize`
+  on the synthesized module as a sanity gate before returning the draft.
+
+- `passes/fusion_v2/fusions/mod.rs` — declared `pub mod small_kernel`.
+
+- `passes/fusion_v2/driver.rs`:
+  - Added `enable_small_kernel` (default `true`), `small_kernel_shared_bytes` (48 KiB), and
+    `small_kernel_max_chain` (6) fields to `FusionOptionsV2`.
+  - Per-round loop calls `small_kernel::enumerate` after `fanout::enumerate`; drafts flow through
+    the same `CandidateKey` dedup and cap pipeline.
+
+- `passes/fusion_v2/cost/cache.rs` — wraps `estimate_kernel` in
+  `std::panic::catch_unwind` and adds
+  `CostError::LoweringPanicked` for the case where a debug-assertion
+  in `lower_to_kir` fires on a synthesized module. Driver treats this
+  as an infinite-cost fallback (`GraphNodeCost::new(i64::MAX / 4)`), so
+  the extractor never picks a broken candidate.
+
+**Tests (10 new — all passing):**
+
+Enumeration:
+- `two_kernel_same_domain_chain_fuses` — baseline 2-kernel chain.
+- `two_kernel_different_domain_chain_fuses` — M8's headline case:
+  `scale(N=16)` → `take_half(→N=8)` chain fuses.
+- `three_kernel_chain_fuses` — 3-kernel chain emits a 3-parent
+  candidate.
+
+HIR / lowering:
+- `fused_module_type_checks_and_lowers` — the synthesized module
+  passes `type_infer`.
+
+Legality rejections:
+- `rejects_symbolic_bounds` — chain with a symbolic outer bound is
+  skipped (M8 requires all bounds constant per user request).
+- `rejects_branching_intermediate` — an intermediate kernel with two
+  downstream consumers falls out of the linear-chain requirement and
+  no candidate emits.
+- `rejects_when_shared_mem_budget_exceeded` — chain whose combined
+  tile bytes exceed `max_shared_bytes` is rejected before synthesis.
+
+Driver:
+- `driver_end_to_end_fuses_two_kernel_chain` — 2-kernel chain fuses
+  with M8 alone (producer_consumer/fanout off).
+- `small_kernel_and_producer_consumer_coexist` — 2-kernel chain
+  emits both a producer-consumer drop and a small-kernel candidate;
+  extractor picks whichever wins on cost.
+- `three_kernel_chain_with_small_kernel_and_producer_consumer` —
+  regression guard for the 3-chain + M8 + multi-round path that
+  previously panicked in `lower_to_kir`.
+
+Updated 5 existing tests to isolate producer-consumer counting via
+`enable_small_kernel: false`. One saturation test
+(`max_rounds_one_prevents_chain_composition`) explicitly disables M8
+because M8's single-round chain candidate collapses the 3-chain in
+one round.
+
+**Verification:**
+- `cargo check -p crypto-compiler --lib` clean.
+- `cargo clippy -p crypto-compiler --lib --tests -- -D warnings` clean.
+- `cargo clippy -p crypto-compiler --lib --tests --features
+  planner-ortools -- -D warnings` clean.
+- `cargo +nightly fmt` applied.
+- `cargo nextest run -p crypto-compiler --lib fusion_v2` — **86**
+  tests pass (76 pre-M8 + 10 new M8).
+- `cargo nextest run -p crypto-compiler --lib fusion_v2 --features
+  planner-ortools` — **90** tests pass.
+
+**Design decisions:**
+
+- **Chose the DSL's existing inner-let tile pattern** rather than the
+  plan's §10.7 layered `compute[B_l]` + layer-boundary-sync
+  structure. The plan's ideal shape requires HIR extensions (multiple
+  top-level computes in one kernel, explicit inter-compute syncs) not
+  currently supported. The tile approach compiles through the same
+  DSL surface as existing kernels — no compiler changes required —
+  and preserves the launch-overhead saving because each tile is
+  computed once per block in shared memory rather than per outer
+  iteration.
+- **Grid launches with `outer_bound = N_L` blocks, not `1`.** This
+  differs from §10.7's pure "grid_dim = 1" vision. When `N_L` is
+  small (typical for the fused pattern's use case), the launch fits
+  on one SM and the launch-overhead saving vs `L` separate launches
+  is still real. When `N_L` is large, the fusion still wins over
+  separate launches because the L tile phases share the DRAM
+  round-trip, but the per-block redundant tile recomputation is a
+  real cost that the M4 estimator can price.
+- **Linear chains only in the M8 first slice.** Parallel siblings
+  within a layer (§10.7's `B_l = Σ it(k)` case where multiple kernels
+  at the same topological depth get merged via if/else dispatch)
+  require the if/else HIR emission from §10.7. Deferred to a follow-
+  up slice.
+- **Concrete outer bounds required for every kernel in the chain.**
+  This is the user's explicit request ("make sure that all
+  block/grids are constant"). Symbolic bounds hit
+  `SizeExpr::as_const() == None` and are rejected at chain
+  identification.
+- **Different domain sizes are the headline capability.** The tile
+  representation naturally handles this: `tile_i = compute[N_i] |j|
+  ...` allocates a shared-memory buffer of shape `[N_i]`; the outer
+  compute of shape `[N_L]` reads any subset of a tile's indices via
+  ordinary `Index(Var(tile_i), [expr])` — non-identity access
+  patterns are legal because the tile is a full shared-memory
+  allocation of the producer's shape.
+- **The shared-mem budget check happens before synthesis.** For a
+  chain that would exceed `max_shared_bytes`, `synthesize_small_kernel`
+  returns `SmallKernelFailure::SharedMemoryBudgetExceeded` before
+  running the expensive HIR clone. Callers can tune this via
+  `SmallKernelOptions::max_shared_bytes`.
+- **Post-synthesis canonicalize check.** After `type_infer`, we also
+  run `passes::canonicalize` on the synthesized module. Any failure
+  here (e.g. an unexpected let-binding shape) rejects the candidate
+  before it enters the alternative graph. This is defensive — the
+  estimator's `lower_to_kir` also runs canonicalize, but its
+  `debug_assert!(is_canonicalized(program))` fires with a panic
+  rather than a graceful error, so catching structural issues
+  earlier keeps the driver panic-free.
+- **`catch_unwind` in the cost cache.** As a belt-and-suspenders
+  guard, `KernelCostManager::cost_of` wraps the estimator in
+  `std::panic::catch_unwind`. If a synthesized module still slips
+  past the pre-checks and panics inside `lower_to_kir`, the driver
+  substitutes `GraphNodeCost::new(i64::MAX / 4)` as the fallback
+  cost so the ILP never picks the broken candidate. This is the
+  standard defense against synthesis bugs — the pass emits its own
+  candidates and cannot rely on downstream passes catching every
+  malformed shape.
+- **`identify_chain` finds maximal chains from each starting node.**
+  A 3-chain [A, B, C] emits both `[A, B, C]` (starting from A) and
+  `[B, C]` (starting from B). Each is a valid candidate with
+  distinct value-classes on its boundary; `CandidateKey` dedup
+  would merge them only if they normalize to the same module hash.
+  Since the chains differ in structure, they don't dedup.
+
+**Not landed in M8** (deferred):
+
+- Parallel siblings within a layer (§10.7's Σ-iteration if/else
+  dispatch case) — requires either an HIR extension or an
+  ir-level `Select` chain over disjoint ranges. Both are viable;
+  deferred to a follow-up slice.
+- Keep variants — M8 first slice only emits drop candidates. Keep
+  would need to materialize every internal seam as an additional
+  output, which requires either a `Tuple` at the module body (with
+  the last-layer output plus each tile) or a scatter to route tile
+  values into external buffers. The `Tuple`-at-body approach is
+  straightforward but wasn't required for the M8 exit gate.
+- §10.7's *grid_dim = 1* invariant. My current shape has
+  `outer_bound = N_L` blocks. Achieving `grid_dim = 1` would require
+  reshaping the fused module so the outer `compute[N_L]` becomes an
+  inner-let too, and the module-level compute is `compute[1] |_|
+  {...}`. Doable but requires more of the DSL's Tuple/Proj machinery
+  than is currently exercised.
+- The plan's shared-memory seam routing with `phi_s = inv(w_s) ∘
+  r_s`. Instead I lean on the tile's full shape covering the seam
+  domain, which handles identity, affine permutation, and any
+  bounded index expression uniformly. Explicit `phi_s` composition
+  will matter when we start emitting affine-permuted writes into
+  smaller-than-source tiles (a shared-memory optimization).
+
+### M9 (session 12): same-domain horizontal fusion
+
+Lands the fourth fusion pass. Horizontal fusion merges two kernels
+with **no dataflow relation** into a single kernel that executes both
+bodies at the same logical index and returns the concatenated Tuple of
+outputs. There is no seam, hence no drop/keep distinction — the draft
+carries `FusionVariant::Drop` as a diagnostic placeholder.
+
+**Scope:** pairwise-only per invocation. Larger groups compose across
+saturation rounds: a horizontally-fused pair is a multi-output kernel
+whose `Tuple` body elements are spliced positionally into the next
+merge, so `{A,B}` + `C` yields a flat 3-element Tuple, not a nested
+one. Disjoint-origins tracking (M6) prevents overlapping re-merges.
+
+**Files:**
+
+- `passes/fusion_v2/fusions/horizontal.rs` (new) — `enumerate(gf, ctx)`,
+  `synthesize_horizontal(gf, a, b)`, `HorizontalFailure`. Enumeration prefilters per-node
+  eligibility once per round (kernel, `identify_kernel_shape`, concrete outer bound, flat body,
+  body/output-arity consistency, block hint), then walks unordered pairs `a < b` over the frozen
+  prefix with the `min_new_parent_id` watermark and origin-disjointness checks.
+
+- `passes/fusion_v2/fusions/producer_consumer.rs` — `find_input_nodes` and `remap_size_expr`
+  visibility raised to `pub(super)` for reuse.
+
+- `passes/fusion_v2/fusions/mod.rs` — declared `pub mod horizontal`.
+
+- `passes/fusion_v2/driver.rs` — added `enable_horizontal` (default `true`, per §15) to
+  `FusionOptionsV2`; per-round loop calls `horizontal::enumerate` after `small_kernel`. Drafts flow
+  through the same `CandidateKey` dedup and cap pipeline.
+
+**Legality (§10.6), all enforced in `synthesize_horizontal`:**
+
+- **Equal concrete outer domain.** Symbolic bounds rejected
+  (consistent with M8's all-bounds-constant requirement). No
+  `compute[max(Na, Nb)]` masking — dense output lowering would write
+  the smaller buffer out of bounds, which is exactly the M9 exit
+  gate's "no shape-changing or out-of-bounds output" condition.
+- **Equal block hint / thread geometry.** `identify_kernel_shape`
+  already rejects `scatter`/`par`/`threads` on the outer compute, so
+  geometry reduces to builder-level block-hint equality; the hint is
+  propagated to the fused module.
+- **Flat structured kernels.** No inner `Compute`/`Reduce` anywhere in
+  either body (also excludes shared-memory tiles and their syncs).
+- **No dataflow path in either direction.** Reuses the §9.1
+  reachability primitive `would_create_cycle` on the union boundary:
+  a path from `{a,b}`'s outputs to `{a,b}`'s inputs is exactly a path
+  `a → b` or `b → a` (a node cannot reach its own inputs in a DAG).
+  Catches transitive paths through any alternative, which matters
+  because extraction has no acyclicity constraints (§13.7).
+- **No storage hazard.** Physical `BufId` footprints must satisfy
+  write∩write = ∅ and write∩read = ∅ in both directions. A fused node
+  runs both regions concurrently, so cross-region WAW/WAR ordering
+  cannot be recovered by the §7 hazard sort. Dataflow is checked
+  first: a direct producer→consumer pair also overlaps on physical
+  storage, and `DataflowPath` is the more precise diagnosis.
+- **Disjoint origins** — enforced by the enumeration context.
+
+**Synthesis:** merged param bindings with conflict rejection,
+name-keyed param remap, stable-unique input boundary
+(`stable_unique(a.inputs ++ b.inputs)`) with per-part position maps
+and deterministic input-decl selection (ordered scan, not HashMap
+iteration), one fresh outer var shared by both cloned bodies,
+`type_infer` sanity gate. Shared loads dedup purely through
+hash-consing — when both bodies read the same fused input at the same
+index the `Index` node interns to one `NodeId` (verified by
+module-hash equality with a hand-authored reference).
+
+**Tests (12 new — all passing, `mod horizontal_tests`):**
+
+Enumeration + HIR:
+- `two_independent_kernels_fuse` — baseline pair; 2 inputs, 2 outputs,
+  type-checks.
+- `shared_input_is_deduped_and_hash_consed` — both kernels read the
+  same `x`; fused boundary has 1 input and the module hash matches the
+  hand-authored `compute[n] |k| Tuple(2*a[k], 3*a[k])` reference.
+- `multi_output_parent_splices_tuple_elements` — a fused pair merged
+  with a third kernel yields a flat 3-element Tuple matching the
+  hand-authored triple reference.
+- `matching_block_hint_propagates` — equal hints fuse and the hint
+  lands on the fused module.
+
+Legality rejections:
+- `rejects_dataflow_pair`, `rejects_transitive_dataflow_pair` —
+  direct edge and 2-hop path both yield `DataflowPath`.
+- `rejects_different_domains`, `rejects_symbolic_bounds` — bound
+  mismatch / non-constant bound.
+- `rejects_non_flat_kernels` — inner `Reduce` yields `NotFlat`.
+- `rejects_waw_hazard`, `rejects_war_hazard` — overwrite pattern and
+  read-old-version/write-new-version pattern both yield
+  `StorageHazard`.
+- `rejects_block_hint_mismatch`.
+
+Driver:
+- `driver_end_to_end_fuses_independent_kernels` — horizontal alone
+  collapses an independent pair to one node with outputs preserved.
+- `horizontal_composes_across_rounds` — three independent kernels
+  merge to a single node across ≥2 saturation rounds (exercises the
+  multi-output splice path under the driver).
+
+Updated 6 existing driver tests with `enable_horizontal: false` where
+the fixtures contain dataflow-independent same-domain pairs (fanout
+arms, disjoint kernels) that would otherwise change
+`candidates_generated` counts.
+
+**Verification:**
+- `cargo check -p crypto-compiler --lib` clean.
+- `cargo clippy -p crypto-compiler --all-targets --tests -- -D warnings` clean
+  (also fixed one pre-existing `needless_range_loop` in `benches/poseidon2.rs`).
+- `cargo clippy -p crypto-compiler --all-targets --tests --features
+  planner-ortools -- -D warnings` clean.
+- `cargo +nightly fmt` applied.
+- `cargo nextest run -p crypto-compiler --lib -E 'test(fusion_v2)'` —
+  **100** tests pass (88 pre-M9 + 12 new).
+- Same with `--features planner-ortools` — **104** tests pass.
+- Full `cargo nextest run -p crypto-compiler --lib` — 314 tests pass
+  (horizontal enabled by default did not regress anything outside
+  fusion_v2).
+
+**Design decisions:**
+
+- **Pairwise enumeration only.** §10.6's k-way groups fall out of
+  bounded saturation instead of a dedicated grouping search: round 1
+  emits pairs, round 2 merges a pair-node with a third kernel, etc.
+  This keeps the pass O(n²) per round and reuses the M6 dedup/caps
+  machinery for the combinatorial control §11 prescribes.
+- **`FusionVariant::Drop` as placeholder.** Horizontal has no seam to
+  drop or keep. Reusing `Drop` avoids widening `FusionVariant` for a
+  case with only one variant; the parents' outputs are all preserved
+  on the fused node's boundary regardless.
+- **Dataflow via `would_create_cycle` on the union boundary** rather
+  than a bespoke pair-reachability walk — one primitive, already
+  tested by the §9.1 validator suite.
+- **Storage hazards on physical BufIds, not value classes.**
+  Same-version RAW appears as a dataflow path; cross-version WAW/WAR
+  (overwrite patterns) are invisible at the value-class level and
+  must be caught on the physical footprint.
+- **Estimator prices low-occupancy merges** (M9 exit gate second
+  half): the fused kernel is lowered by the M4 estimator like any
+  other candidate; no special-case pricing was added. The
+  `catch_unwind` + infinite-cost fallback from M8 guards the lowering
+  path.
+
+**Not landed in M9** (deferred):
+
+- Unequal-domain horizontal via masking — deliberately excluded by
+  §10.6; different-size independent kernels remain separate launches
+  (or fuse through M8 small-kernel when they form a chain).
+- Reduction/non-flat horizontal merges — would need per-region thread
+  geometry reconciliation.
+- Grouped >2-way single-round enumeration — compositional rounds
+  cover it; a dedicated grouping heuristic is only worth adding if
+  round counts become a compile-time problem.
+- The M4 deferral note suggested landing interpreter `&[BufferDecl]`
+  access (shared/register vs global load classification) alongside
+  M9. Not done — M9's flat kernels are global-load dominated, so the
+  estimator's conservative all-global bias affects both the fused and
+  unfused alternatives symmetrically. Revisit with the §12.9
+  calibration harness.
+
+### M10 (session 13): epilogue fusion
+
+Lands the fifth fusion pass. Epilogue fusion is producer-consumer's
+dual: instead of rebuilding the fused kernel on the consumer's
+schedule, it retains the **producer's** top-level `Compute` verbatim —
+bound, `par`, `threads`, and block hint — and substitutes the
+consumer's pointwise expression into the result path right before the
+store. This is the pass that serves the M10 exit gate: "reductions
+followed by pointwise work retain the producer schedule."
+
+**Files:**
+
+- `passes/fusion_v2/fusions/epilogue.rs` (new) — `enumerate(gf, ctx)`,
+  `synthesize_epilogue(gf, p, c, seam, variant)`, `EpilogueFailure`,
+  `identify_epilogue_producer` (top-level `Compute`, no `scatter`, non-`Tuple` body; `par`/
+  `threads` accepted and carried), `producer_consumer_covers` skip filter. Enumeration mirrors the
+  producer-consumer seam loop (frozen prefix, `min_new_parent_id`, disjoint origins, §10.2
+  keep-trigger via the shared `should_emit_keep`).
+- `passes/fusion_v2/fusions/producer_consumer.rs` — `should_emit_keep` raised to `pub(super)`.
+- `passes/fusion_v2/fusions/horizontal.rs` — `body_is_flat` raised to `pub(super)`.
+- `passes/fusion_v2/fusions/mod.rs` — declared `pub mod epilogue`.
+- `passes/fusion_v2/driver.rs` — added `enable_epilogue` (default `true`) to `FusionOptionsV2`;
+  per-round loop calls `epilogue::enumerate` after `horizontal`, with the same
+  `enable_keep_variants` / `enable_all_keep_variants` gating as producer-consumer.
+
+**Legality (§10.4), enforced in `synthesize_epilogue`:**
+
+- **Producer:** single-output kernel, top-level `Compute` with no
+  `scatter` (partial/permuted writes break "consumer element k =
+  f(producer element k)") and a non-`Tuple` body. `par`/`threads`/
+  block hints are allowed — retaining them is the point. No read-site
+  analysis: the producer body is cloned wholesale with `Input`-node
+  substitution, so inputs may be used in any form, not only under
+  `Index`.
+- **Consumer:** single-output flat pointwise kernel — recognizable by
+  `identify_kernel_shape` (which already rejects `scatter`/`par`/
+  `threads` on its outer compute), no inner `Compute`/`Reduce`
+  (`body_is_flat`), no block hint of its own (it would be silently
+  discarded), and **every seam read at the identity index** `y[k]`.
+  Affine-permutation seams are deferred.
+- **Equal outer bound**, compared symbolically (producer-consumer
+  precedent) — the producer schedule is reused unchanged, so M8/M9's
+  concrete-bound requirement does not apply.
+- **Disjoint origins** — enforced by the enumeration context.
+
+**Synthesis:** producer-consumer's conventions throughout — merged
+param bindings with conflict rejection, name-keyed param remap,
+producer inputs declared first then consumer non-seam inputs, one
+fresh outer var `k`, `type_infer` gate, boundary BufIds via
+`gf.physical`. The producer body is cloned **once** at the identity
+index and every seam `Index` node is mapped to that clone through the
+plain `subst` map — no clone-time hook needed, because `clone_expr`
+consults `subst` before descending. Keep variant wraps
+`Tuple(consumer_body, producer_body)` and appends the seam to the
+outputs (§10.2). Canonical names `epilogue_drop`/`epilogue_keep`.
+
+**Overlap with producer-consumer:** for a flat, unhinted producer both
+passes would synthesize identical HIR differing only in module name —
+and the name participates in `module_hash`, so `CandidateKey` dedup
+would *not* collapse the pair, inflating candidate counts in every
+existing driver test. `enumerate` therefore skips producers where
+`identify_kernel_shape(..).is_some() && block_hint().is_none()`
+(producer-consumer's territory). The skip is a dedup measure, not a
+legality constraint — `synthesize_epilogue` still succeeds on such
+pairs when called directly (covered by test). Epilogue's territory:
+block-hinted producers (producer-consumer drops hints), `par`/
+`threads` producers and non-Index input use (its recognizer rejects
+them). Note a block-hinted *flat* producer is enumerated by both
+passes — producer-consumer emits the hintless rebuild, epilogue the
+hint-retaining one — and the estimator/ILP arbitrates.
+
+**Tests (11 new — all passing, `mod epilogue_tests`):**
+
+Exit gate + HIR:
+- `driver_end_to_end_retains_producer_schedule` — block-hinted
+  row-sum reduction + pointwise scale collapses to one
+  `epilogue_drop` kernel with the hint retained (M10 exit gate).
+- `hinted_flat_producer_matches_reference` — module hash equals the
+  hand-authored `compute[n] |k| (2*a[k])*3` reference with hint 128.
+
+Schedule retention:
+- `threads_producer_retains_threads` — `#[grid(threads = 64)]`
+  carries to the fused top-level `Compute`.
+- `par_producer_retains_par` — the producer's `ParSpec` is copied
+  verbatim (its `expr` only references its own `thread`/`seq`
+  binders, so no alpha-renaming is needed).
+
+Variants + coverage:
+- `keep_variant_when_seam_is_output` — drop + keep emitted; keep has
+  2 outputs, `epilogue_keep` name, hint retained.
+- `covered_producer_is_skipped` — flat unhinted producer yields zero
+  drafts from `enumerate` but `synthesize_epilogue` succeeds.
+
+Legality rejections:
+- `rejects_non_identity_seam_read` (`y[n-1-k]` →
+  `SeamReadNotIdentity`), `rejects_non_flat_consumer` (inner `Reduce`
+  → `ConsumerNotPointwise`), `rejects_bound_mismatch`,
+  `rejects_hinted_consumer`, `rejects_tuple_body_producer`.
+
+**Verification:**
+- `cargo check -p crypto-compiler` clean.
+- `cargo clippy -p crypto-compiler --all-targets --tests -- -D warnings` clean;
+  same with `--features planner-ortools`.
+- `cargo +nightly fmt` applied.
+- `cargo nextest run -p crypto-compiler --lib fusion_v2` — **111**
+  tests pass (100 pre-M10 + 11 new). With `--features planner-ortools`
+  — **115** tests pass.
+- Full `cargo nextest run -p crypto-compiler --lib` — 325 tests pass.
+  Epilogue enabled by default caused **zero candidate-count churn** in
+  existing driver tests, confirming the coverage skip works.
+
+**Design decisions:**
+
+- **Single producer clone at the identity index.** Because every seam
+  read is identity, one clone serves all read sites via the `subst`
+  map; producer-consumer's per-site re-clone hook machinery is not
+  needed. Affine-permutation seams (which would need per-site
+  substitution of the producer's outer var) are deferred.
+- **Consumer block hints reject rather than reconcile.** Even an
+  equal hint is rejected — a consumer with an explicit hint signals a
+  deliberate schedule this pass would override; producer-consumer can
+  still fuse the pair on the consumer's terms.
+- **Keep gating reuses `should_emit_keep`** rather than duplicating
+  the §10.2 trigger logic.
+
+**Not landed in M10** (deferred):
+
+- Affine-permutation seam reads (per-site producer inlining, as in
+  producer-consumer's hook path).
+- Multi-output producers (first-slice restriction shared with
+  producer-consumer).
+- Scatter-carrying producers — needs the §8 access-relation machinery
+  to prove the consumer's identity read matches the permuted store.
+- Driver-level tests for `par`/`threads` producers — enumeration-level
+  only, since the estimator's KIR lowering of bare `par` fixtures is
+  exercised separately and a lowering panic would price the candidate
+  at infinite cost (M8 `catch_unwind` guard), silently deselecting it.
+
+### M11 (session 14): opt-in GraphCompiler integration
+
+**Files:** `src/graph_exe.rs`, `src/passes/fusion.rs` (one field),
+`src/passes/fusion_v2/driver.rs` (verbose), `src/passes/fusion_v2/tests.rs`
+(`graph_compiler_tests` module).
+
+Plan §16's opt-in wiring. v2 is now reachable from the public compile
+pipeline while the existing pass stays the default:
+
+- **`FusionStrategy` enum** (private, plan §16 sketch):
+  `Existing(FusionOptions) | V2(Box<FusionOptionsV2>)` (boxed for
+  clippy's `large_enum_variant`), stored as
+  `GraphCompiler.fusion: Option<FusionStrategy>` so `without_fusion`
+  keeps its `None` semantics. `new()` defaults to
+  `Existing(FusionOptions::default())`; `fusion_options` keeps
+  selecting the existing pass; new `fusion_v2_options` selects v2.
+- **`fuse()` routing**: same normalize prelude/postlude for both
+  strategies (`lower_reduce → monomorphize → canonicalize → fuse →
+  canonicalize → monomorphize → plan = None`). The v2 arm clones the
+  options, merges `GraphCompiler::env` into
+  `FusionOptionsV2::graph_symbols` (env wins on conflict — it is
+  already authoritative for memory planning and size evaluation; M4
+  deferral closed), runs `fuse_graph_v2`, and maps `FuseV2Error` to
+  `CompileError::Verify`.
+- **Report embedding** (plan §15 "extend the existing fusion report
+  rather than changing `GraphExe`'s report type"): `FusionReport` gains
+  a defaulted `pub v2: Option<FusionReportV2>` field. When v2 ran, the
+  wrapper carries only `nodes_before`/`nodes_after` and the embedded v2
+  report holds the §15 counters (candidates, rounds, cost-cache stats,
+  `total_runtime_units`, `fallback_reason`). `GraphExe::fusion_report()`
+  and every existing caller (gpu_graph tests, cuda-backend dumps) are
+  unchanged.
+- **`FusionOptionsV2::verbose`** (§15): per-round saturation counters
+  (`generated`/`inserted`/`alt_nodes`) and a selected-extraction dump —
+  one line per selected node with id, seed/alt provenance, kind +
+  module name, `runtime_units`, and value-class ports — mirroring the
+  existing pass's `FusionOptions::verbose`.
+- **No-solver semantics verified** (§16 "do not silently run the
+  existing implementation under the name v2"): without
+  `planner-ortools` the driver already routes to the brute-force
+  extractor (≤ `BRUTE_FORCE_LIMIT` = 32 alt nodes, a genuine v2
+  extraction with `fallback: None`) and otherwise returns the original
+  extraction with `FallbackReason::SolverUnavailable`. Covered by a
+  34-disjoint-kernel test gated `#[cfg(not(feature =
+  "planner-ortools"))]`.
+
+**Tests** (6, in `graph_compiler_tests`, gated on default `planner`
+feature): v2 strategy fuses a two-kernel chain through
+`GraphCompiler::fuse` and embeds the v2 report with `fallback_reason:
+None`; default strategy still runs v1 (`report.v2.is_none()`);
+`without_fusion` disables both; three-chain module-count golden
+comparison (unfused 3 → v1 1 = v2 1); env→`graph_symbols` threading
+(unbound symbolic memcpy size falls back to a 1 KiB estimate, so
+binding the symbol must strictly raise `total_runtime_units`);
+`SolverUnavailable` beyond the brute-force cap.
+
+**Verification:** 117/117 fusion_v2 lib tests default (120/120 with
+`planner-ortools`), full lib 331/331, clippy `-D warnings` clean both
+configs, fmt clean, `cargo check -p openvm-cuda-backend` clean.
+gpu_graph integration suite: 10/12 pass; the 2 failures
+(`module_with_intermediate_buffers_is_rejected`,
+`symbolic::partial_monomorphization_and_fusion`) reproduce on clean
+HEAD `3650dc5b` — pre-existing, unrelated to M11.
+
+**Design decisions:**
+
+- **env overrides `opts.graph_symbols` on merge.** A stale caller-set
+  binding that disagreed with `GraphCompiler::env` would make the
+  estimator price kernels against sizes the planner never compiles
+  for; `symbol()` is the one API for graph sizes.
+- **`FuseV2Error` → `CompileError::Verify`.** Both variants
+  (`TakeGraph`, `Apply`) are structural-invariant failures, matching
+  the existing pass's use of `verify()`-sourced errors.
+- **v1 wrapper fields stay defaulted under v2** rather than being
+  synthesized (e.g. faking `fused` pairs from v2 history): consumers
+  that want v2 detail should read `report.v2`, and fabricated v1
+  counters would corrupt existing dashboards silently.
+
+**Not landed in M11** (deferred):
+
+- Measured-runtime and cold-compile-time comparisons on real workloads
+  — plan M12 collects these per `dsl_port_tests` fixture and folds
+  them into the M11 comparison report.
+- GPU semantic-equivalence tests (fused vs unfused output) — unblocked
+  now that v2 is reachable from `GraphCompiler`; they land with M12's
+  bit-for-bit oracle runs.
+- `NoImprovementOverOriginal` fallback wiring (needs
+  `runtime_tolerance_ppm` in `FusionOptionsV2` and the original-cost
+  comparison in the extractors).
+- Graph-take guard on error paths (§14.3) — `fuse_graph_v2` errors
+  currently leave `g` drained by `take_graph`.
+- Origins/`FusionHistory` in the verbose dump; per-node dump files
+  under `dump_dir` (the module-level dumps only cover compiled
+  kernels).
+- Boundary-local pruning (§11 step 8, efficiency-only).
+
+### M12 (session 15): numerical accuracy + perf on fractional_sumcheck
+
+**Files:** `crates/cuda-backend/src/logup_zerocheck/fractional_ir_dsl.rs`,
+`crates/cuda-backend/src/logup_zerocheck/fractional_sumcheck_gpu_irv2.rs`,
+`crates/compiler/src/passes/fusion_v2/cost/estimator.rs`,
+`crates/compiler/src/passes/fusion_v2/cost/transactions.rs`,
+`crates/compiler/src/passes/fusion_v2/extract/cpsat.rs`,
+`crates/compiler/src/passes/monomorphize.rs` (`outer_bounds` → `pub(crate)`)
+
+**Wiring.** `run_graph_read_bufs` in `fractional_ir_dsl.rs` reads
+`FRAC_DSL_FUSION` (`v1` default / `v2` / `off`) and configures the
+`GraphCompiler` accordingly; under v2 it prints a `[dsl-fusion-v2]`
+report line (generated/inserted/selected/fallback) after compile. The
+`bench_fractional_sumcheck_eager_vs_irv2` bench gained
+`FRAC_V2_BENCH_FUSION_V2=1` plus `FRAC_V2_BENCH_SOLVER_SECS` (default
+60) and `FRAC_V2_BENCH_MAX_ALTS` (default 5000) knobs.
+
+**Correctness gate (exit criterion): PASSED.** All 8 `dsl_port_tests`
+fixtures are bit-for-bit identical to the eager CUDA reference under
+`FRAC_DSL_FUSION=v2` with CP-SAT extraction — every compile reported
+`status=Some(Optimal)`, `fallback=None`. The v1 baseline also passes
+8/8. Full cuda-backend suite: 411/413 (the 2 failures are
+pre-existing on clean HEAD `3650dc5b`, unrelated).
+
+Note: on the fixtures the saturation generates 0 candidates. That is
+legitimate, not a bug: kernel→kernel seams in the fractional-sumcheck
+fold chains have *halving* outer bounds (producer iterates `n`,
+consumer `n/2`), which producer-consumer rejects with
+`OuterBoundMismatch` (M3-slice restriction), and const/memcpy parents
+fail `NotAKernel`. The correctness gate therefore exercises the full
+v2 pipeline (saturation, costing, CP-SAT, apply) but selects the seed
+extraction. The bench graph (below) does produce real fusions.
+
+**Estimator bug 1 — stripped block hints.** `GraphCompiler::fuse()`
+runs `lower_reduce → monomorphize → canonicalize → fuse → canonicalize
+→ monomorphize`. Monomorphize stamps per-group block hints, but the
+canonicalize *before* fuse rebuilds modules and drops them, so any
+kernel with a symbolic outer bound hit `lower_to_kir`'s "a block hint
+is required" error inside the estimator → sentinel cost
+(`i64::MAX/4`). Never visible under v1 (which doesn't lower for
+costing); the final monomorphize re-stamps before real compilation, so
+compiled artifacts were always fine. Fix: `estimate_kernel` now calls
+a local `stamp_block_hint` that mirrors monomorphize's
+`block_size_policy(max_outer)` using bounds concretized against
+`graph_symbols` + `param_bindings`. Covered by new lib test
+`symbolic_outer_bound_is_costed_via_stamped_block_hint`.
+
+**Estimator bug 2 — sampler bound named params to the par index.**
+`analyze_program` threaded only VarId-keyed `ctx.graph_symbols` into
+the transaction sampler; name-keyed `param_bindings` (e.g. `q`) were
+never bound, and `eval_quast` treats any unbound symbol as the par
+index — producing garbage addresses and, post-fix-1, a debug multiply
+overflow swallowed by `catch_unwind` into `CostError::LoweringPanicked`
+→ sentinel cost. Fix: merge `kp.params` × `param_bindings` into an
+augmented context in `analyze_program`, and make `eval_quast` use
+checked arithmetic (overflow → `None` → worst-case sectors instead of
+panic). After both fixes, `fold_ef_frac_columns_dsl` costs scale with
+`q` (3928/7056/13312 units) instead of the sentinel.
+
+**CP-SAT at scale — seed-solution hints.** The bench graph (n=2^16)
+has 2649 seed nodes; saturation generated 60,938 candidates and
+inserted 5000 (`max_total_alternatives` cap hit in round 0), giving a
+7,649-node model (~7.6k bool vars). A cold single-worker CP-SAT could
+not find *any* feasible solution within 5 s or even 60 s per stage →
+`SolverStatusUnknown` → fallback to the unfused original. Fix in
+`cpsat.rs`: hint the always-feasible all-seeds solution (§13.2) before
+stage 1, and re-hint each stage's solution before stages 2–4 (it stays
+feasible under the added objective-lock constraint). With hints the
+60 s solve returns `Feasible`, `fallback=None`, selecting 2226/7649
+nodes (1969 seeds + 257 fused kernels replacing 680 seeds). Verified
+against the existing CP-SAT/brute-force agreement tests (121/121 with
+`planner-ortools`).
+
+**Performance, n=2^16 (compare ratios within-run — the eager baseline
+varies 4.3–6.4 ms across runs with GPU state):**
+
+| metric | v1 | v2 unfused (pre-hints fallback) | v2 hinted CP-SAT (60 s) |
+|--------|----|--------------------------------|--------------------------|
+| eager median | 6.43 ms | 4.33 ms | 4.36 ms |
+| exec ratio vs eager | 1.674× | 2.150× | 1.978× |
+| **capture ratio vs eager** | **1.367×** | 1.307× | **1.251×** |
+| nodes | 2649 → 1428 | 2649 (no fusion) | 2649 → 2226 |
+| unique modules | 455 (445 nvcc'd) | 38 | 48 (14 nvcc'd, 11.9 s) |
+| build+compile wall | 420.6 s (nvcc-dominated) | 488 s | 566 s (generation-dominated) |
+
+Takeaways:
+
+- v2's captured graph is *relatively* faster than v1's (1.251× vs
+  1.367× eager) while compiling **9.5× fewer unique modules** — nvcc
+  work drops from ~420 s to ~12 s. v2's cost model concentrates fusion
+  where it pays instead of v1's 5,832 indiscriminate merges.
+- Fusion itself buys ~4% capture time over unfused v2 (5.66 → 5.45 ms
+  at matched eager baselines) — bounded by the 5000-alternative
+  insertion cap (8% of generated) and the Feasible-not-Optimal solve.
+- Neither v1 nor v2 beats eager at this size; the captured graph is
+  the right comparison point and it is 1.25× eager under v2.
+- v2's wall-clock cost is now dominated by candidate *generation*
+  (~460 s): enumeration does not early-stop once the insertion cap is
+  reached. This is the top efficiency item.
+
+**Not landed in M12** (deferred):
+
+- Early-stop of candidate enumeration at `max_total_alternatives`
+  (60,938 generated vs 5,000 inserted; ~460 s wasted).
+- `num_search_workers` is hardcoded to 1; parallel solve would likely
+  reach Optimal within the stage budget.
+- Producer-consumer across *halving* outer bounds (the dominant seam
+  shape in fractional-sumcheck fold chains) — would let the fixtures
+  generate real candidates.
+- Larger-size sweeps (LOG_N 20/22/24) once generation is cheap enough
+  to iterate.
+
+### M12 follow-up (session 16): parallel enumeration + sentinel-cost exclusion
+
+**Files:** `fusions/mod.rs` (new `par_enumerate` helper),
+`fusions/{producer_consumer,fanout,small_kernel,epilogue,horizontal}.rs`,
+`cost/mod.rs` (`GraphNodeCost::FAILED` + `is_failure`),
+`extract/cpsat.rs`, `driver.rs`,
+`fractional_sumcheck_gpu_irv2.rs` (bench defaults).
+
+**Bench defaults changed.** Horizontal fusion off by default
+(`FRAC_V2_BENCH_HORIZONTAL=1` re-enables — on this graph it cost
+~99% of enumeration time for a handful of launch-quantum savings);
+solver budget 120 s/stage (`FRAC_V2_BENCH_SOLVER_SECS`); alternatives
+cap 10,000 (`FRAC_V2_BENCH_MAX_ALTS`).
+
+**Parallel enumeration.** All five passes now collect their sites
+sequentially in deterministic order, then run per-site synthesis via
+rayon (`par_enumerate` in `fusions/mod.rs`); indexed `collect`
+preserves draft order bit-for-bit vs the sequential loop (draft order
+matters: the insertion cap truncates in draft order). Reject counters
+merge per-site `(label, count)` lists. Round-0 pass timings on the
+n=2^16 bench: producer-consumer 276 ms → 27 ms; saturation total
+272.9 s → 23.0 s (with horizontal off), and the budget now sustains
+**3 rounds** of composition (inserted per round: 2088/5224/2688)
+instead of capping out in round 0.
+
+**Regression found + fixed: sentinel costs poisoned CP-SAT.** The
+3-round graph produces composed `epilogue_keep` candidates whose
+lowering panics (`is_canonicalized` assert, lower_to_kir.rs:70 — §9
+candidate canonicalization is a later milestone). 3,123 such nodes
+each got the `i64::MAX/4` sentinel cost; those coefficients overflowed
+CP-SAT's int64 objective validation → stage 1 `Unknown` in 0.1 s →
+silent fallback to the unfused seeds. Fix: named
+`GraphNodeCost::FAILED` sentinel + `is_failure()`; `cpsat.rs`
+force-excludes failed *alternatives* from the model (`x_a = 0`,
+omitted from the objective — seeds always cover the graph, so
+feasibility holds) and clamps a hypothetical failed *seed*'s
+coefficient so the objective sum cannot overflow; the stage-1 lock
+uses the same clamped coefficients. `driver.rs`'s
+`total_runtime_units` diagnostic skips sentinels. Brute-force
+extractor already summed in i128 and needed no change.
+
+**Bench, n=2^16, horizontal off / 120 s / 10k cap:** generated
+72,351, inserted 10,000, alt graph 12,649 nodes; costing 1.5 s
+(3,123 failures excluded); model x=12649 y=5299 z=792; all 4 stages
+Feasible at 120 s (runtime 14,143,519 vs 14,165,924 in the 60 s
+horizontal-on run; artifacts 67; nodes 2227); selected 2223/12649,
+`fallback=None`. Perf: capture 5.54 ms = 1.226× eager (prior best
+1.251×); exec 8.56 ms = 1.893×. Compile wall 613 s (28 modules
+nvcc'd).
+
+**New/remaining efficiency items:** insertion (`would_create_cycle`
+per candidate) now dominates saturation — 14.5 s in round 2 vs 2.2 s
+of enumeration; the `is_canonicalized` lowering panic on composed
+epilogue_keep candidates wastes 3,123 candidates (real fusion
+opportunities lost, not just noise); enumeration still lacks
+early-stop at the cap (72,351 generated vs 10,000 inserted); solver
+stages are Feasible-not-Optimal even at 120 s (num_search_workers
+still 1).
+
+### Session 17: solver workers, stream-scheduler rebase, LOG_N=24 nsys
+
+**Solver workers.** `solver_num_workers` plumbed through
+`FusionOptionsV2` → `ExtractOptions` → CP-SAT `SatParameters`
+(`num_search_workers`). Default 1 keeps the solve deterministic per
+plan §2.4; the bench defaults to all cores
+(`FRAC_V2_BENCH_SOLVER_WORKERS`). Effect at 16 workers on the
+LOG_N=24 model (x=15,965, y=11,931, z=191): stage 1 (runtime) went
+Feasible-at-120 s → **Optimal in 1.3 s**; stages 3/4 Optimal in
+15.7 s/40.2 s; only stage 2 (artifacts, objective 50) still hits the
+120 s cap Feasible. Total solve 177 s (vs 480 s all-Feasible at 1
+worker on the smaller n=2^16 model).
+
+**Rebase onto `feat/stream-scheduler`** (multi-stream co-scheduling:
+`SchedulerMode::ListV1`, `StreamInstr::WaitOn`, multi-stream graph
+capture). Clean rebase; fixed 5 clippy lints in the incoming
+feature-gated planner code (`planner/heuristic.rs`,
+`planner/list_v1.rs`); all 121 fusion_v2 lib tests pass on the
+rebased tree.
+
+**nsys LOG_N=24** (single profiler window, per-iteration nvtx
+ranges; v2 fusion at 120 s/10 k/horizontal-off defaults + list_v1
+scheduler with 8 streams;
+`target/nsys/frac_v2_log24_fusionv2_streams8.nsys-rep`):
+
+| mode | wall median | kernels/iter | kernel GPU time |
+|---|---|---|---|
+| eager | 17.07 ms | 841 (1 stream) | 6.20 ms |
+| v2 graph exec | 45.15 ms | 5,003 (5 streams used) | 19.74 ms |
+| v2 graph capture | 18.38 ms | 5,003 (graph replay) | 19.66 ms |
+
+Saturation 22.0 s / 2 rounds (generated 30,626, inserted 10,000,
+5,965 seeds → 5,029 selected); costing 1.2 s (14,007 cache hits,
+1,656 sentinel failures — same epilogue_keep canonicalization
+panic); nvcc 9 s (43/50 modules from disk cache).
+
+Findings: (1) captured v2 graph is within **7.7% of eager**
+(18.38 ms vs 17.07 ms; was 22.6% at n=2^16) despite executing
+3.2× the kernel-time — CUDA-graph replay keeps the GPU essentially
+saturated (19.66 ms kernel time in an 18.4 ms window). (2) Un-captured
+graph exec is launch-bound: ~9 µs/launch × 5,029 launches ≈ the 45 ms
+wall; list_v1 also skews placement (2,774/1,347/781/71/30 kernels on
+the 5 streams it used of 8). (3) Eager itself is gap-bound on one
+stream (6.2 ms GPU time in 17.1 ms wall), so beating eager is within
+reach if the 3.2× work amplification drops — the [n,2] Frac spine
+seam legality (rank-2 reads → SeamIndexNotAffine) remains the
+blocker. Caveat: nsys `--capture-range` defaults to
+`stop-shutdown`, which SIGTERMs the test at `cudaProfilerStop`
+(stdout summary lost, profile intact); pass
+`--capture-range-end=stop` to keep the process alive.
 
 ## Design decisions
 

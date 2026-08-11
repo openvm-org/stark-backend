@@ -474,6 +474,40 @@ pub fn clone_expr(
     clone_expr_with_hook(src, root, dst, subst, subst_vars, |_, _, _| Ok(None))
 }
 
+/// Variant of [`clone_expr_with_hook`] that additionally alpha-renames
+/// module-parameter [`VarId`]s through `param_map` wherever they appear
+/// in a size position: `Node::ConstSym` payloads and the `bound`
+/// expressions of cloned `Compute` / `Reduce` nodes. Parameters absent
+/// from the map are kept verbatim.
+///
+/// Cross-module cloning (fusion) must use this entry point: the source
+/// module's parameter `VarId`s are meaningless in the destination
+/// builder's namespace, and leaving them unmapped produces dangling
+/// symbols in the fused module's size expressions.
+pub fn clone_expr_with_params<F>(
+    src: &Module,
+    root: NodeId,
+    dst: &mut IRBuilder,
+    subst: &HashMap<NodeId, NodeId>,
+    subst_vars: &HashMap<VarId, NodeId>,
+    param_map: &HashMap<VarId, VarId>,
+    hook: F,
+) -> Result<NodeId, CloneError>
+where
+    F: FnMut(&mut IRBuilder, NodeId, &HashMap<VarId, NodeId>) -> Result<Option<NodeId>, CloneError>,
+{
+    let mut ctx = CloneCtx {
+        src,
+        dst,
+        subst,
+        vars: subst_vars.clone(),
+        param_map,
+        memo: HashMap::new(),
+        hook: Box::new(hook),
+    };
+    ctx.clone(root)
+}
+
 /// Variant of [`clone_expr`] that invokes `hook` at every source
 /// [`NodeId`] before falling through to the default clone logic. The
 /// hook sees the destination [`IRBuilder`], the source `NodeId`, and a
@@ -500,11 +534,13 @@ pub fn clone_expr_with_hook<F>(
 where
     F: FnMut(&mut IRBuilder, NodeId, &HashMap<VarId, NodeId>) -> Result<Option<NodeId>, CloneError>,
 {
+    let empty = HashMap::new();
     let mut ctx = CloneCtx {
         src,
         dst,
         subst,
         vars: subst_vars.clone(),
+        param_map: &empty,
         memo: HashMap::new(),
         hook: Box::new(hook),
     };
@@ -530,6 +566,9 @@ struct CloneCtx<'a> {
     /// alpha-renaming the entry is `dst.intern(Node::Var(v'))`; for
     /// substitution-by-expression it is an arbitrary computed expression.
     vars: HashMap<VarId, NodeId>,
+    /// Source-module parameter `VarId` remap applied to size positions
+    /// (`ConstSym` payloads, `Compute`/`Reduce` bounds).
+    param_map: &'a HashMap<VarId, VarId>,
     memo: HashMap<NodeId, NodeId>,
     hook: CloneHook<'a>,
 }
@@ -548,11 +587,12 @@ impl CloneCtx<'_> {
         }
         let node = self.src.builder.node(id).clone();
         let out = match node {
-            Node::Input(_)
-            | Node::ConstU32(_)
-            | Node::ConstField(_)
-            | Node::ConstFpExt(_)
-            | Node::ConstSym(_) => self.dst.intern(node),
+            Node::Input(_) | Node::ConstU32(_) | Node::ConstField(_) | Node::ConstFpExt(_) => {
+                self.dst.intern(node)
+            }
+            Node::ConstSym(e) => self
+                .dst
+                .intern(Node::ConstSym(remap_size_expr(&e, self.param_map))),
             Node::Var(v) => self
                 .vars
                 .get(&v)
@@ -603,7 +643,7 @@ impl CloneCtx<'_> {
                 let body = self.clone(body)?;
                 restore(&mut self.vars, var, prev);
                 self.dst.intern(Node::Compute {
-                    bound,
+                    bound: remap_size_expr(&bound, self.param_map),
                     var: v2,
                     body,
                     scatter,
@@ -624,7 +664,7 @@ impl CloneCtx<'_> {
                 restore(&mut self.vars, var, prev);
                 self.dst.intern(Node::Reduce {
                     op,
-                    bound,
+                    bound: remap_size_expr(&bound, self.param_map),
                     var: v2,
                     body,
                 })
@@ -674,6 +714,32 @@ fn restore<K: std::hash::Hash + Eq, V>(map: &mut HashMap<K, V>, key: K, prev: Op
         None => {
             map.remove(&key);
         }
+    }
+}
+
+/// Alpha-renames every [`VarId`] mentioned in `e` through `map` (both
+/// `Sym` positions and `SymConst::Sym` constant positions). Symbols
+/// absent from the map are kept. Used to remap module-parameter symbols
+/// in shape expressions and `ConstSym` payloads when cloning across
+/// builders.
+pub fn remap_size_expr(e: &SizeExpr, map: &HashMap<VarId, VarId>) -> SizeExpr {
+    use std::sync::Arc;
+
+    use crate::quast::{Expr, SymConst};
+    let remap_c = |c: &SymConst| match c {
+        SymConst::Lit(_) => *c,
+        SymConst::Sym(v) => SymConst::Sym(*map.get(v).unwrap_or(v)),
+    };
+    match e {
+        Expr::Sym(v) => Expr::Sym(*map.get(v).unwrap_or(v)),
+        Expr::Const(c) => Expr::Const(remap_c(c)),
+        Expr::Add(a, b) => Expr::Add(
+            Arc::new(remap_size_expr(a, map)),
+            Arc::new(remap_size_expr(b, map)),
+        ),
+        Expr::Mul(a, c) => Expr::Mul(Arc::new(remap_size_expr(a, map)), remap_c(c)),
+        Expr::FloorDiv(a, c) => Expr::FloorDiv(Arc::new(remap_size_expr(a, map)), remap_c(c)),
+        Expr::Neg(a) => Expr::Neg(Arc::new(remap_size_expr(a, map))),
     }
 }
 
