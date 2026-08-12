@@ -641,6 +641,7 @@ impl GraphCompiler {
                 .chain(g.output_bufs().iter())
                 .copied()
                 .collect::<Vec<_>>(),
+            &g.aliases,
             &self.scheduler,
         )
         .map_err(|e| match e {
@@ -678,6 +679,19 @@ impl GraphCompiler {
     pub fn compile(self, mut graph: GraphBuilder) -> Result<GraphExe, CompileError> {
         validate_interface(&graph, self.device)?;
         let nodes_before = graph.nodes.len();
+
+        // Stage 0: restore SSA at the graph-BufId level. Rewrites every
+        // blackbox `carried_outputs` mutation into a fresh SSA output
+        // and records an alias so the planner packs it onto the
+        // canonical's pool slot. Downstream passes then see a graph
+        // where every buffer has ≤1 writer.
+        let ssa_report = crate::passes::restore_ssa(&mut graph)?;
+        if ssa_report.renamed_carried > 0 {
+            eprintln!(
+                "[compile] restore_ssa: renamed {} carried outputs ({} aliases added)",
+                ssa_report.renamed_carried, ssa_report.aliases_added,
+            );
+        }
 
         // Stage 1: normalize the graph. Post-passes every Kernel node's
         // module is a canonical, monomorphized, single-kernel residual

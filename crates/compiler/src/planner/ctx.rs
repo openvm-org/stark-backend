@@ -44,6 +44,16 @@ pub enum PlanError {
 /// Preprocessed planner input: concrete sizes/alignments on the target
 /// device and per-buffer writer / reader lists (ascending in node insertion
 /// order). Every backend consumes this same view.
+///
+/// # Alias-aware indexing
+///
+/// When the graph carries an alias table (produced by
+/// `passes::restore_ssa`), the ctx canonicalizes every buffer reference
+/// at build time: `writers[canon(b)]` / `readers[canon(b)]` accumulate
+/// on the canonical, non-canonical members have empty lists, and
+/// `packable` returns `false` for them. After the backend picks
+/// offsets, `propagate_alias_offsets` copies `offsets[canon]` to every
+/// member.
 pub struct PlanCtx {
     pub n_nodes: usize,
     pub n_bufs: usize,
@@ -55,13 +65,19 @@ pub struct PlanCtx {
     pub on_device: Vec<bool>,
     /// Lifetime pinned to program end (`death = n_nodes`).
     pub pinned: Vec<bool>,
-    /// Per-buffer node indices that write to it.
+    /// Per-buffer node indices that write to it. Empty for non-canonical
+    /// alias members.
     pub writers: Vec<Vec<usize>>,
-    /// Per-buffer node indices that read it.
+    /// Per-buffer node indices that read it. Same canonicalization.
     pub readers: Vec<Vec<usize>>,
+    /// Canonical `BufId` for each buffer under the graph's alias table.
+    /// `canon[b] == b` when `b` is its own canonical (default, no
+    /// aliases). Path-compressed at build time.
+    pub canon: Vec<usize>,
 }
 
 impl PlanCtx {
+    /// Alias-free variant. Every buffer is its own canonical.
     pub fn build(
         bufs: &[BufInfo],
         nodes: &[NodeAccess],
@@ -69,12 +85,58 @@ impl PlanCtx {
         device: DeviceType,
         pin: &[BufId],
     ) -> Result<Self, PlanError> {
+        Self::build_with_aliases(bufs, nodes, env, device, pin, &[])
+    }
+
+    /// Alias-aware entry point. `aliases[b] = Some(parent)` means `b` is
+    /// a fresh SSA version of `parent` and must share `parent`'s pool
+    /// slot. `aliases.len()` must equal `bufs.len()` (or be empty for
+    /// "no aliases").
+    pub fn build_with_aliases(
+        bufs: &[BufInfo],
+        nodes: &[NodeAccess],
+        env: &BTreeMap<VarId, i64>,
+        device: DeviceType,
+        pin: &[BufId],
+        aliases: &[Option<BufId>],
+    ) -> Result<Self, PlanError> {
         let n_nodes = nodes.len();
         let n_bufs = bufs.len();
 
+        // Canonicalize with path compression. For an alias-free graph
+        // this loop degenerates to identity.
+        let mut canon: Vec<usize> = (0..n_bufs).collect();
+        if !aliases.is_empty() {
+            assert_eq!(
+                aliases.len(),
+                n_bufs,
+                "aliases length {} must equal bufs {}",
+                aliases.len(),
+                n_bufs,
+            );
+            for start in 0..n_bufs {
+                let mut cur = start;
+                while let Some(parent) = aliases.get(cur).copied().flatten() {
+                    cur = parent.0;
+                    debug_assert!(cur < n_bufs);
+                }
+                canon[start] = cur;
+                let mut step = start;
+                while let Some(parent) = aliases.get(step).copied().flatten() {
+                    canon[step] = cur;
+                    step = parent.0;
+                    if step == cur {
+                        break;
+                    }
+                }
+            }
+        }
+
         let mut pinned = vec![false; n_bufs];
         for &b in pin {
-            pinned[b.0] = true;
+            // Pin the canonical — the runtime resolves an aliased member
+            // to the canonical's slot.
+            pinned[canon[b.0]] = true;
         }
 
         let mut sizes = vec![0i64; n_bufs];
@@ -83,18 +145,25 @@ impl PlanCtx {
         for (idx, info) in bufs.iter().enumerate() {
             if info.device_type == device {
                 on_device[idx] = true;
-                sizes[idx] = eval_size(BufId(idx), &info.size, env)?;
-                aligns[idx] = (info.elem_size as u64).max(1);
+                let s = eval_size(BufId(idx), &info.size, env)?;
+                let align = (info.elem_size as u64).max(1);
+                let c = canon[idx];
+                // Accumulate on the canonical. Members within a class
+                // carry identical BufInfos in practice (restore_ssa
+                // clones) but be defensive and take the max.
+                sizes[c] = sizes[c].max(s);
+                aligns[c] = aligns[c].max(align);
+                on_device[c] = true;
             }
         }
 
         let writes: Vec<Vec<usize>> = nodes
             .iter()
-            .map(|a| a.writes.iter().map(|b| b.0).collect())
+            .map(|a| a.writes.iter().map(|b| canon[b.0]).collect())
             .collect();
         let reads: Vec<Vec<usize>> = nodes
             .iter()
-            .map(|a| a.reads.iter().map(|b| b.0).collect())
+            .map(|a| a.reads.iter().map(|b| canon[b.0]).collect())
             .collect();
 
         let mut writers: Vec<Vec<usize>> = vec![vec![]; n_bufs];
@@ -107,6 +176,16 @@ impl PlanCtx {
                 readers[b].push(n);
             }
         }
+        // Dedup consecutive duplicates: if a single node writes to two
+        // SSA-renames aliasing the same canonical, we push the node
+        // index twice into `writers[canon]`. That's a spurious repeat
+        // for lifetime derivation.
+        for ws in writers.iter_mut() {
+            ws.dedup();
+        }
+        for rs in readers.iter_mut() {
+            rs.dedup();
+        }
 
         Ok(Self {
             n_nodes,
@@ -117,15 +196,17 @@ impl PlanCtx {
             pinned,
             writers,
             readers,
+            canon,
         })
     }
 
     /// A packable buffer occupies a slot in the returned plan (on the
-    /// target device with non-zero size).
+    /// target device with non-zero size). Only the canonical of an
+    /// alias class is packable — members share the canonical's slot.
     pub fn packable(&self, b: usize) -> bool {
-        // Buffers no node reads or writes need no pool slot; pinned buffers
-        // are exempt so registered interface buffers keep a stable slot
-        // even if optimization removed every access.
+        if self.canon[b] != b {
+            return false;
+        }
         self.on_device[b]
             && self.sizes[b] > 0
             && (self.pinned[b] || !(self.writers[b].is_empty() && self.readers[b].is_empty()))
@@ -233,5 +314,21 @@ pub fn align_up(off: i64, align: i64) -> i64 {
         (off + align - 1) / align * align
     } else {
         off
+    }
+}
+
+/// Copy `offsets[canon] → offsets[member]` for every alias member.
+///
+/// Backends fill offsets only for canonical entries (the non-canonicals
+/// return `packable == false`). Callers must call this once on the
+/// backend's output — the runtime resolves a member `BufId` directly
+/// via `offsets[b]`, so every member of an alias class must carry the
+/// same pool offset the canonical was assigned.
+pub fn propagate_alias_offsets(offsets: &mut [Option<u64>], canon: &[usize]) {
+    for b in 0..offsets.len() {
+        let c = canon[b];
+        if c != b {
+            offsets[b] = offsets[c];
+        }
     }
 }

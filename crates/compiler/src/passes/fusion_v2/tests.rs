@@ -249,6 +249,213 @@ fn hazard_order_respects_waw_between_selected_writers() {
     assert!(matches!(&g.nodes[1], GraphNode::Kernel(_)));
 }
 
+/// Index of the blackbox named `name` in the emitted node sequence.
+fn blackbox_pos(g: &GraphBuilder, name: &str) -> usize {
+    g.nodes
+        .iter()
+        .position(|n| matches!(n, GraphNode::BlackboxKernel(k) if k.name == name))
+        .unwrap_or_else(|| panic!("blackbox `{name}` not emitted"))
+}
+
+#[test]
+fn alias_sibling_war_orders_fused_read_before_clobber() {
+    // Post-`restore_ssa` shape of an in-place mutation: `mutator` reads
+    // `x` and writes `x1`, a fresh SSA sibling aliased to `x` (same pool
+    // slot at runtime). A fused producer+consumer candidate reads `x` at
+    // the consumer's position, past the clobber in seed order. Hazard
+    // ordering must emit the fused read before the mutator.
+    let mut g = GraphBuilder::new();
+    let x = sized_buf(&mut g, "x", 32);
+    let y = sized_buf(&mut g, "y", 32);
+    let z = sized_buf(&mut g, "z", 32);
+    g.insert_const(x, crate::graph_ir::ConstBuf::HostBuf(vec![0; 32]));
+    g.insert_kernel(scale_by_two_module(), vec![x], vec![y], &[]);
+    let x1 = g.add_buf(g.bufs[x.0].clone());
+    g.alias_bufs(x1, x);
+    g.insert_blackbox_kernel(
+        "mutator",
+        [x].into_iter(),
+        [x1].into_iter(),
+        [false].into_iter(),
+        |_, _, _| {},
+    );
+    g.insert_kernel(scale_by_two_module(), vec![y], vec![z], &[]);
+    g.register_output(z);
+    g.register_output(x1);
+
+    let mut gf = take_graph(&mut g).unwrap();
+    let v_x = gf.nodes[0].outputs[0];
+    let v_z = gf.nodes[3].outputs[0];
+    // Fused P+C stand-in: consumes `x` directly, produces the existing
+    // `z` value class. Apply only looks at the positional bindings, so a
+    // named blackbox is enough to track emission order.
+    let fused = gf.insert_candidate(crate::passes::fusion_v2::model::AltGraphNode {
+        inputs: vec![v_x],
+        outputs: vec![v_z],
+        node: GraphNode::BlackboxKernel(crate::graph_ir::KernelNode {
+            inputs: vec![x],
+            outputs: vec![z],
+            carried_outputs: vec![],
+            func: Arc::new(|_, _, _| {}),
+            name: "fused_pc".into(),
+        }),
+    });
+    let sol = ExtractionSolution {
+        nodes: vec![NodeId(0), NodeId(2), fused],
+        fallback: None,
+        status: None,
+    };
+    apply_solution(&mut g, gf, &sol).unwrap();
+    assert!(
+        blackbox_pos(&g, "fused_pc") < blackbox_pos(&g, "mutator"),
+        "fused read of x must precede the alias-sibling clobber of its slot"
+    );
+}
+
+#[test]
+fn graph_input_clobber_orders_reader_before_first_writer() {
+    // `x` is a registered graph input, so its initial version has no
+    // writer and never appears in the writer chain. A write to its alias
+    // sibling `x1` still clobbers the slot; the pristine-input reader
+    // must be emitted first even though seed order has the mutator first.
+    let mut g = GraphBuilder::new();
+    let x = sized_buf(&mut g, "x", 32);
+    let y = sized_buf(&mut g, "y", 32);
+    g.register_input(x);
+    let x1 = g.add_buf(g.bufs[x.0].clone());
+    g.alias_bufs(x1, x);
+    g.insert_blackbox_kernel(
+        "mutator",
+        [x].into_iter(),
+        [x1].into_iter(),
+        [false].into_iter(),
+        |_, _, _| {},
+    );
+    g.insert_kernel(scale_by_two_module(), vec![x], vec![y], &[]);
+    g.register_output(y);
+    g.register_output(x1);
+
+    let gf = take_graph(&mut g).unwrap();
+    let sol = ExtractionSolution::original(&gf);
+    apply_solution(&mut g, gf, &sol).unwrap();
+    let reader = g
+        .nodes
+        .iter()
+        .position(|n| matches!(n, GraphNode::Kernel(_)))
+        .unwrap();
+    assert!(
+        reader < blackbox_pos(&g, "mutator"),
+        "reader of the pristine graph input must precede the clobber of its slot"
+    );
+}
+
+/// Seed graph mixing pre- and post-mutation readers of one alias class:
+///
+/// ```text
+/// 0: const        -> x        (v_x, class x)
+/// 1: P  kernel  x -> y        (pre-mutation reader)
+/// 2: mutator    x -> x1       (alias sibling; v_x1, class x)
+/// 3: D  kernel x1 -> w        (post-mutation reader)
+/// 4: C  blackbox y, w -> z
+/// ```
+fn mixed_mutation_graph() -> (GraphBuilder, [BufId; 6]) {
+    let mut g = GraphBuilder::new();
+    let x = sized_buf(&mut g, "x", 32);
+    let y = sized_buf(&mut g, "y", 32);
+    let z = sized_buf(&mut g, "z", 32);
+    let w = sized_buf(&mut g, "w", 32);
+    g.insert_const(x, crate::graph_ir::ConstBuf::HostBuf(vec![0; 32]));
+    g.insert_kernel(scale_by_two_module(), vec![x], vec![y], &[]);
+    let x1 = g.add_buf(g.bufs[x.0].clone());
+    g.alias_bufs(x1, x);
+    g.insert_blackbox_kernel(
+        "mutator",
+        [x].into_iter(),
+        [x1].into_iter(),
+        [false].into_iter(),
+        |_, _, _| {},
+    );
+    g.insert_kernel(scale_by_two_module(), vec![x1], vec![w], &[]);
+    g.insert_blackbox_kernel(
+        "C",
+        [y, w].into_iter(),
+        [z].into_iter(),
+        [false, false].into_iter(),
+        |_, _, _| {},
+    );
+    g.register_output(z);
+    g.register_output(x1);
+    (g, [x, y, z, w, x1, x])
+}
+
+#[test]
+fn storage_hazard_guard_rejects_pre_and_post_mutation_merge() {
+    use crate::passes::fusion_v2::validate::StorageHazardIndex;
+
+    let (mut g, _bufs) = mixed_mutation_graph();
+    let gf = take_graph(&mut g).unwrap();
+    let index = StorageHazardIndex::new(&gf);
+    let v_x = gf.nodes[0].outputs[0];
+    let v_y = gf.nodes[1].outputs[0];
+    let v_x1 = gf.nodes[2].outputs[0];
+    let v_w = gf.nodes[3].outputs[0];
+    let v_z = gf.nodes[4].outputs[0];
+
+    // A fused P+C would read pre-mutation `x` while depending on `w`,
+    // which derives from the post-mutation sibling: unschedulable.
+    assert!(index.would_create_storage_hazard_cycle(&gf, &[v_x, v_w], &[v_z]));
+    // Reading only the pre-mutation version is fine (order before the
+    // mutator exists).
+    assert!(!index.would_create_storage_hazard_cycle(&gf, &[v_x], &[v_y]));
+    // Reading only the post-mutation version is fine too.
+    assert!(!index.would_create_storage_hazard_cycle(&gf, &[v_x1], &[v_w]));
+    // The in-place pattern is exempt: a candidate that writes the later
+    // version itself has no WAR edge to satisfy.
+    assert!(!index.would_create_storage_hazard_cycle(&gf, &[v_x], &[v_x1]));
+}
+
+#[test]
+fn apply_error_restores_seed_graph() {
+    let (mut g, [x, _y, z, w, _x1, _]) = mixed_mutation_graph();
+    let snapshot = graph_fingerprint(&g);
+
+    let mut gf = take_graph(&mut g).unwrap();
+    let v_x = gf.nodes[0].outputs[0];
+    let v_w = gf.nodes[3].outputs[0];
+    let v_z = gf.nodes[4].outputs[0];
+    // Unschedulable fused stand-in (the insertion guard would reject
+    // it; here we bypass the guard to hit apply's own cycle detection).
+    let fused = gf.insert_candidate(crate::passes::fusion_v2::model::AltGraphNode {
+        inputs: vec![v_x, v_w],
+        outputs: vec![v_z],
+        node: GraphNode::BlackboxKernel(crate::graph_ir::KernelNode {
+            inputs: vec![x, w],
+            outputs: vec![z],
+            carried_outputs: vec![],
+            func: Arc::new(|_, _, _| {}),
+            name: "fused_pc".into(),
+        }),
+    });
+    let sol = ExtractionSolution {
+        nodes: vec![NodeId(0), NodeId(2), NodeId(3), fused],
+        fallback: None,
+        status: None,
+    };
+    let err = apply_solution(&mut g, gf, &sol).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            crate::passes::fusion_v2::ApplyError::HazardCycle { .. }
+        ),
+        "expected HazardCycle, got {err:?}"
+    );
+    assert_eq!(
+        graph_fingerprint(&g),
+        snapshot,
+        "failed apply must restore the original seed graph"
+    );
+}
+
 // -------------------------------------------------------------------------
 // M2 extractor tests: the CP-SAT and brute-force extractors agree on toy
 // alternative graphs, and both pick the runtime-optimal feasible subset.
@@ -3203,6 +3410,7 @@ mod horizontal_tests {
             enable_producer_consumer: false,
             enable_fanout: false,
             enable_small_kernel: false,
+            enable_horizontal: true,
             ..FusionOptionsV2::default()
         };
         let report = fuse_graph_v2(&mut g, &options).unwrap();
@@ -3219,6 +3427,7 @@ mod horizontal_tests {
             enable_producer_consumer: false,
             enable_fanout: false,
             enable_small_kernel: false,
+            enable_horizontal: true,
             ..FusionOptionsV2::default()
         };
         let report = fuse_graph_v2(&mut g, &options).unwrap();

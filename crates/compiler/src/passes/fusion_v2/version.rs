@@ -49,6 +49,7 @@ pub enum TakeGraphError {
 /// (or its take-graph guard on error).
 pub fn take_graph(g: &mut GraphBuilder) -> Result<GraphFuser, TakeGraphError> {
     let n_bufs = g.bufs.len();
+    let canon: Vec<usize> = (0..n_bufs).map(|b| g.canonical_buf(BufId(b)).0).collect();
     let mut gf = GraphFuser {
         // Seed one value class per original physical buffer; index equals
         // BufId, so `ValueClassId(b.0)` is the first instance of `BufId(b.0)`.
@@ -58,6 +59,7 @@ pub fn take_graph(g: &mut GraphBuilder) -> Result<GraphFuser, TakeGraphError> {
         consumers: vec![Vec::new(); n_bufs],
         access_relations: Vec::new(),
         re_exported: (0..n_bufs).map(ValueClassId).collect(),
+        canon,
         inputs: Vec::new(),
         outputs: Vec::new(),
         seed_node_count: 0,
@@ -76,9 +78,13 @@ pub fn take_graph(g: &mut GraphBuilder) -> Result<GraphFuser, TakeGraphError> {
         let operand_bufs = node.get_operands(&gf.bufs);
         let result_bufs = node.get_results();
         // Reject duplicate writes to the same physical buffer within one
-        // node — MVP has no ordering rule for that case.
+        // node — MVP has no ordering rule for that case. Compared on the
+        // alias-class root: two sibling writes hit the same pool slot.
         for (i, a) in result_bufs.iter().enumerate() {
-            if let Some(j) = result_bufs[..i].iter().position(|b| b == a) {
+            if let Some(j) = result_bufs[..i]
+                .iter()
+                .position(|b| gf.canon[b.0] == gf.canon[a.0])
+            {
                 return Err(TakeGraphError::DuplicateWrite {
                     node: idx,
                     buf: a.0,

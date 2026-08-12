@@ -53,7 +53,7 @@ baby-bear-bn254-poseidon2 = [
 touchemall = ["openvm-cuda-common/touchemall"]
 test-utils = ["openvm-stark-backend/test-utils"]
 # Enables the Graph-IR based transcript / kernels (crypto-compiler + planner).
-graph-ir = ["dep:crypto-compiler", "crypto-compiler/planner"]
+graph-ir = ["dep:crypto-compiler", "crypto-compiler/planner-ortools"]
 
 [[bin]]
 name = "bench"

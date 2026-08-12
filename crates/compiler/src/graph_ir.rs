@@ -932,6 +932,16 @@ pub struct GraphBuilder {
     /// (which defines the `get_output` index order). See
     /// [`Self::register_output`].
     output_bufs: Vec<BufId>,
+    /// Alias table: `aliases[b] = Some(parent)` means buffer `b` was
+    /// created by an SSA-restoration pass as a fresh renamed version of
+    /// buffer `parent` (produced when a blackbox kernel mutates `parent`
+    /// in place). Both must resolve to the same physical pool slot at
+    /// runtime — see [`Self::canonical_buf`] and the planner's
+    /// canonicalization step.
+    ///
+    /// Empty until `passes::restore_ssa` runs; entries are per-buffer
+    /// (same length as `bufs`) so a `Vec` lookup is `O(1)`.
+    pub aliases: Vec<Option<BufId>>,
     /// Cached result of the `plan_memory` graph pass. Every structural
     /// mutation (`insert_*`, splits, fusion, dce-removal) resets this to
     /// `None`; the compile driver reuses it when already populated.
@@ -955,11 +965,41 @@ impl GraphBuilder {
     pub fn add_buf(&mut self, info: BufInfo) -> BufId {
         let id = BufId(self.bufs.len());
         self.bufs.push(info);
+        self.aliases.push(None);
         id
     }
 
     pub fn buf_info(&self, id: BufId) -> &BufInfo {
         &self.bufs[id.0]
+    }
+
+    /// Resolve `id` to its canonical `BufId` by following the alias
+    /// chain. Two buffers with the same `canonical_buf` share a runtime
+    /// pool slot.
+    pub fn canonical_buf(&self, id: BufId) -> BufId {
+        let mut cur = id;
+        while let Some(parent) = self.aliases.get(cur.0).copied().flatten() {
+            debug_assert_ne!(parent, cur, "self-alias for {cur:?}");
+            cur = parent;
+        }
+        cur
+    }
+
+    /// Record that `child` is a fresh SSA-renamed version of
+    /// `canonical_buf(parent)` — the two must share a runtime pool slot.
+    pub fn alias_bufs(&mut self, child: BufId, parent: BufId) {
+        assert_ne!(child, parent, "cannot alias buffer to itself: {child:?}");
+        let root = self.canonical_buf(parent);
+        assert_ne!(child, root, "aliasing {child:?} to itself via {parent:?}");
+        if self.aliases.len() < self.bufs.len() {
+            self.aliases.resize(self.bufs.len(), None);
+        }
+        assert!(
+            self.aliases[child.0].is_none(),
+            "buffer {child:?} already aliased to {:?}",
+            self.aliases[child.0],
+        );
+        self.aliases[child.0] = Some(root);
     }
 
     /// Declares `id` as a graph input: its contents are supplied by the

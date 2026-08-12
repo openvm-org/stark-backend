@@ -4,6 +4,9 @@ Status doc for the work adding an SSA-restoration pass + alias-aware planner so
 `verify_graph`'s single-writer / SSA invariant can coexist with `BlackboxKernel`'s
 in-place-mutation contract.
 
+**Status: complete.** All e2e variants pass; the final bug was an
+alias-blind WAR guard in fusion v1 (see "Root cause" below).
+
 ## Background
 
 `GraphBuilder::insert_blackbox_kernel(inputs, outputs, modifies)` takes a per-input
@@ -110,14 +113,15 @@ verifier, sees SSA. `plan_memory` forwards `graph.aliases` to `plan_raw`.
 
 ### Unit tests — `passes::restore_ssa::tests`
 
-All 5 pass in isolation:
+All pass:
 
 - `empty_graph_is_noop`
 - `single_mutation_chain_produces_alias_class` (Memcpy → k0(mut) → k1(mut) →
   reader; asserts 3-member alias class and that the reader reads the last SSA
   version)
+- `intermediate_reader_sees_correct_version` (regression for the deleted
+  `current[latest] = fresh` fallback)
 - `independent_buffers_stay_in_separate_classes`
-- `same_kernel_mutates_two_carried_buffers`
 - `idempotent_when_no_carried_outputs`
 
 ### Existing planner tests
@@ -146,18 +150,14 @@ All 9 pass:
 - `do_fused_sumcheck_round_ir_matches_eager`
 - `do_fused_sumcheck_round_inplace_ir_matches_eager`
 
-### End-to-end — **partial pass, layer 1 still fails**
+### End-to-end — **all 6 variants pass**
 
-`fractional_sumcheck_gpu_ir_matches_eager_dense` (16 leaves, dense):
+`fractional_sumcheck_gpu_ir_matches_eager_{dense, virtual, virtual_half_edge,
+precompute_m_dense, precompute_m_virtual, precompute_m_multi_window}` all
+pass (verified with the on-disk kernel cache cleared first —
+`rm -rf ~/.openvm/kernel_cache`).
 
-| Check                             | Result |
-|-----------------------------------|--------|
-| `verify_graph` (post-`restore_ssa`) | pass   |
-| `fractional_sum` (root observe)   | pass   |
-| `claims_per_layer[0]` (first extract, pre-round-1) | pass   |
-| `claims_per_layer[1]` (post-round-1 extract) | **fail** |
-
-Plumbing observations at `n=16`:
+Plumbing observations at `n=16` (dense):
 
 - `restore_ssa` renamed 12 carried outputs (matches count of mutating blackboxes in the driver).
 - 10 aliases point to the canonical `BufId(2)` (`"leaves"` — the layer buffer) at pool offset 512.
@@ -165,55 +165,59 @@ Plumbing observations at `n=16`:
 - `writers[canonical layer] = [2, 3, 4, 5, 6, 7, 10, 24, 47, 80, 89]` — 1 memcpy + 10 mutations in insertion order.
 - Peak pool: 2096 bytes with aliases vs 2256 bytes without — packing correctly shares the mutation-chain slot.
 
-## Known bug
+## Root cause of the layer-1 divergence (fixed)
 
-The isolated round-composite tests pass, so single-kernel mutation semantics
-are correct. The composed prover diverges from eager between the first-claim
-extract and the second-claim extract, i.e., across round 1's two mutations
-(`frac_compute_round_and_revert` + `fold_ef_frac_columns_inplace`) plus the
-observe/update kernels between them.
+Two suspects were eliminated first:
 
-**Prime suspect** — `rewrite_blackbox` in `passes/restore_ssa.rs`:
+- The `current[latest] = fresh` fallback in `rewrite_blackbox` was deleted
+  (with regression test `intermediate_reader_sees_correct_version`) — the
+  e2e still failed, so `restore_ssa` was not the bug.
+- The planner was verified sound: `PlanCtx::build_with_aliases`
+  canonicalizes every read/write onto the class root, so `edges()` derives
+  WAW/RAW/WAR precedence over the *class*, fully re-serializing the
+  mutation chain. Neutralizing fusion (`FusionOptions { max_iterations: 0 }`)
+  made the e2e pass — isolating the bug to fusion v1.
 
-```rust
-current.insert(original, fresh);
-if latest != original {
-    current.insert(latest, fresh);
-}
-```
+**The bug**: the WAR guard in `enumerate_candidates`
+(`passes/fusion.rs`) checked `writers[input_buf]` — writers of the *exact*
+`BufId`. Post-`restore_ssa`, every `BufId` has exactly one writer by
+construction; an in-place mutation clobbering a slot writes a *fresh SSA
+sibling* of the buffer it overwrites. So the guard never fired, and fusion
+inlined producers into consumers positioned *after* a mutation of the
+producer-input's alias class — moving the producer's read past the clobber
+of its pool slot. First divergence: `sumcheck_polys[0][0]` (round 1's first
+compute), which then cascaded through the transcript.
 
-The second `insert` was added defensively without a concrete test case
-demanding it. If a later node's input already equals `latest` (the previous
-SSA version, which is a legitimate SSA-clean read produced by remap in
-earlier iterations), this `insert` overrides its remap to `fresh` — even
-though that node was inserted between the two mutations and should read
-`latest`, not the yet-to-execute `fresh`.
+**The fix**: the guard now checks class-level writers — `writers[m]`
+unioned over every `m` with the same `canonical_buf` as the producer input.
+Regression test `alias_sibling_war_hazard_blocks_fusion` (blackbox writes
+an alias sibling of the producer's input between producer and consumer →
+candidate rejected).
 
-**Next step**: delete the `if latest != original` block and re-run
-`fractional_sumcheck_gpu_ir_matches_eager_dense`. If that doesn't fix it,
-add a targeted unit test on a hand-built graph
-(`Memcpy → mut → structured-read → mut → structured-read`) that asserts the
-exact post-`restore_ssa` `k.inputs` on each reader — the semantic bug should
-surface there without pulling in the whole prover.
+Note: `passes/fusion_v2` will need the same alias-class WAR treatment when
+it lands; only v1 was fixed here.
 
-## Blocker to further iteration
+## Pre-existing failures on this branch (not related to this work)
 
-The `crypto-compiler` crate is currently uncompilable in the working tree due
-to pre-existing WIP in `passes/fusion_v2/fusions/` (missing imports of
-`clone_expr`, `clone_expr_with_hook`, `QuastEmitter`, `Quast`;
-`remap_size_expr` defined twice; four untracked new fusion files referenced
-by `mod.rs`). Earlier verification runs succeeded off a stale build cache.
-Once `cargo clean` ran, no fresh build succeeds.
+`cargo nextest run -p crypto-compiler`: 424/426 pass. The 2 failures occur
+identically with the fusion fix stashed, i.e. they pre-date it:
 
-Fix path: finish (or temporarily stash) the fusion_v2 refactor, then run
-`cargo nextest run -p openvm-cuda-backend --test-threads=1 fractional_sumcheck_gpu_ir_matches_eager_dense`
-and iterate on the suspect block above.
+- `gpu_graph::module_with_intermediate_buffers_is_rejected` — compile now
+  *succeeds* where the test expects a lowering-time rejection of
+  multi-kernel modules.
+- `gpu_graph::symbolic::partial_monomorphization_and_fusion` — "kernel k0
+  has a symbolic outer bound (s0 * 8); a block hint is required". The same
+  error appears when compiling with `.without_fusion()`: the no-fusion
+  branch of `GraphCompiler::compile` runs `monomorphize` *before*
+  `canonicalize` (the fuse path ends `canonicalize → monomorphize`), so
+  block hints are lost.
 
 ## Files touched
 
 - `crates/compiler/src/graph_ir.rs` — `aliases` field, `canonical_buf`, `alias_bufs`, `add_buf` grow.
 - `crates/compiler/src/passes/mod.rs` — expose `restore_ssa` module.
 - `crates/compiler/src/passes/restore_ssa.rs` — new pass + 5 unit tests.
+- `crates/compiler/src/passes/fusion.rs` — alias-class WAR guard in `enumerate_candidates` + regression test.
 - `crates/compiler/src/planner/ctx.rs` — `build_with_aliases`, `canon` field, `packable` canonical guard, `propagate_alias_offsets`.
 - `crates/compiler/src/planner/mod.rs` — `plan_raw` alias parameter, propagation call.
 - `crates/compiler/src/graph_exe.rs` — stage-0 `restore_ssa` invocation, `plan_memory` alias threading.

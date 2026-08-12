@@ -28,7 +28,7 @@ use crate::{
     graph_ir::{GraphBuilder, GraphNode},
     module_hash::module_hash,
     passes::fusion_v2::{
-        apply::{apply_solution, ApplyError},
+        apply::apply_solution,
         cost::{
             estimate_non_kernel, ArtifactContext, EstimatorConfig, GraphNodeCost, KernelCostManager,
         },
@@ -36,7 +36,7 @@ use crate::{
         fusions::{epilogue, fanout, horizontal, producer_consumer, small_kernel},
         model::{GraphFuser, NodeId},
         saturate::{CandidateKey, SaturationState},
-        validate::would_create_cycle,
+        validate::{would_create_cycle, StorageHazardIndex},
         version::{take_graph, TakeGraphError},
     },
 };
@@ -70,13 +70,13 @@ pub struct FusionOptionsV2 {
     /// it off relies on each fusion pass's legality proof to preserve
     /// the DAG invariant.
     pub validate_alt_graph_acyclicity: bool,
-    /// Wall-time cap for the CP-SAT solve, in seconds.
+    /// Wall-time cap for the CP-SAT solve, in seconds. Default: 60.
     pub solver_time_limit_secs: f64,
-    /// Number of CP-SAT search workers. The default of `1` keeps the
-    /// solve deterministic (plan §2.4); higher values enable the
-    /// parallel portfolio, which is faster but breaks run-to-run
-    /// reproducibility of tie-broken solutions. `0` lets CP-SAT
-    /// decide.
+    /// Number of CP-SAT search workers. Defaults to the number of
+    /// visible CPU cores; multiple workers enable the parallel
+    /// portfolio, which is faster but breaks run-to-run
+    /// reproducibility of tie-broken solutions. Set to `1` for a
+    /// deterministic solve (plan §2.4); `0` lets CP-SAT decide.
     pub solver_num_workers: usize,
     /// Whether producer-consumer candidates should be enumerated.
     pub enable_producer_consumer: bool,
@@ -99,10 +99,12 @@ pub struct FusionOptionsV2 {
     /// `max_region_seed_nodes`). Default: 6.
     pub small_kernel_max_chain: usize,
     /// Whether M9 same-domain horizontal candidates should be
-    /// enumerated (§10.6, §15 default `true`). Horizontal fuses pairs
-    /// of dataflow-independent flat kernels with equal concrete outer
+    /// enumerated (§10.6). Horizontal fuses pairs of
+    /// dataflow-independent flat kernels with equal concrete outer
     /// domain into one kernel returning the concatenated tuple of
     /// outputs; larger groups compose across saturation rounds.
+    /// Default `false`: horizontal candidates inflate enumeration
+    /// quadratically and rarely win on real graphs.
     pub enable_horizontal: bool,
     /// Whether M10 epilogue candidates should be enumerated (§10.4,
     /// §15 default `true`). Epilogue fuses a flat pointwise consumer
@@ -174,14 +176,14 @@ impl Default for FusionOptionsV2 {
             max_enumeration_time_per_round: std::time::Duration::from_secs(2),
             max_outer_iterations: 1,
             validate_alt_graph_acyclicity: true,
-            solver_time_limit_secs: 5.0,
-            solver_num_workers: 1,
+            solver_time_limit_secs: 60.0,
+            solver_num_workers: std::thread::available_parallelism().map_or(1, |n| n.get()),
             enable_producer_consumer: true,
             enable_fanout: true,
             enable_small_kernel: true,
             small_kernel_shared_bytes: 48 * 1024,
             small_kernel_max_chain: 6,
-            enable_horizontal: true,
+            enable_horizontal: false,
             enable_epilogue: true,
             enable_keep_variants: true,
             enable_all_keep_variants: false,
@@ -209,6 +211,12 @@ pub struct FusionReportV2 {
     pub candidates_generated: usize,
     pub candidates_inserted: usize,
     pub candidates_rejected_cycle: usize,
+    /// Candidates rejected by the insertion-time storage-hazard guard:
+    /// the candidate reads a version of a multi-version storage class
+    /// while transitively depending on a later version, so
+    /// reconstruction could not schedule it (see
+    /// [`crate::passes::fusion_v2::validate::StorageHazardIndex`]).
+    pub candidates_rejected_storage_hazard: usize,
     pub candidates_rejected_cap: usize,
     /// M6: candidates discarded because their `CandidateKey` was
     /// already in `SaturationState::seen_candidates` (§9 dedup —
@@ -252,13 +260,13 @@ pub struct FusionReportV2 {
 }
 
 /// Failure modes of [`fuse_graph_v2`]. Structural errors from
-/// [`take_graph`] and [`apply_solution`] surface here.
+/// [`take_graph`] surface here; [`apply_solution`] failures do not — the
+/// driver falls back to the restored original graph and records the
+/// reason in [`FusionReportV2::fallback_reason`].
 #[derive(Debug, Error)]
 pub enum FuseV2Error {
     #[error(transparent)]
     TakeGraph(#[from] TakeGraphError),
-    #[error(transparent)]
-    Apply(#[from] ApplyError),
 }
 
 /// Runs bounded-saturation fusion v2 on `g`, in place. Preserves the
@@ -337,12 +345,16 @@ fn fuse_graph_v2_inner(
     // Step 1: convert to versioned seed alternative graph.
     let mut gf = take_graph(g)?;
     let mut sat = SaturationState::new(gf.seed_node_count);
+    // Valid for the whole invocation: value classes never grow after
+    // take_graph.
+    let hazard_index = StorageHazardIndex::new(&gf);
 
     // Step 2: bounded saturation.
     let max_rounds = options.max_rounds.max(1);
     let mut candidates_generated = 0usize;
     let mut candidates_inserted = 0usize;
     let mut candidates_rejected_cycle = 0usize;
+    let mut candidates_rejected_storage_hazard = 0usize;
     let mut candidates_rejected_cap = 0usize;
     let mut candidates_rejected_dedup = 0usize;
     let mut candidates_rejected_pass_cap = 0usize;
@@ -458,9 +470,10 @@ fn fuse_graph_v2_inner(
         // level is skipped and the next (smaller) level is attempted.
         let levels = rank_by_impact(drafts, &options.artifact);
         let insert_t0 = std::time::Instant::now();
-        let (dedup0, cycle0, cap0) = (
+        let (dedup0, cycle0, hazard0, cap0) = (
             candidates_rejected_dedup,
             candidates_rejected_cycle,
+            candidates_rejected_storage_hazard,
             candidates_rejected_cap,
         );
         let mut inserted_this_round = 0usize;
@@ -487,6 +500,19 @@ fn fuse_graph_v2_inner(
                     candidates_rejected_cycle += 1;
                     continue;
                 }
+                // Storage-hazard guard is unconditional: unlike §9.1
+                // acyclicity (which each pass proves for its own output),
+                // the fusion passes are alias-blind, and an unschedulable
+                // candidate would poison the whole extraction at apply
+                // time.
+                if hazard_index.would_create_storage_hazard_cycle(
+                    &gf,
+                    &draft.alt.inputs,
+                    &draft.alt.outputs,
+                ) {
+                    candidates_rejected_storage_hazard += 1;
+                    continue;
+                }
                 let parents = draft.parents.clone();
                 let node_id = gf.insert_candidate(draft.alt);
                 sat.register_origins(node_id, &parents);
@@ -499,10 +525,12 @@ fn fuse_graph_v2_inner(
             eprintln!(
                 "[fusion-v2] round {round}: generated={generated_this_round}, \
                  inserted={inserted_this_round}, alt_nodes={}, rejected \
-                 dedup={} cycle={} cap={} pass_cap={over_cap}, insert took {:.1} ms",
+                 dedup={} cycle={} storage_hazard={} cap={} pass_cap={over_cap}, \
+                 insert took {:.1} ms",
                 gf.nodes.len(),
                 candidates_rejected_dedup - dedup0,
                 candidates_rejected_cycle - cycle0,
+                candidates_rejected_storage_hazard - hazard0,
                 candidates_rejected_cap - cap0,
                 insert_t0.elapsed().as_secs_f64() * 1e3,
             );
@@ -569,7 +597,7 @@ fn fuse_graph_v2_inner(
     let solve_t0 = std::time::Instant::now();
     let solution = choose_extractor(&gf, &data, &extract_opts);
     let selected_from_solver = solution.nodes.len();
-    let fallback_reason = solution.fallback.clone();
+    let mut fallback_reason = solution.fallback.clone();
     if options.verbose {
         eprintln!(
             "[fusion-v2] solve: {:.1} ms, status={:?}, fallback={:?}, selected={}",
@@ -581,9 +609,21 @@ fn fuse_graph_v2_inner(
         dump_extraction(&gf, &data, &solution);
     }
 
-    // Step 4: apply solution back to the builder.
+    // Step 4: apply solution back to the builder. A rejected solution is
+    // a v2 invariant violation (the insertion guards should have made it
+    // unrepresentable); `apply_solution` restored the original seed
+    // graph, so keep the unfused graph and record the fallback rather
+    // than failing the compile.
     let apply_t0 = std::time::Instant::now();
-    apply_solution(g, gf, &solution)?;
+    if let Err(e) = apply_solution(g, gf, &solution) {
+        eprintln!(
+            "[fusion-v2] apply rejected the selected solution ({e}); falling back to the \
+             original graph"
+        );
+        fallback_reason = Some(FallbackReason::InternalError {
+            message: format!("apply: {e}"),
+        });
+    }
     // Debug-only: statically access-check every selected kernel and dump
     // the HIR of violators (keeps going; the graph compile's own
     // `check_accesses` gate is the enforcing one).
@@ -619,6 +659,7 @@ fn fuse_graph_v2_inner(
         candidates_generated,
         candidates_inserted,
         candidates_rejected_cycle,
+        candidates_rejected_storage_hazard,
         candidates_rejected_cap,
         candidates_rejected_dedup,
         candidates_rejected_pass_cap,

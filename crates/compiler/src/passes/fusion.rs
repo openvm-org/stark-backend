@@ -660,6 +660,24 @@ pub fn enumerate_candidates(
     opts: &FusionOptions,
 ) -> Vec<FusionCandidate> {
     let (writers, readers) = classify_buf_uses(&g.nodes, g.bufs.len());
+    // Class-level writer lists. A write to ANY member of an alias class
+    // (see `passes::restore_ssa`) lands on the class's shared pool slot,
+    // so the WAR hazard check below must consider sibling writes — an
+    // exact-`BufId` check is blind to in-place mutations, which always
+    // write a fresh SSA sibling of the buffer they clobber.
+    let canon: Vec<usize> = (0..g.bufs.len())
+        .map(|b| g.canonical_buf(BufId(b)).0)
+        .collect();
+    let class_writers: Vec<Vec<usize>> = {
+        let mut cw: Vec<Vec<usize>> = vec![Vec::new(); g.bufs.len()];
+        for (b, ws) in writers.iter().enumerate() {
+            cw[canon[b]].extend(ws.iter().copied());
+        }
+        for ws in &mut cw {
+            ws.sort_unstable();
+        }
+        cw
+    };
     let mut out = Vec::new();
     let diag = std::env::var_os("FUSION_DIAG").is_some();
     let log = |src_name: &str, dst_name: &str, reason: &str| {
@@ -720,15 +738,20 @@ pub fn enumerate_candidates(
                 );
                 continue;
             }
-            if kn_src
-                .inputs
-                .iter()
-                .any(|ib| writers[ib.0].iter().any(|&wn| wn > src && wn < dst))
-            {
+            // Fusion grafts the producer's body into the consumer, moving
+            // the producer's reads from time `src` to time `dst`. That is
+            // illegal if the pool slot backing any producer input is
+            // rewritten in between — by a writer of the same `BufId` or of
+            // any alias-class sibling sharing the slot.
+            if kn_src.inputs.iter().any(|ib| {
+                class_writers[canon[ib.0]]
+                    .iter()
+                    .any(|&wn| wn > src && wn < dst)
+            }) {
                 log(
                     &src_name,
                     &dst_name,
-                    "WAR: writer of a src input between src and dst",
+                    "WAR: writer of a src input (or alias sibling) between src and dst",
                 );
                 continue;
             }
@@ -2763,6 +2786,33 @@ mod tests {
         g.insert_memset(ins[0], 0);
         let last = g.nodes.len() - 1;
         g.nodes.swap(1, last);
+        assert!(candidates(&g, &FusionOptions::default()).is_empty());
+    }
+
+    /// Same hazard through the alias table: the intervening writer hits a
+    /// fresh SSA sibling of the producer's input — the shape
+    /// `restore_ssa` leaves behind for in-place mutations — not the input
+    /// `BufId` itself. The shared pool slot is still clobbered, so fusion
+    /// must refuse to move the producer's read past it.
+    #[test]
+    fn alias_sibling_war_hazard_blocks_fusion() {
+        let (mut g, ins) = graph_of(chain_module(), 1, 1);
+        assert!(!candidates(&g, &FusionOptions::default()).is_empty());
+
+        // Blackbox mutation of `ins[0]` between producer (0) and
+        // consumer, writing a fresh SSA version aliased onto it.
+        let v1 = g.add_buf(g.bufs[ins[0].0].clone());
+        g.alias_bufs(v1, ins[0]);
+        g.nodes.insert(
+            1,
+            GraphNode::BlackboxKernel(KernelNode {
+                inputs: vec![ins[0]],
+                outputs: vec![v1],
+                carried_outputs: vec![],
+                func: Arc::new(|_, _, _| {}),
+                name: "mutator".into(),
+            }),
+        );
         assert!(candidates(&g, &FusionOptions::default()).is_empty());
     }
 

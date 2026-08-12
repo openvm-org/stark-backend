@@ -3056,6 +3056,7 @@ mod tests {
     use crypto_compiler::{
         graph_exe::GraphCompiler,
         graph_ir::{DeviceType, GraphBuilder},
+        passes::fusion_v2::FusionOptionsV2,
         planner::SchedulerMode,
     };
     use openvm_cuda_common::{
@@ -3531,13 +3532,57 @@ mod tests {
         buf
     }
 
+    /// Builds a `GraphCompiler` honoring the `FRAC_IR_FUSION` env var:
+    /// `v2` enables fusion v2 (with `FRAC_IR_FUSION_DISABLE=<pass,...>` to
+    /// turn off individual synthesis passes), `off` disables fusion
+    /// entirely, anything else uses the default (v1) pipeline.
+    ///
+    /// `FRAC_BENCH_STREAMS=<n>` overrides `ListSchedulerV1::max_concurrency`;
+    /// use `1` to force single-stream execution when debugging cross-stream
+    /// sync bugs.
+    fn compiler_from_env() -> GraphCompiler {
+        use crypto_compiler::planner::ListSchedulerV1;
+        let mut compiler = GraphCompiler::new().device(DeviceType::Cuda(0));
+        if let Ok(s) = std::env::var("FRAC_BENCH_STREAMS") {
+            let max_concurrency: u32 = s.trim().parse().expect("FRAC_BENCH_STREAMS must be u32");
+            compiler = compiler.scheduler(SchedulerMode::ListV1 {
+                params: ListSchedulerV1 {
+                    max_concurrency,
+                    ..ListSchedulerV1::default()
+                },
+            });
+        }
+        match std::env::var("FRAC_IR_FUSION").as_deref() {
+            Ok("v2") => {
+                let mut opts = FusionOptionsV2 {
+                    verbose: true,
+                    ..FusionOptionsV2::default()
+                };
+                if let Ok(disable) = std::env::var("FRAC_IR_FUSION_DISABLE") {
+                    for pass in disable.split(',') {
+                        match pass.trim() {
+                            "producer_consumer" => opts.enable_producer_consumer = false,
+                            "fanout" => opts.enable_fanout = false,
+                            "small_kernel" => opts.enable_small_kernel = false,
+                            "horizontal" => opts.enable_horizontal = false,
+                            "epilogue" => opts.enable_epilogue = false,
+                            "" => {}
+                            other => panic!("unknown fusion pass `{other}`"),
+                        }
+                    }
+                }
+                compiler = compiler.fusion_v2_options(opts)
+            }
+            Ok("off") => compiler = compiler.without_fusion(),
+            _ => {}
+        }
+        compiler
+    }
+
     /// Compile a graph with no runtime inputs, run it, and read back the
     /// given buffers as raw bytes. Each buffer is registered as a graph
     /// output here, so it must have a writer (e.g. be an `insert_memcpy`
     /// destination).
-    ///
-    /// Uses the heuristic scheduler: the full-driver graphs are too large
-    /// for CP-SAT to find an incumbent within its wall-time cap.
     fn run_graph_read_bufs(
         mut g: GraphBuilder,
         bufs: &[BufId],
@@ -3546,11 +3591,17 @@ mod tests {
         for &b in bufs {
             g.register_output(b);
         }
-        let mut exe = GraphCompiler::new()
-            .device(DeviceType::Cuda(0))
-            .scheduler(SchedulerMode::Heuristic)
-            .compile(g)
-            .expect("graph compile");
+        let mut exe = compiler_from_env().compile(g).expect("graph compile");
+        if let Some(v2) = exe.fusion_report().and_then(|r| r.v2.as_ref()) {
+            eprintln!(
+                "[frac-ir-fusion-v2] nodes {} -> {}, inserted={}, selected={}, fallback={:?}",
+                v2.nodes_before,
+                v2.nodes_after,
+                v2.candidates_inserted,
+                v2.selected_from_solver,
+                v2.fallback_reason,
+            );
+        }
         exe.run(ctx).expect("graph run");
         bufs.iter()
             .map(|&bid| {
@@ -4368,26 +4419,16 @@ mod tests {
     // End-to-end: `fractional_sumcheck_gpu_ir` vs the eager
     // `fractional_sumcheck_gpu`, same leaves, fresh transcripts.
 
-    /// Run the graph-IR driver on `leaves` and read every proof artifact
-    /// back as host `EF` values, reshaped to match the eager proof.
-    #[allow(clippy::type_complexity)]
-    fn run_ir_sumcheck(
-        leaves: &[Frac<EF>],
-        sizes: FractionalInputSize,
-        alpha: EF,
-        ctx: &GpuDeviceCtx,
-    ) -> ((EF, EF), Vec<[EF; 4]>, Vec<Vec<[EF; GKR_S_DEG]>>, Vec<EF>) {
-        let device = DeviceType::Cuda(0);
-        let mut g = GraphBuilder::new();
-        let mut transcript = DuplexSpongeGpuIR::new(&mut g, device);
-        let layer = frac_const_buf(&mut g, "leaves", leaves);
-        let proof =
-            fractional_sumcheck_gpu_ir(&mut g, &mut transcript, layer, sizes, alpha, false, device)
-                .expect("fractional_sumcheck_gpu_ir");
-
-        // Every artifact has in-graph readers (transcript observes / later
-        // kernels), so memcpy each into a fresh buffer that
-        // `run_graph_read_efs` registers as a graph output.
+    /// Memcpy every proof artifact into a fresh scalar buffer, returned in
+    /// canonical order: root_p, root_q, claims (4 per layer), sumcheck
+    /// polynomials, final randomness. Every artifact has in-graph readers
+    /// (transcript observes / later kernels), hence the export copies.
+    /// The caller registers the returned buffers as graph outputs.
+    fn export_proof_artifacts(
+        g: &mut GraphBuilder,
+        proof: &FracSumcheckProofIR,
+        device: DeviceType,
+    ) -> Vec<BufId> {
         let mut exports: Vec<BufId> = Vec::new();
         let export = |g: &mut GraphBuilder, src: BufId, name: String| {
             let out = add_ext_scalar_buf(g, device, &name);
@@ -4395,25 +4436,33 @@ mod tests {
             out
         };
         let (root_p, root_q) = proof.fractional_sum;
-        exports.push(export(&mut g, root_p, "out_root_p".to_string()));
-        exports.push(export(&mut g, root_q, "out_root_q".to_string()));
+        exports.push(export(g, root_p, "out_root_p".to_string()));
+        exports.push(export(g, root_q, "out_root_q".to_string()));
         for (i, claim) in proof.claims_per_layer.iter().enumerate() {
             for (k, buf) in claim.as_array().into_iter().enumerate() {
-                exports.push(export(&mut g, buf, format!("out_claim_{i}_{k}")));
+                exports.push(export(g, buf, format!("out_claim_{i}_{k}")));
             }
         }
         for (i, layer_polys) in proof.sumcheck_polys.iter().enumerate() {
             for (j, s) in layer_polys.iter().enumerate() {
                 for (k, &buf) in s.iter().enumerate() {
-                    exports.push(export(&mut g, buf, format!("out_s_{i}_{j}_{k}")));
+                    exports.push(export(g, buf, format!("out_s_{i}_{j}_{k}")));
                 }
             }
         }
         for (i, &buf) in proof.final_randomness.iter().enumerate() {
-            exports.push(export(&mut g, buf, format!("out_xi_{i}")));
+            exports.push(export(g, buf, format!("out_xi_{i}")));
         }
+        exports
+    }
 
-        let efs = run_graph_read_efs(g, &exports, ctx);
+    /// Split a flat readback of `export_proof_artifacts` buffers back into
+    /// (fractional_sum, claims, polys, final_randomness), shaped by `proof`.
+    #[allow(clippy::type_complexity)]
+    fn reshape_proof_efs(
+        efs: Vec<EF>,
+        proof: &FracSumcheckProofIR,
+    ) -> ((EF, EF), Vec<[EF; 4]>, Vec<Vec<[EF; GKR_S_DEG]>>, Vec<EF>) {
         let mut it = efs.into_iter();
         let fractional_sum = (it.next().unwrap(), it.next().unwrap());
         let claims: Vec<[EF; 4]> = (0..proof.claims_per_layer.len())
@@ -4436,6 +4485,65 @@ mod tests {
             .collect();
         assert!(it.next().is_none(), "leftover exported values");
         (fractional_sum, claims, polys, final_randomness)
+    }
+
+    /// Run the graph-IR driver on `leaves` and read every proof artifact
+    /// back as host `EF` values, reshaped to match the eager proof.
+    #[allow(clippy::type_complexity)]
+    fn run_ir_sumcheck(
+        leaves: &[Frac<EF>],
+        sizes: FractionalInputSize,
+        alpha: EF,
+        ctx: &GpuDeviceCtx,
+    ) -> ((EF, EF), Vec<[EF; 4]>, Vec<Vec<[EF; GKR_S_DEG]>>, Vec<EF>) {
+        let device = DeviceType::Cuda(0);
+        let mut g = GraphBuilder::new();
+        let mut transcript = DuplexSpongeGpuIR::new(&mut g, device);
+        let layer = frac_const_buf(&mut g, "leaves", leaves);
+        let proof =
+            fractional_sumcheck_gpu_ir(&mut g, &mut transcript, layer, sizes, alpha, false, device)
+                .expect("fractional_sumcheck_gpu_ir");
+
+        let exports = export_proof_artifacts(&mut g, &proof, device);
+        let efs = run_graph_read_efs(g, &exports, ctx);
+        reshape_proof_efs(efs, &proof)
+    }
+
+    /// Assert a `run_ir_sumcheck` result equals the eager prover's proof
+    /// artifact-by-artifact: fractional sum, per-layer claims, every
+    /// sumcheck round polynomial, and the final randomness.
+    #[allow(clippy::type_complexity)]
+    fn assert_ir_proof_matches_eager(
+        got: &((EF, EF), Vec<[EF; 4]>, Vec<Vec<[EF; GKR_S_DEG]>>, Vec<EF>),
+        want_proof: &openvm_stark_backend::prover::fractional_sumcheck_gkr::FracSumcheckProof<SC>,
+        want_xi: &[EF],
+    ) {
+        let (got_sum, got_claims, got_polys, got_xi) = got;
+        assert_eq!(
+            *got_sum, want_proof.fractional_sum,
+            "fractional_sum mismatch"
+        );
+        assert_eq!(
+            got_claims.len(),
+            want_proof.claims_per_layer.len(),
+            "claims_per_layer length mismatch"
+        );
+        for (i, (got, want)) in got_claims
+            .iter()
+            .zip(&want_proof.claims_per_layer)
+            .enumerate()
+        {
+            assert_eq!(
+                *got,
+                [want.p_xi_0, want.q_xi_0, want.p_xi_1, want.q_xi_1],
+                "layer {i} claims mismatch"
+            );
+        }
+        assert_eq!(
+            *got_polys, want_proof.sumcheck_polys,
+            "sumcheck_polys mismatch"
+        );
+        assert_eq!(got_xi.as_slice(), want_xi, "final randomness mismatch");
     }
 
     fn assert_e2e_matches_eager(real_len: usize, logical_len: usize, seed: u64) {
@@ -4470,33 +4578,8 @@ mod tests {
         ctx.stream.synchronize().expect("sync");
 
         // Graph-IR side.
-        let (got_sum, got_claims, got_polys, got_xi) = run_ir_sumcheck(&leaves, sizes, alpha, &ctx);
-
-        assert_eq!(
-            got_sum, want_proof.fractional_sum,
-            "fractional_sum mismatch"
-        );
-        assert_eq!(
-            got_claims.len(),
-            want_proof.claims_per_layer.len(),
-            "claims_per_layer length mismatch"
-        );
-        for (i, (got, want)) in got_claims
-            .iter()
-            .zip(&want_proof.claims_per_layer)
-            .enumerate()
-        {
-            assert_eq!(
-                *got,
-                [want.p_xi_0, want.q_xi_0, want.p_xi_1, want.q_xi_1],
-                "layer {i} claims mismatch"
-            );
-        }
-        assert_eq!(
-            got_polys, want_proof.sumcheck_polys,
-            "sumcheck_polys mismatch"
-        );
-        assert_eq!(got_xi, want_xi, "final randomness mismatch");
+        let got = run_ir_sumcheck(&leaves, sizes, alpha, &ctx);
+        assert_ir_proof_matches_eager(&got, &want_proof, &want_xi);
     }
 
     #[test]
@@ -4866,13 +4949,13 @@ mod tests {
 
             println!("\n=== fractional sumcheck: n = 2^{log_n} = {n} leaves ===");
 
-            // Eager warmup — also records `eager_sum` for the sanity check.
-            let eager_sum = {
+            // Eager warmup — records the full proof for the e2e check below.
+            let (eager_proof, eager_xi) = {
                 let d_leaves = leaves_to_device(&leaves, &ctx);
                 let mut sponge = DuplexSpongeGpu::default();
                 let mut mem = MemTracker::start("bench.fractional_eager");
                 ctx.stream.synchronize().expect("sync");
-                let (proof, _xi) = fractional_sumcheck_gpu::<SC, _>(
+                let (proof, xi) = fractional_sumcheck_gpu::<SC, _>(
                     &mut sponge,
                     d_leaves,
                     sizes,
@@ -4883,8 +4966,9 @@ mod tests {
                 )
                 .expect("eager warmup");
                 ctx.stream.synchronize().expect("sync");
-                proof.fractional_sum
+                (proof, xi)
             };
+            let eager_sum = eager_proof.fractional_sum;
 
             // Graph build + compile — never inside an NVTX range or profile.
             let t0 = Instant::now();
@@ -4904,28 +4988,30 @@ mod tests {
                 device,
             )
             .expect("fractional_sumcheck_gpu_ir");
-            // Export the root sum so the graph has outputs and the result
-            // can be checked against the eager proof.
-            let (root_p, root_q) = proof_ir.fractional_sum;
-            let exports: Vec<BufId> = [(root_p, "out_root_p"), (root_q, "out_root_q")]
-                .into_iter()
-                .map(|(src, name)| {
-                    let out = add_ext_scalar_buf(&mut g, device, name);
-                    g.insert_memcpy(src, out);
-                    g.register_output(out);
-                    out
-                })
-                .collect();
+            // Export every proof artifact so this same exe feeds both the
+            // timed runs and the full e2e correctness check below
+            // (exports[0..2] are root_p/root_q for the post-timing sanity
+            // check).
+            let exports = export_proof_artifacts(&mut g, &proof_ir, device);
+            for &b in &exports {
+                g.register_output(b);
+            }
             let build_ms = t0.elapsed().as_secs_f64() * 1e3;
             let n_nodes = g.nodes.len();
 
             let t0 = Instant::now();
-            let mut exe = GraphCompiler::new()
-                .device(device)
-                .scheduler(SchedulerMode::Heuristic)
-                .compile(g)
-                .expect("graph compile");
+            let mut exe = compiler_from_env().compile(g).expect("graph compile");
             let compile_ms = t0.elapsed().as_secs_f64() * 1e3;
+            if let Some(v2) = exe.fusion_report().and_then(|r| r.v2.as_ref()) {
+                println!(
+                    "fusion v2: nodes {} -> {}, inserted={}, selected={}, fallback={:?}",
+                    v2.nodes_before,
+                    v2.nodes_after,
+                    v2.candidates_inserted,
+                    v2.selected_from_solver,
+                    v2.fallback_reason,
+                );
+            }
             println!(
                 "graph build: {build_ms:>8.2} ms ({n_nodes} nodes); compile: {compile_ms:>8.2} \
                  ms ({} unique modules, {} loaded from cache, scratch pool {} bytes)",
@@ -4933,6 +5019,11 @@ mod tests {
                 exe.num_cached_modules(),
                 exe.scratch_bytes(),
             );
+            if let Ok(path) = std::env::var("FRAC_BENCH_DUMP_EXE") {
+                let full = format!("{}.n{n}.txt", path.trim_end_matches(".txt"));
+                std::fs::write(&full, exe.print()).expect("write exe dump");
+                eprintln!("wrote exe dump to {full}");
+            }
 
             assert_eq!(exe.num_inputs(), 1, "leaves should be the only input");
             let d_input = frac_bytes(&leaves).to_device_on(&ctx).expect("H2D");
@@ -4942,6 +5033,28 @@ mod tests {
             ctx.stream.synchronize().expect("sync");
             exe.run(&ctx).expect("graph warmup");
             ctx.stream.synchronize().expect("sync");
+
+            // Full e2e correctness check — the same artifact-by-artifact
+            // comparison as the `_matches_eager_*` tests, read back from
+            // the warmup run of the exact exe the timed pass benchmarks.
+            // Setup stage only: nothing here runs inside the profiler
+            // window or an NVTX range.
+            let read_output = |bid: BufId| -> EF {
+                let idx = (0..exe.num_outputs())
+                    .find(|&i| exe.output_buf_id(i) == bid)
+                    .expect("export output index");
+                ef_from_bytes(&exe.get_output(idx).to_host_on(&ctx).expect("D2H"))
+            };
+            let efs: Vec<EF> = exports.iter().map(|&bid| read_output(bid)).collect();
+            let got = reshape_proof_efs(efs, &proof_ir);
+            assert_ir_proof_matches_eager(&got, &eager_proof, &eager_xi);
+            println!(
+                "e2e check: full proof matches eager ({} claim layers, {} sumcheck rounds, {} \
+                 exported artifacts)",
+                eager_proof.claims_per_layer.len(),
+                eager_proof.sumcheck_polys.iter().map(|l| l.len()).sum::<usize>(),
+                exports.len(),
+            );
 
             states.push(PerSize {
                 log_n,
@@ -4960,22 +5073,34 @@ mod tests {
             });
         }
 
+        // Warm up + capture CUDA graphs for each size before the profiler
+        // window opens, so the timed graph iterations are pure
+        // `cudaGraphLaunch` replays (no capture cost, no per-node host
+        // dispatch overhead).
+        for st in states.iter_mut() {
+            ctx.stream.synchronize().expect("sync");
+            st.exe.capture_graph(&ctx).expect("graph capture");
+            st.exe.launch_graph(&ctx).expect("graph warmup");
+            ctx.stream.synchronize().expect("sync");
+        }
+
         // ---- Timed pass: everything below runs inside a single
         // cudaProfilerStart/Stop window so nsys emits one .nsys-rep file
-        // containing only the labeled timed work.
+        // containing only the labeled timed work. Each iteration is wrapped
+        // in its own NVTX range so the profiler shows a bar per run.
         if nsys_enabled {
             unsafe { cudaProfilerStart() };
         }
         for st in states.iter_mut() {
-            if nsys_enabled {
-                nvtx::range_push!("eager n=2^{}", st.log_n);
-            }
-            for _ in 0..ITERS {
+            for i in 0..ITERS {
                 let d_leaves = leaves_to_device(&st.leaves, &ctx);
                 let mut sponge = DuplexSpongeGpu::default();
                 let mut mem = MemTracker::start("bench.fractional_eager");
                 ctx.stream.synchronize().expect("sync");
                 let t0 = Instant::now();
+                if nsys_enabled {
+                    nvtx::range_push!("eager n=2^{} iter={}", st.log_n, i);
+                }
                 let (proof, _xi) = fractional_sumcheck_gpu::<SC, _>(
                     &mut sponge,
                     d_leaves,
@@ -4987,22 +5112,24 @@ mod tests {
                 )
                 .expect("eager fractional_sumcheck_gpu");
                 ctx.stream.synchronize().expect("sync");
+                if nsys_enabled {
+                    nvtx::range_pop!();
+                }
                 st.eager_ms.push(t0.elapsed().as_secs_f64() * 1e3);
                 st.eager_sum = proof.fractional_sum;
             }
-            if nsys_enabled {
-                nvtx::range_pop!();
-                nvtx::range_push!("graph n=2^{}", st.log_n);
-            }
-            for _ in 0..ITERS {
+            for i in 0..ITERS {
                 ctx.stream.synchronize().expect("sync");
                 let t0 = Instant::now();
-                st.exe.run(&ctx).expect("graph run");
+                if nsys_enabled {
+                    nvtx::range_push!("graph n=2^{} iter={}", st.log_n, i);
+                }
+                st.exe.launch_graph(&ctx).expect("graph launch");
                 ctx.stream.synchronize().expect("sync");
+                if nsys_enabled {
+                    nvtx::range_pop!();
+                }
                 st.graph_ms.push(t0.elapsed().as_secs_f64() * 1e3);
-            }
-            if nsys_enabled {
-                nvtx::range_pop!();
             }
         }
         if nsys_enabled {

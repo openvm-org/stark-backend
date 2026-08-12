@@ -78,6 +78,13 @@ pub struct GraphFuser {
     /// First-instance [`ValueClassId`] for each logical value; the physical
     /// [`BufId`] is `BufId(re_exported[value.0].0)`.
     pub re_exported: ValIdMap<ValueClassId>,
+    /// Canonical (alias-class root) buffer index per physical [`BufId`],
+    /// captured from [`crate::graph_ir::GraphBuilder::canonical_buf`] at
+    /// take-graph time. Alias siblings created by `restore_ssa` share one
+    /// pool slot at runtime, so storage-hazard reasoning must key on the
+    /// canonical buffer, while materialization keeps the exact physical
+    /// [`BufId`] to preserve SSA.
+    pub canon: Vec<usize>,
     /// Initial logical value classes of the registered graph inputs, in
     /// interface order.
     pub inputs: Vec<ValueClassId>,
@@ -94,6 +101,13 @@ impl GraphFuser {
     /// Physical [`BufId`] backing a logical value class.
     pub fn physical(&self, value: ValueClassId) -> BufId {
         BufId(self.re_exported[value.0].0)
+    }
+
+    /// Canonical (alias-class root) [`BufId`] backing a logical value
+    /// class. Use this — not [`Self::physical`] — for storage-hazard
+    /// keying: alias siblings resolve to the same pool slot at runtime.
+    pub fn canonical(&self, value: ValueClassId) -> BufId {
+        BufId(self.canon[self.re_exported[value.0].0])
     }
 
     /// Number of logical value classes currently allocated.

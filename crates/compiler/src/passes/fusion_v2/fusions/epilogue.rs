@@ -43,7 +43,7 @@ use crate::{
     graph_ir::{GraphNode, KernelModuleNode},
     ir::{IRBuilder, Module, Node, NodeId as HirNodeId, SizeExpr, VarId},
     passes::{
-        fusion_utils::clone_expr,
+        fusion_utils::clone_expr_with_params,
         fusion_v2::model::{AltGraphNode, GraphFuser, NodeId, ValueClassId},
     },
     quast::{ParSpec, SExpr},
@@ -310,22 +310,26 @@ pub fn synthesize_epilogue(
             }
         }
     }
-    let mut param_map: HashMap<VarId, VarId> = HashMap::new();
+    // Per-side remaps: producer and consumer each have their own VarId
+    // namespace, so a single map keyed by source VarId would let one
+    // side's param clobber the other's when the same numeric id names
+    // different params.
     let mut seen_names: HashMap<String, VarId> = HashMap::new();
-    for (v, name) in p_module
-        .builder
-        .params()
-        .iter()
-        .chain(c_module.builder.params())
-    {
-        let fresh = *seen_names.entry(name.clone()).or_insert_with(|| {
-            let n = fb.var_watermark();
-            fb.raise_var_watermark(n + 1);
-            fb.inherit_param(VarId(n), name.clone());
-            VarId(n)
-        });
-        param_map.insert(*v, fresh);
-    }
+    let mut normalize = |fb: &mut IRBuilder, module: &Module| {
+        let mut map: HashMap<VarId, VarId> = HashMap::new();
+        for (v, name) in module.builder.params() {
+            let fresh = *seen_names.entry(name.clone()).or_insert_with(|| {
+                let n = fb.var_watermark();
+                fb.raise_var_watermark(n + 1);
+                fb.inherit_param(VarId(n), name.clone());
+                VarId(n)
+            });
+            map.insert(*v, fresh);
+        }
+        map
+    };
+    let p_param_map = normalize(&mut fb, &p_module);
+    let c_param_map = normalize(&mut fb, &c_module);
 
     let mut fused_p_input_nodes: Vec<HirNodeId> = Vec::new();
     let mut fused_c_input_nodes: Vec<Option<HirNodeId>> =
@@ -334,7 +338,7 @@ pub fn synthesize_epilogue(
         let shape: Vec<SizeExpr> = decl
             .shape
             .iter()
-            .map(|d| remap_size_expr(d, &param_map))
+            .map(|d| remap_size_expr(d, &p_param_map))
             .collect();
         fused_p_input_nodes.push(fb.input(decl.name.clone(), decl.elem, shape));
     }
@@ -345,7 +349,7 @@ pub fn synthesize_epilogue(
         let shape: Vec<SizeExpr> = decl
             .shape
             .iter()
-            .map(|d| remap_size_expr(d, &param_map))
+            .map(|d| remap_size_expr(d, &c_param_map))
             .collect();
         fused_c_input_nodes[i] = Some(fb.input(decl.name.clone(), decl.elem, shape));
     }
@@ -368,16 +372,18 @@ pub fn synthesize_epilogue(
     }
     let mut producer_vars: HashMap<VarId, HirNodeId> = HashMap::new();
     producer_vars.insert(p_shape.outer_var, k_var_node);
-    for (from, to) in &param_map {
-        let dst = fb.intern(Node::Var(*to));
-        producer_vars.insert(*from, dst);
-    }
-    let cloned_p = clone_expr(
+    // `clone_expr_with_params` alpha-renames the source module's param
+    // VarIds inside `ConstSym` payloads and `Compute`/`Reduce` bounds; a
+    // plain clone would leave the source VarIds in place, silently
+    // aliasing them to whichever fused param got that numeric id.
+    let cloned_p = clone_expr_with_params(
         &p_module,
         p_shape.body_root,
         &mut fb,
         &producer_subst,
         &producer_vars,
+        &p_param_map,
+        |_, _, _| Ok(None),
     )
     .map_err(|e| EpilogueFailure::CloneError(format!("{e:?}")))?;
 
@@ -397,16 +403,14 @@ pub fn synthesize_epilogue(
     }
     let mut consumer_vars: HashMap<VarId, HirNodeId> = HashMap::new();
     consumer_vars.insert(c_shape.outer_var, k_var_node);
-    for (from, to) in &param_map {
-        let dst = fb.intern(Node::Var(*to));
-        consumer_vars.insert(*from, dst);
-    }
-    let cloned_c = clone_expr(
+    let cloned_c = clone_expr_with_params(
         &c_module,
         c_shape.body_root,
         &mut fb,
         &consumer_subst,
         &consumer_vars,
+        &c_param_map,
+        |_, _, _| Ok(None),
     )
     .map_err(|e| EpilogueFailure::CloneError(format!("{e:?}")))?;
 
@@ -418,7 +422,7 @@ pub fn synthesize_epilogue(
     // Retain the producer's schedule: bound, `par`, `threads`, and the
     // block hint all carry over verbatim.
     let fused_body_id = fb.intern(Node::Compute {
-        bound: remap_size_expr(&p_shape.outer_bound, &param_map),
+        bound: remap_size_expr(&p_shape.outer_bound, &p_param_map),
         var: k_var,
         body: compute_body,
         scatter: None,

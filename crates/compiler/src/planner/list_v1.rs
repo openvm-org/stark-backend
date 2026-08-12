@@ -666,10 +666,45 @@ fn offline_repack(state: &mut SchedState, ctx: &PlanCtx) {
         }
     }
 
-    // Two intervals overlap unless one strictly precedes the other. Match
-    // the heuristic's strict-less-than disjoint rule.
-    let overlaps =
-        |b1: usize, b2: usize| -> bool { !(death[b1] < birth[b2] || death[b2] < birth[b1]) };
+    // For each packable canonical, the set of streams that touch it.
+    // `Some(s)`: every access is on stream `s`. `None`: the buffer sees
+    // multiple streams — it can never share pool bytes with anyone,
+    // because `commit()` only emits cross-stream events for RAW on the
+    // same BufId, so a WAW/WAR at the pool-slot level would race.
+    let mut buf_stream: Vec<Option<u32>> = vec![None; n_bufs];
+    for b in 0..n_bufs {
+        if !ctx.packable(b) {
+            continue;
+        }
+        let mut chosen: Option<u32> = None;
+        let mut multi = false;
+        for &v in ctx.writers[b].iter().chain(ctx.readers[b].iter()) {
+            let s = state.stream[v];
+            match chosen {
+                None => chosen = Some(s),
+                Some(prev) if prev != s => {
+                    multi = true;
+                    break;
+                }
+                _ => {}
+            }
+        }
+        buf_stream[b] = if multi { None } else { chosen };
+    }
+
+    // Two buffers "overlap" (cannot share pool bytes) if EITHER:
+    //   (a) at least one of them is touched by more than one stream; or
+    //   (b) both are single-stream but on *different* streams; or
+    //   (c) both are on the same single stream AND their wall-clock
+    //       lifetime intervals overlap.
+    let overlaps = |b1: usize, b2: usize| -> bool {
+        match (buf_stream[b1], buf_stream[b2]) {
+            (Some(s1), Some(s2)) if s1 == s2 => {
+                !(death[b1] < birth[b2] || death[b2] < birth[b1])
+            }
+            _ => true,
+        }
+    };
 
     let mut to_place: Vec<usize> = (0..n_bufs).filter(|&b| ctx.packable(b)).collect();
     to_place.sort_by(|&a, &b| {
@@ -724,6 +759,7 @@ fn offline_repack(state: &mut SchedState, ctx: &PlanCtx) {
     state.offsets = offsets;
     state.peak_bytes = peak;
 }
+
 
 fn leaf_score(state: &SchedState) -> f64 {
     let makespan = state.stream_free.iter().copied().fold(0.0f64, f64::max);
