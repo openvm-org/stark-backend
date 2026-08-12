@@ -66,7 +66,7 @@ use crate::{
     graph_ir::{BufId, GraphNode, KernelModuleNode},
     ir::{IRBuilder, Node, NodeId as HirNodeId, ScalarType, SizeExpr, VarId},
     passes::{
-        fusion_utils::{clone_expr, remap_size_expr},
+        fusion_utils::{clone_expr_with_params, remap_size_expr},
         fusion_v2::{
             fusions::producer_consumer::{
                 identify_kernel_shape, CandidateDraft, EnumerateContext, FusionVariant, KernelShape,
@@ -370,9 +370,13 @@ pub fn synthesize_small_kernel(
     // Build the fused module.
     let mut fb = IRBuilder::new();
 
-    // Merge param bindings and remap params. Same pattern as producer_consumer.
+    // Merge param bindings and remap params. Same pattern as
+    // producer_consumer. The remap is per link: each source module has
+    // its own VarId namespace, so a single map keyed by source VarId
+    // would let one link's param clobber another's when the same numeric
+    // id names different params.
     let mut merged_bindings = std::collections::BTreeMap::new();
-    let mut param_map: HashMap<VarId, VarId> = HashMap::new();
+    let mut param_maps: Vec<HashMap<VarId, VarId>> = Vec::with_capacity(links.len());
     let mut seen_names: HashMap<String, VarId> = HashMap::new();
     for link in &links {
         for (name, val) in &link.bindings {
@@ -385,6 +389,7 @@ pub fn synthesize_small_kernel(
                 }
             }
         }
+        let mut param_map: HashMap<VarId, VarId> = HashMap::new();
         for (v, name) in link.module.builder.params() {
             let fresh = *seen_names.entry(name.clone()).or_insert_with(|| {
                 let n = fb.var_watermark();
@@ -394,6 +399,7 @@ pub fn synthesize_small_kernel(
             });
             param_map.insert(*v, fresh);
         }
+        param_maps.push(param_map);
     }
 
     // Boundary: for each link, its non-seam inputs (i.e., not the
@@ -435,7 +441,7 @@ pub fn synthesize_small_kernel(
                     let shape: Vec<SizeExpr> = d
                         .shape
                         .iter()
-                        .map(|s| remap_size_expr(s, &param_map))
+                        .map(|s| remap_size_expr(s, &param_maps[li]))
                         .collect();
                     chosen = Some((d.name.clone(), d.elem, shape));
                     break 'outer;
@@ -449,7 +455,7 @@ pub fn synthesize_small_kernel(
 
     // Fused compute's outer var (using the last link's domain).
     let last = &links[links.len() - 1];
-    let outer_bound_fb = remap_size_expr(&last.shape.outer_bound, &param_map);
+    let outer_bound_fb = remap_size_expr(&last.shape.outer_bound, &param_maps[links.len() - 1]);
     let k_var = {
         let n = fb.var_watermark();
         fb.raise_var_watermark(n + 1);
@@ -514,26 +520,28 @@ pub fn synthesize_small_kernel(
             }
         }
 
-        // Vars: link's outer var -> the fused iter var; params via param_map.
+        // Vars: link's outer var -> the fused iter var.
         let mut vars: HashMap<VarId, HirNodeId> = HashMap::new();
         vars.insert(link.shape.outer_var, iter_var_node);
-        for (from, to) in &param_map {
-            let dst = fb.intern(Node::Var(*to));
-            vars.insert(*from, dst);
-        }
 
-        let cloned = clone_expr(
+        // `clone_expr_with_params` alpha-renames the link's param VarIds
+        // inside `ConstSym` payloads and `Compute`/`Reduce` bounds; a
+        // plain clone would leave the source VarIds in place, silently
+        // aliasing them to whichever fused param got that numeric id.
+        let cloned = clone_expr_with_params(
             &link.module,
             link.shape.body_root,
             &mut fb,
             &consumer_subst,
             &vars,
+            &param_maps[i],
+            |_, _, _| Ok(None),
         )
         .map_err(|e| SmallKernelFailure::CloneError(format!("{e:?}")))?;
 
         if i < links.len() - 1 {
             // Wrap as a compute[N_i] |j| cloned.
-            let bound_fb = remap_size_expr(&link.shape.outer_bound, &param_map);
+            let bound_fb = remap_size_expr(&link.shape.outer_bound, &param_maps[i]);
             let tile_compute = fb.intern(Node::Compute {
                 bound: bound_fb,
                 var: iter_var,

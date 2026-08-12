@@ -51,9 +51,9 @@ use std::{
 
 use crate::{
     graph_ir::{BufId, GraphNode, KernelModuleNode},
-    ir::{IRBuilder, Node, NodeId as HirNodeId, SizeExpr, VarId},
+    ir::{IRBuilder, Module, Node, NodeId as HirNodeId, SizeExpr, VarId},
     passes::{
-        fusion_utils::{clone_expr, clone_expr_with_hook, remap_size_expr, CloneError},
+        fusion_utils::{clone_expr_with_params, remap_size_expr, CloneError},
         fusion_v2::{
             fusions::producer_consumer::{
                 identify_kernel_shape, CandidateDraft, EnumerateContext, FusionVariant,
@@ -314,19 +314,28 @@ pub fn synthesize_fanout(
     // Build the fused module.
     let mut fb = IRBuilder::new();
 
-    // Merged param bindings + name-keyed var remap. Same as producer_consumer.
+    // Merged param bindings + name-keyed var remap. Same as
+    // producer_consumer. The remap is per parent module: each has its own
+    // VarId namespace, so a single map keyed by source VarId would let
+    // one parent's param clobber another's when the same numeric id
+    // names different params.
     let mut merged_bindings = p_binding.clone();
-    let mut param_map: HashMap<VarId, VarId> = HashMap::new();
     let mut seen_names: HashMap<String, VarId> = HashMap::new();
-    for (v, name) in p_module.builder.params() {
-        let fresh = *seen_names.entry(name.clone()).or_insert_with(|| {
-            let n = fb.var_watermark();
-            fb.raise_var_watermark(n + 1);
-            fb.inherit_param(VarId(n), name.clone());
-            VarId(n)
-        });
-        param_map.insert(*v, fresh);
-    }
+    let mut normalize = |fb: &mut IRBuilder, module: &Module| {
+        let mut map: HashMap<VarId, VarId> = HashMap::new();
+        for (v, name) in module.builder.params() {
+            let fresh = *seen_names.entry(name.clone()).or_insert_with(|| {
+                let n = fb.var_watermark();
+                fb.raise_var_watermark(n + 1);
+                fb.inherit_param(VarId(n), name.clone());
+                VarId(n)
+            });
+            map.insert(*v, fresh);
+        }
+        map
+    };
+    let p_param_map = normalize(&mut fb, &p_module);
+    let mut c_param_maps: Vec<HashMap<VarId, VarId>> = Vec::with_capacity(consumer_recs.len());
     for rec in &consumer_recs {
         for (name, val) in &rec.bindings {
             match merged_bindings.get(name) {
@@ -338,15 +347,7 @@ pub fn synthesize_fanout(
                 }
             }
         }
-        for (v, name) in rec.module.builder.params() {
-            let fresh = *seen_names.entry(name.clone()).or_insert_with(|| {
-                let n = fb.var_watermark();
-                fb.raise_var_watermark(n + 1);
-                fb.inherit_param(VarId(n), name.clone());
-                VarId(n)
-            });
-            param_map.insert(*v, fresh);
-        }
+        c_param_maps.push(normalize(&mut fb, &rec.module));
     }
 
     // Boundary: producer inputs first, then each consumer's non-seam inputs,
@@ -393,7 +394,7 @@ pub fn synthesize_fanout(
                 let shape: Vec<SizeExpr> = d
                     .shape
                     .iter()
-                    .map(|s| remap_size_expr(s, &param_map))
+                    .map(|s| remap_size_expr(s, &p_param_map))
                     .collect();
                 decl = Some((d.name.as_str(), d.elem, shape));
                 break;
@@ -408,7 +409,7 @@ pub fn synthesize_fanout(
                         let shape: Vec<SizeExpr> = d
                             .shape
                             .iter()
-                            .map(|s| remap_size_expr(s, &param_map))
+                            .map(|s| remap_size_expr(s, &c_param_maps[ci]))
                             .collect();
                         decl = Some((d.name.as_str(), d.elem, shape));
                         done = true;
@@ -427,7 +428,7 @@ pub fn synthesize_fanout(
     }
 
     // Fused compute's outer var + Node::Var.
-    let outer_bound_fb = remap_size_expr(&p_shape.outer_bound, &param_map);
+    let outer_bound_fb = remap_size_expr(&p_shape.outer_bound, &p_param_map);
     let k_var = {
         let n = fb.var_watermark();
         fb.raise_var_watermark(n + 1);
@@ -445,16 +446,18 @@ pub fn synthesize_fanout(
     }
     let mut producer_vars: HashMap<VarId, HirNodeId> = HashMap::new();
     producer_vars.insert(p_shape.outer_var, k_var_node);
-    for (from, to) in &param_map {
-        let dst = fb.intern(Node::Var(*to));
-        producer_vars.insert(*from, dst);
-    }
-    let seam_body_node = clone_expr(
+    // `clone_expr_with_params` alpha-renames the source module's param
+    // VarIds inside `ConstSym` payloads and `Compute`/`Reduce` bounds; a
+    // plain clone would leave the source VarIds in place, silently
+    // aliasing them to whichever fused param got that numeric id.
+    let seam_body_node = clone_expr_with_params(
         &p_module,
         p_shape.body_root,
         &mut fb,
         &producer_subst,
         &producer_vars,
+        &p_param_map,
+        |_, _, _| Ok(None),
     )
     .map_err(|e| FanoutFailure::CloneError(format!("{e:?}")))?;
 
@@ -476,10 +479,6 @@ pub fn synthesize_fanout(
         }
         let mut consumer_vars: HashMap<VarId, HirNodeId> = HashMap::new();
         consumer_vars.insert(rec.shape.outer_var, k_var_node);
-        for (from, to) in &param_map {
-            let dst = fb.intern(Node::Var(*to));
-            consumer_vars.insert(*from, dst);
-        }
         // Fast lookup for this consumer's seam-read Index NodeIds.
         let seam_read_nodes: HashSet<HirNodeId> = rec
             .shape
@@ -499,12 +498,13 @@ pub fn synthesize_fanout(
                 Ok(None)
             }
         };
-        let cloned = clone_expr_with_hook(
+        let cloned = clone_expr_with_params(
             &rec.module,
             rec.shape.body_root,
             &mut fb,
             &consumer_subst,
             &consumer_vars,
+            &c_param_maps[ci],
             hook,
         )
         .map_err(|e| FanoutFailure::CloneError(format!("{e:?}")))?;

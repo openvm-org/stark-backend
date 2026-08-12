@@ -55,16 +55,10 @@ pub enum SchedulerMode {
     ListV1 { params: ListSchedulerV1 },
 }
 
-#[allow(clippy::derivable_impls)]
 impl Default for SchedulerMode {
     fn default() -> Self {
-        #[cfg(feature = "planner-ortools")]
-        {
-            SchedulerMode::CpSat { max_secs: 30.0 }
-        }
-        #[cfg(not(feature = "planner-ortools"))]
-        {
-            SchedulerMode::Heuristic
+        SchedulerMode::ListV1 {
+            params: ListSchedulerV1::default(),
         }
     }
 }

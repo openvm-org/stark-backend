@@ -9,11 +9,13 @@
 //!
 //! 1. RAW edges are added between the unique selected producer of each consumed value and the
 //!    consuming node.
-//! 2. WAW edges are added between successive selected writers of the same physical [`BufId`],
-//!    following [`ValueClassId`] order (which is the seed insertion order for that buffer's
-//!    versions).
+//! 2. WAW edges are added between successive selected writers of the same canonical (alias-class
+//!    root) [`BufId`], following [`ValueClassId`] order (which is the seed insertion order for that
+//!    buffer's versions).
 //! 3. WAR edges are added between each selected consumer of version `k` and the first selected
-//!    writer of a version greater than `k` on the same physical buffer.
+//!    writer of a version greater than `k` on the same canonical buffer. Alias siblings (fresh SSA
+//!    renames of an in-place mutation, see `passes::restore_ssa`) share one pool slot, so hazards
+//!    are keyed on the canonical buffer, not the exact physical [`BufId`].
 //!
 //! The resulting precedence graph is acyclic by construction under the
 //! MVP restrictions: value edges are a subgraph of the acyclic
@@ -70,8 +72,51 @@ pub fn apply_solution(
     gf: GraphFuser,
     solution: &ExtractionSolution,
 ) -> Result<(), ApplyError> {
-    // Validate the solution structurally before mutating the builder so
-    // any error path leaves `g` restorable from the moved nodes.
+    let order = match validate_and_order(&gf, solution) {
+        Ok(order) => order,
+        Err(e) => {
+            // Restore the pre-`take_graph` graph: the seed prefix of
+            // `gf.nodes` is the original node list in insertion order,
+            // which is hazard-correct by construction.
+            let seed_count = gf.seed_node_count;
+            g.nodes = gf
+                .nodes
+                .into_iter()
+                .take(seed_count)
+                .map(|n| n.node)
+                .collect();
+            g.plan = None;
+            return Err(e);
+        }
+    };
+
+    // Move the selected GraphNodes out of the fuser in emission order. On
+    // any panic between here and the assignment below the caller keeps
+    // the pre-take_graph state through the original fuser prefix (we
+    // consume `gf`, so a panicking `into_iter` would still yield the
+    // remaining nodes to a Drop guard if one were installed; for M1 we
+    // rely on the operations here being infallible after validation).
+    let mut arena: Vec<Option<GraphNode>> = gf.nodes.into_iter().map(|n| Some(n.node)).collect();
+    let mut emitted: Vec<GraphNode> = Vec::with_capacity(order.len());
+    for id in order {
+        emitted.push(
+            arena[id.0]
+                .take()
+                .expect("topological sort emits every selected NodeId exactly once"),
+        );
+    }
+    g.nodes = emitted;
+    g.plan = None;
+    Ok(())
+}
+
+/// Structural validation plus the hazard-respecting emission order.
+/// Read-only over `gf`; all `apply_solution` failures originate here,
+/// before any node has been moved out of the fuser.
+fn validate_and_order(
+    gf: &GraphFuser,
+    solution: &ExtractionSolution,
+) -> Result<Vec<NodeId>, ApplyError> {
     let selected: Vec<NodeId> = solution.nodes.clone();
     let selected_set: HashMap<NodeId, ()> = selected.iter().map(|&n| (n, ())).collect();
 
@@ -107,26 +152,7 @@ pub fn apply_solution(
     }
 
     // Storage-hazard precedence graph over selected nodes.
-    let order = topological_order(&gf, &selected, &selected_producer, &selected_set)?;
-
-    // Move the selected GraphNodes out of the fuser in emission order. On
-    // any panic between here and the assignment below the caller keeps
-    // the pre-take_graph state through the original fuser prefix (we
-    // consume `gf`, so a panicking `into_iter` would still yield the
-    // remaining nodes to a Drop guard if one were installed; for M1 we
-    // rely on the operations here being infallible after validation).
-    let mut arena: Vec<Option<GraphNode>> = gf.nodes.into_iter().map(|n| Some(n.node)).collect();
-    let mut emitted: Vec<GraphNode> = Vec::with_capacity(order.len());
-    for id in order {
-        emitted.push(
-            arena[id.0]
-                .take()
-                .expect("topological sort emits every selected NodeId exactly once"),
-        );
-    }
-    g.nodes = emitted;
-    g.plan = None;
-    Ok(())
+    topological_order(gf, &selected, &selected_producer, &selected_set)
 }
 
 fn topological_order(
@@ -161,13 +187,17 @@ fn topological_order(
         }
     }
 
-    // Selected writers per physical buffer, in increasing ValueClassId
-    // order (which matches seed insertion order for that buffer's versions).
-    // Keyed on `BufId.0` since BufId is not Ord.
+    // Selected writers per canonical (alias-class root) buffer, in
+    // increasing ValueClassId order (which matches seed insertion order
+    // for that buffer's versions — allocation order is global insertion
+    // order even across alias siblings). Keyed on the canonical rather
+    // than the exact physical BufId because post-`restore_ssa` an
+    // in-place mutation writes a fresh SSA sibling of the buffer whose
+    // pool slot it clobbers; hazards live at the slot level.
     let mut writers_by_buf: HashMap<usize, Vec<(ValueClassId, NodeId)>> = HashMap::new();
     for &n in selected {
         for &out in &gf.nodes[n.0].outputs {
-            let buf = gf.physical(out);
+            let buf = gf.canonical(out);
             writers_by_buf.entry(buf.0).or_default().push((out, n));
         }
     }
@@ -206,6 +236,22 @@ fn topological_order(
                         add_edge(c, next_writer, &mut succ);
                     }
                 }
+            }
+        }
+    }
+    // A graph input's initial version has no writer, so it never appears
+    // in `writers_by_buf` — but a selected write to its canonical buffer
+    // (an alias sibling, or a direct rewrite of the input) still clobbers
+    // the slot its consumers read. Order those consumers before the first
+    // selected writer of the class.
+    for &v_in in &gf.inputs {
+        let Some(writers) = writers_by_buf.get(&gf.canonical(v_in).0) else {
+            continue;
+        };
+        let first_writer = writers[0].1;
+        if let Some(cs) = consumers_by_val.get(&v_in) {
+            for &c in cs {
+                add_edge(c, first_writer, &mut succ);
             }
         }
     }

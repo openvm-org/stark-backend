@@ -54,7 +54,7 @@ use crate::{
     ir::{IRBuilder, Module, Node, NodeId as HirNodeId, ScalarType, SizeExpr, VarId},
     module_hash::children_of,
     passes::{
-        fusion_utils::clone_expr,
+        fusion_utils::clone_expr_with_params,
         fusion_v2::{
             fusions::producer_consumer::{
                 find_input_nodes, identify_kernel_shape, remap_size_expr, CandidateDraft,
@@ -202,9 +202,11 @@ pub(super) fn body_is_flat(module: &Module, root: HirNodeId) -> bool {
 /// write∩write (WAW) or write∩read in either direction (WAR/RAW at
 /// differing versions). Value-class-level RAW (same version) shows up
 /// as a dataflow path instead and is caught by [`has_dataflow_path`].
+/// Footprints are compared on the canonical (alias-class root) buffer:
+/// alias siblings share one pool slot.
 fn has_storage_hazard(gf: &GraphFuser, a: NodeId, b: NodeId) -> bool {
     let phys =
-        |vs: &[ValueClassId]| -> HashSet<usize> { vs.iter().map(|&v| gf.physical(v).0).collect() };
+        |vs: &[ValueClassId]| -> HashSet<usize> { vs.iter().map(|&v| gf.canonical(v).0).collect() };
     let writes_a = phys(&gf.nodes[a.0].outputs);
     let writes_b = phys(&gf.nodes[b.0].outputs);
     let reads_a = phys(&gf.nodes[a.0].inputs);
@@ -290,9 +292,12 @@ pub fn synthesize_horizontal(
     }
 
     // Merged param bindings + name-keyed var remap. Same pattern as
-    // producer_consumer / fanout.
+    // producer_consumer / fanout. The remap is per part: each source
+    // module has its own VarId namespace, so a shared map keyed by
+    // source VarId would let one part's param clobber another's when
+    // the same numeric id names different params.
     let mut merged_bindings: BTreeMap<String, i64> = BTreeMap::new();
-    let mut param_map: HashMap<VarId, VarId> = HashMap::new();
+    let mut param_maps: Vec<HashMap<VarId, VarId>> = Vec::with_capacity(parts.len());
     let mut seen_names: HashMap<String, VarId> = HashMap::new();
     for part in &parts {
         for (name, val) in &part.bindings {
@@ -305,6 +310,7 @@ pub fn synthesize_horizontal(
                 }
             }
         }
+        let mut param_map: HashMap<VarId, VarId> = HashMap::new();
         for (v, name) in part.module.builder.params() {
             let fresh = *seen_names.entry(name.clone()).or_insert_with(|| {
                 let n = fb.var_watermark();
@@ -314,6 +320,7 @@ pub fn synthesize_horizontal(
             });
             param_map.insert(*v, fresh);
         }
+        param_maps.push(param_map);
     }
 
     // Boundary: stable-unique(a.inputs ++ b.inputs), with a per-part
@@ -349,7 +356,7 @@ pub fn synthesize_horizontal(
                     let shape: Vec<SizeExpr> = d
                         .shape
                         .iter()
-                        .map(|s| remap_size_expr(s, &param_map))
+                        .map(|s| remap_size_expr(s, &param_maps[pi]))
                         .collect();
                     chosen = Some((d.name.clone(), d.elem, shape));
                     break 'parts;
@@ -361,7 +368,7 @@ pub fn synthesize_horizontal(
     }
 
     // Fused compute's outer var.
-    let outer_bound_fb = remap_size_expr(&parts[0].shape.outer_bound, &param_map);
+    let outer_bound_fb = remap_size_expr(&parts[0].shape.outer_bound, &param_maps[0]);
     let k_var = {
         let n = fb.var_watermark();
         fb.raise_var_watermark(n + 1);
@@ -384,12 +391,21 @@ pub fn synthesize_horizontal(
         }
         let mut vars: HashMap<VarId, HirNodeId> = HashMap::new();
         vars.insert(part.shape.outer_var, k_var_node);
-        for (from, to) in &param_map {
-            let dst = fb.intern(Node::Var(*to));
-            vars.insert(*from, dst);
-        }
-        let cloned = clone_expr(&part.module, part.shape.body_root, &mut fb, &subst, &vars)
-            .map_err(|e| HorizontalFailure::CloneError(format!("{e:?}")))?;
+        // `clone_expr_with_params` alpha-renames the part's parameter
+        // VarIds inside `ConstSym` payloads and `Compute`/`Reduce`
+        // bounds; a plain clone would leave the source VarIds in place,
+        // silently aliasing them to whichever fused param got that
+        // numeric id.
+        let cloned = clone_expr_with_params(
+            &part.module,
+            part.shape.body_root,
+            &mut fb,
+            &subst,
+            &vars,
+            &param_maps[pi],
+            |_, _, _| Ok(None),
+        )
+        .map_err(|e| HorizontalFailure::CloneError(format!("{e:?}")))?;
         let n_outputs = gf.nodes[part.alt_idx].outputs.len();
         if n_outputs == 1 {
             tuple_elems.push(cloned);

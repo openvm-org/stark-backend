@@ -109,6 +109,7 @@ fn bench_one(name: &str, n: usize, fanin: usize, seed: u64) {
         &env,
         device,
         &[],
+        &[],
         &SchedulerMode::Heuristic,
     )
     .expect("heuristic plan");
@@ -125,6 +126,7 @@ fn bench_one(name: &str, n: usize, fanin: usize, seed: u64) {
         &nodes,
         &env,
         device,
+        &[],
         &[],
         &SchedulerMode::CpSat { max_secs: 30.0 },
     );
