@@ -315,16 +315,13 @@ fn caller_supplied_pool_arena() {
     }
 }
 
-/// Post-Phase-7: `lower_to_kir` requires single-kernel modules. A
-/// two-stage parallel-reduce that survives to graph compilation without
-/// being split first triggers a lowering error. The full P7.5 pipeline
-/// will canonicalize + split such modules before lowering; until then,
-/// this pins the error contract at the lowering boundary.
-///
-/// Replaced in P7.12 by a test that compiles this same graph
-/// successfully by driving canonicalize → split_module.
+/// A two-stage parallel reduce cannot lower directly — `lower_to_kir`
+/// requires single-kernel modules. The `canonicalize` + `split_module`
+/// passes rewrite the reduce into a producer/consumer kernel pair before
+/// lowering, so compilation succeeds and produces two distinct kernel
+/// modules.
 #[test]
-fn module_with_intermediate_buffers_is_rejected() {
+fn multi_kernel_module_is_split_and_compiles() {
     const K: usize = 1 << 12;
     let mut b = IRBuilder::new();
     let x = b.input("x", ScalarType::BabyBear, vec![K]);
@@ -338,15 +335,8 @@ fn module_with_intermediate_buffers_is_rejected() {
     g.register_output(out);
     g.insert_kernel(m, [x], [out], &[]);
 
-    let err = match GraphCompiler::new().compile(g) {
-        Ok(_) => panic!("expected graph compilation to reject multi-kernel modules at lowering"),
-        Err(e) => e,
-    };
-    let msg = err.to_string();
-    assert!(
-        msg.contains("intermediate tensor") && msg.contains("single-kernel"),
-        "unexpected error: {msg}"
-    );
+    let exe = GraphCompiler::new().compile(g).unwrap();
+    assert_eq!(exe.num_unique_modules(), 2);
 }
 
 // ---------------------------------------------------------------------------

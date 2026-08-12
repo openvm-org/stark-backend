@@ -705,6 +705,13 @@ impl GraphCompiler {
                 self.lower_reduce(&mut graph)?;
                 self.monomorphize(&mut graph)?;
                 self.canonicalize(&mut graph)?;
+                // canonicalize + split_program rebuild each kernel through
+                // a fresh IRBuilder that drops the block hint, and the new
+                // outer bounds (post-flatten of nested computes) may differ
+                // from the pre-canonicalize ones anyway. Re-run monomorphize
+                // so split children get a block hint sized from their own
+                // `max_outer`.
+                self.monomorphize(&mut graph)?;
                 None
             }
         };

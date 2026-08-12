@@ -190,7 +190,22 @@ mod tests {
             |_, _, _| {},
         );
 
-        let plan = plan(&g, &BTreeMap::new(), DeviceType::Cuda(0)).unwrap();
+        // Pin the scheduler under test — the packing invariant this test
+        // covers is scheduler-specific. `SchedulerMode::default()` is a
+        // multi-stream `ListV1`, whose stream-multi guard prevents
+        // pool-sharing across streams and would not produce a single-stream
+        // packed plan.
+        let nodes: Vec<NodeAccess> = g.nodes.iter().map(access_from_node).collect();
+        let plan = plan_raw(
+            &g.bufs,
+            &nodes,
+            &BTreeMap::new(),
+            DeviceType::Cuda(0),
+            &[],
+            &[],
+            &SchedulerMode::Heuristic,
+        )
+        .unwrap();
         assert_eq!(plan.order(), vec![0, 1, 2]);
         assert_eq!(plan.peak_bytes, 500);
         assert!(plan.offsets.iter().all(Option::is_some));
