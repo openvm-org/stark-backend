@@ -20,6 +20,8 @@ Tracks progress against `detailed-fusion-plan-v2.md`. Update as milestones land.
 | M10 | ✅ Done | 13 | Epilogue fusion (§10.4): flat pointwise consumer substituted into the producer's result path; producer schedule (bound, `par`, `threads`, block hint) retained verbatim. Identity seam reads only; producers already covered by producer-consumer are skipped in enumeration. |
 | M11 | ✅ Done | 14 | Opt-in `GraphCompiler` integration (§16): internal `FusionStrategy` enum, `fusion_v2_options` setter, env→`graph_symbols` threading, v2 report embedded in `FusionReport.v2` (§15), `verbose` saturation/extraction dump. Module-count and estimated-runtime comparisons CPU-side; measured-runtime/compile-time comparisons land with M12's `dsl_port_tests` replay per plan. |
 | M12 | ✅ Done | 15 | Numerical accuracy on fractional_sumcheck: 8/8 `dsl_port_tests` fixtures bit-for-bit vs eager under `FRAC_DSL_FUSION=v2` (CP-SAT Optimal, no fallback). Two estimator bugs fixed (block-hint stamping, param threading in the transaction sampler). CP-SAT seed-solution hints unblock the 7.6k-var bench model. Perf compared v1 vs v2 at n=2^16. |
+| M13 | ✅ Done | 18 | General producer-consumer fusion: rank-k seam reads, arbitrary producer write maps via provided (trusted) scatter inverses, reshape-view linearize/delinearize, param unification by (name, value) with `n`/`n#1` splitting so symbolic fold chains fuse into one shared artifact. GPU-validated end-to-end; fixed a latent codegen read-sink bug the selected graph exposed. |
+| Ext §1+§2 | ✅ Done | 19 | `fusion_extension.md` §1 composed-keep canonicalization (embedded `Let{Compute}` tile hoisting to fixpoint, `is_canonicalized` invariant restored, sentinel exclusions → 0) + §2 multi-output producers / multi-seam fusion in producer-consumer and fanout (designated seam output, siblings stay materialized, per-`(producer, output)` fanout grouping). |
 
 ## What landed
 
@@ -433,6 +435,8 @@ Driver tests (8):
 | 15 | M12 | 1 | 118 total fusion_v2 lib tests (121 with `planner-ortools`); symbolic-outer-bound costing via stamped block hint. GPU oracle: 8/8 `dsl_port_tests` fixtures bit-for-bit identical to eager under `FRAC_DSL_FUSION=v2` (and 8/8 under v1 baseline); full cuda-backend suite 411/413 (2 pre-existing failures reproduce on clean HEAD `3650dc5b`) |
 | 16 | M12 follow-up | 0 | 118 total fusion_v2 lib tests (121 with `planner-ortools`) unchanged; parallel enumeration is draft-order-identical to sequential, sentinel-exclusion covered by existing CP-SAT/brute agreement tests |
 | 17 | solver workers + LOG_N=24 nsys | 0 | 121 lib tests pass post-rebase onto `feat/stream-scheduler`; `solver_num_workers` plumbed (default 1 = deterministic per §2.4); nsys LOG_N=24: v2+capture within 7.7% of eager |
+| 18 | M13 | 14 | 135 total fusion_v2 lib tests (with `planner-ortools`); 11 general-PC tests (symbolic q-fold chain, halving-chain param split with association-order hash identity, reshape-view, rank-k reads, scatter-inverse composition, drop gates) + 3 select-guard regression tests (2 minimal shapes + exact GKR `fused_drop` repro). GPU: 8/8 `dsl_port_tests` bit-for-bit under `FRAC_DSL_FUSION=v2`; LOG_N=10 bench passes post-fix (selected=702, fallback=None) |
+| 19 | Ext §1+§2 | 5 (+1 updated) | 140 total fusion_v2 lib tests (with `planner-ortools`); 3 multi-seam tests (drop through one output of a keep node with the sibling materialized, per-output fanout enumeration, multi-output fanout vs hand-authored reference) + 2 composed-keep canonicalization tests (unit `is_canonicalized` + real cost, driver `cost_failures == 0`), both stash-verified sensitive to the canonicalize fix (pre-fix: unit fails, driver shows 10 sentinel failures) |
 
 ### M3 final slice (session 6): affine / nested / reduction
 
@@ -1937,6 +1941,183 @@ blocker. Caveat: nsys `--capture-range` defaults to
 `stop-shutdown`, which SIGTERMs the test at `cudaProfilerStop`
 (stdout summary lost, profile intact); pass
 `--capture-range-end=stop` to keep the process alive.
+
+### M13 (session 18): general producer-consumer fusion + read-sink codegen fix
+
+**Files:** `fusions/producer_consumer.rs` (rework),
+`fusion_utils.rs` (`clone_expr_with_params`, `remap_size_expr`),
+`driver.rs` (env-gated `FUSION_V2_CHECK_SELECTED` post-solve checker,
+`FUSION_V2_DEBUG=2` HIR dump on cost failure),
+`passes/codegen.rs` (read-sink fix), `tests.rs`
+(`general_pc_tests` ×11, `select_guard_tests` ×2,
+`select_guard_full_repro` ×1).
+
+**General producer-consumer synthesis.** The pass no longer
+special-cases identity/affine/nested shapes; one synthesis loop covers
+all of them. `KernelShape` captures every read as a rank-k `ReadSite`
+(one `SExpr` per axis, with inner index scope recorded). At each seam
+read the producer body is re-cloned with its outer variable substituted
+by the composed coordinate σ: read coords → linearize over the
+consumer's declared seam view → delinearize over the producer's
+physical output shape (the reshape-view case) → the producer's
+*provided* scatter inverse (trusted per plan — never verified).
+Rank-extending producer spines (`Pack`, inner `Compute` nests) are
+drilled per read using the trailing composed coordinates; `Pack`
+drilling requires literal component indices. Drop gate is seam
+element-count equality, proven symbolically when possible, otherwise
+certified against the candidate pair's concrete bindings. Keep still
+requires plain kernels, scalar producer body, equal outer bounds.
+
+**Param-split normalization.** Module parameters unify by
+(name, bound value); a name bound to two different values splits
+(`n`, `n#1`, …). A chain of the *same* `Arc`'d symbolic kernel invoked
+at halving sizes fuses level-by-level into a single symbolic artifact
+shared by every level, and different association orders of the chain
+hash identically (`chain_association_orders_hash_identically`).
+
+**GPU validation.** 8/8 `dsl_port_tests` fixtures bit-for-bit vs eager
+under `FRAC_DSL_FUSION=v2`. fold→round producer-consumer candidates now
+enumerate (previously all rejected with `OuterBoundMismatch`). The
+LOG_N=10 GKR bench selects a 702-node graph (from 1044 seeds,
+generated=32,706, inserted=10,000, rounds=[2032, 7968],
+`fallback=None`) and passes: capture 2.06 ms = 1.117× eager /
+0.675× un-captured graph exec; exec 3.05 ms; peak pool 98,784 bytes.
+The composed-keep costing panics (`is_canonicalized`,
+lower_to_kir.rs:70) reproduce on CPU and are the known pre-existing §9
+canonicalization gap — sentinel-excluded, not a regression.
+
+**Bug found + fixed: eager emission of select-guarded reads
+(cudaError 700).** First GPU run of the selected graph faulted.
+`CRYPTO_COMPILER_CHECK_ACCESSES=1` pinned it statically:
+`fused_drop_k0: read of buffer pre: index -1 out of bounds [0, 16)`
+with `p=0` — a `if j < p then pre[0, p-1-j] else post[0, 7+p-j]` read
+emitted *eagerly* at the par top. Root cause in
+`codegen::compute_read_sinks`: it required all uses of a read's value
+to agree on a single **first** select crossing. Canonicalize duplicates
+the guarded eq-prefix combination into both branches of the consumer's
+outer `if k == 0` select, the uses disagree on the first crossing, the
+read loses its sink, and the untaken-side load executes. Fix: sink at
+each use's **innermost** enclosing crossing (set-valued; a bare use
+keeps the read eager), emitting the `const` load at every distinct
+crossing's branch entry — the innermost select is the guard, so this
+matches the DSL's short-circuit placement even after duplication. A
+value used on *both* sides of one select is effectively unguarded there
+and stays eager (and bounds-checked) — `read_used_in_both_branches_checked`
+guards that. `check_accesses` shares `compute_read_sinks`, so checker
+and codegen agree by construction. Exact CPU repro kept as
+`select_guard_full_repro::gkr_fused_drop_shape_passes_check`.
+
+**Kernel-cache caveat.** `~/.openvm/kernel_cache` keys on module hash
+only — no codegen version — so artifacts built before the fix stayed
+poisonous under unchanged hashes. Cache wiped for validation; if
+codegen changes again, either wipe or add a codegen version to the
+cache key.
+
+**Debug aids kept (env-gated):** `FUSION_V2_CHECK_SELECTED=1`
+statically access-checks every selected kernel post-solve and dumps
+violators' HIR (non-fatal; the graph compile's `check_accesses` gate
+remains the enforcing one); `FUSION_V2_DEBUG=2` dumps the HIR of
+modules whose costing fails.
+
+**CP-SAT stage 2 (artifact count) off by default.** New
+`ExtractOptions::optimize_artifact_count` /
+`FusionOptionsV2::optimize_artifact_count` flag, default `false`
+(replaces the temporary `FUSION_V2_SKIP_STAGE2` env hack). Stage 2 was
+the only lex stage consistently Feasible-not-Optimal within the
+wall-time budget (sessions 16–17); hard artifact pressure remains
+available via the `max_modules` / `max_new_modules` constraints. Both
+extractors honor the flag — brute force zeroes the artifact component
+of its `LexCost` when off — so the M2 agreement gate still holds
+(`agree_random_property` now parametrized over both modes;
+`shared_artifact_across_two_alternatives_is_charged_once` opts in).
+
+**Extension plan.** `fusion_extension.md` documents the road to more
+general fusion: composed-keep canonicalization (the §9 gap),
+multi-output/multi-seam producers, keep-variant generalization,
+param-split adoption in the other four passes, epilogue affine seams,
+small-kernel DAG groups, horizontal masking, non-const Pack drilling,
+and symbolic reshape strides — each with current-code snippets,
+proposed change, and rationale, plus a 4-phase sequencing.
+
+### Extension §1+§2 (session 19): composed-keep canonicalization + multi-output seams
+
+**Files:** `passes/canonicalize.rs` (embedded tile hoisting),
+`fusions/producer_consumer.rs` (multi-output producer seams),
+`fusions/fanout.rs` (same, plus per-`(producer, output)` enumeration),
+`driver.rs` (`FusionReportV2::cost_failures`), `tests.rs`
+(`multi_seam_tests` ×3, `composed_keep_canonicalize_tests` ×2).
+
+**§1 — canonicalization of composed keep candidates.** Composing an
+epilogue keep over a tile-chain (small-kernel) producer wholesale-clones
+the producer body — `Let{value: Compute}` tile chains and all — into a
+`Tuple` element / mid-expression position below the kernel body root.
+`canonicalize` accepted these but only peeled lets *wrapping* the body,
+so `is_canonicalized` rejected the output and `lower_to_kir`'s
+`debug_assert!(is_canonicalized(..))` fired during costing; the
+candidates were sentinel-priced `FAILED` and never extractable (3,123
+exclusions at n=2^16 on the GKR bench per `fusion_extension.md` §1).
+Fix: `hoist_embedded_lets`, a memoized rewriter (per-kernel
+`HoistState`) that peels `Let{Compute}` at any embedded position into
+`inner_lets` shared-memory tiles and scalar lets into the inline
+environment. The memo doubles as CSE: a producer clone appearing both
+as a tuple element and as the seam substitution is processed once and
+pushes its tiles once, so the rewrite is closed under repeated
+composition. `local_binders` tracks thread/tile iteration vars along
+the traversal path and `refs_any_var` blocks hoisting a tile whose body
+captures one (tiles materialize per block, not per thread). Inline-let
+values are themselves re-hoisted to fixpoint, since peeling can surface
+new scalar lets out of tile bodies. The invariant
+`canonicalize(m).is_ok() ⇒ is_canonicalized(p)` is restored by a final
+scalar-form check that turns residual non-canonical shapes into a
+graceful `CompileError::Canonicalize` instead of a downstream panic.
+The rewrite only fires on bodies the old code mishandled;
+previously-working candidates canonicalize byte-identically. One
+scalar-form rule was relaxed to keep split_module's contract: a Var in
+a scalar position bound to a single materialized kernel output (a
+scalar-typed top-level let, e.g. a bare top-level reduce wrapped into
+`compute [1]`) is canonical — split_module turns it into a shape-[]
+input, and direct lowering of the multi-kernel program is still
+gracefully rejected by `lower_to_kir`'s intermediate-tensor check
+(caught by `split_module::tests::reduce_result_becomes_scalar_input`,
+which the stricter check had regressed).
+
+**§2 — multi-output producers / multi-seam fusion.** Producer-consumer
+and fanout no longer require single-output producers. The seam is one
+designated producer output (`seam_out_idx` tuple element); the sibling
+elements stay materialized in the fused node. Output conventions:
+drop = `(producer.outputs \ seam) ++ consumer outputs`,
+keep = `producer.outputs ++ consumer outputs` — single-output cases
+reduce to the old orders, so existing candidates hash byte-identically.
+Fanout enumerates per `(producer, output)` pair and clones the producer
+body once whole, decomposing the resulting tuple in the destination
+builder, preserving intra-producer subexpression sharing.
+`SynthesisFailure::ProducerNotSingleOutput` and
+`FanoutFailure::ProducerNotSingleOutput` are gone; epilogue keeps its
+single-output gate (out of §2 scope). Downstream effect: round-1 keep
+nodes are now legal producers of their kept seam, so saturation
+composes them with the seam's other consumers in later rounds
+(`driver_enumerates_two_candidates_when_producer_feeds_two_consumers`
+updated 4 → 8 generated candidates accordingly).
+
+**Report plumbing.** `FusionReportV2::cost_failures` surfaces the
+`KernelCostManager` sentinel-exclusion count (lowering panics caught
+via `catch_unwind` and priced `FAILED`), making the §1 driver exit gate
+observable.
+
+**Tests.** `multi_seam_tests`: drop through output 0 of a two-output
+keep node with the sibling still materialized (module hash vs a
+hand-authored `Tuple([5*(3*(2*x[i])), 2*x[i]])`), per-output fanout
+enumeration over a multi-output producer, and multi-output fanout
+synthesis vs a hand-authored reference.
+`composed_keep_canonicalize_tests`: a round-1 small-kernel tile-chain
+node composed under a round-2 epilogue keep asserts `is_canonicalized`
+and a real (non-`FAILED`) `estimate_kernel` cost after structural
+sanity checks (Tuple body root, embedded `Let` present); a driver test
+on a halving chain with a two-consumer epilogue asserts
+`rounds_run >= 2` and `cost_failures == 0`. Both §1 tests were
+stash-verified sensitive: with the canonicalize fix reverted, the unit
+test fails `is_canonicalized` and the driver test reports 10 sentinel
+failures.
 
 ## Design decisions
 

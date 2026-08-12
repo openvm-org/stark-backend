@@ -49,8 +49,22 @@ use crate::{
 #[derive(Debug, Clone)]
 pub struct FusionOptionsV2 {
     /// Hard cap on the number of candidates inserted into the
-    /// alternative graph (§11 `max_total_alternatives`).
+    /// alternative graph, summed across every saturation round of one
+    /// outer iteration. Enforced level-by-level after
+    /// impact-ranking: a level is inserted only if it fits entirely
+    /// under the remaining budget.
     pub max_total_alternatives: usize,
+    /// Wall-time budget for the enumeration phase of one saturation
+    /// round. Each pass checks this deadline mid-loop and returns
+    /// early; passes after the deadline elapses are skipped for the
+    /// round. Applies only to site enumeration + synthesis — the
+    /// insert/dedup/cycle loop is unbounded.
+    pub max_enumeration_time_per_round: std::time::Duration,
+    /// Number of outer fusion iterations. Each outer iteration runs a
+    /// full enumeration + saturation + extraction cycle, then re-runs
+    /// enumeration on the extracted graph. Default `1` reproduces the
+    /// original single-pass behavior. `0` is coerced to `1`.
+    pub max_outer_iterations: usize,
     /// If `true`, every candidate is checked against §9.1's
     /// insertion-time acyclicity guard before being inserted. Turning
     /// it off relies on each fusion pass's legality proof to preserve
@@ -157,6 +171,8 @@ impl Default for FusionOptionsV2 {
     fn default() -> Self {
         Self {
             max_total_alternatives: 5000,
+            max_enumeration_time_per_round: std::time::Duration::from_secs(2),
+            max_outer_iterations: 1,
             validate_alt_graph_acyclicity: true,
             solver_time_limit_secs: 5.0,
             solver_num_workers: 1,
@@ -210,6 +226,9 @@ pub struct FusionReportV2 {
     /// the number of kernel cost lookups performed by the driver.
     pub cost_cache_hits: u64,
     pub cost_cache_misses: u64,
+    /// Kernel cost lookups that failed to lower and were priced at the
+    /// failure sentinel, excluding the candidate from extraction.
+    pub cost_failures: u64,
     /// M4: sum of `runtime_units` across all alternative nodes seen by
     /// the extractor. Useful for regression tracking of the estimator.
     pub total_runtime_units: i64,
@@ -223,6 +242,13 @@ pub struct FusionReportV2 {
     /// M6: `true` if the loop stopped because `max_rounds` fired rather
     /// than reaching a fixed point (`candidates_inserted == 0`).
     pub max_rounds_hit: bool,
+    /// Number of outer iterations actually executed. Equal to
+    /// `options.max_outer_iterations` unless the last iteration
+    /// inserted zero candidates (fixed point).
+    pub outer_iterations_run: usize,
+    /// Per-outer-iteration insert counts. `outer_inserted[i]` is the
+    /// number of candidates inserted during outer iteration `i`.
+    pub outer_inserted: Vec<usize>,
 }
 
 /// Failure modes of [`fuse_graph_v2`]. Structural errors from
@@ -238,7 +264,71 @@ pub enum FuseV2Error {
 /// Runs bounded-saturation fusion v2 on `g`, in place. Preserves the
 /// registered interface, invalidates `g.plan`, and returns a diagnostic
 /// [`FusionReportV2`].
+///
+/// The outer loop runs up to `options.max_outer_iterations` full
+/// enumeration + saturation + extraction cycles, feeding the extracted
+/// graph back in as the seed for the next cycle. It stops early if an
+/// iteration produces no fusion (`candidates_inserted == 0`).
 pub fn fuse_graph_v2(
+    g: &mut GraphBuilder,
+    options: &FusionOptionsV2,
+) -> Result<FusionReportV2, FuseV2Error> {
+    let nodes_before = g.nodes.len();
+    let max_outer = options.max_outer_iterations.max(1);
+
+    let mut aggregate = FusionReportV2::default();
+    let mut outer_inserted: Vec<usize> = Vec::new();
+
+    for outer_iter in 0..max_outer {
+        if options.verbose && max_outer > 1 {
+            eprintln!(
+                "[fusion-v2] outer iteration {}/{max_outer} starting on {} node(s)",
+                outer_iter + 1,
+                g.nodes.len(),
+            );
+        }
+        let inner = fuse_graph_v2_inner(g, options)?;
+        outer_inserted.push(inner.candidates_inserted);
+        merge_inner_report(&mut aggregate, &inner);
+        if inner.candidates_inserted == 0 {
+            break;
+        }
+    }
+
+    aggregate.nodes_before = nodes_before;
+    aggregate.nodes_after = g.nodes.len();
+    aggregate.outer_iterations_run = outer_inserted.len();
+    aggregate.outer_inserted = outer_inserted;
+    aggregate.rounds_run = aggregate.rounds_inserted.len();
+    Ok(aggregate)
+}
+
+/// Accumulates one outer iteration's report into the aggregate.
+fn merge_inner_report(agg: &mut FusionReportV2, inner: &FusionReportV2) {
+    agg.candidates_generated += inner.candidates_generated;
+    agg.candidates_inserted += inner.candidates_inserted;
+    agg.candidates_rejected_cycle += inner.candidates_rejected_cycle;
+    agg.candidates_rejected_cap += inner.candidates_rejected_cap;
+    agg.candidates_rejected_dedup += inner.candidates_rejected_dedup;
+    agg.candidates_rejected_pass_cap += inner.candidates_rejected_pass_cap;
+    agg.selected_from_solver += inner.selected_from_solver;
+    agg.cost_cache_hits += inner.cost_cache_hits;
+    agg.cost_cache_misses += inner.cost_cache_misses;
+    agg.cost_failures += inner.cost_failures;
+    agg.total_runtime_units = agg
+        .total_runtime_units
+        .saturating_add(inner.total_runtime_units);
+    agg.rounds_inserted
+        .extend_from_slice(&inner.rounds_inserted);
+    agg.max_rounds_hit |= inner.max_rounds_hit;
+    // Last-iteration wins for structural fields; the aggregate's
+    // `fallback_reason` reflects the final extraction only.
+    agg.fallback_reason = inner.fallback_reason.clone();
+}
+
+/// One outer iteration: enumeration + saturation + extraction + apply.
+/// Returns a per-iteration report; the outer loop accumulates.
+fn fuse_graph_v2_inner(
     g: &mut GraphBuilder,
     options: &FusionOptionsV2,
 ) -> Result<FusionReportV2, FuseV2Error> {
@@ -248,10 +338,7 @@ pub fn fuse_graph_v2(
     let mut gf = take_graph(g)?;
     let mut sat = SaturationState::new(gf.seed_node_count);
 
-    // Step 2: bounded saturation. Each round freezes the current node
-    // count, enumerates every enabled pass over that frozen prefix,
-    // deduplicates by CandidateKey, validates, and inserts. Stops when
-    // a round inserts zero candidates or `max_rounds` fires.
+    // Step 2: bounded saturation.
     let max_rounds = options.max_rounds.max(1);
     let mut candidates_generated = 0usize;
     let mut candidates_inserted = 0usize;
@@ -262,47 +349,51 @@ pub fn fuse_graph_v2(
     let mut rounds_inserted: Vec<usize> = Vec::new();
     let mut max_rounds_hit = false;
 
-    // `min_new_parent_id` starts at 0 (round 1: all seeds are new).
-    // After round r ends, it advances to the frozen count of that
-    // round + inserted candidates, so round r+1 only enumerates pairs
-    // involving at least one node inserted in round r.
     let mut min_new_parent_id = 0usize;
     let sat_t0 = std::time::Instant::now();
     for round in 0..max_rounds {
         let frozen = gf.nodes.len();
+        // Enumeration deadline: this round's wall-time budget for
+        // pass site collection and synthesis. `None` disables.
+        let round_start = std::time::Instant::now();
+        let deadline = if options.max_enumeration_time_per_round.is_zero() {
+            None
+        } else {
+            Some(round_start + options.max_enumeration_time_per_round)
+        };
+        let mk_ctx =
+            |enum_opts: producer_consumer::EnumerateOptions| producer_consumer::EnumerateContext {
+                frozen_node_count: frozen,
+                origins: &sat.origins,
+                min_new_parent_id,
+                options: enum_opts,
+                deadline,
+            };
+        let past_deadline = || {
+            deadline
+                .map(|d| std::time::Instant::now() >= d)
+                .unwrap_or(false)
+        };
 
-        // Enumerate. Passes see the frozen prefix and current origins.
-        // `pass_stats` records `(pass, generated, wall time)` per pass
-        // for the verbose dump.
         let mut pass_stats: Vec<(&'static str, usize, std::time::Duration)> = Vec::new();
         let t = std::time::Instant::now();
         let mut drafts = if options.enable_producer_consumer {
-            enumerate_producer_consumer(&gf, &sat, frozen, min_new_parent_id, options)
+            enumerate_producer_consumer(&gf, &sat, frozen, min_new_parent_id, options, deadline)
         } else {
             Vec::new()
         };
         pass_stats.push(("producer-consumer", drafts.len(), t.elapsed()));
-        if options.enable_fanout {
+        if options.enable_fanout && !past_deadline() {
             let t = std::time::Instant::now();
             let before = drafts.len();
-            let fanout_ctx = producer_consumer::EnumerateContext {
-                frozen_node_count: frozen,
-                origins: &sat.origins,
-                min_new_parent_id,
-                options: producer_consumer::EnumerateOptions::default(),
-            };
+            let fanout_ctx = mk_ctx(producer_consumer::EnumerateOptions::default());
             drafts.extend(fanout::enumerate(&gf, &fanout_ctx));
             pass_stats.push(("fanout", drafts.len() - before, t.elapsed()));
         }
-        if options.enable_small_kernel {
+        if options.enable_small_kernel && !past_deadline() {
             let t = std::time::Instant::now();
             let before = drafts.len();
-            let sk_ctx = producer_consumer::EnumerateContext {
-                frozen_node_count: frozen,
-                origins: &sat.origins,
-                min_new_parent_id,
-                options: producer_consumer::EnumerateOptions::default(),
-            };
+            let sk_ctx = mk_ctx(producer_consumer::EnumerateOptions::default());
             let sk_opts = small_kernel::SmallKernelOptions {
                 max_shared_bytes: options.small_kernel_shared_bytes,
                 max_chain_length: options.small_kernel_max_chain,
@@ -310,30 +401,20 @@ pub fn fuse_graph_v2(
             drafts.extend(small_kernel::enumerate(&gf, &sk_ctx, sk_opts));
             pass_stats.push(("small-kernel", drafts.len() - before, t.elapsed()));
         }
-        if options.enable_horizontal {
+        if options.enable_horizontal && !past_deadline() {
             let t = std::time::Instant::now();
             let before = drafts.len();
-            let h_ctx = producer_consumer::EnumerateContext {
-                frozen_node_count: frozen,
-                origins: &sat.origins,
-                min_new_parent_id,
-                options: producer_consumer::EnumerateOptions::default(),
-            };
+            let h_ctx = mk_ctx(producer_consumer::EnumerateOptions::default());
             drafts.extend(horizontal::enumerate(&gf, &h_ctx));
             pass_stats.push(("horizontal", drafts.len() - before, t.elapsed()));
         }
-        if options.enable_epilogue {
+        if options.enable_epilogue && !past_deadline() {
             let t = std::time::Instant::now();
             let before = drafts.len();
-            let e_ctx = producer_consumer::EnumerateContext {
-                frozen_node_count: frozen,
-                origins: &sat.origins,
-                min_new_parent_id,
-                options: producer_consumer::EnumerateOptions {
-                    enable_all_keep_variants: options.enable_all_keep_variants
-                        && options.enable_keep_variants,
-                },
-            };
+            let e_ctx = mk_ctx(producer_consumer::EnumerateOptions {
+                enable_all_keep_variants: options.enable_all_keep_variants
+                    && options.enable_keep_variants,
+            });
             let mut e_drafts = epilogue::enumerate(&gf, &e_ctx);
             if !options.enable_keep_variants {
                 e_drafts.retain(|d| d.variant != producer_consumer::FusionVariant::Keep);
@@ -348,6 +429,12 @@ pub fn fuse_graph_v2(
                 eprintln!(
                     "[fusion-v2] round {round} pass {pass}: generated={generated} in {:.1} ms",
                     dt.as_secs_f64() * 1e3,
+                );
+            }
+            if past_deadline() {
+                eprintln!(
+                    "[fusion-v2] round {round} enumeration deadline hit ({:.1} ms budget)",
+                    options.max_enumeration_time_per_round.as_secs_f64() * 1e3,
                 );
             }
         }
@@ -365,6 +452,11 @@ pub fn fuse_graph_v2(
         };
         candidates_rejected_pass_cap += over_cap;
 
+        // Impact-rank drafts and insert level-by-level. A level (all
+        // drafts sharing one fused-module hash) is inserted whole only
+        // if the remaining budget accommodates it; otherwise the whole
+        // level is skipped and the next (smaller) level is attempted.
+        let levels = rank_by_impact(drafts, &options.artifact);
         let insert_t0 = std::time::Instant::now();
         let (dedup0, cycle0, cap0) = (
             candidates_rejected_dedup,
@@ -372,36 +464,35 @@ pub fn fuse_graph_v2(
             candidates_rejected_cap,
         );
         let mut inserted_this_round = 0usize;
-        for draft in drafts {
-            if candidates_inserted >= options.max_total_alternatives {
-                candidates_rejected_cap += 1;
+        for level in levels {
+            let remaining = options
+                .max_total_alternatives
+                .saturating_sub(candidates_inserted);
+            if level.len() > remaining {
+                candidates_rejected_cap += level.len();
                 continue;
             }
-            // CandidateKey dedup across rounds (§9). Compute the key
-            // now; if it collides with `seen_candidates` skip without
-            // touching the arenas.
-            let Some(key) = candidate_key(&draft, &options.artifact) else {
-                // Non-kernel candidates have no artifact key today —
-                // no producer-consumer pass emits these, but the guard
-                // keeps future passes safe.
-                candidates_rejected_dedup += 1;
-                continue;
-            };
-            if !sat.note_seen(key) {
-                candidates_rejected_dedup += 1;
-                continue;
+            for draft in level {
+                let Some(key) = candidate_key(&draft, &options.artifact) else {
+                    candidates_rejected_dedup += 1;
+                    continue;
+                };
+                if !sat.note_seen(key) {
+                    candidates_rejected_dedup += 1;
+                    continue;
+                }
+                if options.validate_alt_graph_acyclicity
+                    && would_create_cycle(&gf, &draft.alt.inputs, &draft.alt.outputs)
+                {
+                    candidates_rejected_cycle += 1;
+                    continue;
+                }
+                let parents = draft.parents.clone();
+                let node_id = gf.insert_candidate(draft.alt);
+                sat.register_origins(node_id, &parents);
+                candidates_inserted += 1;
+                inserted_this_round += 1;
             }
-            if options.validate_alt_graph_acyclicity
-                && would_create_cycle(&gf, &draft.alt.inputs, &draft.alt.outputs)
-            {
-                candidates_rejected_cycle += 1;
-                continue;
-            }
-            let parents = draft.parents.clone();
-            let node_id = gf.insert_candidate(draft.alt);
-            sat.register_origins(node_id, &parents);
-            candidates_inserted += 1;
-            inserted_this_round += 1;
         }
         rounds_inserted.push(inserted_this_round);
         if options.verbose {
@@ -423,13 +514,6 @@ pub fn fuse_graph_v2(
         if round + 1 == max_rounds {
             max_rounds_hit = true;
         }
-        // Round-cap check: if we've hit the total-alt cap there's no
-        // point running another round.
-        if candidates_inserted >= options.max_total_alternatives {
-            break;
-        }
-        // Advance the "new since last round" watermark so the next
-        // enumeration skips pairs entirely inside the previous prefix.
         min_new_parent_id = frozen;
     }
     let rounds_run = rounds_inserted.len();
@@ -542,11 +626,62 @@ pub fn fuse_graph_v2(
         fallback_reason,
         cost_cache_hits: stats.hits,
         cost_cache_misses: stats.misses,
+        cost_failures: stats.failures,
         total_runtime_units,
         rounds_run,
         rounds_inserted,
         max_rounds_hit,
+        // Populated by the outer-loop caller.
+        outer_iterations_run: 0,
+        outer_inserted: Vec::new(),
     })
+}
+
+/// Groups drafts by their fused-module hash (the `artifact.module_hash`
+/// component of [`CandidateKey`]) and returns the groups sorted by
+/// descending size. Ties break on the first-appearance draft position
+/// in the input, preserving determinism. Within a group, drafts stay
+/// in their input (enumeration) order.
+///
+/// The insertion loop uses this to prefer high-impact patterns — a
+/// fused kernel applicable at many graph sites — over one-off
+/// candidates when the total-alternatives cap is tight.
+fn rank_by_impact(
+    drafts: Vec<producer_consumer::CandidateDraft>,
+    artifact: &ArtifactContext,
+) -> Vec<Vec<producer_consumer::CandidateDraft>> {
+    use std::collections::HashMap;
+    // Insertion-ordered groups keyed by module hash. Drafts without
+    // an artifact key (non-kernel candidates today; none in practice)
+    // go into a per-draft singleton bucket keyed by their input
+    // position so they still get considered.
+    let mut order: Vec<[u8; 32]> = Vec::new();
+    let mut first_seen: HashMap<[u8; 32], usize> = HashMap::new();
+    let mut buckets: HashMap<[u8; 32], Vec<producer_consumer::CandidateDraft>> = HashMap::new();
+    let mut orphans: Vec<Vec<producer_consumer::CandidateDraft>> = Vec::new();
+    for (idx, draft) in drafts.into_iter().enumerate() {
+        let hash = match candidate_key(&draft, artifact) {
+            Some(k) => k.artifact.module_hash,
+            None => {
+                orphans.push(vec![draft]);
+                continue;
+            }
+        };
+        first_seen.entry(hash).or_insert_with(|| {
+            order.push(hash);
+            idx
+        });
+        buckets.entry(hash).or_default().push(draft);
+    }
+    let mut groups: Vec<Vec<producer_consumer::CandidateDraft>> = order
+        .into_iter()
+        .map(|h| buckets.remove(&h).unwrap_or_default())
+        .collect();
+    // Sort by size desc; ties keep first-appearance order (stable
+    // sort preserves the original slice order).
+    groups.sort_by_key(|g| std::cmp::Reverse(g.len()));
+    groups.extend(orphans);
+    groups
 }
 
 /// `verbose` one-line summary of the selected extraction (§15): how
@@ -587,6 +722,7 @@ fn enumerate_producer_consumer(
     frozen: usize,
     min_new_parent_id: usize,
     options: &FusionOptionsV2,
+    deadline: Option<std::time::Instant>,
 ) -> Vec<producer_consumer::CandidateDraft> {
     let enable_all = options.enable_all_keep_variants && options.enable_keep_variants;
     let enum_opts = producer_consumer::EnumerateOptions {
@@ -597,6 +733,7 @@ fn enumerate_producer_consumer(
         origins: &sat.origins,
         min_new_parent_id,
         options: enum_opts,
+        deadline,
     };
     let mut drafts = producer_consumer::enumerate(gf, &ctx);
     if !options.enable_keep_variants {

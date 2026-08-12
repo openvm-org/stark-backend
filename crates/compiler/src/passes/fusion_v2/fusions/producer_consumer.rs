@@ -37,11 +37,12 @@
 //! - module parameters unify by (name, bound value); a name bound to two different values is split
 //!   (`n`, `n#1`, …), so a chain of the *same* symbolic kernel invoked at shrinking sizes fuses
 //!   into a single symbolic artifact shared by every level;
-//! - the seam value has exactly one producer output position (single output on the producer
-//!   kernel).
+//! - the producer may have several outputs (a `Tuple` body): the seam is one designated output
+//!   element, inlined at consumer reads; the sibling elements remain materialized, which requires
+//!   plain kernels and equal outer bounds (the siblings are emitted at the fused domain's index).
 //!
 //! The keep variant additionally requires plain kernels (no attributes),
-//! a scalar producer body (no rank-extending spine), and equal outer
+//! a scalar seam body (no rank-extending spine), and equal outer
 //! bounds, because the seam is materialized at the fused domain's index.
 //!
 //! Synthesis is a capture-free HIR clone. The consumer's compute body is
@@ -51,8 +52,9 @@
 //! delinearize over the producer's physical shape → provided scatter
 //! inverse), evaluated as a fresh HIR expression in the fused builder.
 //!
-//! The multi-seam case (§10.1 grouping) is deferred: it requires
-//! multi-output producers, which live outside this M3 slice.
+//! Multi-output producers are enumerated per `(producer, output)` pair:
+//! `gf.producers` lists a node once per produced value class, so the
+//! seam value alone designates the output element to fuse through.
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
@@ -276,9 +278,6 @@ pub enum SynthesisFailure {
     /// Keep variant only: producer and consumer have different outer
     /// bounds (drop tolerates this via the element-count gate).
     OuterBoundMismatch,
-    /// The producer produces zero or several outputs. The M3 slice
-    /// only supports single-output producers.
-    ProducerNotSingleOutput,
     /// No consumer read site references the seam value.
     NoSeamReadInConsumer,
     /// A consumer read of the seam has an index expression that is not
@@ -314,13 +313,16 @@ pub enum SynthesisFailure {
 ///   compute body wraps the consumer and producer expressions in a `Tuple` so both are emitted from
 ///   the same iteration (§10.2).
 ///
-/// The producer body is *re-cloned* at each seam-read site with the
-/// producer's outer variable substituted by that read's composed
-/// coordinate σ, so identity, affine-permutation, nested-index,
+/// The producer's seam element is *re-cloned* at each seam-read site
+/// with the producer's outer variable substituted by that read's
+/// composed coordinate σ, so identity, affine-permutation, nested-index,
 /// reshape-view and scattered-producer consumers all reduce to the same
 /// synthesis loop. Rank-extending producer bodies (`Pack`, inner
 /// `Compute` nests) are drilled per read using the trailing composed
-/// coordinates.
+/// coordinates. For a multi-output producer the seam is
+/// `p_alt.outputs.position(seam_val)`'s tuple element; the sibling
+/// elements stay materialized (drop appends them to the outputs, keep
+/// appends every producer output).
 pub fn synthesize_producer_consumer(
     gf: &GraphFuser,
     producer_node: NodeId,
@@ -342,9 +344,22 @@ pub fn synthesize_producer_consumer(
     let p_shape = identify_kernel_shape(&p_module).ok_or(SynthesisFailure::UnsupportedShape)?;
     let c_shape = identify_kernel_shape(&c_module).ok_or(SynthesisFailure::UnsupportedShape)?;
 
-    if p_alt.outputs.len() != 1 {
-        return Err(SynthesisFailure::ProducerNotSingleOutput);
+    // Seam selection for multi-output producers: the seam is one
+    // designated output; a multi-output producer's body is a `Tuple`
+    // whose elements line up with `p_alt.outputs`. The seam element is
+    // inlined at consumer reads; every other element stays materialized.
+    let Some(seam_out_idx) = p_alt.outputs.iter().position(|&v| v == seam_val) else {
+        debug_assert!(false, "seam value is not an output of the producer node");
+        return Err(SynthesisFailure::UnsupportedShape);
+    };
+    let p_elems: Vec<HirNodeId> = match p_module.builder.node(p_shape.body_root) {
+        Node::Tuple(es) if p_alt.outputs.len() > 1 => es.clone(),
+        _ => vec![p_shape.body_root],
+    };
+    if p_elems.len() != p_alt.outputs.len() {
+        return Err(SynthesisFailure::UnsupportedShape);
     }
+    let p_seam_root = p_elems[seam_out_idx];
 
     // Consumer input position(s) at which the seam is bound.
     let seam_positions: Vec<usize> = c_alt
@@ -407,12 +422,13 @@ pub fn synthesize_producer_consumer(
         env: side_env(&c_module, &c_binding),
     };
 
-    // Producer output geometry. `spine` is the rank-extending chain of
-    // Pack / inner-Compute steps under the outer compute; `p_logical`
-    // is the producer's logical output shape (outer bound ++ spine
-    // dims); `p_phys` is what the seam buffer actually stores — equal
-    // to `p_logical` unless a scatter rewrites the layout.
-    let spine = producer_spine(&p_module, p_shape.body_root)?;
+    // Producer output geometry for the seam element. `spine` is the
+    // rank-extending chain of Pack / inner-Compute steps under the outer
+    // compute; `p_logical` is the seam's logical output shape (outer
+    // bound ++ spine dims); `p_phys` is what the seam buffer actually
+    // stores — equal to `p_logical` unless a scatter rewrites the
+    // layout.
+    let spine = producer_spine(&p_module, p_seam_root)?;
     let mut p_logical: Vec<SExpr> = vec![p_shape.outer_bound.clone()];
     p_logical.extend(spine.iter().map(|s| s.dim.clone()));
     let p_phys: Vec<SExpr> = match &p_shape.scatter {
@@ -435,12 +451,25 @@ pub fn synthesize_producer_consumer(
         }
     };
 
-    if variant == FusionVariant::Keep {
-        // Keep materializes the seam at the fused domain's index, so it
-        // requires plain kernels, a scalar producer body, and equal
-        // outer bounds.
-        if !p_shape.is_plain() || !c_shape.is_plain() || !spine.is_empty() {
+    // Materialized producer elements: every element for keep, the
+    // non-seam elements for drop. Materialization emits the element at
+    // the fused domain's index, so it requires plain kernels and equal
+    // outer bounds; the keep seam additionally needs a scalar body (no
+    // rank-extending spine), and a materialized element may not be a
+    // bare inner compute (canonicalize has no binder to hoist it under).
+    let materializes_producer_elems = variant == FusionVariant::Keep || p_alt.outputs.len() > 1;
+    if materializes_producer_elems {
+        if !p_shape.is_plain() || !c_shape.is_plain() {
             return Err(SynthesisFailure::UnsupportedShape);
+        }
+        if variant == FusionVariant::Keep && !spine.is_empty() {
+            return Err(SynthesisFailure::UnsupportedShape);
+        }
+        for (i, &e) in p_elems.iter().enumerate() {
+            let materialized = variant == FusionVariant::Keep || i != seam_out_idx;
+            if materialized && matches!(p_module.builder.node(e), Node::Compute { .. }) {
+                return Err(SynthesisFailure::UnsupportedShape);
+            }
         }
         if !two_tier_eq(&p_shape.outer_bound, &p_ctx, &c_shape.outer_bound, &c_ctx) {
             return Err(SynthesisFailure::OuterBoundMismatch);
@@ -581,14 +610,14 @@ pub fn synthesize_producer_consumer(
             };
             drill.insert(*node, action);
         }
-        // Clone the producer body with producer.outer_var → sigma_node,
-        // drilling Pack / inner-Compute spine steps per this read's
-        // plan.
+        // Clone the seam element of the producer body with
+        // producer.outer_var → sigma_node, drilling Pack / inner-Compute
+        // spine steps per this read's plan.
         let mut producer_vars: HashMap<VarId, HirNodeId> = HashMap::new();
         producer_vars.insert(p_shape.outer_var, sigma_node);
         let inlined = clone_with_drill(
             &p_module,
-            p_shape.body_root,
+            p_seam_root,
             dst,
             &producer_subst,
             &producer_vars,
@@ -609,29 +638,48 @@ pub fn synthesize_producer_consumer(
     )
     .map_err(|e| SynthesisFailure::CloneError(format!("{e:?}")))?;
 
-    // For the keep variant, materialize the seam alongside the consumer
-    // output. Both share the fused compute's outer var, so a single
-    // Compute with a `Tuple` body suffices (§10.2). Producer inputs and
-    // producer-var mapping match the hook's inline substitution, but the
-    // outer-var image is `k_var_node` directly (identity access at the
-    // materialized index).
-    let compute_body = match variant {
-        FusionVariant::Drop => cloned_body,
-        FusionVariant::Keep => {
-            let mut producer_vars: HashMap<VarId, HirNodeId> = HashMap::new();
-            producer_vars.insert(p_shape.outer_var, k_var_node);
-            let seam_body = clone_expr_with_params(
-                &p_module,
-                p_shape.body_root,
-                &mut fb,
-                &producer_subst,
-                &producer_vars,
-                &p_param_map,
-                |_, _, _| Ok(None),
-            )
-            .map_err(|e| SynthesisFailure::CloneError(format!("{e:?}")))?;
-            fb.intern(Node::Tuple(vec![cloned_body, seam_body]))
+    // Materialize producer elements alongside the consumer outputs: the
+    // seam (and, for a multi-output producer, its siblings) for keep,
+    // the non-seam siblings only for drop. All share the fused compute's
+    // outer var, so a single Compute with a `Tuple` body suffices
+    // (§10.2). Producer inputs and producer-var mapping match the hook's
+    // inline substitution, but the outer-var image is `k_var_node`
+    // directly (identity access at the materialized index).
+    let mut body_elems: Vec<HirNodeId> = if c_alt.outputs.len() > 1 {
+        match fb.node(cloned_body) {
+            Node::Tuple(es) => es.clone(),
+            _ => {
+                return Err(SynthesisFailure::CloneError(
+                    "multi-output consumer body is not a tuple".into(),
+                ))
+            }
         }
+    } else {
+        vec![cloned_body]
+    };
+    for (i, &elem_root) in p_elems.iter().enumerate() {
+        let materialized = variant == FusionVariant::Keep || i != seam_out_idx;
+        if !materialized {
+            continue;
+        }
+        let mut producer_vars: HashMap<VarId, HirNodeId> = HashMap::new();
+        producer_vars.insert(p_shape.outer_var, k_var_node);
+        let cloned = clone_expr_with_params(
+            &p_module,
+            elem_root,
+            &mut fb,
+            &producer_subst,
+            &producer_vars,
+            &p_param_map,
+            |_, _, _| Ok(None),
+        )
+        .map_err(|e| SynthesisFailure::CloneError(format!("{e:?}")))?;
+        body_elems.push(cloned);
+    }
+    let compute_body = if body_elems.len() == 1 {
+        body_elems[0]
+    } else {
+        fb.intern(Node::Tuple(body_elems))
     };
 
     // The consumer's launch attributes transfer verbatim: their exprs
@@ -675,13 +723,16 @@ pub fn synthesize_producer_consumer(
             fused_inputs.push(v);
         }
     }
+    // Output order mirrors the body tuple: consumer outputs first, then
+    // the materialized producer elements in producer output order. Keep
+    // appends every producer output — the seam included, so the
+    // extractor sees this candidate as a valid producer of the seam
+    // (§10.2) — while drop appends only the seam's siblings.
     let mut fused_outputs: Vec<ValueClassId> = c_alt.outputs.clone();
-    if variant == FusionVariant::Keep {
-        // Keep variant appends the seam value as an additional output
-        // (§10.2). The extractor now sees this candidate as a valid
-        // producer of the seam, so selecting keep alone satisfies the
-        // producer equation for both the seam and the consumer's outputs.
-        fused_outputs.push(seam_val);
+    for (i, &v) in p_alt.outputs.iter().enumerate() {
+        if variant == FusionVariant::Keep || i != seam_out_idx {
+            fused_outputs.push(v);
+        }
     }
 
     // Buffer bindings for the underlying KernelModuleNode: the
@@ -1249,6 +1300,11 @@ pub struct EnumerateContext<'a> {
     /// alternative-graph node count at the end of round `r`.
     pub min_new_parent_id: usize,
     pub options: EnumerateOptions,
+    /// Optional wall-time deadline for the enumerator. When set,
+    /// passes check it in the site-collection loop and between
+    /// synthesis chunks and return early once the current instant
+    /// passes it. `None` disables the deadline.
+    pub deadline: Option<std::time::Instant>,
 }
 
 /// Owned context wrapper for callers that want an
@@ -1287,6 +1343,7 @@ impl OwnedEnumerateContext {
             origins: &self.origins,
             min_new_parent_id: 0,
             options: self.options,
+            deadline: None,
         }
     }
 }
@@ -1318,7 +1375,12 @@ pub fn enumerate(gf: &GraphFuser, ctx: &EnumerateContext) -> Vec<CandidateDraft>
     // independently; deduplication is handled downstream by
     // `CandidateKey`.
     let mut sites: Vec<(NodeId, NodeId, ValueClassId)> = Vec::new();
-    for (v, producers) in gf.producers.iter().enumerate() {
+    'outer: for (v, producers) in gf.producers.iter().enumerate() {
+        if let Some(t) = ctx.deadline {
+            if std::time::Instant::now() >= t {
+                break 'outer;
+            }
+        }
         for pu in producers {
             let p_node = pu.node;
             if p_node.0 >= frozen {
@@ -1345,7 +1407,7 @@ pub fn enumerate(gf: &GraphFuser, ctx: &EnumerateContext) -> Vec<CandidateDraft>
             }
         }
     }
-    let (out, rejects) = super::par_enumerate(sites, |(p_node, c_node, seam)| {
+    let (out, rejects) = super::par_enumerate(sites, ctx.deadline, |(p_node, c_node, seam)| {
         let mut drafts = Vec::new();
         let mut rejects: Vec<(String, u64)> = Vec::new();
         match synthesize_producer_consumer(gf, p_node, c_node, seam, FusionVariant::Drop) {

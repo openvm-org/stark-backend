@@ -1672,9 +1672,12 @@ mod driver_tests {
             ..FusionOptionsV2::default()
         };
         let report = fuse_graph_v2(&mut g, &options).unwrap();
-        // Two drop candidates (one per consumer) plus two keep
-        // candidates (seam has another consumer): 4 total.
-        assert_eq!(report.candidates_generated, 4);
+        // Round 1: two drop candidates (one per consumer) plus two keep
+        // candidates (seam has another consumer). Round 2: each round-1
+        // keep node is a multi-output producer of `y`, so it composes
+        // with the *other* consumer through the `y` seam (drop + keep
+        // each): 4 + 4 = 8 total.
+        assert_eq!(report.candidates_generated, 8);
         assert!(g.nodes.iter().all(|n| matches!(n, GraphNode::Kernel(_))));
         assert_eq!(g.output_bufs(), &[z1, z2]);
     }
@@ -5046,5 +5049,410 @@ mod select_guard_full_repro {
     fn gkr_fused_drop_shape_passes_check() {
         let (m, bindings) = build_repro();
         check_module_accesses(&m, &bindings).unwrap();
+    }
+}
+
+// ---------------------------------------------------------------------
+// Multi-output producers / multi-seam fusion (fusion_extension.md §2):
+// a keep-variant fused node exposes several outputs; later rounds fuse
+// through ONE designated output (the seam) while the sibling outputs
+// stay materialized.
+// ---------------------------------------------------------------------
+mod multi_seam_tests {
+    use super::*;
+    use crate::{
+        module_hash::module_hash,
+        passes::fusion_v2::{
+            fusions::{fanout, producer_consumer},
+            GraphFuser,
+        },
+    };
+
+    fn scale_by(n: usize, c: u32) -> Arc<crate::ir::Module> {
+        let mut b = IRBuilder::new();
+        let a = b.input("a", ScalarType::BabyBear, vec![n]);
+        let body = b.compute(n, |b, i| {
+            let ai = b.index(a, &[i]);
+            let cst = b.const_field(c);
+            b.mul(ai, cst)
+        });
+        Arc::new(b.finish("scale_by", body))
+    }
+
+    fn draft_module(d: &producer_consumer::CandidateDraft) -> Arc<crate::ir::Module> {
+        match &d.alt.node {
+            GraphNode::Kernel(k) => k.module.clone(),
+            _ => panic!("expected Kernel"),
+        }
+    }
+
+    fn seed_ctx(gf: &GraphFuser) -> producer_consumer::OwnedEnumerateContext {
+        producer_consumer::OwnedEnumerateContext::all_seed(
+            gf,
+            producer_consumer::EnumerateOptions::default(),
+        )
+    }
+
+    /// Keep-fuses `y = 2*x` (node 0) with `z = 3*y` (node 1) through
+    /// seam `y`, inserts the candidate, and returns its NodeId. The
+    /// inserted node has outputs `[z, y]` (consumer output first, then
+    /// the materialized seam) and body `Tuple([3*(2*x[i]), 2*x[i]])`.
+    fn insert_keep_node(gf: &mut GraphFuser) -> NodeId {
+        let seam_y = gf.nodes[0].outputs[0];
+        let keep = producer_consumer::synthesize_producer_consumer(
+            gf,
+            NodeId(0),
+            NodeId(1),
+            seam_y,
+            producer_consumer::FusionVariant::Keep,
+        )
+        .expect("keep fusion of the scale chain");
+        gf.insert_candidate(keep.alt)
+    }
+
+    /// `y = 2*x; z = 3*y; w = 5*z` with `y` and `w` graph outputs.
+    fn keep_then_chain(n: usize) -> GraphFuser {
+        let mut g = GraphBuilder::new();
+        let x = sized_buf(&mut g, "x", (n * 4) as i64);
+        let y = sized_buf(&mut g, "y", (n * 4) as i64);
+        let z = sized_buf(&mut g, "z", (n * 4) as i64);
+        let w = sized_buf(&mut g, "w", (n * 4) as i64);
+        g.register_input(x);
+        g.register_output(y);
+        g.register_output(w);
+        g.insert_kernel(scale_by(n, 2), vec![x], vec![y], &[]);
+        g.insert_kernel(scale_by(n, 3), vec![y], vec![z], &[]);
+        g.insert_kernel(scale_by(n, 5), vec![z], vec![w], &[]);
+        crate::passes::fusion_v2::take_graph(&mut g).unwrap()
+    }
+
+    /// `y = 2*x; z = 3*y; u = 5*z; v = 7*z` with `y`, `u`, `v` graph
+    /// outputs — `z` fans out to two consumers.
+    fn keep_then_fan(n: usize) -> GraphFuser {
+        let mut g = GraphBuilder::new();
+        let x = sized_buf(&mut g, "x", (n * 4) as i64);
+        let y = sized_buf(&mut g, "y", (n * 4) as i64);
+        let z = sized_buf(&mut g, "z", (n * 4) as i64);
+        let u = sized_buf(&mut g, "u", (n * 4) as i64);
+        let v = sized_buf(&mut g, "v", (n * 4) as i64);
+        g.register_input(x);
+        g.register_output(y);
+        g.register_output(u);
+        g.register_output(v);
+        g.insert_kernel(scale_by(n, 2), vec![x], vec![y], &[]);
+        g.insert_kernel(scale_by(n, 3), vec![y], vec![z], &[]);
+        g.insert_kernel(scale_by(n, 5), vec![z], vec![u], &[]);
+        g.insert_kernel(scale_by(n, 7), vec![z], vec![v], &[]);
+        crate::passes::fusion_v2::take_graph(&mut g).unwrap()
+    }
+
+    #[test]
+    fn drop_through_one_output_of_keep_node_materializes_sibling() {
+        let n = 8;
+        let mut gf = keep_then_chain(n);
+        let keep_id = insert_keep_node(&mut gf);
+        assert_eq!(gf.nodes[keep_id.0].outputs.len(), 2);
+        let seam_z = gf.nodes[keep_id.0].outputs[0];
+        assert_eq!(seam_z, gf.nodes[1].outputs[0]);
+
+        let d = producer_consumer::synthesize_producer_consumer(
+            &gf,
+            keep_id,
+            NodeId(2),
+            seam_z,
+            producer_consumer::FusionVariant::Drop,
+        )
+        .expect("drop fusion through output 0 of a two-output producer");
+
+        // Consumer output first, then the still-materialized sibling y.
+        let y_val = gf.nodes[0].outputs[0];
+        let w_val = gf.nodes[2].outputs[0];
+        assert_eq!(d.alt.outputs, vec![w_val, y_val]);
+
+        let fused = draft_module(&d);
+        crate::passes::type_infer(&fused).expect("multi-seam drop module type-checks");
+
+        // compute[N] |i| Tuple([5*(3*(2*x[i])), 2*x[i]]) — the seam
+        // element is inlined into the consumer, the sibling stays.
+        let reference = {
+            let mut b = IRBuilder::new();
+            let a = b.input("a", ScalarType::BabyBear, vec![n]);
+            let body = b.compute(n, |b, i| {
+                let ai = b.index(a, &[i]);
+                let two = b.const_field(2);
+                let y = b.mul(ai, two);
+                let three = b.const_field(3);
+                let z = b.mul(y, three);
+                let five = b.const_field(5);
+                let w = b.mul(z, five);
+                b.tuple(&[w, y])
+            });
+            b.finish(fused.name.clone(), body)
+        };
+        assert_eq!(
+            module_hash(&fused),
+            module_hash(&reference),
+            "multi-seam drop should inline the seam element and re-materialize the sibling"
+        );
+    }
+
+    #[test]
+    fn fanout_enumerates_multi_output_producer_per_output() {
+        let n = 8;
+        let mut gf = keep_then_fan(n);
+        let keep_id = insert_keep_node(&mut gf);
+        let ctx = seed_ctx(&gf);
+        let drafts = fanout::enumerate(&gf, &ctx.as_ref());
+        // Both producers of `z` (the original node 1 and the inserted
+        // keep node) fan out to consumers {2, 3}.
+        let multi = drafts
+            .iter()
+            .find(|d| d.parents[0] == keep_id)
+            .expect("fanout draft through the multi-output producer");
+        assert_eq!(multi.parents.len(), 3);
+        assert!(drafts.iter().any(|d| d.parents[0] == NodeId(1)));
+    }
+
+    #[test]
+    fn fanout_through_multi_output_producer_matches_reference() {
+        let n = 8;
+        let mut gf = keep_then_fan(n);
+        let keep_id = insert_keep_node(&mut gf);
+        let seam_z = gf.nodes[keep_id.0].outputs[0];
+
+        let d = fanout::synthesize_fanout(
+            &gf,
+            keep_id,
+            &[(NodeId(2), vec![0]), (NodeId(3), vec![0])],
+            seam_z,
+            producer_consumer::FusionVariant::Drop,
+        )
+        .expect("fanout through output 0 of a two-output producer");
+
+        // Producer's surviving outputs first, then the consumers'.
+        let y_val = gf.nodes[0].outputs[0];
+        let u_val = gf.nodes[2].outputs[0];
+        let v_val = gf.nodes[3].outputs[0];
+        assert_eq!(d.alt.outputs, vec![y_val, u_val, v_val]);
+
+        let fused = draft_module(&d);
+        crate::passes::type_infer(&fused).expect("multi-output fanout module type-checks");
+
+        // compute[N] |i| Tuple([2*x[i], 5*(3*(2*x[i])), 7*(3*(2*x[i]))])
+        // — sibling y materialized, seam z computed once and shared by
+        // both consumers.
+        let reference = {
+            let mut b = IRBuilder::new();
+            let a = b.input("a", ScalarType::BabyBear, vec![n]);
+            let body = b.compute(n, |b, i| {
+                let ai = b.index(a, &[i]);
+                let two = b.const_field(2);
+                let y = b.mul(ai, two);
+                let three = b.const_field(3);
+                let z = b.mul(y, three);
+                let five = b.const_field(5);
+                let u = b.mul(z, five);
+                let seven = b.const_field(7);
+                let v = b.mul(z, seven);
+                b.tuple(&[y, u, v])
+            });
+            b.finish(fused.name.clone(), body)
+        };
+        assert_eq!(
+            module_hash(&fused),
+            module_hash(&reference),
+            "multi-output fanout should share one seam instance and re-materialize the sibling"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------
+// Canonicalization of composed keep candidates (fusion_extension.md §1):
+// a round-1 small-kernel node has a `Let`-bound tile chain at its body
+// root; composing it under an epilogue keep buries the `Let`s inside
+// the keep `Tuple` (and mid-expression on the consumer element).
+// `canonicalize` must hoist them into inner_lets so `is_canonicalized`
+// holds and the estimator prices a real cost instead of the FAILED
+// sentinel.
+// ---------------------------------------------------------------------
+mod composed_keep_canonicalize_tests {
+    use super::*;
+    use crate::{
+        module_hash::module_hash,
+        passes::fusion_v2::{
+            cost::{estimate_kernel, EstimateContext, EstimatorConfig},
+            fuse_graph_v2,
+            fusions::{epilogue, producer_consumer, small_kernel},
+            take_graph, FusionOptionsV2,
+        },
+    };
+
+    /// Halving fold: input length `2*n_out`, `y[i] = x[i] + x[i+n_out]`.
+    fn fold_lit(n_out: usize) -> Arc<crate::ir::Module> {
+        let mut b = IRBuilder::new();
+        let x = b.input("x", ScalarType::BabyBear, vec![2 * n_out]);
+        let body = b.compute(n_out, |b, i| {
+            let xi = b.index(x, &[i]);
+            let c = b.const_u32(n_out as u32);
+            let ixn = b.add(i, c);
+            let xin = b.index(x, &[ixn]);
+            b.add(xi, xin)
+        });
+        Arc::new(b.finish("fold_lit", body))
+    }
+
+    /// Pointwise epilogue consumer: `w[i] = a[i] * s[i]`.
+    fn mul_pair(n: usize) -> Arc<crate::ir::Module> {
+        let mut b = IRBuilder::new();
+        let a = b.input("a", ScalarType::BabyBear, vec![n]);
+        let s = b.input("s", ScalarType::BabyBear, vec![n]);
+        let body = b.compute(n, |b, i| {
+            let ai = b.index(a, &[i]);
+            let si = b.index(s, &[i]);
+            b.mul(ai, si)
+        });
+        Arc::new(b.finish("mul_pair", body))
+    }
+
+    /// Pointwise epilogue consumer: `u[i] = 5 * a[i]`.
+    fn scale5(n: usize) -> Arc<crate::ir::Module> {
+        let mut b = IRBuilder::new();
+        let a = b.input("a", ScalarType::BabyBear, vec![n]);
+        let body = b.compute(n, |b, i| {
+            let ai = b.index(a, &[i]);
+            let five = b.const_field(5);
+            b.mul(ai, five)
+        });
+        Arc::new(b.finish("scale5", body))
+    }
+
+    /// `y = fold(x) (16→8); z = fold(y) (8→4); w = z * inv; u = 5 * z`
+    /// with `z`, `w`, `u` graph outputs. Two consumers of `z` stop the
+    /// round-1 small-kernel chain at [k0, k1], so the driver inserts a
+    /// tile-chain node producing `z`; composing an epilogue on it in
+    /// round 2 requires the keep variant (`z` stays live).
+    fn halving_chain_with_epilogue() -> crate::graph_ir::GraphBuilder {
+        let mut g = crate::graph_ir::GraphBuilder::new();
+        let x = sized_buf(&mut g, "x", 16 * 4);
+        let y = sized_buf(&mut g, "y", 8 * 4);
+        let z = sized_buf(&mut g, "z", 4 * 4);
+        let inv = sized_buf(&mut g, "inv", 4 * 4);
+        let w = sized_buf(&mut g, "w", 4 * 4);
+        let u = sized_buf(&mut g, "u", 4 * 4);
+        g.register_input(x);
+        g.register_input(inv);
+        g.register_output(z);
+        g.register_output(w);
+        g.register_output(u);
+        g.insert_kernel(fold_lit(8), vec![x], vec![y], &[]);
+        g.insert_kernel(fold_lit(4), vec![y], vec![z], &[]);
+        g.insert_kernel(mul_pair(4), vec![z, inv], vec![w], &[]);
+        g.insert_kernel(scale5(4), vec![z], vec![u], &[]);
+        g
+    }
+
+    #[test]
+    fn composed_epilogue_keep_of_tile_chain_producer_canonicalizes() {
+        let mut g = halving_chain_with_epilogue();
+        let mut gf = take_graph(&mut g).unwrap();
+
+        // Round 1: small-kernel fuses the halving chain [k0, k1] into a
+        // module with a Let-bound tile chain at the body root.
+        let sk = small_kernel::synthesize_small_kernel(
+            &gf,
+            &[NodeId(0), NodeId(1)],
+            producer_consumer::FusionVariant::Drop,
+            &Default::default(),
+        )
+        .expect("small-kernel candidate for the [k0, k1] chain");
+        let sk_id = gf.insert_candidate(sk.alt);
+
+        // Round 2: epilogue keep of (small-kernel node, mul_pair).
+        let seam_z = gf.nodes[1].outputs[0];
+        let d = epilogue::synthesize_epilogue(
+            &gf,
+            sk_id,
+            NodeId(2),
+            seam_z,
+            producer_consumer::FusionVariant::Keep,
+        )
+        .expect("composed epilogue keep of the tile-chain producer");
+        let m = match &d.alt.node {
+            GraphNode::Kernel(k) => k.module.clone(),
+            _ => panic!("expected Kernel"),
+        };
+
+        // Sanity: the composed body is the shape §1 targets — a keep
+        // Tuple whose elements embed `Let`-bound tile computes below
+        // the body root (`is_canonicalized` rejected this before the
+        // embedded-let hoist).
+        let body_root = match m.builder.node(m.body) {
+            crate::ir::Node::Compute { body, .. } => *body,
+            other => panic!("expected outer Compute, got {other:?}"),
+        };
+        let has_embedded_let = {
+            use crate::module_hash::children_of;
+            let mut found = false;
+            let mut work = vec![body_root];
+            let mut seen = std::collections::HashSet::new();
+            while let Some(id) = work.pop() {
+                if !seen.insert(id) {
+                    continue;
+                }
+                let node = m.builder.node(id);
+                if matches!(node, crate::ir::Node::Let { .. }) {
+                    found = true;
+                    break;
+                }
+                work.extend(children_of(node));
+            }
+            found
+        };
+        assert!(
+            matches!(m.builder.node(body_root), crate::ir::Node::Tuple(_)),
+            "keep body should be a Tuple"
+        );
+        assert!(
+            has_embedded_let,
+            "fixture must embed a Let-bound tile below the body root"
+        );
+
+        // §1 exit gate: canonicalize succeeds AND the result satisfies
+        // is_canonicalized — the invariant lower_to_kir asserts.
+        let types = crate::passes::type_infer(&m).expect("composed keep module type-checks");
+        let program =
+            crate::passes::canonicalize((*m).clone(), types).expect("canonicalize succeeds");
+        assert!(
+            crate::passes::is_canonicalized(&program),
+            "composed keep body must canonicalize to scalar form"
+        );
+
+        // And the estimator prices a real cost, not the FAILED sentinel.
+        let hash = module_hash(&m);
+        let (cost, _brk) = estimate_kernel(
+            &m,
+            hash,
+            &EstimateContext::default(),
+            &EstimatorConfig::default(),
+            1,
+        )
+        .expect("composed keep candidate must be costable");
+        assert!(!cost.is_failure(), "cost must not be the FAILED sentinel");
+    }
+
+    #[test]
+    fn driver_halving_chain_has_no_sentinel_cost_failures() {
+        let mut g = halving_chain_with_epilogue();
+        let report = fuse_graph_v2(&mut g, &FusionOptionsV2::default()).unwrap();
+        // Composition must actually happen (round 2 inserts composed
+        // candidates) or the sentinel assertion below is vacuous.
+        assert!(
+            report.rounds_run >= 2,
+            "expected composed candidates in round 2, got report {report:?}"
+        );
+        assert_eq!(
+            report.cost_failures, 0,
+            "no candidate may be priced at the failure sentinel"
+        );
     }
 }

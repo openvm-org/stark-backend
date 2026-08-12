@@ -198,6 +198,73 @@ struct CanonCx<'a> {
     env: HashMap<VarId, CanonValue>,
 }
 
+/// Per-kernel state for [`CanonCx::hoist_embedded_lets`].
+#[derive(Default)]
+struct HoistState {
+    /// Original node -> hoisted rewrite. Shared across the whole kernel so a
+    /// subtree appearing in several positions (e.g. an epilogue-keep producer
+    /// clone used both as a tuple element and as the seam substitution) is
+    /// processed once and its tiles pushed once.
+    memo: HashMap<NodeId, NodeId>,
+    /// Stack of binders introduced below the kernel body root along the
+    /// current traversal path.
+    local_binders: Vec<VarId>,
+}
+
+/// Whether any `Var` in the subtree rooted at `root` references one of
+/// `forbidden`. Binders are globally fresh, so a forbidden var cannot be
+/// rebound inside the subtree and plain occurrence checking suffices.
+fn refs_any_var(b: &IRBuilder, root: NodeId, forbidden: &[VarId]) -> bool {
+    if forbidden.is_empty() {
+        return false;
+    }
+    let mut visited = HashSet::new();
+    let mut stack = vec![root];
+    while let Some(id) = stack.pop() {
+        if !visited.insert(id) {
+            continue;
+        }
+        match b.node(id) {
+            Node::Var(v) => {
+                if forbidden.contains(v) {
+                    return true;
+                }
+            }
+            Node::Input(_)
+            | Node::ConstU32(_)
+            | Node::ConstField(_)
+            | Node::ConstFpExt(_)
+            | Node::ConstSym(_) => {}
+            Node::LiftFpExt(x) => stack.push(*x),
+            Node::Bin(_, x, y) => {
+                stack.push(*x);
+                stack.push(*y);
+            }
+            Node::Select {
+                cond,
+                then_val,
+                else_val,
+            } => {
+                stack.push(*cond);
+                stack.push(*then_val);
+                stack.push(*else_val);
+            }
+            Node::Index { tensor, indices } => {
+                stack.push(*tensor);
+                stack.extend(indices.iter().copied());
+            }
+            Node::Compute { body, .. } | Node::Reduce { body, .. } => stack.push(*body),
+            Node::Let { value, body, .. } => {
+                stack.push(*value);
+                stack.push(*body);
+            }
+            Node::Tuple(elems) | Node::Pack(elems) => stack.extend(elems.iter().copied()),
+            Node::Proj(t, _) => stack.push(*t),
+        }
+    }
+    false
+}
+
 impl CanonCx<'_> {
     fn ty(&self, id: NodeId) -> Result<Type, CompileError> {
         self.types
@@ -393,7 +460,8 @@ impl CanonCx<'_> {
         // let-bound inner computes become shared-memory tiles.
         let mut inline_lets = HashMap::new();
         let mut inner_lets = Vec::new();
-        let body = self.peel_body_lets(body, &mut inline_lets, &mut inner_lets)?;
+        let mut st = HoistState::default();
+        let body = self.peel_body_lets(body, &mut inline_lets, &mut inner_lets, &mut st)?;
 
         // If the body is an inner compute, flatten any deeper nests into it.
         let (inner, inner_par, result_root) = match self.b.node(body).clone() {
@@ -463,10 +531,54 @@ impl CanonCx<'_> {
                     });
                 }
                 let inner_body = self.peel_scalar_lets(inner_body, &mut inline_lets)?;
-                (Some((m, j)), inner_par.map(|p| *p), inner_body)
+                // Hoist embedded tiles out of the thread-level body; the
+                // thread index is a local binder (tiles are materialized per
+                // block, not per thread).
+                st.local_binders.push(j);
+                let inner_body = self.hoist_embedded_lets(
+                    inner_body,
+                    &mut inline_lets,
+                    &mut inner_lets,
+                    &mut st,
+                );
+                st.local_binders.pop();
+                (Some((m, j)), inner_par.map(|p| *p), inner_body?)
             }
-            _ => (None, None, body),
+            _ => {
+                let body =
+                    self.hoist_embedded_lets(body, &mut inline_lets, &mut inner_lets, &mut st)?;
+                (None, None, body)
+            }
         };
+
+        // Inline-let values are resolved at use sites, so tiles buried in
+        // them are hoisted too — to fixpoint, since hoisting can peel new
+        // scalar lets out of tile bodies into the inline environment. A value
+        // peeled from a thread-level or tile body may reference that body's
+        // iteration variable, so all iteration binders are kept local.
+        loop {
+            st.local_binders.clear();
+            if let Some((_, j)) = &inner {
+                st.local_binders.push(*j);
+            }
+            st.local_binders
+                .extend(inner_lets.iter().map(|il| il.iter_var));
+            let mut entries: Vec<(VarId, NodeId)> =
+                inline_lets.iter().map(|(&v, &n)| (v, n)).collect();
+            entries.sort_unstable_by_key(|&(v, _)| v);
+            let mut changed = false;
+            for (v, n) in entries {
+                let n2 = self.hoist_embedded_lets(n, &mut inline_lets, &mut inner_lets, &mut st)?;
+                if n2 != n {
+                    inline_lets.insert(v, n2);
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        st.local_binders.clear();
 
         // Absorb a perfect nest `compute [N] |i| { compute [M] |j| { e } }`
         // into one flat `compute [N*M] |t| { e[i := t/M, j := t%M] }` so
@@ -559,6 +671,33 @@ impl CanonCx<'_> {
                 results.len()
             )));
         }
+        if member_types.iter().any(|t| !matches!(t, Type::Tensor(..))) {
+            return Err(CompileError::Canonicalize(format!(
+                "kernel members must be tensor-typed, got {member_types:?}"
+            )));
+        }
+
+        // canonicalize's contract is `Ok(p)` ⇒ `is_canonicalized(p)`: any
+        // residual non-scalar shape the rewrites could not repair (an
+        // unhoistable embedded compute, a tuple in a scalar position) is a
+        // graceful error here rather than a lowering failure.
+        let mut visited = HashSet::new();
+        let roots = results.iter().chain(inner_lets.iter().map(|il| &il.result));
+        for r in roots {
+            let scalars: &[NodeId] = match r {
+                ResultExpr::Scalar(n) => std::slice::from_ref(n),
+                ResultExpr::Pack(elems) => elems,
+            };
+            for &n in scalars {
+                if !is_scalar_form(self.b, &self.env, &inline_lets, n, &mut visited) {
+                    return Err(CompileError::Canonicalize(
+                        "kernel body is not in canonical scalar form after rewrites \
+                         (residual compute/tuple in a scalar position)"
+                            .into(),
+                    ));
+                }
+            }
+        }
 
         let let_id = self.kernels.len();
         let num_outs = results.len();
@@ -601,63 +740,12 @@ impl CanonCx<'_> {
         mut id: NodeId,
         inline_lets: &mut HashMap<VarId, NodeId>,
         inner_lets: &mut Vec<InnerLet>,
+        st: &mut HoistState,
     ) -> Result<NodeId, CompileError> {
         while let Node::Let { var, value, body } = self.b.node(id).clone() {
             match self.b.node(value).clone() {
-                Node::Compute {
-                    bound,
-                    var: iter_var,
-                    body: tile_body,
-                    scatter,
-                    par,
-                    threads,
-                } => {
-                    if threads.is_some() {
-                        return Err(CompileError::Canonicalize(
-                            "#[grid(threads = ...)] is only supported on the outer compute".into(),
-                        ));
-                    }
-                    // Compose the tile's scatter into a flat store map while
-                    // the logical (pre-flattening) shape is still known.
-                    let tile_scatter = match scatter {
-                        None => None,
-                        Some(sc) => {
-                            let mut logical = vec![bound.clone()];
-                            logical.extend_from_slice(self.ty(tile_body)?.shape());
-                            let logical = concrete_dims(&logical, "scatter")?;
-                            let mut sc = *sc;
-                            sc.bind_and_validate(&logical)?;
-                            Some(sc.store_map(self.b.fresh_var())?)
-                        }
-                    };
-                    let (elem, shape) = match self.ty(value)? {
-                        Type::Tensor(e, s) => (e, s),
-                        other => {
-                            return Err(CompileError::Canonicalize(format!(
-                                "let-bound inner compute must have tensor type, got {other:?}"
-                            )))
-                        }
-                    };
-                    let bound0 = bound.clone();
-                    let (bound, iter_var, tile_body) =
-                        self.flatten_nests(bound, iter_var, tile_body)?;
-                    if par.is_some() && bound != bound0 {
-                        return Err(CompileError::Canonicalize(
-                            "#[par(...)] on a compute with nested computes is not supported".into(),
-                        ));
-                    }
-                    let tile_body = self.peel_scalar_lets(tile_body, inline_lets)?;
-                    let result = self.classify_result(tile_body)?;
-                    inner_lets.push(InnerLet {
-                        var,
-                        bound,
-                        iter_var,
-                        result,
-                        elem,
-                        shape,
-                        scatter: tile_scatter,
-                        par: par.map(|p| *p),
-                    });
+                Node::Compute { .. } => {
+                    self.process_tile_let(var, value, inline_lets, inner_lets, st)?;
                     id = body;
                 }
                 _ => match self.ty(value)? {
@@ -677,15 +765,249 @@ impl CanonCx<'_> {
         Ok(id)
     }
 
+    /// Turns `let var = compute [bound] |iter_var| tile_body` into an
+    /// [`InnerLet`] pushed onto `inner_lets`. Shared by the root-spine peel
+    /// ([`CanonCx::peel_body_lets`]) and the embedded hoist
+    /// ([`CanonCx::hoist_embedded_lets`]); the tile body itself is hoisted
+    /// recursively, so nested tile lets land in `inner_lets` in dependency
+    /// order (a nested tile is pushed before the tile that reads it).
+    fn process_tile_let(
+        &mut self,
+        var: VarId,
+        value: NodeId,
+        inline_lets: &mut HashMap<VarId, NodeId>,
+        inner_lets: &mut Vec<InnerLet>,
+        st: &mut HoistState,
+    ) -> Result<(), CompileError> {
+        let Node::Compute {
+            bound,
+            var: iter_var,
+            body: tile_body,
+            scatter,
+            par,
+            threads,
+        } = self.b.node(value).clone()
+        else {
+            unreachable!("process_tile_let called on a non-compute let value");
+        };
+        if threads.is_some() {
+            return Err(CompileError::Canonicalize(
+                "#[grid(threads = ...)] is only supported on the outer compute".into(),
+            ));
+        }
+        // Compose the tile's scatter into a flat store map while the logical
+        // (pre-flattening) shape is still known.
+        let tile_scatter = match scatter {
+            None => None,
+            Some(sc) => {
+                let mut logical = vec![bound.clone()];
+                logical.extend_from_slice(self.ty(tile_body)?.shape());
+                let logical = concrete_dims(&logical, "scatter")?;
+                let mut sc = *sc;
+                sc.bind_and_validate(&logical)?;
+                Some(sc.store_map(self.b.fresh_var())?)
+            }
+        };
+        let (elem, shape) = match self.ty(value)? {
+            Type::Tensor(e, s) => (e, s),
+            other => {
+                return Err(CompileError::Canonicalize(format!(
+                    "let-bound inner compute must have tensor type, got {other:?}"
+                )))
+            }
+        };
+        let bound0 = bound.clone();
+        let (bound, iter_var, tile_body) = self.flatten_nests(bound, iter_var, tile_body)?;
+        if par.is_some() && bound != bound0 {
+            return Err(CompileError::Canonicalize(
+                "#[par(...)] on a compute with nested computes is not supported".into(),
+            ));
+        }
+        let tile_body = self.peel_scalar_lets(tile_body, inline_lets)?;
+        // The tile's iteration variable is a local binder while hoisting from
+        // its body: a nested tile that reads it cannot be materialized once
+        // per block.
+        st.local_binders.push(iter_var);
+        let tile_body = self.hoist_embedded_lets(tile_body, inline_lets, inner_lets, st)?;
+        st.local_binders.pop();
+        let result = self.classify_result(tile_body)?;
+        inner_lets.push(InnerLet {
+            var,
+            bound,
+            iter_var,
+            result,
+            elem,
+            shape,
+            scatter: tile_scatter,
+            par: par.map(|p| *p),
+        });
+        Ok(())
+    }
+
+    /// Rewrites `id` by hoisting embedded `let v = compute ...` bindings —
+    /// tuple elements, operands, let values, reduce bodies — into
+    /// `inner_lets`, generalizing the root-spine peel to arbitrary body
+    /// positions. Composed fusion candidates (e.g. an epilogue keep of a
+    /// tile-chain producer) put such chains below the body root, where the
+    /// old peel never looked.
+    ///
+    /// A tile is hoisted only when it references no local binder (a binder
+    /// introduced below the kernel body root: reduce/thread iteration
+    /// variables and embedded scalar-let vars); tiles are materialized once
+    /// per outer iteration, so a dependence on a local binder makes the hoist
+    /// unsound and the let is left in place for the residual-shape check to
+    /// reject. Scalar lets stay embedded ([`is_scalar_form`] accepts them),
+    /// so bodies that already canonicalize are rewritten to themselves,
+    /// node-for-node.
+    ///
+    /// Memoized on [`NodeId`]: binders are globally fresh, so a shared
+    /// subtree can only reference binders in scope at every occurrence and
+    /// the hoist decision is occurrence-invariant. The memo also dedups the
+    /// epilogue-keep shape, where one producer clone appears both as a tuple
+    /// element and as the seam substitution.
+    fn hoist_embedded_lets(
+        &mut self,
+        id: NodeId,
+        inline_lets: &mut HashMap<VarId, NodeId>,
+        inner_lets: &mut Vec<InnerLet>,
+        st: &mut HoistState,
+    ) -> Result<NodeId, CompileError> {
+        if let Some(&r) = st.memo.get(&id) {
+            return Ok(r);
+        }
+        let result = match self.b.node(id).clone() {
+            Node::Let { var, value, body }
+                if matches!(self.b.node(value), Node::Compute { .. }) =>
+            {
+                if refs_any_var(self.b, value, &st.local_binders) {
+                    let body2 = {
+                        st.local_binders.push(var);
+                        let r = self.hoist_embedded_lets(body, inline_lets, inner_lets, st);
+                        st.local_binders.pop();
+                        r?
+                    };
+                    self.b.intern(Node::Let {
+                        var,
+                        value,
+                        body: body2,
+                    })
+                } else {
+                    self.process_tile_let(var, value, inline_lets, inner_lets, st)?;
+                    self.hoist_embedded_lets(body, inline_lets, inner_lets, st)?
+                }
+            }
+            Node::Let { var, value, body } => {
+                let value2 = self.hoist_embedded_lets(value, inline_lets, inner_lets, st)?;
+                let body2 = {
+                    st.local_binders.push(var);
+                    let r = self.hoist_embedded_lets(body, inline_lets, inner_lets, st);
+                    st.local_binders.pop();
+                    r?
+                };
+                self.b.intern(Node::Let {
+                    var,
+                    value: value2,
+                    body: body2,
+                })
+            }
+            Node::Reduce {
+                op,
+                bound,
+                var,
+                body,
+            } => {
+                let body2 = {
+                    st.local_binders.push(var);
+                    let r = self.hoist_embedded_lets(body, inline_lets, inner_lets, st);
+                    st.local_binders.pop();
+                    r?
+                };
+                self.b.intern(Node::Reduce {
+                    op,
+                    bound,
+                    var,
+                    body: body2,
+                })
+            }
+            Node::LiftFpExt(x) => {
+                let x2 = self.hoist_embedded_lets(x, inline_lets, inner_lets, st)?;
+                self.b.lift_fpext(x2)
+            }
+            Node::Bin(op, x, y) => {
+                let x2 = self.hoist_embedded_lets(x, inline_lets, inner_lets, st)?;
+                let y2 = self.hoist_embedded_lets(y, inline_lets, inner_lets, st)?;
+                self.b.bin(op, x2, y2)
+            }
+            Node::Select {
+                cond,
+                then_val,
+                else_val,
+            } => {
+                let c2 = self.hoist_embedded_lets(cond, inline_lets, inner_lets, st)?;
+                let t2 = self.hoist_embedded_lets(then_val, inline_lets, inner_lets, st)?;
+                let e2 = self.hoist_embedded_lets(else_val, inline_lets, inner_lets, st)?;
+                self.b.select(c2, t2, e2)
+            }
+            // The tensor operand is a tensor reference, not a scalar
+            // position; only the indices are rewritten.
+            Node::Index { tensor, indices } => {
+                let mut ix2 = Vec::with_capacity(indices.len());
+                for ix in indices {
+                    ix2.push(self.hoist_embedded_lets(ix, inline_lets, inner_lets, st)?);
+                }
+                self.b.index(tensor, &ix2)
+            }
+            Node::Tuple(elems) => {
+                let mut e2 = Vec::with_capacity(elems.len());
+                for e in elems {
+                    e2.push(self.hoist_embedded_lets(e, inline_lets, inner_lets, st)?);
+                }
+                self.b.tuple(&e2)
+            }
+            Node::Pack(elems) => {
+                let mut e2 = Vec::with_capacity(elems.len());
+                for e in elems {
+                    e2.push(self.hoist_embedded_lets(e, inline_lets, inner_lets, st)?);
+                }
+                self.b.pack(&e2)
+            }
+            Node::Proj(t, k) => {
+                let t2 = self.hoist_embedded_lets(t, inline_lets, inner_lets, st)?;
+                self.b.proj(t2, k)
+            }
+            // A bare compute in a scalar position has no binder to hoist
+            // under; left for the residual-shape check.
+            Node::Var(_)
+            | Node::Input(_)
+            | Node::ConstU32(_)
+            | Node::ConstField(_)
+            | Node::ConstFpExt(_)
+            | Node::ConstSym(_)
+            | Node::Compute { .. } => id,
+        };
+        if result != id {
+            if let Some(t) = self.types.try_get(id).cloned() {
+                self.types.insert(result, t);
+            }
+        }
+        st.memo.insert(id, result);
+        Ok(result)
+    }
+
     /// Peels `let v = <scalar> in ...` wrappers off an inner body into an
-    /// inline environment. Tensor-typed lets are only supported directly
-    /// under the outer compute (see [`CanonCx::peel_body_lets`]).
+    /// inline environment. Stops at a compute-valued let (handled by
+    /// [`CanonCx::hoist_embedded_lets`]); other tensor-typed lets are only
+    /// supported directly under the outer compute (see
+    /// [`CanonCx::peel_body_lets`]).
     fn peel_scalar_lets(
         &mut self,
         mut id: NodeId,
         inline_lets: &mut HashMap<VarId, NodeId>,
     ) -> Result<NodeId, CompileError> {
         while let Node::Let { var, value, body } = self.b.node(id).clone() {
+            if matches!(self.b.node(value), Node::Compute { .. }) {
+                break;
+            }
             match self.ty(value)? {
                 Type::Scalar(_) => {
                     inline_lets.insert(var, value);
@@ -817,7 +1139,7 @@ pub fn is_canonicalized(program: &Program) -> bool {
                 ResultExpr::Pack(elems) => elems,
             };
             for &n in scalars {
-                if !is_scalar_form(b, program, ck, n, &mut visited) {
+                if !is_scalar_form(b, &program.env, &ck.inline_lets, n, &mut visited) {
                     return false;
                 }
             }
@@ -832,8 +1154,8 @@ pub fn is_canonicalized(program: &Program) -> bool {
 /// are walked.
 fn is_scalar_form(
     b: &IRBuilder,
-    program: &Program,
-    ck: &CanonKernel,
+    env: &HashMap<VarId, CanonValue>,
+    inline_lets: &HashMap<VarId, NodeId>,
     id: NodeId,
     visited: &mut HashSet<NodeId>,
 ) -> bool {
@@ -846,30 +1168,40 @@ fn is_scalar_form(
         | Node::ConstFpExt(_)
         | Node::ConstSym(_)
         | Node::Input(_) => true,
-        Node::LiftFpExt(x) => is_scalar_form(b, program, ck, *x, visited),
+        Node::LiftFpExt(x) => is_scalar_form(b, env, inline_lets, *x, visited),
         Node::Var(v) => {
-            if let Some(&n) = ck.inline_lets.get(v) {
-                return is_scalar_form(b, program, ck, n, visited);
+            if let Some(&n) = inline_lets.get(v) {
+                return is_scalar_form(b, env, inline_lets, n, visited);
             }
-            match program.env.get(v) {
-                Some(CanonValue::Scalar(n)) => is_scalar_form(b, program, ck, *n, visited),
-                Some(CanonValue::Tensors(_)) => false,
+            match env.get(v) {
+                Some(CanonValue::Scalar(n)) => is_scalar_form(b, env, inline_lets, *n, visited),
+                // A scalar-typed top-level let materialized as a kernel
+                // output (e.g. a bare top-level reduce wrapped into
+                // `compute [1]`): the use reads the single element as a
+                // scalar. `split_module` turns it into a shape-[] input;
+                // direct lowering of the multi-kernel program is rejected
+                // gracefully by `lower_to_kir`'s intermediate-tensor
+                // check. Type inference guarantees a Var in a scalar
+                // position is scalar-typed, so only single-element
+                // materializations occur here; a tuple-valued var is
+                // malformed.
+                Some(CanonValue::Tensors(refs)) => refs.len() == 1,
                 // Iteration and binder variables are scalar.
                 None => true,
             }
         }
         Node::Bin(_, x, y) => {
-            is_scalar_form(b, program, ck, *x, visited)
-                && is_scalar_form(b, program, ck, *y, visited)
+            is_scalar_form(b, env, inline_lets, *x, visited)
+                && is_scalar_form(b, env, inline_lets, *y, visited)
         }
         Node::Select {
             cond,
             then_val,
             else_val,
         } => {
-            is_scalar_form(b, program, ck, *cond, visited)
-                && is_scalar_form(b, program, ck, *then_val, visited)
-                && is_scalar_form(b, program, ck, *else_val, visited)
+            is_scalar_form(b, env, inline_lets, *cond, visited)
+                && is_scalar_form(b, env, inline_lets, *then_val, visited)
+                && is_scalar_form(b, env, inline_lets, *else_val, visited)
         }
         Node::Index { tensor, indices } => {
             matches!(
@@ -877,12 +1209,12 @@ fn is_scalar_form(
                 Node::Input(_) | Node::Var(_) | Node::Proj(..)
             ) && indices
                 .iter()
-                .all(|&ix| is_scalar_form(b, program, ck, ix, visited))
+                .all(|&ix| is_scalar_form(b, env, inline_lets, ix, visited))
         }
-        Node::Reduce { body, .. } => is_scalar_form(b, program, ck, *body, visited),
+        Node::Reduce { body, .. } => is_scalar_form(b, env, inline_lets, *body, visited),
         Node::Let { value, body, .. } => {
-            is_scalar_form(b, program, ck, *value, visited)
-                && is_scalar_form(b, program, ck, *body, visited)
+            is_scalar_form(b, env, inline_lets, *value, visited)
+                && is_scalar_form(b, env, inline_lets, *body, visited)
         }
         Node::Compute { .. } | Node::Tuple(_) | Node::Proj(..) | Node::Pack(_) => false,
     }

@@ -115,7 +115,7 @@ pub fn enumerate(gf: &GraphFuser, ctx: &EnumerateContext) -> Vec<CandidateDraft>
     // triangular row lengths).
     let rows: Vec<usize> = (0..frozen).filter(|&a| elig[a].is_some()).collect();
     let elig = &elig;
-    let (out, rejects) = super::par_enumerate(rows, |a| {
+    let (out, rejects) = super::par_enumerate(rows, ctx.deadline, |a| {
         let ea = elig[a].as_ref().expect("rows filtered to Some");
         let mut drafts = Vec::new();
         let mut row_rejects: std::collections::BTreeMap<String, u64> = Default::default();

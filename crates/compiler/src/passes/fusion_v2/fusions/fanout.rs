@@ -12,15 +12,18 @@
 //!
 //! ```text
 //! inputs  = stable_unique(producer.inputs ++ each c_i.inputs \ seam)
-//! outputs = Drop:  concat(c_1.outputs, .., c_k.outputs)
-//!           Keep:  [seam] ++ concat(c_1.outputs, .., c_k.outputs)
+//! outputs = Drop:  (producer.outputs \ seam) ++ concat(c_1.outputs, .., c_k.outputs)
+//!           Keep:  producer.outputs ++ concat(c_1.outputs, .., c_k.outputs)
 //! ```
+//!
+//! Multi-output producers (e.g. keep-variant fused kernels) are handled
+//! by grouping consumers per `(producer, output)` pair: each output is
+//! an independent fanout seam. The seam element of the producer's body
+//! tuple feeds the consumers; sibling elements stay materialized in the
+//! fused tuple under both variants.
 //!
 //! The M7 slice restricts to:
 //!
-//! - single-output producers (multi-output fanout requires the M5 keep-variant kernels to enter
-//!   fanout as producers themselves; that composition works through the saturation driver in later
-//!   rounds);
 //! - **identity** seam reads at every consumer — every reachable `y[j]` in a consumer must resolve
 //!   to `outer_var(j)`. Non-identity permutations force per-site producer re-evaluation and defeat
 //!   fanout's "compute once" invariant; those cases fall back to producer-consumer for individual
@@ -71,7 +74,6 @@ use crate::{
 pub enum FanoutFailure {
     NotAKernel,
     UnsupportedShape,
-    ProducerNotSingleOutput,
     NotEnoughConsumers,
     OuterBoundMismatch,
     SeamReadNotIdentity,
@@ -93,110 +95,108 @@ pub fn enumerate(gf: &GraphFuser, ctx: &EnumerateContext) -> Vec<CandidateDraft>
     type FanoutSite = (NodeId, Vec<(NodeId, Vec<usize>)>, ValueClassId);
     let mut pre_rejects: std::collections::BTreeMap<String, u64> = Default::default();
     let mut sites: Vec<FanoutSite> = Vec::new();
-    for p_id in 0..frozen {
+    'outer: for p_id in 0..frozen {
+        if let Some(t) = ctx.deadline {
+            if std::time::Instant::now() >= t {
+                break 'outer;
+            }
+        }
         let p_node = NodeId(p_id);
-        // Producer with at least one output value.
-        let outputs = &gf.nodes[p_id].outputs;
-        if outputs.is_empty() {
-            continue;
-        }
-        // For M7 we handle single-output producers only. Multi-output
-        // producers (e.g. from a keep-variant fused kernel) are the
-        // multi-seam case, deferred.
-        if outputs.len() != 1 {
-            continue;
-        }
-        let seam = outputs[0];
-
         // Only kernels can be producers in fanout.
         if !matches!(&gf.nodes[p_id].node, GraphNode::Kernel(_)) {
             continue;
         }
 
-        // Collect eligible consumers of `seam` within the frozen prefix.
-        let mut candidates: Vec<(NodeId, Vec<usize>)> = Vec::new();
-        for cu in &gf.consumers[seam.0] {
-            if cu.node.0 >= frozen {
-                continue;
-            }
-            if cu.node == p_node {
-                continue;
-            }
-            if !matches!(&gf.nodes[cu.node.0].node, GraphNode::Kernel(_)) {
-                continue;
-            }
-            match candidates.iter_mut().find(|(id, _)| *id == cu.node) {
-                Some((_, positions)) => positions.push(cu.pos),
-                None => candidates.push((cu.node, vec![cu.pos])),
-            }
-        }
-        if candidates.len() < 2 {
-            continue;
-        }
-        // Only consider this group if at least one participant is new
-        // since the last saturation round; otherwise the same fanout
-        // was already emitted.
-        let all_old = candidates.iter().all(|(c, _)| c.0 < ctx.min_new_parent_id)
-            && p_id < ctx.min_new_parent_id;
-        if all_old {
-            continue;
-        }
-        // Origin-disjointness across the full parent set.
-        let mut origin_union: std::collections::BTreeSet<NodeId> =
-            std::collections::BTreeSet::new();
-        let mut origins_ok = true;
-        for seed in &ctx.origins[p_id] {
-            if !origin_union.insert(*seed) {
-                origins_ok = false;
-                break;
-            }
-        }
-        if origins_ok {
-            for (c, _) in &candidates {
-                for seed in &ctx.origins[c.0] {
-                    if !origin_union.insert(*seed) {
-                        origins_ok = false;
-                        break;
-                    }
+        // Consumers are grouped per `(producer, output)` pair: each
+        // output of a multi-output producer (e.g. a keep-variant fused
+        // kernel) is an independent fanout seam.
+        for &seam in &gf.nodes[p_id].outputs {
+            // Collect eligible consumers of `seam` within the frozen prefix.
+            let mut candidates: Vec<(NodeId, Vec<usize>)> = Vec::new();
+            for cu in &gf.consumers[seam.0] {
+                if cu.node.0 >= frozen {
+                    continue;
                 }
-                if !origins_ok {
+                if cu.node == p_node {
+                    continue;
+                }
+                if !matches!(&gf.nodes[cu.node.0].node, GraphNode::Kernel(_)) {
+                    continue;
+                }
+                match candidates.iter_mut().find(|(id, _)| *id == cu.node) {
+                    Some((_, positions)) => positions.push(cu.pos),
+                    None => candidates.push((cu.node, vec![cu.pos])),
+                }
+            }
+            if candidates.len() < 2 {
+                continue;
+            }
+            // Only consider this group if at least one participant is new
+            // since the last saturation round; otherwise the same fanout
+            // was already emitted.
+            let all_old = candidates.iter().all(|(c, _)| c.0 < ctx.min_new_parent_id)
+                && p_id < ctx.min_new_parent_id;
+            if all_old {
+                continue;
+            }
+            // Origin-disjointness across the full parent set.
+            let mut origin_union: std::collections::BTreeSet<NodeId> =
+                std::collections::BTreeSet::new();
+            let mut origins_ok = true;
+            for seed in &ctx.origins[p_id] {
+                if !origin_union.insert(*seed) {
+                    origins_ok = false;
                     break;
                 }
             }
-        }
-        if !origins_ok {
-            if debug >= 1 {
-                *pre_rejects.entry("OriginOverlap".into()).or_default() += 1;
-            }
-            continue;
-        }
-        // Deterministic order: consumers sorted by NodeId.
-        candidates.sort_by_key(|(c, _)| c.0);
-        sites.push((p_node, candidates, seam));
-    }
-    let (out, mut rejects) = super::par_enumerate(sites, |(p_node, candidates, seam)| {
-        let mut drafts = Vec::new();
-        let mut rejects: Vec<(String, u64)> = Vec::new();
-        match synthesize_fanout(gf, p_node, &candidates, seam, FusionVariant::Drop) {
-            Ok(draft) => drafts.push(draft),
-            Err(e) => {
-                if debug >= 1 {
-                    rejects.push((super::variant_name(&e), 1));
-                }
-            }
-        }
-        if should_emit_keep(gf, seam, &candidates, frozen) {
-            match synthesize_fanout(gf, p_node, &candidates, seam, FusionVariant::Keep) {
-                Ok(draft) => drafts.push(draft),
-                Err(e) => {
-                    if debug >= 1 {
-                        rejects.push((format!("keep:{}", super::variant_name(&e)), 1));
+            if origins_ok {
+                for (c, _) in &candidates {
+                    for seed in &ctx.origins[c.0] {
+                        if !origin_union.insert(*seed) {
+                            origins_ok = false;
+                            break;
+                        }
+                    }
+                    if !origins_ok {
+                        break;
                     }
                 }
             }
+            if !origins_ok {
+                if debug >= 1 {
+                    *pre_rejects.entry("OriginOverlap".into()).or_default() += 1;
+                }
+                continue;
+            }
+            // Deterministic order: consumers sorted by NodeId.
+            candidates.sort_by_key(|(c, _)| c.0);
+            sites.push((p_node, candidates, seam));
         }
-        (drafts, rejects)
-    });
+    }
+    let (out, mut rejects) =
+        super::par_enumerate(sites, ctx.deadline, |(p_node, candidates, seam)| {
+            let mut drafts = Vec::new();
+            let mut rejects: Vec<(String, u64)> = Vec::new();
+            match synthesize_fanout(gf, p_node, &candidates, seam, FusionVariant::Drop) {
+                Ok(draft) => drafts.push(draft),
+                Err(e) => {
+                    if debug >= 1 {
+                        rejects.push((super::variant_name(&e), 1));
+                    }
+                }
+            }
+            if should_emit_keep(gf, seam, &candidates, frozen) {
+                match synthesize_fanout(gf, p_node, &candidates, seam, FusionVariant::Keep) {
+                    Ok(draft) => drafts.push(draft),
+                    Err(e) => {
+                        if debug >= 1 {
+                            rejects.push((format!("keep:{}", super::variant_name(&e)), 1));
+                        }
+                    }
+                }
+            }
+            (drafts, rejects)
+        });
     if debug >= 1 {
         for (k, n) in pre_rejects {
             *rejects.entry(k).or_default() += n;
@@ -240,18 +240,38 @@ pub fn synthesize_fanout(
     if consumers.len() < 2 {
         return Err(FanoutFailure::NotEnoughConsumers);
     }
-    // Producer must be a single-output Kernel with recognizable shape.
+    // Producer must be a Kernel with recognizable shape.
     let p_alt = &gf.nodes[producer_node.0];
     let (p_module, p_binding) = match &p_alt.node {
         GraphNode::Kernel(k) => (k.module.clone(), k.param_bindings.clone()),
         _ => return Err(FanoutFailure::NotAKernel),
     };
-    if p_alt.outputs.len() != 1 {
-        return Err(FanoutFailure::ProducerNotSingleOutput);
-    }
+    let Some(seam_out_idx) = p_alt.outputs.iter().position(|&v| v == seam) else {
+        debug_assert!(false, "seam value is not an output of the producer node");
+        return Err(FanoutFailure::UnsupportedShape);
+    };
     let p_shape = identify_kernel_shape(&p_module)
         .filter(|s| s.is_plain())
         .ok_or(FanoutFailure::UnsupportedShape)?;
+    // Per-output tuple elements of the producer body. Multi-output
+    // producers (keep-variant fused kernels) expose one element per
+    // output; the seam element feeds the consumers and the sibling
+    // elements stay materialized in the fused tuple.
+    let p_elems: Vec<HirNodeId> = match p_module.builder.node(p_shape.body_root) {
+        Node::Tuple(es) if p_alt.outputs.len() > 1 => es.clone(),
+        _ => vec![p_shape.body_root],
+    };
+    if p_elems.len() != p_alt.outputs.len() {
+        return Err(FanoutFailure::UnsupportedShape);
+    }
+    for (i, &e) in p_elems.iter().enumerate() {
+        let materialized = variant == FusionVariant::Keep || i != seam_out_idx;
+        if materialized && matches!(p_module.builder.node(e), Node::Compute { .. }) {
+            // A bare tile-valued element cannot be re-materialized
+            // through the fused scalar tuple.
+            return Err(FanoutFailure::UnsupportedShape);
+        }
+    }
 
     // Every consumer must recognize + share bound + read seam by identity.
     struct ConsumerRec {
@@ -449,7 +469,10 @@ pub fn synthesize_fanout(
         let dst = fb.intern(Node::Var(*to));
         producer_vars.insert(*from, dst);
     }
-    let seam_body_node = clone_expr(
+    // The whole body is cloned once (not per element) so intra-producer
+    // subexpression sharing between the seam and its siblings survives
+    // into the fused HIR.
+    let cloned_p_root = clone_expr(
         &p_module,
         p_shape.body_root,
         &mut fb,
@@ -457,6 +480,19 @@ pub fn synthesize_fanout(
         &producer_vars,
     )
     .map_err(|e| FanoutFailure::CloneError(format!("{e:?}")))?;
+    let cloned_p_elems: Vec<HirNodeId> = if p_alt.outputs.len() > 1 {
+        match fb.node(cloned_p_root) {
+            Node::Tuple(es) => es.clone(),
+            _ => {
+                return Err(FanoutFailure::CloneError(
+                    "multi-output producer body did not clone to a tuple".into(),
+                ))
+            }
+        }
+    } else {
+        vec![cloned_p_root]
+    };
+    let seam_body_node = cloned_p_elems[seam_out_idx];
 
     // ---- Step B: for each consumer, clone its body with the seam-read
     // hook returning `seam_body_node` directly. Hash-consing means every
@@ -514,12 +550,17 @@ pub fn synthesize_fanout(
     // ---- Step C: assemble the fused compute body.
     //
     // Body:
-    //     Tuple([c_i(k, seam)...])                — drop
-    //     Tuple([seam, c_i(k, seam)...])          — keep
+    //     Tuple([p_elems \ seam, c_i(k, seam)...])   — drop
+    //     Tuple([p_elems, c_i(k, seam)...])          — keep
     //     compute[N] |k| { <body> }
+    //
+    // Sibling outputs of a multi-output producer stay materialized in
+    // both variants; only the seam element is dropped under Drop.
     let mut tuple_elems: Vec<HirNodeId> = Vec::new();
-    if variant == FusionVariant::Keep {
-        tuple_elems.push(seam_body_node);
+    for (i, &e) in cloned_p_elems.iter().enumerate() {
+        if variant == FusionVariant::Keep || i != seam_out_idx {
+            tuple_elems.push(e);
+        }
     }
     tuple_elems.extend(cloned_consumer_bodies.iter().copied());
     let compute_body = if tuple_elems.len() == 1 {
@@ -549,8 +590,10 @@ pub fn synthesize_fanout(
     // Boundary value bindings.
     let fused_inputs = fused_input_values.clone();
     let mut fused_outputs: Vec<ValueClassId> = Vec::new();
-    if variant == FusionVariant::Keep {
-        fused_outputs.push(seam);
+    for (i, &v) in p_alt.outputs.iter().enumerate() {
+        if variant == FusionVariant::Keep || i != seam_out_idx {
+            fused_outputs.push(v);
+        }
     }
     for rec in &consumer_recs {
         fused_outputs.extend(gf.nodes[rec.alt_idx].outputs.iter().copied());

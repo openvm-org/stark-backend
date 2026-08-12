@@ -63,19 +63,41 @@ pub(crate) type EnumerateResult = (
 /// (rayon's indexed `collect` keeps input order), and concatenated
 /// sequentially. Draft order matters downstream — the driver's
 /// insertion cap truncates in draft order.
-pub(crate) fn par_enumerate<S, F>(sites: Vec<S>, synth: F) -> EnumerateResult
+///
+/// If `deadline` is `Some(t)`, sites are processed in chunks of
+/// `CHUNK` and the loop returns early once `Instant::now() >= t`. All
+/// sites in a started chunk are completed (rayon can't cancel
+/// mid-map), so overrun is bounded by chunk wall time.
+pub(crate) fn par_enumerate<S, F>(
+    sites: Vec<S>,
+    deadline: Option<std::time::Instant>,
+    synth: F,
+) -> EnumerateResult
 where
     S: Send,
     F: Fn(S) -> SiteResult + Send + Sync,
 {
     use rayon::prelude::*;
-    let per_site: Vec<_> = sites.into_par_iter().map(synth).collect();
+    const CHUNK: usize = 512;
     let mut drafts = Vec::new();
     let mut rejects = std::collections::BTreeMap::new();
-    for (d, rs) in per_site {
-        drafts.extend(d);
-        for (k, n) in rs {
-            *rejects.entry(k).or_default() += n;
+    let mut iter = sites.into_iter();
+    loop {
+        if let Some(t) = deadline {
+            if std::time::Instant::now() >= t {
+                break;
+            }
+        }
+        let chunk: Vec<S> = iter.by_ref().take(CHUNK).collect();
+        if chunk.is_empty() {
+            break;
+        }
+        let per_site: Vec<_> = chunk.into_par_iter().map(&synth).collect();
+        for (d, rs) in per_site {
+            drafts.extend(d);
+            for (k, n) in rs {
+                *rejects.entry(k).or_default() += n;
+            }
         }
     }
     (drafts, rejects)

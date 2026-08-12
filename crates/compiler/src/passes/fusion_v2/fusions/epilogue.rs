@@ -153,7 +153,12 @@ pub fn enumerate(gf: &GraphFuser, ctx: &EnumerateContext) -> Vec<CandidateDraft>
     // parallel synthesis over the collected sites.
     let mut pre_rejects: std::collections::BTreeMap<String, u64> = Default::default();
     let mut sites: Vec<(NodeId, NodeId, ValueClassId)> = Vec::new();
-    for (v, producers) in gf.producers.iter().enumerate() {
+    'outer: for (v, producers) in gf.producers.iter().enumerate() {
+        if let Some(t) = ctx.deadline {
+            if std::time::Instant::now() >= t {
+                break 'outer;
+            }
+        }
         for pu in producers {
             let p_node = pu.node;
             if p_node.0 >= frozen {
@@ -185,7 +190,7 @@ pub fn enumerate(gf: &GraphFuser, ctx: &EnumerateContext) -> Vec<CandidateDraft>
             }
         }
     }
-    let (out, mut rejects) = super::par_enumerate(sites, |(p_node, c_node, seam)| {
+    let (out, mut rejects) = super::par_enumerate(sites, ctx.deadline, |(p_node, c_node, seam)| {
         let mut drafts = Vec::new();
         let mut rejects: Vec<(String, u64)> = Vec::new();
         match synthesize_epilogue(gf, p_node, c_node, seam, FusionVariant::Drop) {

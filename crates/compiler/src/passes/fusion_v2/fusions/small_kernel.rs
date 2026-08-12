@@ -128,7 +128,12 @@ pub fn enumerate(
     // over the unique chains.
     let mut chains: Vec<Vec<NodeId>> = Vec::new();
     let mut emitted_chains: HashSet<Vec<NodeId>> = HashSet::new();
-    for p_id in 0..frozen {
+    'outer: for p_id in 0..frozen {
+        if let Some(t) = ctx.deadline {
+            if std::time::Instant::now() >= t {
+                break 'outer;
+            }
+        }
         let start = NodeId(p_id);
         let chain = match identify_chain(gf, ctx, start, &options) {
             Some(c) => c,
@@ -148,8 +153,13 @@ pub fn enumerate(
         chains.push(chain);
     }
     let options = &options;
-    let (out, rejects) = super::par_enumerate(chains, |chain| {
-        match synthesize_small_kernel(gf, &chain, FusionVariant::Drop, options) {
+    let (out, rejects) =
+        super::par_enumerate(chains, ctx.deadline, |chain| match synthesize_small_kernel(
+            gf,
+            &chain,
+            FusionVariant::Drop,
+            options,
+        ) {
             Ok(draft) => (vec![draft], Vec::new()),
             Err(e) => {
                 let rejects = if debug >= 1 {
@@ -159,8 +169,7 @@ pub fn enumerate(
                 };
                 (Vec::new(), rejects)
             }
-        }
-    });
+        });
     if debug >= 1 {
         super::dump_rejects("small-kernel", &rejects);
     }

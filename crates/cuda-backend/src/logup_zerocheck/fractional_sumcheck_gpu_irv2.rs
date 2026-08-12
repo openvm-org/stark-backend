@@ -784,12 +784,81 @@ mod tests {
         assert_irv2_matches_eager(1024, 0x5EED_D010);
     }
 
+    /// Fusion-v2 options shared by the bench and the graph dump, read from
+    /// the `FRAC_V2_BENCH_*` environment:
+    ///
+    /// - `FRAC_V2_BENCH_SOLVER_SECS` — CP-SAT wall-time per lex stage (default 120; the option's 5s
+    ///   default returns SolverStatusUnknown on the full graph's ~7.6k-variable model and falls
+    ///   back to the original unfused extraction).
+    /// - `FRAC_V2_BENCH_MAX_ALTS` — total cap on inserted alternatives across every saturation
+    ///   round of one outer iteration (default 10_000). Enforced level-by-level after impact
+    ///   ranking.
+    /// - `FRAC_V2_BENCH_MAX_ROUNDS` — saturation round bound (default 4,
+    ///   `FusionOptionsV2::default`).
+    /// - `FRAC_V2_BENCH_MAX_ENUM_MS` — per-round enumeration wall-time budget in milliseconds
+    ///   (default 2000). Passes past the deadline are skipped for the round.
+    /// - `FRAC_V2_BENCH_OUTER_ITERS` — number of outer fusion iterations (default 1). Each outer
+    ///   iteration runs a full enumeration + saturation + extraction cycle on the graph produced by
+    ///   the previous iteration.
+    /// - `FRAC_V2_BENCH_HORIZONTAL=1` — re-enable horizontal fusion. Off by default: on this graph
+    ///   it costs ~99% of enumeration time for a handful of launch-quantum savings.
+    /// - `FRAC_V2_BENCH_SOLVER_WORKERS` — CP-SAT workers (default: all cores; neither caller needs
+    ///   the deterministic single-worker solve, and one worker is Feasible-not-Optimal even at
+    ///   120s/stage).
+    ///
+    /// Stage 2 of the lex objective (artifact count) stays off —
+    /// `optimize_artifact_count` defaults to `false`.
+    fn fusion_v2_options_from_env() -> crypto_compiler::passes::fusion_v2::FusionOptionsV2 {
+        let defaults = crypto_compiler::passes::fusion_v2::FusionOptionsV2::default();
+        let solver_secs = std::env::var("FRAC_V2_BENCH_SOLVER_SECS")
+            .ok()
+            .and_then(|s| s.parse::<f64>().ok())
+            .unwrap_or(120.0);
+        let max_alts = std::env::var("FRAC_V2_BENCH_MAX_ALTS")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(10_000);
+        let max_rounds = std::env::var("FRAC_V2_BENCH_MAX_ROUNDS")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(defaults.max_rounds);
+        let horizontal = std::env::var_os("FRAC_V2_BENCH_HORIZONTAL").is_some();
+        let solver_workers = std::env::var("FRAC_V2_BENCH_SOLVER_WORKERS")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get()));
+        let max_enum = std::env::var("FRAC_V2_BENCH_MAX_ENUM_MS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .map(std::time::Duration::from_millis)
+            .unwrap_or(defaults.max_enumeration_time_per_round);
+        let outer_iters = std::env::var("FRAC_V2_BENCH_OUTER_ITERS")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(defaults.max_outer_iterations);
+        crypto_compiler::passes::fusion_v2::FusionOptionsV2 {
+            verbose: true,
+            solver_time_limit_secs: solver_secs,
+            solver_num_workers: solver_workers,
+            max_total_alternatives: max_alts,
+            max_rounds,
+            max_enumeration_time_per_round: max_enum,
+            max_outer_iterations: outer_iters,
+            enable_horizontal: horizontal,
+            ..defaults
+        }
+    }
+
     /// Dump the v2 graph as text (both the pre-compile `GraphBuilder` and the
     /// planner-scheduled `GraphExe`), plus per-module HIR/KIR/CUDA for every
     /// unique DSL module. Ignored by default so it doesn't fire in CI.
     ///
     /// Input size via `FRAC_V2_DUMP_LOG_N` (log2 leaf count, default 6);
     /// output dir via `CRYPTO_COMPILER_DUMP_IR` (default `target/ir_dump_v2/`).
+    /// `FRAC_V2_BENCH_FUSION_V2=1` runs the fusion-v2 pipeline instead of
+    /// v1 (same `FRAC_V2_BENCH_*` knobs as the bench — see
+    /// [`fusion_v2_options_from_env`]; build with
+    /// `--features crypto-compiler/planner-ortools`).
     ///
     /// Run:
     ///
@@ -849,15 +918,18 @@ mod tests {
 
         // Run the normalize + fusion passes without compiling, and dump
         // the post-fusion graph alongside per-round stats.
-        let fuse_opts = FusionOptions {
-            verbose: true,
-            max_iterations: 50,
-            ..FusionOptions::default()
+        let compiler = GraphCompiler::new().device(device);
+        let compiler = if std::env::var_os("FRAC_V2_BENCH_FUSION_V2").is_some() {
+            compiler.fusion_v2_options(fusion_v2_options_from_env())
+        } else {
+            compiler.fusion_options(FusionOptions {
+                verbose: true,
+                max_iterations: 50,
+                ..FusionOptions::default()
+            })
         };
         let mut g_fused = g;
-        let report = GraphCompiler::new()
-            .device(device)
-            .fusion_options(fuse_opts)
+        let report = compiler
             .fuse(&mut g_fused)
             .expect("fuse pass")
             .expect("fusion enabled");
@@ -871,15 +943,39 @@ mod tests {
             g_fused.to_cytoscape_json(),
         )
         .expect("write fused cytoscape dump");
-        println!(
-            "fusion summary: nodes {} -> {} (deduped modules: {}), rounds: {}",
-            report.nodes_before, report.nodes_after, report.deduped, report.rounds,
-        );
-        for stats in &report.rounds_detail {
+        if let Some(v2) = report.v2.as_ref() {
             println!(
-                "  round {}: fused={}, dce_removed={}, nodes_after={}, est_modules={}",
-                stats.round, stats.fused, stats.dce_removed, stats.nodes_after, stats.est_modules,
+                "fusion v2 summary: nodes {} -> {}, generated={}, inserted={}, \
+                 selected={}, rounds_run={} (inserted per round: {:?}, max_rounds_hit={}), \
+                 cost cache {}h/{}m ({} sentinel failures), fallback={:?}",
+                v2.nodes_before,
+                v2.nodes_after,
+                v2.candidates_generated,
+                v2.candidates_inserted,
+                v2.selected_from_solver,
+                v2.rounds_run,
+                v2.rounds_inserted,
+                v2.max_rounds_hit,
+                v2.cost_cache_hits,
+                v2.cost_cache_misses,
+                v2.cost_failures,
+                v2.fallback_reason,
             );
+        } else {
+            println!(
+                "fusion summary: nodes {} -> {} (deduped modules: {}), rounds: {}",
+                report.nodes_before, report.nodes_after, report.deduped, report.rounds,
+            );
+            for stats in &report.rounds_detail {
+                println!(
+                    "  round {}: fused={}, dce_removed={}, nodes_after={}, est_modules={}",
+                    stats.round,
+                    stats.fused,
+                    stats.dce_removed,
+                    stats.nodes_after,
+                    stats.est_modules,
+                );
+            }
         }
 
         // At very large `n` the full compile (~hundreds of unique nvcc
@@ -1053,14 +1149,15 @@ mod tests {
                     .storage_size(200 * 1024 * 1024 * 1024),
             );
             let scheduler_mode = match std::env::var("FRAC_V2_BENCH_SCHEDULER")
-                .unwrap_or_else(|_| "heuristic".into())
+                .unwrap_or_else(|_| "list_v1".into())
                 .as_str()
             {
-                "list_v1" | "streams" => {
+                "heuristic" => SchedulerMode::Heuristic,
+                _ => {
                     let max_conc: u32 = std::env::var("FRAC_V2_BENCH_STREAMS")
                         .ok()
                         .and_then(|v| v.parse().ok())
-                        .unwrap_or(2);
+                        .unwrap_or(4);
                     SchedulerMode::ListV1 {
                         params: ListSchedulerV1 {
                             max_concurrency: max_conc,
@@ -1068,7 +1165,6 @@ mod tests {
                         },
                     }
                 }
-                _ => SchedulerMode::Heuristic,
             };
             println!("scheduler: {scheduler_mode:?}");
             let t0 = Instant::now();
@@ -1086,46 +1182,14 @@ mod tests {
                 compiler = compiler.without_fusion();
             }
             // `FRAC_V2_BENCH_FUSION_V2=1` benchmarks the fusion-v2
-            // pipeline instead. Build with
+            // pipeline instead (knobs read from the environment — see
+            // `fusion_v2_options_from_env`). Build with
             // `--features crypto-compiler/planner-ortools`; without it,
             // graphs beyond the 32-alt-node brute-force cap fall back to
             // the original (unfused) extraction and the comparison is
             // meaningless.
-            // The default 5s/stage CP-SAT limit returns
-            // SolverStatusUnknown on the full graph's ~7.6k-variable
-            // model (falls back to the original unfused extraction);
-            // tune with `FRAC_V2_BENCH_SOLVER_SECS` /
-            // `FRAC_V2_BENCH_MAX_ALTS`.
             if std::env::var_os("FRAC_V2_BENCH_FUSION_V2").is_some() {
-                let solver_secs = std::env::var("FRAC_V2_BENCH_SOLVER_SECS")
-                    .ok()
-                    .and_then(|s| s.parse::<f64>().ok())
-                    .unwrap_or(120.0);
-                let max_alts = std::env::var("FRAC_V2_BENCH_MAX_ALTS")
-                    .ok()
-                    .and_then(|s| s.parse::<usize>().ok())
-                    .unwrap_or(10_000);
-                // Horizontal is off by default: on this graph it costs
-                // ~99% of enumeration time for a handful of launch-quantum
-                // savings. `FRAC_V2_BENCH_HORIZONTAL=1` re-enables it.
-                let horizontal = std::env::var_os("FRAC_V2_BENCH_HORIZONTAL").is_some();
-                // All cores by default: the bench doesn't need the
-                // deterministic single-worker solve, and one worker is
-                // Feasible-not-Optimal even at 120s/stage.
-                let solver_workers = std::env::var("FRAC_V2_BENCH_SOLVER_WORKERS")
-                    .ok()
-                    .and_then(|s| s.parse::<usize>().ok())
-                    .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get()));
-                compiler = compiler.fusion_v2_options(
-                    crypto_compiler::passes::fusion_v2::FusionOptionsV2 {
-                        verbose: true,
-                        solver_time_limit_secs: solver_secs,
-                        solver_num_workers: solver_workers,
-                        max_total_alternatives: max_alts,
-                        enable_horizontal: horizontal,
-                        ..Default::default()
-                    },
-                );
+                compiler = compiler.fusion_v2_options(fusion_v2_options_from_env());
             }
             let exe = compiler
                 .nvcc_timeout(Some(Duration::from_secs(900)))
