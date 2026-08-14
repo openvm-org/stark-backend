@@ -240,12 +240,149 @@ Roughly matched the plan's A0-A7 ordering:
 
 ## Phase B — general linear-layout machinery
 
-Status: **not started**. Waiting on Phase A soak.
+Status: **foundations + three core algorithms landed, unwired.**
+The B.7 landing sequence (B.4-partial → B.2+B.3 → B.1 → B.4-full) still
+lies ahead; what's below is the algorithmic scaffolding those steps will
+consume.
 
-The plan sub-items (B.1 layout_infer rewrite, B.2 allocate_convert_scratch,
-B.3 insert_sync extension, B.4 codegen `best_decomposition`, B.5
-landing sequence, B.6 the three key algorithms, B.7 order) are all
-still speculative — no code exists for any of them yet.
+### B.foundations · cost model + F₂ + block decomposition
+
+- **`ConversionCostModel`** — `crates/compiler/src/passes/layout_cost.rs`
+  (new file). Wraps the constants from the Phase B cost-model decision
+  (SHUFFLE_COST=3, SHARED_COST=30·k, SYNC_COST=100, SYMBOLIC_WEIGHT=2³⁰)
+  behind `shuffle_round_cost`, `shared_round_cost(bank_conflict_factor)`,
+  `sync_cost`, and `loop_weight` (saturating multiplication so nested
+  symbolic loops don't overflow). 5 CPU tests.
+- **F₂ subspace primitives** — `kernel_ir::f2` submodule. `reduce`
+  (canonical RREF), `rank`, `contains`, `sum`, `intersection`
+  (Zassenhaus), `standard_basis`, `complement` (inside ambient),
+  `complement_within` (inside a containing subspace), `extend_with`,
+  `take_independent`. All operate on `Vec<u64>` — each `u64` a bit vector
+  over the ambient dim. Consumed by B.6.2 and B.6.3.
+- **`LinearLayout::is_distributed`** — Def 4.10 check (≤1 non-zero bit
+  per column, distinct non-zero columns). Filters candidate par-attrs in
+  B.6.1 and guards Strategy A's paper-condition-suffices claim in B.6.3.
+- **Block decomposition** — `PhysPartition { slot, lane, warp }` +
+  `LinearLayout::{phys_partition, lane_block, warp_block, slot_block,
+  is_warp_column_identity, output_bits}`. Deduplicates the ad-hoc
+  slot/lane/warp split inside `classify_convert`; used pervasively by
+  the three algorithms. 12 CPU tests across the new helpers.
+
+### B.6.1 · par-attr inference
+
+**Status:** landed as a pure function, unwired.
+`crates/compiler/src/passes/par_attr_infer.rs` (new file).
+`infer_par_attr(cost, reads, default, block, phys_bits) -> LinearLayout`
+implements the algorithm from the plan verbatim: candidate set =
+`{default} ∪ {g⁺ ∘ L_B for each read}` filtered by `is_distributed`,
+scored by `cost_tier` (0/1/2 by warp/lane block identity, weighted by
+loop iteration counts), tie-broken by Hamming distance toward `default`.
+8 CPU tests including the "hot read wins" weighting scenario.
+
+Wiring into `layout_infer.rs` is B.1; the current default-par-attr
+computation at `layout_infer.rs:66` becomes the `default` argument.
+
+### B.6.2 · shared layout selection
+
+**Status:** landed as pure functions, unwired.
+`crates/compiler/src/passes/shared_swizzle.rs` (new file). Ports
+Triton's `GenericSwizzling.cpp` two-access algorithm to our
+`LinearLayout`: maximal common vec, dangerous subspaces `U_A`/`U_B`,
+common/exclusive split, safe directions (global complement + paired
+XORs `E_A[i] ⊕ E_B[i]`), idx selection with fallback into `U_A`, bank
+as the remaining complement. `SharedLayout { vec, bank, idx,
+output_dim }` returned as F₂ subspace bases in RREF.
+
+Multi-access `choose_shared_layout(cost, accesses, output_dim,
+element_bytes, block)` enumerates C(N,2) pairs and picks the min
+loop-weighted `conflict_factor` candidate; `row_major_default` is the
+safety-net baseline. `conflict_factor` computes rank deficiency of lane
+columns' bank-projection — bank-conflict-free ⇒ 0, k-way ⇒ k−1. 6 CPU
+tests including the classic transpose case where the swizzle beats
+row-major.
+
+Wiring into `layout_infer.rs` (as `choose_target`'s
+`choose_shared_layout` call) and `codegen.rs` (as
+`best_decomposition`'s scratch swizzle picker) is B.1 / B.4.
+
+### B.6.3 · convert decomposition
+
+**Status:** landed as pure function, unwired.
+`crates/compiler/src/passes/convert_decompose.rs` (new file).
+`best_decomposition(cost, src, dst, block, logical_bits, loop_iters) ->
+DecompositionResult` scores two strategies and returns the min:
+
+- **A (pure shuffle)** — paper §5.4. Applicable iff
+  `C.is_warp_column_identity(block)` (the `(C)_Wrp = I` condition).
+  Round count = `2^|R|` where R extends `V ∪ I ∪ G` to `F₂^logical_bits`
+  per page 8 of the paper (V, I, E, F, G computed from
+  intersections/complements of `src.reg/thr` and `dst.reg/thr`).
+- **B (pure bounce)** — always applicable. Delegates to
+  `optimal_shared_swizzle` for the scratch buffer's `SharedLayout`; cost
+  = store + sync + load, each shared round scaled by `conflict_factor`.
+
+`Strategy::Copy` short-circuits when `maps_agree(src, dst)`. The hybrid
+Strategy C (per the plan's landing pragma restricted to
+`T ∈ {∅, all-lane-bits} × {Pre}`) is deferred to the full B.4 landing
+— its two extremes are exactly A and B, so nothing is missed. 6 CPU
+tests: identity ⇒ Copy, lane-only mix ⇒ Shuffle beats Bounce,
+warp-crossing ⇒ Bounce, `loop_iters` scales cost linearly, matching
+partitions give |R|=0.
+
+### B.4-partial · `gen_convert` routes through `best_decomposition`
+
+**Status:** landed. `crates/compiler/src/passes/codegen.rs`.
+
+`gen_convert`'s Register→Register arm no longer calls
+`classify_convert`; it computes `best_decomposition(cost, f,
+map∘ld, block, kb)` and dispatches on `Strategy::{Copy, Slot, Shuffle,
+Bounce}`. Emission paths are unchanged — the goal is golden parity
+against the classify_convert-driven flow. Two implementation notes:
+
+- **`Strategy::Slot`** added to the enum with detection matching
+  `classify_convert`'s `slot_only` block (thread-input columns pure
+  identity, slot-input columns don't contribute thread outputs, no
+  thread offset).
+- **`is_warp_column_identity` tightened** — now also rejects
+  non-warp inputs whose image touches warp output bits, matching
+  `classify_convert::warp_fixed`. Under Def 4.10 distributedness the
+  two directions imply each other; the tighter check is defense in
+  depth against non-distributed inputs slipping into the pure-shuffle
+  path (where `gen_shuffle`'s `expect` on the lane-block inverse
+  would panic).
+
+`Strategy::Bounce` still errors at codegen; that's B.4-full. The
+composite `C = f_inv.compose(map.compose(ld))` is recomputed inside
+gen_convert for the Slot / Shuffle emitters, keeping the current
+byte-for-byte output.
+
+### Verification
+
+- Unit tests: **409/409** pass (`cargo nextest run -p crypto-compiler
+  --lib`), up from Phase A's 365 by the 44 new tests here.
+- Integration tests: **490/490** pass (`cargo nextest run -p
+  crypto-compiler --tests`) — golden parity confirmed for the
+  Plan::View conversions today's pipeline emits.
+- Rustfmt clean on new files (`cargo +nightly fmt`).
+
+### What lands next (B.7 order)
+
+1. **B.4-partial** ✓ landed (see previous section).
+2. **B.2 + B.3**: `allocate_convert_scratch` pass sizes the shared
+   scratch `Alloc`s inserted by future B.1; `insert_sync` picks up the
+   new accesses without code changes.
+3. **B.1**: `layout_infer` becomes ConvertLayout-only; `promote_tiles`,
+   `Plan`, `pad_layout_identity`, the seven-precondition bailout, and
+   the identity-only ConvertLayout `map` all disappear together.
+4. **B.4-full**: expand `best_decomposition` to Strategy C hybrids and
+   Shared→Register / Shared→Shared arms; delete `classify_convert` and
+   the reg→reg Bounce compile-error path.
+
+B.foundations + B.6.{1,2,3} landed as above (pure functions, unwired).
+B.1 layout_infer rewrite, B.2 allocate_convert_scratch, B.3 insert_sync
+extension, B.4 codegen `best_decomposition` integration, B.5/B.7
+landing wiring are still speculative — no consumer code exists for the
+above scaffolding yet.
 
 Known Phase B enablers already in Phase A:
 - `right_inverse` (B.4's `factor_reg_to_reg` needs it; A1 provides).
@@ -281,20 +418,80 @@ Deferred from Phase A to Phase B:
   A uses row-major shared layouts throughout. B.6.2 implements the
   paper's Appendix §9.2 algorithm.
 
-## Open questions for Phase B
+## Phase B design decisions
 
-- What's the right cost-model constant for `SHUFFLE_COST` vs
-  `SHARED_COST` on the target hardware (RTX 5090 / GB202)? Phase A
-  didn't need one; Phase B's `best_decomposition` argmin depends on
-  it.
-- Does the fusion-v2 driver's cost estimator (`fusion_v2/cost/`) need
-  to be aware of `ConvertLayout` costs when scoring candidates? Right
-  now `stamp_block_hint` bakes `block_size_policy(max_bound)` into
-  the module before lowering — under B.1's ConvertLayout-first
-  design, the *number* of ConvertLayouts becomes a first-class cost
-  term, not just launch-geometry.
-- The `Promotion { kb }` field added in A5 lives on the old
-  `promote_tiles` path; B.1 dissolves that path entirely. Whatever
-  replaces it needs the same `kb`-vs-`bases.len()` distinction —
-  logical bit count is *not* the same as physical input width once
-  Gap 1's warp-alignment kicks in.
+Resolved from the "open questions" list. Marked with a date so the
+doc doubles as the rationale trail.
+
+### Cost model (2026-08-14)
+
+**Constants:**
+- `SHUFFLE_COST = 3` cycles per `__shfl_sync` round.
+- `SHARED_COST = 30` cycles per shared round without bank conflicts.
+- `k`-way bank conflict multiplies `SHARED_COST` by `k` (so 30·k
+  cycles for a k-way conflict).
+
+**Encapsulation.** These numbers are hardware-specific (chosen for
+the current RTX 5090 / GB202 target). Wrap them in a single
+`ConversionCostModel` (or `struct LayoutCostConstants`) type in
+`crates/compiler/src/passes/layout_cost.rs` (new file) with methods
+`shuffle_round_cost(&self) -> u64`, `shared_round_cost(&self,
+bank_conflict_factor: u64) -> u64`, and `sync_cost(&self) -> u64`.
+Instantiate once at pass-driver entry and thread through
+`best_decomposition`, `choose_target`, `optimal_shared_swizzle`
+scorers, and the fusion-v2 estimator. Rationale: when we retune per
+hardware (or add per-op measured overrides from a benchmark run),
+the change lives at one construction site — no scattered constants
+to hunt.
+
+**Loop weighting.** Multiplicative on the raw cycle count: per the
+plan's B.6.1/B.6.2/B.6.3 convention, each cost is multiplied by
+`loop_weight(op) = product of enclosing loop iteration counts`, with
+`SYMBOLIC_WEIGHT ≈ 2^30` per unknown-bound loop. Symbolic bounds
+compound multiplicatively — a symbolic loop nested inside another
+symbolic loop weights `2^60`, which stays well below `u64::MAX`
+even for reasonable depths.
+
+### Fusion-v2 cost estimator awareness (2026-08-14)
+
+**Ruling:** yes, the estimator must be `ConvertLayout`-aware once
+B.1 lands. Under B.1's design, the number and shape of ConvertLayout
+ops varies per candidate — a candidate that fuses a cross-warp
+consumer into a producer's tile may need a costly shared-bounce
+ConvertLayout that a keep-unfused variant avoids entirely. Scoring
+that difference is exactly the estimator's job.
+
+**How it plugs in:** the estimator already calls
+`ModuleCompiler::lower(stamped_module)` at `fusion_v2/cost/estimator.rs:171`
+and gets a `KirProgram` back. Under B.1 the KIR will contain
+ConvertLayout ops as first-class statements. Walk them at
+estimator time, run `best_decomposition` with the shared cost
+constants, sum the resulting cycle counts (loop-weighted), and add
+to the estimator's existing launch-cost term. Do NOT try to model
+this without lowering — the layout choices are lowering artifacts,
+and any pre-lowering heuristic would be less accurate than just
+lowering and inspecting. The estimator's per-run overhead
+(~0.3 ms/run per the current logs) grows a bit; the `kernel cost
+cache` at the estimator entry point already dedupes by module hash,
+so repeat costs are still O(1).
+
+### `Promotion { kb }` — derive from buffer shape (2026-08-14)
+
+**Ruling:** the `kb: usize` field added in A5 is a workaround, not a
+design constraint. Under the paper's model a `LinearLayout` maps
+`(Reg, Lane, Thr) → logical` — the *logical* space is external to
+the layout, tracked by the buffer's shape / the compute def's tensor
+type. Layout output width need not equal `bases.len()`; it's
+determined by the tensor.
+
+**Follow-up:** during B.1 (which dissolves `promote_tiles` entirely
+into the ConvertLayout-first flow), derive `kb` inline from the
+target buffer's shape (`log2(buffer.len())`) at the point of use —
+`gen_convert`, `promotion.kb` reads, ConvertLayout emission. Drop
+the cached `kb` field. This matches the physical / logical
+separation the paper makes explicit.
+
+Phase A left the field in place because it was the smallest change
+to keep the codegen path indexing correctly under warp-aligned
+input widths; the "correct" fix is a Phase B refactor along with
+the rest of the promote_tiles → ConvertLayout migration.

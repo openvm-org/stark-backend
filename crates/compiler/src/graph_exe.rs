@@ -1854,10 +1854,8 @@ impl GraphExe {
         // into a serial one, so a deadlocked kernel blocks the sync — and
         // the last printed instr *is* the stuck one, unmasking the
         // upstream culprit behind launch-queue back-pressure.
-        let sync_each: bool = std::env::var("GRAPH_EXE_SYNC_EACH_INSTR")
-            .ok()
-            .as_deref()
-            == Some("1");
+        let sync_each: bool =
+            std::env::var("GRAPH_EXE_SYNC_EACH_INSTR").ok().as_deref() == Some("1");
         // `GRAPH_EXE_DISPATCH_WATCHDOG_MS=<ms>` — run every instruction's
         // dispatch on a scoped worker thread and wait up to `<ms>` for it
         // to complete. If the worker doesn't finish in time, dump the
@@ -1891,35 +1889,33 @@ impl GraphExe {
         // hasn't advanced, it prints the stashed dump for the currently
         // running node and `std::process::exit`s — the only safe way to
         // reap a thread blocked inside a CUDA driver call.
-        let per_node_dump: std::sync::Arc<Vec<Option<String>>> =
-            if dispatch_watchdog_ms.is_some() {
-                let mut v = Vec::with_capacity(nodes.len());
-                for (node_idx, exe_node) in nodes.iter().enumerate() {
-                    v.push(match exe_node {
-                        ExeNode::Kernel(k) => Some(format!(
-                            "instr Kernel node={node_idx} name=\"{}\" \
+        let per_node_dump: std::sync::Arc<Vec<Option<String>>> = if dispatch_watchdog_ms.is_some() {
+            let mut v = Vec::with_capacity(nodes.len());
+            for (node_idx, exe_node) in nodes.iter().enumerate() {
+                v.push(match exe_node {
+                    ExeNode::Kernel(k) => Some(format!(
+                        "instr Kernel node={node_idx} name=\"{}\" \
                              kernel_idx={}\n--- HIR ---\n{}\n\
                              --- compiled CUDA source ---\n{}",
-                            k.name,
-                            k.kernel_idx,
-                            crate::dump::dump_hir(&k.debug_module),
-                            kernels[k.kernel_idx].source(),
-                        )),
-                        ExeNode::Blackbox(bb) => Some(format!(
-                            "instr Blackbox node={node_idx} name=\"{}\" \
+                        k.name,
+                        k.kernel_idx,
+                        crate::dump::dump_hir(&k.debug_module),
+                        kernels[k.kernel_idx].source(),
+                    )),
+                    ExeNode::Blackbox(bb) => Some(format!(
+                        "instr Blackbox node={node_idx} name=\"{}\" \
                              (no HIR module)",
-                            bb.kernel.name,
-                        )),
-                        _ => None,
-                    });
-                }
-                std::sync::Arc::new(v)
-            } else {
-                std::sync::Arc::new(Vec::new())
-            };
+                        bb.kernel.name,
+                    )),
+                    _ => None,
+                });
+            }
+            std::sync::Arc::new(v)
+        } else {
+            std::sync::Arc::new(Vec::new())
+        };
         let current_instr_ai = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let current_node_ai =
-            std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(usize::MAX));
+        let current_node_ai = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(usize::MAX));
         let watchdog_done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let watchdog = dispatch_watchdog_ms.map(|ms| {
             let dump = std::sync::Arc::clone(&per_node_dump);
@@ -1949,9 +1945,7 @@ impl GraphExe {
                                 eprintln!("{d}");
                             }
                         }
-                        eprintln!(
-                            "[graph_exe.run] dispatch watchdog: exit(101)"
-                        );
+                        eprintln!("[graph_exe.run] dispatch watchdog: exit(101)");
                         std::process::exit(101);
                     }
                 }
@@ -1977,11 +1971,21 @@ impl GraphExe {
                             "Const node={node_idx} stream={} buf={:?}",
                             plan.stream[*node_idx], c.buf,
                         ),
-                        ExeNode::Memcpy { src, dst, num_bytes, .. } => format!(
+                        ExeNode::Memcpy {
+                            src,
+                            dst,
+                            num_bytes,
+                            ..
+                        } => format!(
                             "Memcpy node={node_idx} stream={} {:?}->{:?} {num_bytes}B",
                             plan.stream[*node_idx], src, dst,
                         ),
-                        ExeNode::Memset { buf, num_bytes, val, .. } => format!(
+                        ExeNode::Memset {
+                            buf,
+                            num_bytes,
+                            val,
+                            ..
+                        } => format!(
                             "Memset node={node_idx} stream={} buf={:?} {num_bytes}B val={val:#x}",
                             plan.stream[*node_idx], buf,
                         ),
@@ -2024,9 +2028,7 @@ impl GraphExe {
                         );
                     }
                 }
-                eprintln!(
-                    "[graph_exe.run] returning early before dispatching instr {i_idx}"
-                );
+                eprintln!("[graph_exe.run] returning early before dispatching instr {i_idx}");
                 return Ok(());
             }
             let instr_t0 = if slow_instr_ms.is_some() {
@@ -2250,9 +2252,7 @@ impl GraphExe {
                             );
                         }
                     }
-                    eprintln!(
-                        "[graph_exe.run] returning early from run() after slow instr dump"
-                    );
+                    eprintln!("[graph_exe.run] returning early from run() after slow instr dump");
                     return Ok(());
                 }
             }

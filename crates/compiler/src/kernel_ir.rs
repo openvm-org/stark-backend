@@ -221,6 +221,372 @@ impl LinearLayout {
     }
 }
 
+/// The `(slot, lane, warp)` partition of a `k`-bit physical index under a
+/// CTA of `block` threads. `k = LinearLayout::bases.len()`, `tb = min(k,
+/// log2(block))`, `lane = min(tb, 5)`, `warp = tb - lane`, `slot = k - tb`.
+/// Bit positions are: lanes `0..lane`, warps `lane..lane+warp`, slots
+/// `lane+warp..k`.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct PhysPartition {
+    pub slot: usize,
+    pub lane: usize,
+    pub warp: usize,
+}
+
+impl PhysPartition {
+    /// Thread bits total (lane + warp).
+    pub fn thread_bits(&self) -> usize {
+        self.lane + self.warp
+    }
+
+    /// All bits (slot + thread).
+    pub fn total_bits(&self) -> usize {
+        self.slot + self.lane + self.warp
+    }
+
+    /// Bit mask covering lane positions in an output `u64`.
+    pub fn lane_mask(&self) -> u64 {
+        if self.lane == 0 {
+            0
+        } else {
+            (1u64 << self.lane) - 1
+        }
+    }
+
+    /// Bit mask covering warp positions in an output `u64`.
+    pub fn warp_mask(&self) -> u64 {
+        if self.warp == 0 {
+            0
+        } else {
+            ((1u64 << self.warp) - 1) << self.lane
+        }
+    }
+
+    /// Bit mask covering slot positions in an output `u64`.
+    pub fn slot_mask(&self) -> u64 {
+        if self.slot == 0 {
+            0
+        } else {
+            let tb = self.thread_bits();
+            ((1u64 << self.slot) - 1) << tb
+        }
+    }
+}
+
+impl LinearLayout {
+    /// The `(slot, lane, warp)` partition for a `block`-thread CTA.
+    /// `block` must be a power of two.
+    pub fn phys_partition(&self, block: usize) -> PhysPartition {
+        debug_assert!(block.is_power_of_two(), "block must be pow2");
+        let k = self.bases.len();
+        let tb = k.min(block.trailing_zeros() as usize);
+        let lane = tb.min(5);
+        let warp = tb - lane;
+        let slot = k - tb;
+        PhysPartition { slot, lane, warp }
+    }
+
+    /// The diagonal lane sub-block `C_ll`: lane inputs projected onto
+    /// lane outputs, as a `lane × lane` `LinearLayout` with offset 0.
+    /// Used by `cost_tier` (B.6.1) — tier 0 requires `is_identity()`.
+    pub fn lane_block(&self, block: usize) -> LinearLayout {
+        let p = self.phys_partition(block);
+        let mask = p.lane_mask();
+        LinearLayout {
+            bases: (0..p.lane).map(|i| self.bases[i] & mask).collect(),
+            offset: 0,
+        }
+    }
+
+    /// The diagonal warp sub-block `C_ww`: warp inputs projected onto
+    /// warp outputs, shifted down so bit 0 is the first warp position.
+    /// `is_identity()` on this equals the paper's `(C)_Wrp = I` **only
+    /// when** the layout is distributed (Def 4.10) so cross-terms are
+    /// forced to zero; use [`Self::is_warp_column_identity`] for the
+    /// unconditional paper condition.
+    pub fn warp_block(&self, block: usize) -> LinearLayout {
+        let p = self.phys_partition(block);
+        let mask = p.warp_mask();
+        LinearLayout {
+            bases: (0..p.warp)
+                .map(|i| (self.bases[p.lane + i] & mask) >> p.lane)
+                .collect(),
+            offset: 0,
+        }
+    }
+
+    /// The diagonal slot sub-block `C_ss`: slot inputs projected onto
+    /// slot outputs, shifted down so bit 0 is the first slot position.
+    pub fn slot_block(&self, block: usize) -> LinearLayout {
+        let p = self.phys_partition(block);
+        let mask = p.slot_mask();
+        let tb = p.thread_bits();
+        LinearLayout {
+            bases: (0..p.slot)
+                .map(|i| (self.bases[tb + i] & mask) >> tb)
+                .collect(),
+            offset: 0,
+        }
+    }
+
+    /// Paper §5.4 condition `(C)_Wrp = I`: the warp-input column block
+    /// of this layout is the identity embedding (`bases[lane + i] ==
+    /// 1 << (lane + i)` for `i in 0..warp`), and the offset has no warp
+    /// bits. Equivalent to `C_ww = I ∧ C_sw = 0 ∧ C_lw = 0`. Also checks
+    /// that non-warp inputs contribute no warp output (`C_ws = 0 ∧
+    /// C_wl = 0`) — under Def 4.10 distributedness the two follow from
+    /// each other, but this defensive check keeps a non-distributed
+    /// layout from silently routing through the pure-shuffle path.
+    /// This is the pure-shuffle applicability condition in Strategy A of
+    /// `best_decomposition` (B.6.3).
+    pub fn is_warp_column_identity(&self, block: usize) -> bool {
+        let p = self.phys_partition(block);
+        let warp_mask = p.warp_mask();
+        if self.offset & warp_mask != 0 {
+            return false;
+        }
+        for (i, &b) in self.bases.iter().enumerate() {
+            let want = if (p.lane..p.lane + p.warp).contains(&i) {
+                1u64 << i
+            } else {
+                0
+            };
+            // For warp-input columns: full column must be identity
+            // (`b == want`, i.e. no slot/lane output either — matches
+            // classify_convert's slot_only / warp_fixed pair). For
+            // non-warp inputs: no warp-output bits.
+            if (p.lane..p.lane + p.warp).contains(&i) {
+                if b != want {
+                    return false;
+                }
+            } else if b & warp_mask != 0 {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Effective output width: `1 + msb(offset | max(bases))`. Zero if
+    /// the layout is the zero map.
+    pub fn output_bits(&self) -> usize {
+        let m = self
+            .bases
+            .iter()
+            .copied()
+            .fold(self.offset, |acc, b| acc | b);
+        if m == 0 {
+            0
+        } else {
+            64 - m.leading_zeros() as usize
+        }
+    }
+
+    /// Def 4.10 (distributed layout): every column has at most one
+    /// non-zero bit, and all non-zero columns are distinct. Under this
+    /// invariant `apply` is a permutation of `2^k` values onto its image,
+    /// with the zero columns marking replicated (broadcast) input bits.
+    /// The paper's shuffle construction and Strategy A of
+    /// `best_decomposition` rely on this shape.
+    pub fn is_distributed(&self) -> bool {
+        let mut seen: u64 = 0;
+        for &b in &self.bases {
+            if b == 0 {
+                continue;
+            }
+            // Exactly one bit set.
+            if b & (b - 1) != 0 {
+                return false;
+            }
+            // Distinct from every prior non-zero column.
+            if seen & b != 0 {
+                return false;
+            }
+            seen |= b;
+        }
+        true
+    }
+}
+
+/// F₂ subspace primitives. Subspaces are represented as `Vec<u64>` where
+/// each `u64` is a bit-vector in `F₂^d` (LSB = coordinate 0). The ambient
+/// dim `d` is implicit — callers pass it when constructing standard-basis
+/// sets or complements. Bases returned by these helpers are in **reduced
+/// row echelon form**: pivots at strictly increasing bit positions, each
+/// pivot bit present in exactly one basis vector.
+pub mod f2 {
+    /// Reduce a set of vectors to a canonical RREF basis. Drops zero
+    /// vectors; the returned list is sorted by ascending pivot bit.
+    pub fn reduce(mut vecs: Vec<u64>) -> Vec<u64> {
+        let mut basis: Vec<u64> = Vec::new();
+        for mut v in vecs.drain(..) {
+            for &p in basis.iter() {
+                let pb = p.trailing_zeros();
+                if (v >> pb) & 1 == 1 {
+                    v ^= p;
+                }
+            }
+            if v == 0 {
+                continue;
+            }
+            let vb = v.trailing_zeros();
+            for p in basis.iter_mut() {
+                if (*p >> vb) & 1 == 1 {
+                    *p ^= v;
+                }
+            }
+            let pos = basis
+                .iter()
+                .position(|&p| p.trailing_zeros() > vb)
+                .unwrap_or(basis.len());
+            basis.insert(pos, v);
+        }
+        basis
+    }
+
+    /// Dimension (rank) of the subspace spanned by `vecs`.
+    pub fn rank(vecs: &[u64]) -> usize {
+        reduce(vecs.to_vec()).len()
+    }
+
+    /// Whether `v` lies in the span of `basis`. `basis` need not be
+    /// reduced.
+    pub fn contains(basis: &[u64], v: u64) -> bool {
+        let reduced = reduce(basis.to_vec());
+        let mut cur = v;
+        for &p in reduced.iter() {
+            let pb = p.trailing_zeros();
+            if (cur >> pb) & 1 == 1 {
+                cur ^= p;
+            }
+        }
+        cur == 0
+    }
+
+    /// Sum of two subspaces (union of bases, then reduce).
+    pub fn sum(a: &[u64], b: &[u64]) -> Vec<u64> {
+        let mut all = Vec::with_capacity(a.len() + b.len());
+        all.extend_from_slice(a);
+        all.extend_from_slice(b);
+        reduce(all)
+    }
+
+    /// Intersection of two subspaces via Zassenhaus. Represents each
+    /// pair `(left, right)` as a single `u128` and column-reduces on the
+    /// left; rows whose left is zero after reduction give the
+    /// intersection through their right component.
+    pub fn intersection(a: &[u64], b: &[u64]) -> Vec<u64> {
+        let mut rows: Vec<(u64, u64)> = a
+            .iter()
+            .map(|&x| (x, x))
+            .chain(b.iter().map(|&y| (y, 0)))
+            .collect();
+        let mut r = 0;
+        loop {
+            // Find the row in `rows[r..]` with the smallest non-zero
+            // trailing_zeros on its left component.
+            let mut pivot: Option<usize> = None;
+            let mut min_bit = u32::MAX;
+            for (i, row) in rows.iter().enumerate().skip(r) {
+                if row.0 != 0 {
+                    let bit = row.0.trailing_zeros();
+                    if bit < min_bit {
+                        min_bit = bit;
+                        pivot = Some(i);
+                    }
+                }
+            }
+            let Some(p) = pivot else {
+                break;
+            };
+            rows.swap(r, p);
+            let (lp, rp) = rows[r];
+            for (i, row) in rows.iter_mut().enumerate() {
+                if i != r && (row.0 >> min_bit) & 1 == 1 {
+                    row.0 ^= lp;
+                    row.1 ^= rp;
+                }
+            }
+            r += 1;
+        }
+        // Rows with zero left give the intersection through their right.
+        let inter: Vec<u64> = rows[r..]
+            .iter()
+            .map(|&(_, r_)| r_)
+            .filter(|&x| x != 0)
+            .collect();
+        reduce(inter)
+    }
+
+    /// Standard basis of `F₂^dim`: `[1, 2, 4, …, 2^(dim-1)]`.
+    pub fn standard_basis(dim: usize) -> Vec<u64> {
+        (0..dim).map(|i| 1u64 << i).collect()
+    }
+
+    /// A basis for a complement of `sub` inside `F₂^ambient_dim`. Greedy:
+    /// start from an empty basis, walk the standard basis of the ambient
+    /// space, and keep each `e_i` that raises the current rank. The union
+    /// with `sub` spans the whole ambient space; the returned basis has
+    /// `ambient_dim - rank(sub)` vectors.
+    pub fn complement(sub: &[u64], ambient_dim: usize) -> Vec<u64> {
+        let mut current = reduce(sub.to_vec());
+        let base_rank = current.len();
+        let mut extra: Vec<u64> = Vec::new();
+        for i in 0..ambient_dim {
+            let e = 1u64 << i;
+            if !contains(&current, e) {
+                current.push(e);
+                current = reduce(current);
+                extra.push(e);
+            }
+        }
+        debug_assert_eq!(current.len(), base_rank + extra.len());
+        extra
+    }
+
+    /// A basis for a complement of `sub` **inside `containing`**. `sub`
+    /// should be a subspace of `containing`; the returned basis together
+    /// with `sub` spans `containing`, and its size is `rank(containing) -
+    /// rank(sub)`. Vectors are drawn greedily from `containing`'s basis
+    /// in the given order.
+    pub fn complement_within(sub: &[u64], containing: &[u64]) -> Vec<u64> {
+        let mut current = reduce(sub.to_vec());
+        let mut extra: Vec<u64> = Vec::new();
+        for &v in containing.iter() {
+            if !contains(&current, v) {
+                current.push(v);
+                current = reduce(current);
+                extra.push(v);
+            }
+        }
+        extra
+    }
+
+    /// Extend `current` toward `ambient_dim` dimensions by greedily adding
+    /// vectors from `candidates` (in order) that raise the rank, up to
+    /// `max_extra`. Returns the added vectors (not the union).
+    pub fn extend_with(current: &[u64], candidates: &[u64], max_extra: usize) -> Vec<u64> {
+        let mut cur = reduce(current.to_vec());
+        let mut added: Vec<u64> = Vec::new();
+        for &c in candidates.iter() {
+            if added.len() >= max_extra {
+                break;
+            }
+            if !contains(&cur, c) {
+                cur.push(c);
+                cur = reduce(cur);
+                added.push(c);
+            }
+        }
+        added
+    }
+
+    /// The first `count` vectors of `basis` (already reduced), or all of
+    /// them if there are fewer.
+    pub fn take_independent(basis: &[u64], count: usize) -> Vec<u64> {
+        basis.iter().take(count).copied().collect()
+    }
+}
+
 /// Whether two XOR-affine maps agree as functions over the union of
 /// their input widths. Missing high bases are treated as zero — inputs
 /// past either domain are masked out by upstream bounds guards, so a
@@ -320,7 +686,11 @@ pub fn classify_convert(c: &LinearLayout, block: usize) -> ConvertKind {
         return ConvertKind::Bounce;
     }
     let warp_fixed = c.bases.iter().enumerate().all(|(i, &b)| {
-        let want = if (lane_bits..tb).contains(&i) { 1 << i } else { 0 };
+        let want = if (lane_bits..tb).contains(&i) {
+            1 << i
+        } else {
+            0
+        };
         b & warp_mask == want
     });
     if !warp_fixed {
@@ -896,6 +1266,248 @@ mod tests {
             offset: 5,
         };
         assert!(!maps_agree(&a, &d));
+    }
+
+    #[test]
+    fn phys_partition_splits_k_into_slot_lane_warp() {
+        // k=9, block=256 → tb=8, lane=5, warp=3, slot=1.
+        let l = LinearLayout::identity(9);
+        let p = l.phys_partition(256);
+        assert_eq!(
+            p,
+            PhysPartition {
+                slot: 1,
+                lane: 5,
+                warp: 3
+            }
+        );
+        assert_eq!(p.thread_bits(), 8);
+        assert_eq!(p.lane_mask(), 0b11111);
+        assert_eq!(p.warp_mask(), 0b111 << 5);
+        assert_eq!(p.slot_mask(), 1 << 8);
+    }
+
+    #[test]
+    fn phys_partition_sub_warp_block() {
+        // k=4, block=16 → tb=4, lane=4, warp=0, slot=0.
+        let l = LinearLayout::identity(4);
+        let p = l.phys_partition(16);
+        assert_eq!(
+            p,
+            PhysPartition {
+                slot: 0,
+                lane: 4,
+                warp: 0
+            }
+        );
+        assert_eq!(p.warp_mask(), 0);
+        assert_eq!(p.slot_mask(), 0);
+    }
+
+    #[test]
+    fn diagonal_blocks_of_identity_are_identities() {
+        let l = LinearLayout::identity(9);
+        let b = 256usize;
+        assert!(l.lane_block(b).is_identity());
+        assert!(l.warp_block(b).is_identity());
+        assert!(l.slot_block(b).is_identity());
+        assert!(l.is_warp_column_identity(b));
+    }
+
+    #[test]
+    fn warp_block_isolates_warp_diagonal() {
+        // k=9, block=256, so warp inputs are bits 5..8 → three columns
+        // bases[5], bases[6], bases[7]. Set bases[5] to touch bit 5 (warp)
+        // AND bit 0 (lane): warp_block projects out the lane part.
+        let mut l = LinearLayout::identity(9);
+        l.bases[5] = (1 << 5) | 1; // warp bit 5 + lane bit 0
+        let wb = l.warp_block(256);
+        // First warp column shifted down: bit 5 → bit 0 (identity in warp
+        // bit 0); lane bit 0 is masked out.
+        assert_eq!(wb.bases, vec![1, 2, 4]);
+        assert!(wb.is_identity());
+        // The paper condition, however, is violated (lane part is non-zero).
+        assert!(!l.is_warp_column_identity(256));
+    }
+
+    #[test]
+    fn is_warp_column_identity_rejects_offset_in_warp_bits() {
+        let mut l = LinearLayout::identity(9);
+        l.offset = 1 << 6; // a warp-bit offset
+        assert!(!l.is_warp_column_identity(256));
+    }
+
+    #[test]
+    fn output_bits_is_top_bit_position_plus_one() {
+        let l = LinearLayout::identity(5);
+        assert_eq!(l.output_bits(), 5);
+        let z = LinearLayout {
+            bases: vec![0, 0, 0],
+            offset: 0,
+        };
+        assert_eq!(z.output_bits(), 0);
+        let off = LinearLayout {
+            bases: vec![1, 2],
+            offset: 1 << 7,
+        };
+        assert_eq!(off.output_bits(), 8);
+    }
+
+    #[test]
+    fn is_distributed_flags_replicated_layouts() {
+        // Identity is distributed.
+        assert!(LinearLayout::identity(5).is_distributed());
+        // Replicated (zero columns) is distributed.
+        let repl = LinearLayout {
+            bases: vec![1, 2, 0, 0, 0],
+            offset: 0,
+        };
+        assert!(repl.is_distributed());
+        // Two columns share bit 0 → not distributed.
+        let dup = LinearLayout {
+            bases: vec![1, 1],
+            offset: 0,
+        };
+        assert!(!dup.is_distributed());
+        // A column has two bits set → not distributed.
+        let two_bits = LinearLayout {
+            bases: vec![1, 3],
+            offset: 0,
+        };
+        assert!(!two_bits.is_distributed());
+        // Offset does not affect distributedness (Def 4.10 is on columns).
+        let off = LinearLayout {
+            bases: vec![1, 2, 4],
+            offset: 7,
+        };
+        assert!(off.is_distributed());
+    }
+
+    #[test]
+    fn f2_reduce_produces_canonical_rref() {
+        // {3, 5, 6} — bits {01, 10, 11} in the low 3 positions is trivial;
+        // reduce should give the standard basis of the span.
+        let r = f2::reduce(vec![3, 5, 6]);
+        // Rank is 2 (three vectors sum to 0 in F_2).
+        assert_eq!(r.len(), 2);
+        // Pivots strictly increasing.
+        for w in r.windows(2) {
+            assert!(w[0].trailing_zeros() < w[1].trailing_zeros());
+        }
+        // Each pivot bit is present in exactly one basis vector (RREF).
+        for i in 0..r.len() {
+            let pb = r[i].trailing_zeros();
+            for j in 0..r.len() {
+                if i != j {
+                    assert_eq!((r[j] >> pb) & 1, 0);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn f2_reduce_drops_zero_and_dependent_vectors() {
+        let r = f2::reduce(vec![0, 1, 0, 2, 3, 0]);
+        assert_eq!(r, vec![1, 2]);
+        assert_eq!(f2::rank(&[0, 0, 0]), 0);
+    }
+
+    #[test]
+    fn f2_contains_recognizes_span_membership() {
+        let basis = vec![1, 2];
+        assert!(f2::contains(&basis, 0));
+        assert!(f2::contains(&basis, 1));
+        assert!(f2::contains(&basis, 2));
+        assert!(f2::contains(&basis, 3));
+        assert!(!f2::contains(&basis, 4));
+        assert!(!f2::contains(&basis, 7));
+    }
+
+    #[test]
+    fn f2_sum_and_intersection_agree_with_dimension_formula() {
+        // A = span{1, 2, 4}, B = span{2, 4, 8}. A ∩ B = span{2, 4},
+        // A + B = span{1, 2, 4, 8}.
+        let a = vec![1, 2, 4];
+        let b = vec![2, 4, 8];
+        let inter = f2::intersection(&a, &b);
+        let sum = f2::sum(&a, &b);
+        assert_eq!(f2::rank(&inter), 2);
+        assert_eq!(f2::rank(&sum), 4);
+        assert_eq!(
+            f2::rank(&a) + f2::rank(&b),
+            f2::rank(&inter) + f2::rank(&sum),
+        );
+        // Every vector in the intersection is in both A and B.
+        for &v in inter.iter() {
+            assert!(f2::contains(&a, v));
+            assert!(f2::contains(&b, v));
+        }
+    }
+
+    #[test]
+    fn f2_intersection_of_disjoint_subspaces_is_empty() {
+        let a = vec![1, 2];
+        let b = vec![4, 8];
+        let inter = f2::intersection(&a, &b);
+        assert_eq!(inter.len(), 0);
+    }
+
+    #[test]
+    fn f2_intersection_of_overlapping_non_axis_vectors() {
+        // A = span{1 ⊕ 2, 4} = {0, 3, 4, 7}. B = span{3, 8} = {0, 3, 8, 11}.
+        // A ∩ B = {0, 3}.
+        let a = vec![3, 4];
+        let b = vec![3, 8];
+        let inter = f2::intersection(&a, &b);
+        assert_eq!(inter, vec![3]);
+    }
+
+    #[test]
+    fn f2_complement_spans_ambient_when_unioned() {
+        // sub = {1, 4} in F_2^4. Complement should give {2, 8}.
+        let sub = vec![1, 4];
+        let comp = f2::complement(&sub, 4);
+        assert_eq!(comp.len(), 2);
+        let mut combined = sub.clone();
+        combined.extend(comp.iter().copied());
+        assert_eq!(f2::rank(&combined), 4);
+    }
+
+    #[test]
+    fn f2_complement_of_full_space_is_empty() {
+        let sub = vec![1, 2, 4];
+        let comp = f2::complement(&sub, 3);
+        assert!(comp.is_empty());
+    }
+
+    #[test]
+    fn f2_extend_with_greedy_picks_first_rank_increasing() {
+        let current = vec![1];
+        let candidates = vec![1, 3, 2, 4]; // 1 dup, 3 = 1 ^ 2 (new), 2 (redundant now), 4 (new)
+        let added = f2::extend_with(&current, &candidates, 3);
+        assert_eq!(added, vec![3, 4]);
+    }
+
+    #[test]
+    fn f2_complement_within_extracts_quotient_basis() {
+        // containing = span{1, 2, 4}, sub = span{3} (= span{1 ⊕ 2}).
+        // A complement of sub inside containing has dim 2.
+        let sub = vec![3];
+        let containing = vec![1, 2, 4];
+        let comp = f2::complement_within(&sub, &containing);
+        assert_eq!(comp.len(), 2);
+        // union must span containing.
+        let mut union = sub.clone();
+        union.extend(comp.iter().copied());
+        assert_eq!(f2::rank(&union), 3);
+    }
+
+    #[test]
+    fn f2_extend_with_respects_max_extra() {
+        let current: Vec<u64> = vec![];
+        let cands = f2::standard_basis(5);
+        let added = f2::extend_with(&current, &cands, 2);
+        assert_eq!(added, vec![1, 2]);
     }
 
     #[test]

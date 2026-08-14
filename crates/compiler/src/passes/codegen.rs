@@ -36,10 +36,11 @@ use std::{
 use crate::{
     ir::{BinOp, ScalarType, SizeExpr, VarId},
     kernel_ir::{
-        classify_convert, const_src_slot, maps_agree, Access, BufId, BufferKind, ConvertKind,
-        IndexMap, KBound, Kernel, KirProgram, LinearLayout, ParAttr, SSABlock, SSANode, SSAOpCode,
-        SSARes,
+        const_src_slot, maps_agree, Access, BufId, BufferKind, IndexMap, KBound, Kernel,
+        KirProgram, LinearLayout, ParAttr, SSABlock, SSANode, SSAOpCode, SSARes,
     },
+    passes::convert_decompose::{best_decomposition, Strategy},
+    passes::layout_cost::ConversionCostModel,
     passes::plan_shared_mem::{plan_shared_mem, SharedMemPlan},
     quast::{CStrEmitter, Expr, Quast, SymConst},
     CompileError,
@@ -1029,24 +1030,27 @@ fn gen_convert(
                     sd.name
                 ))
             })?;
-            let c = f_inv.compose(&map.compose(&ld));
-            match classify_convert(&c, k.block) {
-                ConvertKind::Copy => {
+            let dst_effective = map.compose(&ld);
+            let c = f_inv.compose(&dst_effective);
+            let cost_model = ConversionCostModel::default();
+            let dec = best_decomposition(&cost_model, &f, &dst_effective, k.block, kb, &[]);
+            match dec.strategy {
+                Strategy::Copy => {
                     for i in 0..n.div_ceil(k.block) {
                         writeln!(s, "{pad}{dst_reg}[{i}] = {src_reg}[{i}];").unwrap();
                     }
                 }
-                ConvertKind::Slot => {
+                Strategy::Slot => {
                     let tb = kb.min(k.block.trailing_zeros() as usize);
                     for i in 0..(1usize << (kb - tb)) {
                         let from = c.apply((i as u64) << tb) >> tb;
                         writeln!(s, "{pad}{dst_reg}[{i}] = {src_reg}[{from}];").unwrap();
                     }
                 }
-                ConvertKind::Shuffle => {
+                Strategy::Shuffle { .. } => {
                     gen_shuffle(s, &c, &dst_reg, &src_reg, dst.0, kb, k.block, depth)
                 }
-                ConvertKind::Bounce => {
+                Strategy::Bounce { .. } => {
                     return Err(CompileError::Codegen(format!(
                         "register conversion {} <- {} needs a shared-memory bounce",
                         dd.name, sd.name

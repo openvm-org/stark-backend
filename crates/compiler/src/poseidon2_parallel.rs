@@ -95,10 +95,9 @@ fn select_by_index(b: &mut IRBuilder, i: NodeId, values: &[NodeId]) -> NodeId {
 /// `__syncthreads`:
 ///
 /// - `prev[j]` — the lane's own slot, a register copy.
-/// - `prev[j XOR s]` for `s ∈ {1, 2, 3}` — an XOR-stride permutation of
-///   the lane bits (integer form `j + s - 2·(j % (2s)) / s * (2s)` for
-///   powers of two; the `s = 3` case is spelled `chunk_base + (3 - r)`
-///   so the whole map stays XOR-linear).
+/// - `prev[j XOR s]` for `s ∈ {1, 2, 3}` — an XOR-stride permutation of the lane bits (integer form
+///   `j + s - 2·(j % (2s)) / s * (2s)` for powers of two; the `s = 3` case is spelled `chunk_base +
+///   (3 - r)` so the whole map stays XOR-linear).
 ///
 /// `x_{(r+1) mod 4}` equals `p1` for even `r` and `p3` for odd `r`, so
 /// it drops out of the already-fetched partners with one two-way select

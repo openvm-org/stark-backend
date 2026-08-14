@@ -3538,23 +3538,19 @@ mod tests {
     /// both benches). Consumed by [`compiler_from_env`] when
     /// `FRAC_IR_FUSION=v2` is set.
     ///
-    /// - `FRAC_V2_BENCH_SOLVER_SECS` — CP-SAT wall-time per lex stage
-    ///   (default 120; the crate default of 5s returns
-    ///   `SolverStatusUnknown` on large graphs and falls back to the
-    ///   original unfused extraction).
-    /// - `FRAC_V2_BENCH_MAX_ALTS` — total cap on inserted alternatives
-    ///   across every saturation round of one outer iteration
-    ///   (default 10_000).
-    /// - `FRAC_V2_BENCH_MAX_ROUNDS` — saturation round bound
+    /// - `FRAC_V2_BENCH_SOLVER_SECS` — CP-SAT wall-time per lex stage (default 120; the crate
+    ///   default of 5s returns `SolverStatusUnknown` on large graphs and falls back to the original
+    ///   unfused extraction).
+    /// - `FRAC_V2_BENCH_MAX_ALTS` — total cap on inserted alternatives across every saturation
+    ///   round of one outer iteration (default 10_000).
+    /// - `FRAC_V2_BENCH_MAX_ROUNDS` — saturation round bound (default from
+    ///   `FusionOptionsV2::default`).
+    /// - `FRAC_V2_BENCH_MAX_ENUM_MS` — per-round enumeration wall-time budget in milliseconds
     ///   (default from `FusionOptionsV2::default`).
-    /// - `FRAC_V2_BENCH_MAX_ENUM_MS` — per-round enumeration wall-time
-    ///   budget in milliseconds (default from `FusionOptionsV2::default`).
-    /// - `FRAC_V2_BENCH_OUTER_ITERS` — number of outer fusion iterations
-    ///   (default from `FusionOptionsV2::default`).
-    /// - `FRAC_V2_BENCH_HORIZONTAL=1` — re-enable horizontal fusion
-    ///   (off by default).
-    /// - `FRAC_V2_BENCH_SOLVER_WORKERS` — CP-SAT workers
-    ///   (default: all cores).
+    /// - `FRAC_V2_BENCH_OUTER_ITERS` — number of outer fusion iterations (default from
+    ///   `FusionOptionsV2::default`).
+    /// - `FRAC_V2_BENCH_HORIZONTAL=1` — re-enable horizontal fusion (off by default).
+    /// - `FRAC_V2_BENCH_SOLVER_WORKERS` — CP-SAT workers (default: all cores).
     ///
     /// Individual synthesis passes can additionally be turned off via
     /// `FRAC_IR_FUSION_DISABLE=<pass,...>` (handled by
@@ -5018,13 +5014,18 @@ mod tests {
             // Eager warmup — records the full proof for the e2e check below.
             let (eager_proof, eager_xi) = {
                 let t_eager = Instant::now();
-                println!("[bench] eager warmup: H2D {} MiB…", (n * FRAC_EF_BYTES) >> 20);
+                println!(
+                    "[bench] eager warmup: H2D {} MiB…",
+                    (n * FRAC_EF_BYTES) >> 20
+                );
                 let d_leaves = leaves_to_device(&leaves, &ctx);
                 let mut sponge = DuplexSpongeGpu::default();
                 let mut mem = MemTracker::start("bench.fractional_eager");
                 ctx.stream.synchronize().expect("sync");
                 let h2d_ms = t_eager.elapsed().as_secs_f64() * 1e3;
-                println!("[bench] eager warmup: H2D done in {h2d_ms:>8.2} ms; running eager sumcheck…");
+                println!(
+                    "[bench] eager warmup: H2D done in {h2d_ms:>8.2} ms; running eager sumcheck…"
+                );
                 let t_run = Instant::now();
                 let (proof, xi) = fractional_sumcheck_gpu::<SC, _>(
                     &mut sponge,
@@ -5151,7 +5152,11 @@ mod tests {
                 "e2e check: full proof matches eager ({} claim layers, {} sumcheck rounds, {} \
                  exported artifacts)",
                 eager_proof.claims_per_layer.len(),
-                eager_proof.sumcheck_polys.iter().map(|l| l.len()).sum::<usize>(),
+                eager_proof
+                    .sumcheck_polys
+                    .iter()
+                    .map(|l| l.len())
+                    .sum::<usize>(),
                 exports.len(),
             );
 

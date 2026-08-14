@@ -699,9 +699,7 @@ fn offline_repack(state: &mut SchedState, ctx: &PlanCtx) {
     //       lifetime intervals overlap.
     let overlaps = |b1: usize, b2: usize| -> bool {
         match (buf_stream[b1], buf_stream[b2]) {
-            (Some(s1), Some(s2)) if s1 == s2 => {
-                !(death[b1] < birth[b2] || death[b2] < birth[b1])
-            }
+            (Some(s1), Some(s2)) if s1 == s2 => !(death[b1] < birth[b2] || death[b2] < birth[b1]),
             _ => true,
         }
     };
@@ -759,7 +757,6 @@ fn offline_repack(state: &mut SchedState, ctx: &PlanCtx) {
     state.offsets = offsets;
     state.peak_bytes = peak;
 }
-
 
 fn leaf_score(state: &SchedState) -> f64 {
     let makespan = state.stream_free.iter().copied().fold(0.0f64, f64::max);

@@ -1041,7 +1041,10 @@ mod tests {
         let cwd = std::env::current_dir().expect("cwd");
         let report_stem = cwd.join(REPORT_STEM);
         std::fs::create_dir_all(report_stem.parent().unwrap()).expect("create ncu_reports dir");
-        eprintln!("[ncu] profiling all sponge transcript ops -> {}.ncu-rep", report_stem.display());
+        eprintln!(
+            "[ncu] profiling all sponge transcript ops -> {}.ncu-rep",
+            report_stem.display()
+        );
         let status = std::process::Command::new("ncu")
             .arg("--set")
             .arg("full")
@@ -1174,7 +1177,11 @@ mod tests {
             .without_kernel_cache()
             .compile(g)
             .expect("graph compile");
-        assert_eq!(exe.num_inputs(), inputs.len(), "input count mismatch for op {op}");
+        assert_eq!(
+            exe.num_inputs(),
+            inputs.len(),
+            "input count mismatch for op {op}"
+        );
         for (i, bytes) in inputs.iter().enumerate() {
             let dbuf = bytes.as_slice().to_device_on(ctx).expect("H2D");
             exe.set_input(ctx, i, &dbuf).expect("set_input");
