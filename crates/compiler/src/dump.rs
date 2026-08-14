@@ -1046,7 +1046,10 @@ mod tests {
     };
 
     /// Shared-memory tile: outer compute of a let-bound inner tile plus a
-    /// reversed reader (same module as passes.rs's shared-tile test).
+    /// reader whose access map (`tile[j % (t/2)]`) is non-invertible, so
+    /// [`classify_convert`](crate::kernel_ir::classify_convert) can't serve
+    /// it via a register-only shuffle and the tile falls back to a
+    /// shared-memory mirror (same module as passes.rs's shared-tile test).
     fn tile_module() -> Module {
         let (blocks, t) = (4usize, 8usize);
         let mut b = IRBuilder::new();
@@ -1060,9 +1063,9 @@ mod tests {
             });
             b.bind(tile, |b, tile| {
                 b.compute(t, |b, j| {
-                    let last = b.const_u32(t as u32 - 1);
-                    let rev = b.sub(last, j);
-                    b.index(tile, &[rev])
+                    let half = b.const_u32((t / 2) as u32);
+                    let fold = b.rem(j, half);
+                    b.index(tile, &[fold])
                 })
             })
         });
@@ -1094,7 +1097,7 @@ mod tests {
             hir.contains("let v2 = compute[8] |v1| { a[v0 * 8 + v1] } in"),
             "{hir}"
         );
-        assert!(hir.contains("compute[8] |v3| { v2[7 - v3] }"), "{hir}");
+        assert!(hir.contains("compute[8] |v3| { v2[v3 % 4] }"), "{hir}");
     }
 
     /// A shared subexpression with no free variables that is only used
@@ -1240,16 +1243,19 @@ mod tests {
         assert!(kir.contains("buffers:"), "{kir}");
         assert!(kir.contains("input#0"), "{kir}");
         assert!(kir.contains("output#0"), "{kir}");
-        // One 8-element shared tile: 32 bytes at offset 0.
-        assert!(kir.contains(" shared@0"), "{kir}");
-        assert!(kir.contains("layout=id"), "{kir}");
+        // Under Gap 1 the tile module launches with a warp-aligned block.
+        // Under Gap 4 the sub-warp `tile[j % (t/2)]` fold classifies as a
+        // Shuffle broadcast rather than falling through to a shared
+        // mirror, so both the tile and its view are register buffers.
+        assert!(kir.contains("register layout="), "{kir}");
         assert!(kir.contains("kernel "), "{kir}");
-        assert!(kir.contains("grid[4] block[8] shared=32B"), "{kir}");
+        assert!(kir.contains("grid[4] block[32] shared=0B"), "{kir}");
         assert!(kir.contains("^grid(v0):"), "{kir}");
         assert!(kir.contains("alloc b"), "{kir}");
         assert!(kir.contains("par[8]"), "{kir}");
-        // The barrier between the tile producer and its consumer.
-        assert!(kir.contains("\n  sync\n"), "{kir}");
+        // No sync: register-only pipeline.
+        assert!(!kir.contains("\n  sync\n"), "{kir}");
+        assert!(kir.contains("convert_layout"), "{kir}");
         // Both pars capture the grid var and mirror their write as a result.
         assert!(kir.contains("captures(v0)"), "{kir}");
         assert!(kir.contains(" -> (v"), "{kir}");

@@ -1028,6 +1028,7 @@ fn build_exe_node(
                 outputs: k.outputs,
                 set_params,
                 stream,
+                debug_module: Arc::clone(&k.module),
             })
         }
         GraphNode::BlackboxKernel(k) => ExeNode::Blackbox(ExeBlackbox { kernel: k, stream }),
@@ -1234,6 +1235,12 @@ struct ExeKernel {
     /// Stream index this kernel launches on. `0` is `ctx.stream`; higher
     /// indices are internally-owned auxiliary streams.
     stream: u32,
+    /// Original (post-fusion, pre-lower) source module for this node.
+    /// Kept for debug tooling: the run-time trace can dump the module's
+    /// HIR + the compiled `.cu` source when a specific instruction stalls,
+    /// so we can identify which fused kernel is misbehaving without a
+    /// separate lookup table.
+    debug_module: Arc<ir::Module>,
 }
 
 struct ExeBlackbox {
@@ -1815,7 +1822,229 @@ impl GraphExe {
             }
         };
 
-        for instr in &plan.instructions {
+        // Optional per-instruction trace, gated by `GRAPH_EXE_TRACE=<N>`.
+        // Prints one line every `N` instructions with elapsed wall time,
+        // stream, and instruction kind — surfaces host-dispatch progress
+        // when a large graph's warmup appears to hang.
+        //
+        // `GRAPH_EXE_SLOW_INSTR_MS=<ms>` additionally arms a per-instruction
+        // timer: if a single dispatch takes longer than `<ms>` host-side,
+        // dumps the offending instruction's kernel module (HIR + compiled
+        // `.cu` source) to stderr and returns from `run` immediately. Used
+        // to isolate a fused-kernel deadlock or a kernel that blocks on
+        // the CUDA launch queue.
+        let trace_stride: Option<usize> = std::env::var("GRAPH_EXE_TRACE")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .filter(|&n| n > 0);
+        let slow_instr_ms: Option<u128> = std::env::var("GRAPH_EXE_SLOW_INSTR_MS")
+            .ok()
+            .and_then(|s| s.parse::<u128>().ok());
+        // `GRAPH_EXE_STOP_AT_INSTR=<idx>` — dump the target instruction's
+        // source module *before* dispatching it, then return. Use when a
+        // dispatch is expected to block (e.g. CUDA launch queue back-pressure
+        // from an earlier deadlocked kernel) so the post-dispatch
+        // `SLOW_INSTR_MS` timer is unreachable.
+        let stop_at_instr: Option<usize> = std::env::var("GRAPH_EXE_STOP_AT_INSTR")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok());
+        // `GRAPH_EXE_SYNC_EACH_INSTR=1` — synchronize the dispatch stream
+        // after every instruction so the loop only advances once the GPU
+        // has finished the previous kernel. Turns the async launch queue
+        // into a serial one, so a deadlocked kernel blocks the sync — and
+        // the last printed instr *is* the stuck one, unmasking the
+        // upstream culprit behind launch-queue back-pressure.
+        let sync_each: bool = std::env::var("GRAPH_EXE_SYNC_EACH_INSTR")
+            .ok()
+            .as_deref()
+            == Some("1");
+        // `GRAPH_EXE_DISPATCH_WATCHDOG_MS=<ms>` — run every instruction's
+        // dispatch on a scoped worker thread and wait up to `<ms>` for it
+        // to complete. If the worker doesn't finish in time, dump the
+        // pre-prepared kernel module info for the stuck instruction and
+        // `std::process::exit(101)` — the only safe way to abandon a
+        // thread blocked inside a CUDA driver call. Only kicks in on the
+        // instruction that actually blocks, so it doesn't slow the fast
+        // path.
+        let dispatch_watchdog_ms: Option<u64> = std::env::var("GRAPH_EXE_DISPATCH_WATCHDOG_MS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok());
+        let trace_t0 = std::time::Instant::now();
+        let n_instr = plan.instructions.len();
+        if trace_stride.is_some()
+            || slow_instr_ms.is_some()
+            || sync_each
+            || dispatch_watchdog_ms.is_some()
+        {
+            eprintln!(
+                "[graph_exe.run] dispatching {n_instr} stream instr(s) across {} stream(s)…",
+                plan.num_streams,
+            );
+        }
+
+        // Watchdog wiring. If `dispatch_watchdog_ms` is set, pre-materialize
+        // one dump string per exe node (HIR + compiled CUDA source for
+        // kernels; short label for Blackbox) so the watchdog can look up
+        // the stuck node without racing the main thread for the borrow.
+        // The main thread bumps the `Ordering::SeqCst` counters before each
+        // dispatch; if the watchdog wakes up after `ms` and the counter
+        // hasn't advanced, it prints the stashed dump for the currently
+        // running node and `std::process::exit`s — the only safe way to
+        // reap a thread blocked inside a CUDA driver call.
+        let per_node_dump: std::sync::Arc<Vec<Option<String>>> =
+            if dispatch_watchdog_ms.is_some() {
+                let mut v = Vec::with_capacity(nodes.len());
+                for (node_idx, exe_node) in nodes.iter().enumerate() {
+                    v.push(match exe_node {
+                        ExeNode::Kernel(k) => Some(format!(
+                            "instr Kernel node={node_idx} name=\"{}\" \
+                             kernel_idx={}\n--- HIR ---\n{}\n\
+                             --- compiled CUDA source ---\n{}",
+                            k.name,
+                            k.kernel_idx,
+                            crate::dump::dump_hir(&k.debug_module),
+                            kernels[k.kernel_idx].source(),
+                        )),
+                        ExeNode::Blackbox(bb) => Some(format!(
+                            "instr Blackbox node={node_idx} name=\"{}\" \
+                             (no HIR module)",
+                            bb.kernel.name,
+                        )),
+                        _ => None,
+                    });
+                }
+                std::sync::Arc::new(v)
+            } else {
+                std::sync::Arc::new(Vec::new())
+            };
+        let current_instr_ai = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let current_node_ai =
+            std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(usize::MAX));
+        let watchdog_done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let watchdog = dispatch_watchdog_ms.map(|ms| {
+            let dump = std::sync::Arc::clone(&per_node_dump);
+            let cur_instr = std::sync::Arc::clone(&current_instr_ai);
+            let cur_node = std::sync::Arc::clone(&current_node_ai);
+            let done = std::sync::Arc::clone(&watchdog_done);
+            std::thread::spawn(move || {
+                use std::sync::atomic::Ordering;
+                loop {
+                    if done.load(Ordering::SeqCst) {
+                        return;
+                    }
+                    let baseline = cur_instr.load(Ordering::SeqCst);
+                    std::thread::sleep(std::time::Duration::from_millis(ms));
+                    if done.load(Ordering::SeqCst) {
+                        return;
+                    }
+                    let now = cur_instr.load(Ordering::SeqCst);
+                    if now == baseline {
+                        let nid = cur_node.load(Ordering::SeqCst);
+                        eprintln!(
+                            "\n[graph_exe.run] dispatch watchdog: instr {now} stuck \
+                             for {ms}ms (node_idx={nid})",
+                        );
+                        if nid < dump.len() {
+                            if let Some(d) = dump[nid].as_deref() {
+                                eprintln!("{d}");
+                            }
+                        }
+                        eprintln!(
+                            "[graph_exe.run] dispatch watchdog: exit(101)"
+                        );
+                        std::process::exit(101);
+                    }
+                }
+            })
+        });
+
+        for (i_idx, instr) in plan.instructions.iter().enumerate() {
+            let desc = if trace_stride.is_some() || slow_instr_ms.is_some() {
+                Some(match instr {
+                    StreamInstr::WaitOn(s, e) => {
+                        format!("WaitOn(stream={s}, event={e})")
+                    }
+                    StreamInstr::Node(node_idx) => match &nodes[*node_idx] {
+                        ExeNode::Kernel(k) => format!(
+                            "Kernel node={node_idx} stream={} name=\"{}\"",
+                            plan.stream[*node_idx], k.name,
+                        ),
+                        ExeNode::Blackbox(bb) => format!(
+                            "Blackbox node={node_idx} stream={} name=\"{}\"",
+                            plan.stream[*node_idx], bb.kernel.name,
+                        ),
+                        ExeNode::Const(c) => format!(
+                            "Const node={node_idx} stream={} buf={:?}",
+                            plan.stream[*node_idx], c.buf,
+                        ),
+                        ExeNode::Memcpy { src, dst, num_bytes, .. } => format!(
+                            "Memcpy node={node_idx} stream={} {:?}->{:?} {num_bytes}B",
+                            plan.stream[*node_idx], src, dst,
+                        ),
+                        ExeNode::Memset { buf, num_bytes, val, .. } => format!(
+                            "Memset node={node_idx} stream={} buf={:?} {num_bytes}B val={val:#x}",
+                            plan.stream[*node_idx], buf,
+                        ),
+                    },
+                })
+            } else {
+                None
+            };
+            if let (Some(stride), Some(d)) = (trace_stride, desc.as_ref()) {
+                if i_idx % stride == 0 {
+                    eprintln!(
+                        "[graph_exe.run] instr {i_idx}/{n_instr} at {:>7.2}s: {d}",
+                        trace_t0.elapsed().as_secs_f64(),
+                    );
+                }
+            }
+            if Some(i_idx) == stop_at_instr {
+                eprintln!(
+                    "\n[graph_exe.run] STOP_AT_INSTR fired at instr {i_idx}/{n_instr}: {}",
+                    desc.as_deref().unwrap_or("(no description)"),
+                );
+                if let StreamInstr::Node(node_idx) = instr {
+                    if let ExeNode::Kernel(k) = &nodes[*node_idx] {
+                        eprintln!(
+                            "\n--- HIR module `{}` (inputs={:?}, set_params={:?}) ---",
+                            k.debug_module.name,
+                            k.debug_module.builder.inputs(),
+                            k.set_params,
+                        );
+                        eprintln!("{}", crate::dump::dump_hir(&k.debug_module));
+                        eprintln!(
+                            "\n--- compiled CUDA source (kernel_idx={}) ---",
+                            k.kernel_idx,
+                        );
+                        eprintln!("{}", kernels[k.kernel_idx].source());
+                    } else if let ExeNode::Blackbox(bb) = &nodes[*node_idx] {
+                        eprintln!(
+                            "(Blackbox node `{}` has no HIR module to dump)",
+                            bb.kernel.name,
+                        );
+                    }
+                }
+                eprintln!(
+                    "[graph_exe.run] returning early before dispatching instr {i_idx}"
+                );
+                return Ok(());
+            }
+            let instr_t0 = if slow_instr_ms.is_some() {
+                Some(std::time::Instant::now())
+            } else {
+                None
+            };
+            if dispatch_watchdog_ms.is_some() {
+                use std::sync::atomic::Ordering;
+                current_instr_ai.store(i_idx, Ordering::SeqCst);
+                current_node_ai.store(
+                    match instr {
+                        StreamInstr::Node(nid) => *nid,
+                        _ => usize::MAX,
+                    },
+                    Ordering::SeqCst,
+                );
+            }
             match *instr {
                 StreamInstr::WaitOn(s, e) => {
                     let ev = &events[e];
@@ -1975,6 +2204,72 @@ impl GraphExe {
                     }
                 }
             }
+            if sync_each {
+                // Sync every configured stream — a stuck kernel blocks here
+                // and pins the last printed instr as the culprit.
+                ctx.stream.synchronize().map_err(|e| {
+                    CompileError::Runtime(format!("sync_each ctx.stream failed: {e:?}"))
+                })?;
+                for aux in streams.iter().skip(1).filter_map(|s| s.as_ref()) {
+                    aux.synchronize().map_err(|e| {
+                        CompileError::Runtime(format!("sync_each aux stream failed: {e:?}"))
+                    })?;
+                }
+            }
+            if let (Some(threshold_ms), Some(t0), Some(d)) =
+                (slow_instr_ms, instr_t0, desc.as_ref())
+            {
+                let elapsed_ms = t0.elapsed().as_millis();
+                if elapsed_ms > threshold_ms {
+                    eprintln!(
+                        "\n[graph_exe.run] SLOW instr {i_idx}/{n_instr} took {elapsed_ms} ms \
+                         (threshold {threshold_ms} ms): {d}"
+                    );
+                    // For Kernel nodes, dump the source module (HIR) plus the
+                    // compiled CUDA source of the deduped artifact this
+                    // instruction launched. `debug_module` is the pre-lower
+                    // HIR; kernels[kernel_idx].source() is the emitted .cu.
+                    if let StreamInstr::Node(node_idx) = instr {
+                        if let ExeNode::Kernel(k) = &nodes[*node_idx] {
+                            eprintln!(
+                                "\n--- HIR module `{}` (params={:?}, set_params={:?}) ---",
+                                k.debug_module.name,
+                                k.debug_module.builder.inputs(),
+                                k.set_params,
+                            );
+                            eprintln!("{}", crate::dump::dump_hir(&k.debug_module));
+                            eprintln!(
+                                "\n--- compiled CUDA source (kernel_idx={}) ---",
+                                k.kernel_idx,
+                            );
+                            eprintln!("{}", kernels[k.kernel_idx].source());
+                        } else if let ExeNode::Blackbox(bb) = &nodes[*node_idx] {
+                            eprintln!(
+                                "(Blackbox node `{}` has no HIR module to dump)",
+                                bb.kernel.name,
+                            );
+                        }
+                    }
+                    eprintln!(
+                        "[graph_exe.run] returning early from run() after slow instr dump"
+                    );
+                    return Ok(());
+                }
+            }
+        }
+
+        if trace_stride.is_some() {
+            eprintln!(
+                "[graph_exe.run] all {n_instr} instr(s) dispatched in {:>7.2}s (host time)",
+                trace_t0.elapsed().as_secs_f64(),
+            );
+        }
+        // Retire the dispatch watchdog: signal done and join. The join is
+        // trivial once the watchdog observes `done`.
+        if let Some(h) = watchdog {
+            use std::sync::atomic::Ordering;
+            watchdog_done.store(true, Ordering::SeqCst);
+            let _ = h.join();
         }
 
         // Join every auxiliary stream back into ctx.stream so callers can

@@ -162,10 +162,17 @@ mod tests {
     /// producer par writes to a promoted register tile, a
     /// [`SSAOpCode::ConvertLayout`] mirrors it to shared for the bouncing
     /// consumer, and `insert_sync` places a barrier before the consumer.
+    ///
+    /// The consumer's read index folds through a symbolic constant
+    /// (`(j + #m) % t`) so `linearize_accesses` can't turn it into a
+    /// `Linear` map — the read stays `SExpr`, layout inference routes
+    /// it through the shared-memory mirror, and `insert_sync` places a
+    /// barrier before the consumer par.
     #[test]
     fn shared_tile_gets_alloc_and_sync() {
         let (blocks, t) = (4usize, 8usize);
         let mut b = IRBuilder::new();
+        let m = b.symbol("m");
         let a = b.input("a", ScalarType::BabyBear, vec![blocks * t]);
         let body = b.compute(blocks, |b, i| {
             let tile = b.compute(t, |b, j| {
@@ -176,9 +183,11 @@ mod tests {
             });
             b.bind(tile, |b, tile| {
                 b.compute(t, |b, j| {
-                    let last = b.const_u32(t as u32 - 1);
-                    let rev = b.sub(last, j);
-                    b.index(tile, &[rev])
+                    let mv = b.const_sym(m);
+                    let off = b.add(j, mv);
+                    let tc = b.const_u32(t as u32);
+                    let ix = b.rem(off, tc);
+                    b.index(tile, &[ix])
                 })
             })
         });
@@ -192,7 +201,9 @@ mod tests {
         assert_eq!(kprog.kernels.len(), 1);
         let kernel = &kprog.kernels[0];
         assert_eq!(kernel.grid.bound.as_const(), Some(blocks));
-        assert_eq!(kernel.block, t);
+        // Warp-aligned launch (Gap 1): sub-warp compute[t] runs on 32
+        // threads with a replicated par-attr.
+        assert_eq!(kernel.block, 32);
         assert_eq!(
             stmt_kinds(kernel),
             ["alloc", "alloc", "par", "convert", "sync", "par"]
@@ -226,11 +237,16 @@ mod tests {
     }
 
     /// Back-to-back tile producers do not need a barrier between them; the
-    /// barrier goes before the first consumer.
+    /// barrier goes before the first consumer that reads their mirrors.
+    /// Both consumer reads go through symbolic-modulus indices so
+    /// `linearize_accesses` can't linearize them — they stay `SExpr`
+    /// and route through the shared mirror, exercising the "shared read"
+    /// path in `insert_sync`.
     #[test]
     fn independent_tiles_share_one_sync() {
         let (blocks, t) = (2usize, 8usize);
         let mut b = IRBuilder::new();
+        let m = b.symbol("m");
         let a = b.input("a", ScalarType::BabyBear, vec![blocks * t]);
         let body = b.compute(blocks, |b, i| {
             let t1 = b.compute(t, |b, j| {
@@ -249,13 +265,15 @@ mod tests {
                 });
                 b.bind(t2, |b, t2| {
                     b.compute(t, |b, j| {
-                        // Reversed reads keep both tiles in shared memory
-                        // (`t - 1 - j` is affine-XOR, not linear, so the
-                        // readers cannot be served from registers).
-                        let last = b.const_u32(t as u32 - 1);
-                        let rev = b.sub(last, j);
-                        let x = b.index(t1, &[rev]);
-                        let y = b.index(t2, &[rev]);
+                        // `(j + #m) % t` keeps the read `SExpr` so both
+                        // tiles bounce through shared memory (the only
+                        // reliably-Mirror-planning path post-Gap-4).
+                        let mv = b.const_sym(m);
+                        let off = b.add(j, mv);
+                        let tc = b.const_u32(t as u32);
+                        let ix = b.rem(off, tc);
+                        let x = b.index(t1, &[ix]);
+                        let y = b.index(t2, &[ix]);
                         b.add(x, y)
                     })
                 })

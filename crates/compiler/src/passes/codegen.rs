@@ -36,8 +36,9 @@ use std::{
 use crate::{
     ir::{BinOp, ScalarType, SizeExpr, VarId},
     kernel_ir::{
-        classify_convert, Access, BufId, BufferKind, ConvertKind, IndexMap, KBound, Kernel,
-        KirProgram, LinearLayout, ParAttr, SSABlock, SSANode, SSAOpCode, SSARes,
+        classify_convert, const_src_slot, maps_agree, Access, BufId, BufferKind, ConvertKind,
+        IndexMap, KBound, Kernel, KirProgram, LinearLayout, ParAttr, SSABlock, SSANode, SSAOpCode,
+        SSARes,
     },
     passes::plan_shared_mem::{plan_shared_mem, SharedMemPlan},
     quast::{CStrEmitter, Expr, Quast, SymConst},
@@ -654,7 +655,17 @@ fn gen_par(
             ll_apply_str(&attr.layout, &phys)
         )
         .unwrap();
-        writeln!(s, "{pad}    if ({v} >= {bound}u) continue;").unwrap();
+        // Guard on the phys index, not on `v`: under Gap 2 a replicated
+        // par-attr (zero columns for `bound < block`) maps every phys
+        // index into `[0, bound)`, so a guard on `v` never fires and
+        // replicated threads would execute the body — clobbering their
+        // own register slots with the wrong value (each thread's local
+        // register buffer is distinct even when the "logical" indices
+        // are replicated). Phys-guarding restores the tail-mask
+        // semantics for the par body while ConvertLayout ops (which
+        // sit at the statement level, outside par bodies) keep their
+        // full 32-lane participation for `__shfl_sync` masks.
+        writeln!(s, "{pad}    if ({phys} >= {bound}u) continue;").unwrap();
         gen_par_body(
             s,
             p,
@@ -1007,8 +1018,16 @@ fn gen_convert(
         (BufferKind::Register, BufferKind::Register) => {
             let ld = dd.layout.clone().unwrap_or_else(id);
             let f = sd.layout.clone().unwrap_or_else(id);
-            let f_inv = f.inverse().ok_or_else(|| {
-                CompileError::Codegen(format!("register buffer {} has a singular layout", sd.name))
+            // Gap 4: the source register layout is surjective onto the
+            // tile's kb-bit logical space (may be replicated / non-square
+            // under Gap 2). The min-weight right inverse routes replicas
+            // through a canonical source, matching gen_shuffle's fast
+            // path and preventing multi-source shuffle races.
+            let f_inv = f.right_inverse(kb).ok_or_else(|| {
+                CompileError::Codegen(format!(
+                    "register buffer {} has a layout that isn't surjective onto its {kb} logical bits",
+                    sd.name
+                ))
             })?;
             let c = f_inv.compose(&map.compose(&ld));
             match classify_convert(&c, k.block) {
@@ -1107,32 +1126,19 @@ fn gen_shuffle(
     block: usize,
     depth: usize,
 ) {
-    let mut pad = "    ".repeat(depth);
+    let pad = "    ".repeat(depth);
     let tb = kb.min(block.trailing_zeros() as usize);
     let slots = 1usize << (kb - tb);
-    let n = 1usize << kb;
     let pre = format!("_cv{dst_id}");
-    // `classify_convert` guarantees kb >= 5, so `n` covers whole warps and
-    // the full shuffle mask stays valid under the guard.
-    let guard = n < block;
-    if guard {
-        writeln!(s, "{pad}if (threadIdx.x < {n}u) {{").unwrap();
-        pad.push_str("    ");
-    }
+    // Under Gap 1 the kernel launches with `blockDim.x >= 32` and under
+    // Gap 2 every physical lane holds a defined replica of the source
+    // registers, so the full-mask shuffle stays valid even when the
+    // logical domain `n = 1 << kb` is smaller than `block`. No guard.
     let c_lin = LinearLayout {
         bases: c.bases.clone(),
         offset: 0,
     };
-    // Sender-slot constness: no thread-input bit (i < tb) may cross into
-    // slot output (bit ≥ tb). Warp-input bases are pinned to their input by
-    // classify_convert's `warp_fixed`, so this is really just a check on
-    // the lane-input rows of `C`.
-    let slot_mask: u64 = if tb >= u64::BITS as usize {
-        0
-    } else {
-        !((1u64 << tb) - 1)
-    };
-    let const_src_slot = c.bases[..tb].iter().all(|&b| b & slot_mask == 0);
+    let src_slot_const = const_src_slot(c, tb);
     writeln!(
         s,
         "{pad}const uint32_t {pre}_ct = {};",
@@ -1145,7 +1151,13 @@ fn gen_shuffle(
         bases: c.bases[..5.min(kb)].to_vec(),
         offset: 0,
     };
-    let m_inv = if slots > 1 && !const_src_slot {
+    // General path only when the sender slot varies per receiver — it
+    // needs the lane-block inverse to turn a receiver lane into the
+    // sender lane whose slot to present. Classify_convert admits either
+    // `const_src_slot` (multi-source broadcast, fast path) or invertible
+    // lane block (transpose-style, general path); when the former is
+    // true the general path is unused and the inverse never touched.
+    let m_inv = if slots > 1 && !src_slot_const {
         writeln!(
             s,
             "{pad}const uint32_t {pre}_cw = {pre}_ct ^ {};",
@@ -1158,14 +1170,14 @@ fn gen_shuffle(
                 offset: 0,
             }
             .inverse()
-            .expect("classify_convert checked the lane block"),
+            .expect("classify_convert admitted this via invertible-lane path"),
         )
     } else {
         None
     };
     for sp in 0..slots {
         let cs = c.apply((sp as u64) << tb);
-        let val = if slots == 1 || const_src_slot {
+        let val = if slots == 1 || src_slot_const {
             // `cs` has no bits below tb from `sp << tb`, and no bits at or
             // above tb from any lane/warp input under the const-slot
             // condition, so the sender slot is exactly `cs >> tb`.
@@ -1196,10 +1208,6 @@ fn gen_shuffle(
             "{pad}{dst_reg}[{sp}] = __shfl_sync(0xffffffffu, {val}, ({cs}u ^ {pre}_ct) & 31u);"
         )
         .unwrap();
-    }
-    if guard {
-        pad.truncate(pad.len() - 4);
-        writeln!(s, "{pad}}}").unwrap();
     }
 }
 
@@ -1375,14 +1383,6 @@ fn bin_str(op: BinOp, ty: ScalarType, a: &str, b: &str) -> String {
             }
         }
     }
-}
-
-/// Whether two XOR-affine maps agree as functions, treating missing high
-/// bases as zero (inputs past either domain are masked by bounds guards).
-fn maps_agree(a: &LinearLayout, b: &LinearLayout) -> bool {
-    a.offset == b.offset
-        && (0..a.bases.len().max(b.bases.len()))
-            .all(|i| a.bases.get(i).copied().unwrap_or(0) == b.bases.get(i).copied().unwrap_or(0))
 }
 
 /// C lvalue for one access: the buffer element at the access's index. The

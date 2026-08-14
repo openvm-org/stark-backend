@@ -225,7 +225,7 @@ But for now I chose to not use those bytecodes because there's still a performan
 
 **This is important**: for register/compute heavy cryptography operations like the Bn254 scalar field, those compilers don't perform any instruction-cache aware optimization as far as I know, they inline everything, which blows up the instruction cache. There's no way to control the codegen process in those cases. To be fair there's no optimization in the current compiler that does this either, but when it comes up we could.
 
-
+For example, if a kernel computes something with a lot of stages, like Bn254 poseidon permutation. Naively inlining all the functions would blowup the instruction cache. Instead we can be more strategic in which functions we inline and which we don't inline. (Which is a combinatorial search problem). From my experience nvcc doesn't do this very well, likely because it's search budget is very limited or it uses some heuristics that's tuned for CPU. We an afford more compilation time for the search.
 
 
 # crypto-compiler file structure

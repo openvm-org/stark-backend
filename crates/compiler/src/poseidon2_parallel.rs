@@ -71,71 +71,93 @@ fn select_by_index(b: &mut IRBuilder, i: NodeId, values: &[NodeId]) -> NodeId {
     rec(b, i, values, 0, values.len() as u32)
 }
 
-/// Per-lane linear combination that recovers `apply_mat4`'s residue-`r` output
-/// for a 4-lane chunk. The lane's own residue is picked with a nested select.
-///
-/// The four M-outputs share the same addition chain (`t01 = x0 + x1`,
-/// `t23 = x2 + x3`, ...), which is reused verbatim from
-/// [`crate::kernels::apply_mat4`]; every lane in the chunk redundantly
-/// computes all four, then picks its own — the redundancy is bounded (4x
-/// arithmetic in this stage only) and hash-consing dedups the shared
-/// sub-expressions across lanes.
-fn apply_mat4_lane(
-    b: &mut IRBuilder,
-    j: NodeId,
-    x0: NodeId,
-    x1: NodeId,
-    x2: NodeId,
-    x3: NodeId,
-) -> NodeId {
-    let t01 = kernel!(b, x0 + x1);
-    let t23 = kernel!(b, x2 + x3);
-    let t0123 = kernel!(b, t01 + t23);
-    let t01123 = kernel!(b, t0123 + x1);
-    let t01233 = kernel!(b, t0123 + x3);
-    let y0 = kernel!(b, t01123 + t01);
-    let y1 = kernel!(b, t01123 + (x2 + x2));
-    let y2 = kernel!(b, t01233 + t23);
-    let y3 = kernel!(b, t01233 + (x0 + x0));
-    // Pick y_r where r = j mod 4.
-    let four = b.const_u32(4);
-    let r = b.rem(j, four);
-    select_by_index(b, r, &[y0, y1, y2, y3])
-}
-
 /// Emits the intra-chunk `apply_mat4` layer as a warp-parallel stage.
 ///
-/// Every lane `j` needs `x_r = state[chunk_base + r]` for `r = 0..3` (with
-/// `chunk_base = j - j%4`). Under the identity par layout `state[chunk_base + r]`
-/// with `r != j%4` is a same-warp shuffle — `layout_infer` classifies the
-/// map `j - j%4 + r` as a Shuffle over the low four lane bits.
+/// The MDS-light 4×4 matrix
+///
+/// ```text
+/// M4 = 2 3 1 1
+///      1 2 3 1
+///      1 1 2 3
+///      3 1 1 2
+/// ```
+///
+/// has the closed form `M4[k] · x = s + x_k + 2·x_{(k+1) mod 4}` where
+/// `s = x_0 + x_1 + x_2 + x_3` is the chunk sum. This lets every lane
+/// compute *only* its own residue instead of computing all four `y_r`s
+/// and picking one with a select tree — the prior lowering had to emit
+/// a select tree because the four raw reads `prev[chunk_base + r]` fold
+/// four lanes onto one and don't classify as warp shuffles.
+///
+/// The shuffled reads used here are all *invertible* under the identity
+/// par layout, so [`crate::kernel_ir::classify_convert`] lowers each one
+/// to a single `__shfl_sync` — no shared-memory bounce and no
+/// `__syncthreads`:
+///
+/// - `prev[j]` — the lane's own slot, a register copy.
+/// - `prev[j XOR s]` for `s ∈ {1, 2, 3}` — an XOR-stride permutation of
+///   the lane bits (integer form `j + s - 2·(j % (2s)) / s * (2s)` for
+///   powers of two; the `s = 3` case is spelled `chunk_base + (3 - r)`
+///   so the whole map stays XOR-linear).
+///
+/// `x_{(r+1) mod 4}` equals `p1` for even `r` and `p3` for odd `r`, so
+/// it drops out of the already-fetched partners with one two-way select
+/// on `j % 2` — no fifth shuffle needed.
 fn apply_mat4_stage(b: &mut IRBuilder, prev: NodeId) -> NodeId {
     let par = lane_par(b);
     b.compute_with(WIDTH, None, Some(par), None, |b, j| {
-        let x0 = kernel!(b, prev[j - j % 4]);
-        let x1 = kernel!(b, prev[j - j % 4 + 1]);
-        let x2 = kernel!(b, prev[j - j % 4 + 2]);
-        let x3 = kernel!(b, prev[j - j % 4 + 3]);
-        apply_mat4_lane(b, j, x0, x1, x2, x3)
+        kernel!(b,
+            // XOR-stride reads: every lane picks up its own chunk's four
+            // elements via three warp shuffles.
+            let own = prev[j];                                      // x_r
+            let p1  = prev[j + 1 - 2 * (j % 2)];                    // x_(r XOR 1)
+            let p2  = prev[j + 2 - 4 * (j % 4 / 2)];                // x_(r XOR 2)
+            let p3  = prev[j - j % 4 + 3 - j % 4];                  // x_(r XOR 3)
+            let s   = own + p1 + p2 + p3;                           // chunk sum
+            // x_((r+1) mod 4) is p1 for even r ({0,2}) and p3 for
+            // odd r ({1,3}) — one lane-local select on bit 0 of j.
+            let x_next = if j % 2 == 0 then p1 else p3;
+            // y_r = s + x_r + 2 * x_{(r+1) mod 4}.
+            s + own + x_next + x_next
+        )
     })
 }
 
 /// Emits the cross-chunk sums-layer of `mds_light`: each lane returns
-/// `state[j] + sum_{c=0..4} state[j%4 + 4c]` — the second half of `mds_light`
-/// after `apply_mat4`.
+/// `state[j] + sum_{c=0..4} state[j%4 + 4c]` — the second half of
+/// `mds_light` after `apply_mat4`.
 ///
-/// The four cross-chunk reads are stride-4 warp shuffles (bases `0, 4, 8, 12`
-/// XOR-affinely permute the lane bits within a 16-lane block).
+/// The prior lowering read `state[j%4 + 4c]` for `c = 0..3`; four lanes
+/// with the same `j%4` all pull the same source, so the map is
+/// non-invertible and [`classify_convert`](crate::kernel_ir::classify_convert)
+/// used to bounce it through shared memory. Substituting `c` for the
+/// XOR-partner stride gives the same 4-lane column (as a *set*) via
+/// invertible XOR strides:
+///
+/// ```text
+/// {j XOR 0, j XOR 4, j XOR 8, j XOR 12}  ==  {j%4 + 4c : c = 0..3}
+/// ```
+///
+/// so the column sum is `state[j] + state[j XOR 4] + state[j XOR 8] +
+/// state[j XOR 12]`, each a single warp shuffle. The formula then
+/// simplifies to `mds_cross[j] = 2·state[j] + state[j XOR 4] +
+/// state[j XOR 8] + state[j XOR 12]`, since `state[j]` appears both as
+/// the row's own term and inside its own column sum.
+///
+/// XOR strides `4` and `8` use the standard butterfly integer form
+/// `j + s - (j % 2s) / s * 2s`; XOR-`12` is `j + 12 - 8·(j/4)`, which
+/// evaluates to `j XOR 12` over the 16-lane domain and stays
+/// XOR-linear so `to_linear_layout` picks it up as the identity-bases
+/// layout with `offset = 12`.
 fn mds_cross_stage(b: &mut IRBuilder, prev: NodeId) -> NodeId {
     let par = lane_par(b);
     b.compute_with(WIDTH, None, Some(par), None, |b, j| {
-        // sum_j = state[j%4] + state[j%4 + 4] + state[j%4 + 8] + state[j%4 + 12]
         kernel!(b,
-            let a0 = prev[j % 4];
-            let a1 = prev[j % 4 + 4];
-            let a2 = prev[j % 4 + 8];
-            let a3 = prev[j % 4 + 12];
-            prev[j] + (a0 + a1) + (a2 + a3)
+            let own = prev[j];
+            let c4  = prev[j + 4 - 8 * (j % 8 / 4)];              // j XOR 4
+            let c8  = prev[j + 8 - 16 * (j % 16 / 8)];            // j XOR 8
+            let c12 = prev[j + 12 - 8 * (j / 4)];                  // j XOR 12
+            own + own + c4 + c8 + c12
         )
     })
 }
@@ -206,18 +228,28 @@ fn external_rc_sbox_stage(b: &mut IRBuilder, prev: NodeId, rc: &[u32; 16]) -> No
 
 /// Internal-round stage 1: for lane 0 write `sbox(state[0] + rc)`, other
 /// lanes pass through their own slot.
+///
+/// The sbox chain is anchored inside the `j == 0` branch so that only lane
+/// 0 evaluates it — select is short-circuit
+/// (see [[project_dsl_load_semantics]]) and the branch reads
+/// `orig = prev[j]`, which for lane 0 IS `prev[0]`. Reading `prev[0]`
+/// outside the branch would compile to a broadcast: a non-invertible
+/// access map that [`classify_convert`](crate::kernel_ir::classify_convert)
+/// still bounces through shared memory. Keeping the read as `prev[j]`
+/// makes it a per-lane Copy — no shuffle, no shmem, no `__syncthreads`.
 fn internal_sbox_stage(b: &mut IRBuilder, prev: NodeId, rc: u32) -> NodeId {
     let par = lane_par(b);
     b.compute_with(WIDTH, None, Some(par), None, |b, j| {
         let rc_const = b.const_field(rc);
         kernel!(b,
-            let s0 = prev[0];
-            let x = s0 + rc_const;
-            let x2 = x * x;
-            let x4 = x2 * x2;
-            let sbox_val = (x2 * x) * x4;
             let orig = prev[j];
-            if j == 0 then sbox_val else orig
+            if j == 0 then
+                let x = orig + rc_const;
+                let x2 = x * x;
+                let x4 = x2 * x2;
+                (x2 * x) * x4
+            else
+                orig
         )
     })
 }

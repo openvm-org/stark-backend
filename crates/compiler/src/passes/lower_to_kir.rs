@@ -167,11 +167,23 @@ pub fn lower_to_kir(program: &Program) -> Result<KirProgram, CompileError> {
             }
         }
         let flat = ck.inner.is_none() && ck.inner_lets.is_empty();
+        // Warp-alignment (Gap 1, Phase A): every kernel launches with
+        // `blockDim.x` a multiple of 32 so shuffle masks name only
+        // resident lanes. Explicit sub-warp `#[grid(threads = X)]` hints
+        // (X < 32) get rounded up to 32 with sub-warp semantics falling
+        // out of the par-attr and body tail-mask — the shuffle path
+        // (ConvertLayout ops at the statement level) needs a full warp
+        // of resident lanes to keep `__shfl_sync(0xFFFFFFFF, ...)`
+        // valid; the par body still guards on phys ≥ bound so
+        // higher lanes stay inactive for the actual work.
         let (grid_bound, block) = match ck.outer_bound.as_const() {
             Some(outer_bound) => {
                 let outer_bound = outer_bound as usize;
                 if flat {
-                    let block = ck.threads.unwrap_or_else(|| outer_bound.min(BLOCK_SIZE));
+                    let block = ck
+                        .threads
+                        .unwrap_or_else(|| outer_bound.min(BLOCK_SIZE))
+                        .max(32);
                     (KBound::Const(outer_bound.div_ceil(block)), block)
                 } else {
                     let mut max_par = 1;
@@ -181,7 +193,10 @@ pub fn lower_to_kir(program: &Program) -> Result<KirProgram, CompileError> {
                     if let Some((m, _)) = &ck.inner {
                         max_par = max_par.max(concrete(m, "inner bound")?);
                     }
-                    let block = ck.threads.unwrap_or_else(|| max_par.min(BLOCK_SIZE));
+                    let block = ck
+                        .threads
+                        .unwrap_or_else(|| max_par.min(BLOCK_SIZE))
+                        .max(32);
                     (KBound::Const(outer_bound), block)
                 }
             }
@@ -207,7 +222,8 @@ pub fn lower_to_kir(program: &Program) -> Result<KirProgram, CompileError> {
                             ck.name, ck.outer_bound
                         )));
                     }
-                };
+                }
+                .max(32);
                 let grid = ck
                     .outer_bound
                     .add(&SizeExpr::from(block - 1))
@@ -490,26 +506,78 @@ impl<'a> LowerCx<'a> {
     }
 
     /// Converts the `#[par]` spec into a [`ParAttr`] once the block size is
-    /// fixed: `thread < block`, `seq < bound / block`.
+    /// fixed. Accepts sub-block bounds (Gap 1): under warp-alignment a
+    /// spec authored for a sub-warp block (e.g. Poseidon2-16 with
+    /// `threads=16`) now runs on a block of at least 32 lanes, with
+    /// the extra lanes tail-masked out of the par body via
+    /// `phys ≥ bound`. The spec's layout is padded with identity bases
+    /// on the extra thread bits so `attr.layout` stays a bijection on
+    /// its full `log2(block) + log2(seq_size)` domain — codegen's
+    /// identity-layout fast path (strided `for v = threadIdx.x; v < bound`)
+    /// picks up the tail-mask for free when the padded result happens
+    /// to be identity.
     fn spec_attr(&self, spec: &ParSpec, bound: usize) -> Result<ParAttr, CompileError> {
         let block = self.k.block;
-        if !bound.is_power_of_two() || !block.is_power_of_two() || bound < block {
+        if !bound.is_power_of_two() || !block.is_power_of_two() {
             return Err(CompileError::Lower(format!(
-                "#[par] compute bound {bound} must be a power-of-two multiple of the \
-                 block size {block}"
+                "#[par] compute bound {bound} and block size {block} must both be powers of two"
             )));
         }
-        let seq_size = bound / block;
-        let bounds = BTreeMap::from([(spec.thread, block as u64), (spec.seq, seq_size as u64)]);
+        // seq_size = ceil(bound / block).max(1). Under warp-alignment
+        // bound may be smaller than block; then seq_size = 1 and the
+        // spec's thread var ranges over `[0, bound)` (`thread_bound`).
+        let seq_size = (bound / block).max(1);
+        let thread_bound = bound.min(block);
+        let bounds = BTreeMap::from([
+            (spec.thread, thread_bound as u64),
+            (spec.seq, seq_size as u64),
+        ]);
         let layout = spec.expr.to_linear_layout(&bounds).ok_or_else(|| {
             CompileError::Lower(format!(
-                "#[par] map is not XOR-linear over thread < {block}, seq < {seq_size}"
+                "#[par] map is not XOR-linear over thread < {thread_bound}, seq < {seq_size}"
             ))
         })?;
-        if layout.bases.len() != bound.trailing_zeros() as usize || layout.inverse().is_none() {
+        let live_bits = bound.trailing_zeros() as usize;
+        if layout.bases.len() != live_bits || layout.inverse().is_none() {
             return Err(CompileError::Lower(
                 "#[par] map must be a bijection on the compute domain".into(),
             ));
+        }
+        // Pad the thread half with identity bases up to `log2(block)`.
+        // The spec's own thread bits sit in positions `0..log2(thread_bound)`
+        // (spec.thread's VarId is smaller than spec.seq's — see
+        // `IRBuilder::par_map`); identity padding puts `1 << i` at
+        // positions `log2(thread_bound)..log2(block)`, then the seq
+        // bases move down by the same padding count.
+        let block_bits = block.trailing_zeros() as usize;
+        let live_thread_bits = thread_bound.trailing_zeros() as usize;
+        let seq_bits = seq_size.trailing_zeros() as usize;
+        let target_bits = block_bits + seq_bits;
+        if layout.bases.len() < target_bits {
+            let mut padded = crate::kernel_ir::LinearLayout {
+                bases: Vec::with_capacity(target_bits),
+                offset: layout.offset,
+            };
+            // Live thread bases (spec-computed).
+            padded
+                .bases
+                .extend_from_slice(&layout.bases[..live_thread_bits]);
+            // Identity bases for the replicated / padded thread bits.
+            for i in live_thread_bits..block_bits {
+                padded.bases.push(1u64 << i);
+            }
+            // Live seq bases: the spec placed them at input positions
+            // `log2(thread_bound)..log2(bound)` mapped to arbitrary
+            // output positions. Shift the input positions to
+            // `log2(block)..log2(block)+log2(seq_size)` while keeping
+            // the same output values.
+            padded
+                .bases
+                .extend_from_slice(&layout.bases[live_thread_bits..]);
+            return Ok(ParAttr {
+                seq_size,
+                layout: padded,
+            });
         }
         Ok(ParAttr { seq_size, layout })
     }
@@ -1436,7 +1504,12 @@ mod tests {
     }
 
     #[test]
-    fn par_bound_smaller_than_block_is_rejected() {
+    fn par_bound_smaller_than_block_pads_with_identity() {
+        // Under warp-align (Gap 1) the kernel launches at block=32, but
+        // the `#[par]` spec was authored for compute[8]. `spec_attr` pads
+        // the spec's 3-bit identity with identity bases on positions
+        // 3..5 (the "extras" beyond the spec's live domain); tail-masking
+        // in the par body keeps threads 8..31 inert.
         let mut b = IRBuilder::new();
         let a = b.input("a", ScalarType::BabyBear, vec![8]);
         let body = crate::kernel!(
@@ -1452,7 +1525,17 @@ mod tests {
                 }
         );
         let module = b.finish("tiny", body);
-        let err = lower_result(module).unwrap_err();
-        assert!(matches!(&err, CompileError::Lower(m) if m.contains("power-of-two multiple")));
+        let kprog = lower_result(module).unwrap();
+        let attr = kprog.kernels[0]
+            .ops()
+            .iter()
+            .find_map(|op| match &op.opcode {
+                SSAOpCode::Par { attr, .. } => attr.as_ref(),
+                _ => None,
+            })
+            .expect("par attr present");
+        assert_eq!(attr.seq_size, 1);
+        assert_eq!(attr.layout.bases, vec![1, 2, 4, 8, 16]);
+        assert_eq!(kprog.kernels[0].block, 32);
     }
 }

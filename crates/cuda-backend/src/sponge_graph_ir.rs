@@ -683,7 +683,7 @@ fn load_state(b: &mut IRBuilder, state: NodeId) -> [NodeId; 16] {
 
 #[cfg(test)]
 mod tests {
-    use crypto_compiler::graph_exe::GraphCompiler;
+    use crypto_compiler::graph_exe::{GraphCompiler, GraphExe};
     use openvm_cuda_common::{
         common::get_device,
         copy::MemCopyH2D,
@@ -1000,5 +1000,185 @@ mod tests {
             "expected exactly 4 unique kernel modules (2 observe + permute + \
              sample read) for the emitted 20 observes + 15 samples"
         );
+    }
+
+    // -----------------------------------------------------------------
+    // ncu profiling — one ncu report per transcript-op module.
+
+    #[link(name = "cudart")]
+    extern "C" {
+        fn cudaProfilerStart() -> i32;
+        fn cudaProfilerStop() -> i32;
+    }
+
+    const PROFILE_OPS: &[&str] = &["observe", "observe_perm", "observe_ext_perm", "permute"];
+    const PROFILE_ENV: &str = "SPONGE_PROFILE_CHILD";
+    const PROFILE_TEST_PATH: &str = "sponge_graph_ir::tests::profile_transcript_ops";
+    const REPORT_STEM: &str = "target/ncu_reports/sponge_transcript_ops";
+
+    /// Emits a single `ncu --set full --import-source yes` report covering
+    /// all four transcript-op kernels (`observe`, `observe_perm`,
+    /// `observe_ext_perm`, `permute`) at `target/ncu_reports/sponge_transcript_ops.ncu-rep`.
+    ///
+    /// The test doubles as its own child: the orchestrator spawns `ncu`
+    /// once on the same test binary with `SPONGE_PROFILE_CHILD=1`, and the
+    /// child runs all four kernels back-to-back inside one
+    /// `cudaProfilerStart/Stop` window with per-op NVTX ranges so ncu can
+    /// attribute launches by name. Setup (JIT + H2D + warmup) happens
+    /// outside the window. `-lineinfo` is forwarded to nvcc via
+    /// `CUDA_LINEINFO=1`, and the kernel cache is bypassed so every child
+    /// compiles fresh — a prior cache hit compiled without lineinfo would
+    /// suppress the SASS↔source mapping ncu needs.
+    #[test]
+    #[ignore]
+    fn profile_transcript_ops() {
+        if std::env::var(PROFILE_ENV).is_ok() {
+            run_profile_child();
+            return;
+        }
+
+        let exe = std::env::current_exe().expect("current_exe");
+        let cwd = std::env::current_dir().expect("cwd");
+        let report_stem = cwd.join(REPORT_STEM);
+        std::fs::create_dir_all(report_stem.parent().unwrap()).expect("create ncu_reports dir");
+        eprintln!("[ncu] profiling all sponge transcript ops -> {}.ncu-rep", report_stem.display());
+        let status = std::process::Command::new("ncu")
+            .arg("--set")
+            .arg("full")
+            .arg("--import-source")
+            .arg("yes")
+            .arg("--profile-from-start")
+            .arg("off")
+            .arg("-f")
+            .arg("-o")
+            .arg(&report_stem)
+            .arg(&exe)
+            .arg("--exact")
+            .arg(PROFILE_TEST_PATH)
+            .arg("--ignored")
+            .arg("--nocapture")
+            .env("CUDA_LINEINFO", "1")
+            .env(PROFILE_ENV, "1")
+            .status()
+            .expect("spawn ncu (is it on PATH?)");
+        assert!(status.success(), "ncu failed: {status:?}");
+    }
+
+    fn run_profile_child() {
+        let ctx = test_ctx();
+        let modules = SpongeModules::new();
+        let device = DeviceType::Cuda(0);
+
+        // Build one single-kernel `GraphExe` per op ahead of time so JIT,
+        // H2D uploads, and warmup all sit outside the profiler window.
+        let mut runners: Vec<(&'static str, GraphExe)> = PROFILE_OPS
+            .iter()
+            .map(|op| (*op, build_op_exe(&ctx, &modules, device, op)))
+            .collect();
+
+        // Warm each op once so first-launch driver work (module loads,
+        // cubin JITs, CUDA graph capture) doesn't pollute the profile.
+        for (_op, exe) in &mut runners {
+            exe.run(&ctx).expect("warmup run");
+        }
+        ctx.stream.synchronize().expect("warmup sync");
+
+        unsafe { cudaProfilerStart() };
+        for (op, exe) in &mut runners {
+            nvtx::range_push!("sponge_{}", op);
+            exe.run(&ctx).expect("profiled run");
+            ctx.stream.synchronize().expect("profiled sync");
+            nvtx::range_pop!();
+        }
+        unsafe { cudaProfilerStop() };
+    }
+
+    /// Builds a single-kernel graph for one transcript op, compiles it
+    /// with the kernel cache disabled (so nvcc runs fresh with lineinfo),
+    /// and binds zero-initialized inputs.
+    fn build_op_exe(
+        ctx: &GpuDeviceCtx,
+        modules: &SpongeModules,
+        device: DeviceType,
+        op: &str,
+    ) -> GraphExe {
+        let mut g = GraphBuilder::new();
+        let inputs: Vec<Vec<u8>> = match op {
+            "observe" => {
+                let state_in = alloc_state_buf(&mut g, device, "state_in");
+                let value_in = add_input_f_buf(&mut g, "value_in");
+                let state_out = alloc_state_buf(&mut g, device, "state_out");
+                g.register_input(state_in);
+                g.register_input(value_in);
+                g.register_output(state_out);
+                g.insert_kernel(
+                    modules.observe.clone(),
+                    [state_in, value_in],
+                    [state_out],
+                    &[("i", 0)],
+                );
+                vec![vec![0u8; WIDTH * 4], vec![0u8; 4]]
+            }
+            "observe_perm" => {
+                let state_in = alloc_state_buf(&mut g, device, "state_in");
+                let value_in = add_input_f_buf(&mut g, "value_in");
+                let state_out = alloc_state_buf(&mut g, device, "state_out");
+                g.register_input(state_in);
+                g.register_input(value_in);
+                g.register_output(state_out);
+                g.insert_kernel(
+                    modules.observe_perm.clone(),
+                    [state_in, value_in],
+                    [state_out],
+                    &[],
+                );
+                vec![vec![0u8; WIDTH * 4], vec![0u8; 4]]
+            }
+            "observe_ext_perm" => {
+                // Any p in `CHUNK - D_EF..CHUNK` selects the permuting
+                // variant; pick the boundary so the pre-perm run fills
+                // exactly `D_EF` slots.
+                let state_in = alloc_state_buf(&mut g, device, "state_in");
+                let value_in = add_input_ext_buf(&mut g, "value_in");
+                let state_out = alloc_state_buf(&mut g, device, "state_out");
+                g.register_input(state_in);
+                g.register_input(value_in);
+                g.register_output(state_out);
+                g.insert_kernel(
+                    modules.observe_ext_perm.clone(),
+                    [state_in, value_in],
+                    [state_out],
+                    &[("p", (CHUNK - D_EF) as i64)],
+                );
+                vec![vec![0u8; WIDTH * 4], vec![0u8; D_EF * 4]]
+            }
+            "permute" => {
+                let state_in = alloc_state_buf(&mut g, device, "state_in");
+                let state_out = alloc_state_buf(&mut g, device, "state_out");
+                g.register_input(state_in);
+                g.register_output(state_out);
+                g.insert_kernel(modules.permute.clone(), [state_in], [state_out], &[]);
+                vec![vec![0u8; WIDTH * 4]]
+            }
+            other => panic!("unknown op {other:?}"),
+        };
+
+        // `without_kernel_cache` forces a fresh nvcc compile in this
+        // process — needed because `CUDA_LINEINFO=1` doesn't change the
+        // module hash, so an existing cache entry built without lineinfo
+        // would be reused and ncu's source annotation would be blank.
+        // The `.cu` file lives in the JIT tempdir owned by the loaded
+        // `KernelProgram`, which stays alive for the profiler window.
+        let mut exe = GraphCompiler::new()
+            .device(device)
+            .without_kernel_cache()
+            .compile(g)
+            .expect("graph compile");
+        assert_eq!(exe.num_inputs(), inputs.len(), "input count mismatch for op {op}");
+        for (i, bytes) in inputs.iter().enumerate() {
+            let dbuf = bytes.as_slice().to_device_on(ctx).expect("H2D");
+            exe.set_input(ctx, i, &dbuf).expect("set_input");
+        }
+        exe
     }
 }

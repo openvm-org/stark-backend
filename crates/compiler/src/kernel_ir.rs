@@ -161,6 +161,74 @@ impl LinearLayout {
         out.offset = out.linear_apply(self.offset);
         Some(out)
     }
+
+    /// A right inverse `T⁺` covering `out_bits` output bits, or `None` if
+    /// the linear part isn't surjective onto `F_2^{out_bits}` (some
+    /// output bit isn't in the column span). For any `y < 2^out_bits`,
+    /// `self.apply(result.apply(y)) == y`.
+    ///
+    /// Semantics: `self` is XOR-affine `T(x) = M(x) ^ offset`; the
+    /// returned layout represents `T⁺(y) = M⁺(y ^ offset)`, so its
+    /// `bases.len() == out_bits` and output width is `self.bases.len()`
+    /// (input-side width of the original). Solutions to `M x = e_j`
+    /// aren't unique when the column span has slack (zero columns or
+    /// dependent columns); this picks the min-Hamming-weight preimage
+    /// by using only the pivot columns (slack columns contribute zero
+    /// to the preimage). That's the "canonical replica" convention —
+    /// replicated inputs (zero columns of `M`) resolve to the pivot's
+    /// physical index rather than being scattered arbitrarily.
+    pub fn right_inverse(&self, out_bits: usize) -> Option<LinearLayout> {
+        let k = self.bases.len();
+        // Column-space Gaussian elimination on the linear part. `m[c]`
+        // is column c of the current (post-elimination) matrix; `inv[c]`
+        // tracks the column op history so `M ∘ inv[c] = m[c]` (i.e.,
+        // `inv[c]` is the pre-image in the original input space of the
+        // current column c).
+        let mut m: Vec<u64> = self.bases.clone();
+        let mut inv: Vec<u64> = (0..k).map(|i| 1u64 << i).collect();
+        // For each output bit r, the input-space vector whose image is
+        // `e_r`. `None` means no such vector exists ⇒ not surjective.
+        let mut preimage: Vec<Option<u64>> = vec![None; out_bits];
+        // Columns already used as pivots.
+        let mut used: Vec<bool> = vec![false; k];
+        for r in 0..out_bits {
+            let pivot = (0..k).find(|&c| !used[c] && (m[c] >> r) & 1 == 1)?;
+            used[pivot] = true;
+            preimage[r] = Some(inv[pivot]);
+            // Zero bit r out of all other columns using the pivot.
+            let piv_m = m[pivot];
+            let piv_inv = inv[pivot];
+            for c in 0..k {
+                if c != pivot && (m[c] >> r) & 1 == 1 {
+                    m[c] ^= piv_m;
+                    inv[c] ^= piv_inv;
+                }
+            }
+        }
+        let new_bases: Vec<u64> = preimage.into_iter().map(|p| p.unwrap()).collect();
+        // Affine: `T⁺(y) = M⁺(y ^ offset)`. Represent as a `LinearLayout`
+        // with linear part `M⁺` and offset `M⁺(self.offset)`, so
+        // `result.apply(y) = M⁺(y) ^ M⁺(self.offset) = M⁺(y ^ self.offset)`.
+        let tmp = LinearLayout {
+            bases: new_bases.clone(),
+            offset: 0,
+        };
+        let new_offset = tmp.linear_apply(self.offset);
+        Some(LinearLayout {
+            bases: new_bases,
+            offset: new_offset,
+        })
+    }
+}
+
+/// Whether two XOR-affine maps agree as functions over the union of
+/// their input widths. Missing high bases are treated as zero — inputs
+/// past either domain are masked out by upstream bounds guards, so a
+/// map with a shorter `bases` acts as if its high input bits are ignored.
+pub fn maps_agree(a: &LinearLayout, b: &LinearLayout) -> bool {
+    a.offset == b.offset
+        && (0..a.bases.len().max(b.bases.len()))
+            .all(|i| a.bases.get(i).copied().unwrap_or(0) == b.bases.get(i).copied().unwrap_or(0))
 }
 
 /// How a layout-conversion map `C` (destination physical index to source
@@ -181,8 +249,33 @@ pub enum ConvertKind {
     Bounce,
 }
 
+/// Whether the "sender slot" a shuffle would consume for each destination
+/// slot `s'` is thread-independent. Fast path in [`ConvertKind::Shuffle`]:
+/// no lane- or warp-input base of `C` writes into slot output positions,
+/// so `C(s' << tb ^ tid) >> tb` collapses to `C(s' << tb) >> tb`. Under
+/// this condition a shuffle can broadcast from a canonical source slot
+/// even when the lane block is non-invertible (e.g. a replicated par as
+/// under Gap 2) — the receivers just all read the same sender.
+pub fn const_src_slot(c: &LinearLayout, tb: usize) -> bool {
+    let slot_mask: u64 = if tb >= u64::BITS as usize {
+        0
+    } else {
+        !((1u64 << tb) - 1)
+    };
+    c.bases[..tb.min(c.bases.len())]
+        .iter()
+        .all(|&b| b & slot_mask == 0)
+}
+
 /// Classifies the conversion map `C` over `k = C.bases.len()` input bits for
-/// a block of `block` threads. `C` must be square (outputs also `k` bits).
+/// a block of `block` threads. `C` maps dst physical → src physical, with
+/// the low `min(k, log2(block))` bits being thread bits (lane in the low 5,
+/// warp above) and the rest slot bits.
+///
+/// Under Gap 4 (surjective source layouts), `Shuffle` no longer requires
+/// the lane block to be invertible: the fast path through `const_src_slot`
+/// covers replicated senders where multiple destination lanes broadcast
+/// from one canonical source.
 pub fn classify_convert(c: &LinearLayout, block: usize) -> ConvertKind {
     if c.is_identity() {
         return ConvertKind::Copy;
@@ -208,27 +301,48 @@ pub fn classify_convert(c: &LinearLayout, block: usize) -> ConvertKind {
         return ConvertKind::Slot;
     }
 
-    if tb < 5 || k < 5 {
+    if tb == 0 {
+        // No thread bits ⇒ nothing to shuffle; the legitimate within-thread
+        // cases were caught by `slot_only` above.
         return ConvertKind::Bounce;
     }
+    // Lane bits are the low `min(tb, 5)` thread bits; the remaining thread
+    // bits (bits 5..tb, only if the CTA spans multiple warps) are warp
+    // bits. Sub-warp CTAs (tb < 5, e.g. Poseidon2-16 at block=16) have no
+    // warp bits — the checks below collapse to trivialities but the same
+    // code covers them.
+    let lane_bits = tb.min(5);
+    let lane_mask = (1u64 << lane_bits) - 1;
+    let warp_mask = thread_mask & !lane_mask;
     // Offset bits in the lane fold into a lane XOR and slot bits into the
     // per-slot constants, but warp bits would cross warps.
-    let warp_mask = thread_mask & !31;
     if c.offset & warp_mask != 0 {
         return ConvertKind::Bounce;
     }
     let warp_fixed = c.bases.iter().enumerate().all(|(i, &b)| {
-        let want = if (5..tb).contains(&i) { 1 << i } else { 0 };
+        let want = if (lane_bits..tb).contains(&i) { 1 << i } else { 0 };
         b & warp_mask == want
     });
     if !warp_fixed {
         return ConvertKind::Bounce;
     }
     let lane_block = LinearLayout {
-        bases: c.bases[..5].iter().map(|&b| b & 31).collect(),
+        bases: c.bases[..lane_bits]
+            .iter()
+            .map(|&b| b & lane_mask)
+            .collect(),
         offset: 0,
     };
-    if lane_block.inverse().is_some() {
+    // Shuffle-fast-path: sender slot constant across the warp. Covers the
+    // whole XOR-offset butterfly family AND the replicated broadcasts
+    // introduced by Gap 2 (non-invertible lane blocks from zero-column
+    // par-attrs), which are exactly the cases where a full-mask shuffle
+    // broadcasts one source lane's value to many receivers.
+    //
+    // Bijective lane block AND non-const src slot is the general shuffle
+    // path (transpose-style): `gen_shuffle` inverts the lane block to
+    // route each destination slot from a per-tid computed source.
+    if const_src_slot(c, tb) || lane_block.inverse().is_some() {
         ConvertKind::Shuffle
     } else {
         ConvertKind::Bounce
@@ -663,6 +777,128 @@ mod tests {
     }
 
     #[test]
+    fn right_inverse_identity() {
+        let l = LinearLayout::identity(5);
+        let r = l.right_inverse(5).unwrap();
+        assert!(r.is_identity());
+    }
+
+    #[test]
+    fn right_inverse_replicated_high_bits() {
+        // bases = [1, 2, 0, 0, 0]: two live low-bit inputs, three replicated
+        // (zero) columns. Right inverse must (i) exist, (ii) round-trip,
+        // (iii) put the canonical replica in the pivot (low) bits.
+        let l = LinearLayout {
+            bases: vec![1, 2, 0, 0, 0],
+            offset: 0,
+        };
+        let r = l.right_inverse(2).unwrap();
+        assert_eq!(r.bases, vec![1, 2]);
+        for y in 0..4u64 {
+            assert_eq!(l.apply(r.apply(y)), y, "round-trip failed at y={y}");
+        }
+    }
+
+    #[test]
+    fn right_inverse_replicated_low_bits() {
+        // bases = [0, 0, 0, 1, 2]: replication on the low three input bits,
+        // live columns at input positions 3 and 4. Canonical replicas
+        // should live at bits 3 and 4 (the pivot inputs), matching the
+        // Gap 7 counterexample where canonical lanes are {0, 8, 16, 24}.
+        let l = LinearLayout {
+            bases: vec![0, 0, 0, 1, 2],
+            offset: 0,
+        };
+        let r = l.right_inverse(2).unwrap();
+        assert_eq!(r.bases, vec![1 << 3, 1 << 4]);
+        assert_eq!(r.apply(0), 0);
+        assert_eq!(r.apply(1), 1 << 3);
+        assert_eq!(r.apply(2), 1 << 4);
+        assert_eq!(r.apply(3), (1 << 3) | (1 << 4));
+        for y in 0..4u64 {
+            assert_eq!(l.apply(r.apply(y)), y);
+        }
+    }
+
+    #[test]
+    fn right_inverse_non_surjective() {
+        // Only one output bit is in the column span; two-bit codomain
+        // has no right inverse.
+        let l = LinearLayout {
+            bases: vec![1, 0],
+            offset: 0,
+        };
+        assert!(l.right_inverse(2).is_none());
+    }
+
+    #[test]
+    fn right_inverse_affine() {
+        let l = LinearLayout {
+            bases: vec![1, 2, 4],
+            offset: 5,
+        };
+        let r = l.right_inverse(3).unwrap();
+        for y in 0..8u64 {
+            assert_eq!(l.apply(r.apply(y)), y);
+        }
+    }
+
+    #[test]
+    fn right_inverse_matches_inverse_on_square_bijections() {
+        let rot = rotation5();
+        let r = rot.right_inverse(5).unwrap();
+        let inv = rot.inverse().unwrap();
+        assert_eq!(r.bases, inv.bases);
+        assert_eq!(r.offset, inv.offset);
+    }
+
+    #[test]
+    fn right_inverse_of_composite_shift() {
+        // The `shift` layout in singular_maps_have_no_inverse (x -> x >> 1)
+        // is 4 → 3 dimensional but surjective onto its 3 low bits.
+        let shift = LinearLayout {
+            bases: vec![0, 1, 2, 4],
+            offset: 0,
+        };
+        let r = shift.right_inverse(3).unwrap();
+        for y in 0..8u64 {
+            assert_eq!(shift.apply(r.apply(y)), y);
+        }
+        // Right composition is a projector on inputs, not the identity.
+        let projector = r.compose(&shift);
+        // shift.apply(1) = 0 (bit 0 collapsed), so projector maps bit-0
+        // input to 0.
+        assert_eq!(projector.apply(1), 0);
+        // Bits 1, 2, 3 survive as bits 0, 1, 2 → 1, 2, 4 after reinjection.
+        assert_eq!(projector.apply(2), 2);
+        assert_eq!(projector.apply(4), 4);
+        assert_eq!(projector.apply(8), 8);
+    }
+
+    #[test]
+    fn maps_agree_treats_missing_bases_as_zero() {
+        let a = LinearLayout {
+            bases: vec![1, 2, 4],
+            offset: 0,
+        };
+        let b = LinearLayout {
+            bases: vec![1, 2, 4, 0, 0],
+            offset: 0,
+        };
+        assert!(maps_agree(&a, &b));
+        let c = LinearLayout {
+            bases: vec![1, 2, 4, 8],
+            offset: 0,
+        };
+        assert!(!maps_agree(&a, &c));
+        let d = LinearLayout {
+            bases: vec![1, 2, 4],
+            offset: 5,
+        };
+        assert!(!maps_agree(&a, &d));
+    }
+
+    #[test]
     fn classify_convert_cases() {
         let block = 256usize;
         assert_eq!(
@@ -688,10 +924,20 @@ mod tests {
         warp_mix.bases[5] = 1;
         warp_mix.bases[0] = 1 << 5;
         assert_eq!(classify_convert(&warp_mix, block), ConvertKind::Bounce);
-        // Singular lane block: two lanes fold onto one.
+        // Singular lane block with `const_src_slot`: bit-0 lane input maps
+        // to no output, so pairs of receiver lanes broadcast the same
+        // sender slot. Under Gap 4 this is a Shuffle, not a Bounce —
+        // `__shfl_sync` handles many-to-one lane routing natively.
         let mut fold = LinearLayout::identity(9);
         fold.bases[0] = 0;
-        assert_eq!(classify_convert(&fold, block), ConvertKind::Bounce);
+        assert_eq!(classify_convert(&fold, block), ConvertKind::Shuffle);
+        // Singular lane block *with* lane→slot mixing: a lane input maps
+        // into a slot output bit, so the sender slot is thread-dependent
+        // even though the lane block is non-invertible. Fast path (const
+        // src slot) fails and the general path can't invert → Bounce.
+        let mut fold_slot = LinearLayout::identity(9);
+        fold_slot.bases[0] = 1 << 8; // bit-0 lane → bit-8 (a slot bit)
+        assert_eq!(classify_convert(&fold_slot, block), ConvertKind::Bounce);
         // Pure XOR offsets: slot bits permute registers, lane bits shuffle
         // (a butterfly partner read), warp bits cross warps.
         let mut slot_off = LinearLayout::identity(10);
@@ -708,6 +954,45 @@ mod tests {
             classify_convert(&lane_rot, 100),
             ConvertKind::Bounce,
             "non-pow2 block"
+        );
+
+        // Sub-warp block (WIDTH=16 sponge / Poseidon2-16 pattern): tb = k = 4,
+        // no warp bits. XOR-stride partner reads are invertible lane
+        // permutations and must classify as Shuffle.
+        let sub_warp_block = 16usize;
+        for stride in [1u64, 2, 4, 8] {
+            let mut xor_stride = LinearLayout::identity(4);
+            xor_stride.offset = stride;
+            assert_eq!(
+                classify_convert(&xor_stride, sub_warp_block),
+                ConvertKind::Shuffle,
+                "sub-warp XOR-stride {stride}",
+            );
+        }
+        // Sub-warp non-invertible lane block (apply_mat4's `j - j%4 + r`
+        // access: bits 0 and 1 collapse). Under Gap 4 this is a Shuffle —
+        // 4 receivers per canonical sender, all resolved to the same
+        // register slot (fast path).
+        let mat4_read = LinearLayout {
+            bases: vec![0, 0, 4, 8],
+            offset: 1,
+        };
+        assert_eq!(
+            classify_convert(&mat4_read, sub_warp_block),
+            ConvertKind::Shuffle,
+            "sub-warp non-invertible lane block with const src slot",
+        );
+        // Sub-warp k=6 (kb-tb=2 slot bits) with a lane→slot cross-term
+        // and a singular lane block: no fast path *and* no general
+        // path. Bounce.
+        let mat4_hard = LinearLayout {
+            bases: vec![16, 0, 4, 8, 0, 32],
+            offset: 0,
+        };
+        assert_eq!(
+            classify_convert(&mat4_hard, sub_warp_block),
+            ConvertKind::Bounce,
+            "sub-warp singular lane block with lane→slot cross-term",
         );
     }
 }

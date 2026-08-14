@@ -3532,9 +3532,78 @@ mod tests {
         buf
     }
 
+    /// Fusion-v2 options driven by the `FRAC_V2_BENCH_*` environment (same
+    /// names and semantics as `fractional_sumcheck_gpu_irv2::tests::
+    /// fusion_v2_options_from_env`, so a single set of env exports drives
+    /// both benches). Consumed by [`compiler_from_env`] when
+    /// `FRAC_IR_FUSION=v2` is set.
+    ///
+    /// - `FRAC_V2_BENCH_SOLVER_SECS` — CP-SAT wall-time per lex stage
+    ///   (default 120; the crate default of 5s returns
+    ///   `SolverStatusUnknown` on large graphs and falls back to the
+    ///   original unfused extraction).
+    /// - `FRAC_V2_BENCH_MAX_ALTS` — total cap on inserted alternatives
+    ///   across every saturation round of one outer iteration
+    ///   (default 10_000).
+    /// - `FRAC_V2_BENCH_MAX_ROUNDS` — saturation round bound
+    ///   (default from `FusionOptionsV2::default`).
+    /// - `FRAC_V2_BENCH_MAX_ENUM_MS` — per-round enumeration wall-time
+    ///   budget in milliseconds (default from `FusionOptionsV2::default`).
+    /// - `FRAC_V2_BENCH_OUTER_ITERS` — number of outer fusion iterations
+    ///   (default from `FusionOptionsV2::default`).
+    /// - `FRAC_V2_BENCH_HORIZONTAL=1` — re-enable horizontal fusion
+    ///   (off by default).
+    /// - `FRAC_V2_BENCH_SOLVER_WORKERS` — CP-SAT workers
+    ///   (default: all cores).
+    ///
+    /// Individual synthesis passes can additionally be turned off via
+    /// `FRAC_IR_FUSION_DISABLE=<pass,...>` (handled by
+    /// [`compiler_from_env`]).
+    fn fusion_v2_options_from_env() -> FusionOptionsV2 {
+        let defaults = FusionOptionsV2::default();
+        let solver_secs = std::env::var("FRAC_V2_BENCH_SOLVER_SECS")
+            .ok()
+            .and_then(|s| s.parse::<f64>().ok())
+            .unwrap_or(120.0);
+        let max_alts = std::env::var("FRAC_V2_BENCH_MAX_ALTS")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(10_000);
+        let max_rounds = std::env::var("FRAC_V2_BENCH_MAX_ROUNDS")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(defaults.max_rounds);
+        let horizontal = std::env::var_os("FRAC_V2_BENCH_HORIZONTAL").is_some();
+        let solver_workers = std::env::var("FRAC_V2_BENCH_SOLVER_WORKERS")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get()));
+        let max_enum = std::env::var("FRAC_V2_BENCH_MAX_ENUM_MS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .map(std::time::Duration::from_millis)
+            .unwrap_or(defaults.max_enumeration_time_per_round);
+        let outer_iters = std::env::var("FRAC_V2_BENCH_OUTER_ITERS")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(defaults.max_outer_iterations);
+        FusionOptionsV2 {
+            verbose: true,
+            solver_time_limit_secs: solver_secs,
+            solver_num_workers: solver_workers,
+            max_total_alternatives: max_alts,
+            max_rounds,
+            max_enumeration_time_per_round: max_enum,
+            max_outer_iterations: outer_iters,
+            enable_horizontal: horizontal,
+            ..defaults
+        }
+    }
+
     /// Builds a `GraphCompiler` honoring the `FRAC_IR_FUSION` env var:
-    /// `v2` enables fusion v2 (with `FRAC_IR_FUSION_DISABLE=<pass,...>` to
-    /// turn off individual synthesis passes), `off` disables fusion
+    /// `v2` enables fusion v2 with the tunables from
+    /// [`fusion_v2_options_from_env`] (with `FRAC_IR_FUSION_DISABLE=<pass,...>`
+    /// to turn off individual synthesis passes), `off` disables fusion
     /// entirely, anything else uses the default (v1) pipeline.
     ///
     /// `FRAC_BENCH_STREAMS=<n>` overrides `ListSchedulerV1::max_concurrency`;
@@ -3554,10 +3623,7 @@ mod tests {
         }
         match std::env::var("FRAC_IR_FUSION").as_deref() {
             Ok("v2") => {
-                let mut opts = FusionOptionsV2 {
-                    verbose: true,
-                    ..FusionOptionsV2::default()
-                };
+                let mut opts = fusion_v2_options_from_env();
                 if let Ok(disable) = std::env::var("FRAC_IR_FUSION_DISABLE") {
                     for pass in disable.split(',') {
                         match pass.trim() {
@@ -4951,10 +5017,15 @@ mod tests {
 
             // Eager warmup — records the full proof for the e2e check below.
             let (eager_proof, eager_xi) = {
+                let t_eager = Instant::now();
+                println!("[bench] eager warmup: H2D {} MiB…", (n * FRAC_EF_BYTES) >> 20);
                 let d_leaves = leaves_to_device(&leaves, &ctx);
                 let mut sponge = DuplexSpongeGpu::default();
                 let mut mem = MemTracker::start("bench.fractional_eager");
                 ctx.stream.synchronize().expect("sync");
+                let h2d_ms = t_eager.elapsed().as_secs_f64() * 1e3;
+                println!("[bench] eager warmup: H2D done in {h2d_ms:>8.2} ms; running eager sumcheck…");
+                let t_run = Instant::now();
                 let (proof, xi) = fractional_sumcheck_gpu::<SC, _>(
                     &mut sponge,
                     d_leaves,
@@ -4966,6 +5037,8 @@ mod tests {
                 )
                 .expect("eager warmup");
                 ctx.stream.synchronize().expect("sync");
+                let eager_run_ms = t_run.elapsed().as_secs_f64() * 1e3;
+                println!("[bench] eager warmup: done in {eager_run_ms:>8.2} ms");
                 (proof, xi)
             };
             let eager_sum = eager_proof.fractional_sum;
@@ -5026,13 +5099,39 @@ mod tests {
             }
 
             assert_eq!(exe.num_inputs(), 1, "leaves should be the only input");
+            let t_h2d = Instant::now();
+            println!("[bench] graph: H2D {} MiB…", (n * FRAC_EF_BYTES) >> 20);
             let d_input = frac_bytes(&leaves).to_device_on(&ctx).expect("H2D");
+            let h2d_ms = t_h2d.elapsed().as_secs_f64() * 1e3;
+            println!("[bench] graph: H2D done in {h2d_ms:>8.2} ms; set_input (also allocates {} MiB scratch pool on first use)…", exe.scratch_bytes() >> 20);
+            let t_set = Instant::now();
             exe.set_input(&ctx, 0, &d_input).expect("set_input");
+            ctx.stream.synchronize().expect("sync");
+            let set_ms = t_set.elapsed().as_secs_f64() * 1e3;
+            println!(
+                "[bench] graph: set_input+pool alloc+sync done in {set_ms:>8.2} ms; \
+                 dispatching warmup exe.run() ({} exe nodes)…",
+                exe.num_nodes(),
+            );
 
-            // Graph exec warmup.
-            ctx.stream.synchronize().expect("sync");
+            // Graph exec warmup. Split into (dispatch, sync) so we can tell
+            // whether the host-side node dispatch is slow or whether it's
+            // GPU-side compute we're waiting on.
+            ctx.stream.synchronize().expect("sync pre-warmup");
+            let t_dispatch = Instant::now();
             exe.run(&ctx).expect("graph warmup");
-            ctx.stream.synchronize().expect("sync");
+            let dispatch_ms = t_dispatch.elapsed().as_secs_f64() * 1e3;
+            println!(
+                "[bench] graph: warmup exe.run() host dispatch done in {dispatch_ms:>8.2} ms; \
+                 awaiting stream sync…",
+            );
+            let t_sync = Instant::now();
+            ctx.stream.synchronize().expect("sync post-warmup");
+            let sync_ms = t_sync.elapsed().as_secs_f64() * 1e3;
+            println!(
+                "[bench] graph: warmup GPU sync done in {sync_ms:>8.2} ms (total warmup {:>8.2} ms)",
+                dispatch_ms + sync_ms,
+            );
 
             // Full e2e correctness check — the same artifact-by-artifact
             // comparison as the `_matches_eager_*` tests, read back from
@@ -5079,9 +5178,22 @@ mod tests {
         // dispatch overhead).
         for st in states.iter_mut() {
             ctx.stream.synchronize().expect("sync");
+            println!("[bench] n=2^{}: capturing CUDA graph…", st.log_n);
+            let t_cap = Instant::now();
             st.exe.capture_graph(&ctx).expect("graph capture");
+            let cap_ms = t_cap.elapsed().as_secs_f64() * 1e3;
+            println!(
+                "[bench] n=2^{}: capture done in {cap_ms:>8.2} ms; graph launch warmup…",
+                st.log_n,
+            );
+            let t_lw = Instant::now();
             st.exe.launch_graph(&ctx).expect("graph warmup");
             ctx.stream.synchronize().expect("sync");
+            let lw_ms = t_lw.elapsed().as_secs_f64() * 1e3;
+            println!(
+                "[bench] n=2^{}: graph launch warmup done in {lw_ms:>8.2} ms",
+                st.log_n,
+            );
         }
 
         // ---- Timed pass: everything below runs inside a single

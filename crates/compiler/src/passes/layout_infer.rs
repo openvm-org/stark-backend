@@ -5,8 +5,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::{
     ir::{SizeExpr, VarId},
     kernel_ir::{
-        classify_convert, AddressSpace, BufId, BufferDecl, BufferKind, ConvertKind, IndexMap,
-        Kernel, KirProgram, LinearLayout, ParAttr, SSABlock, SSANode, SSAOp, SSAOpCode,
+        classify_convert, maps_agree, AddressSpace, BufId, BufferDecl, BufferKind, ConvertKind,
+        IndexMap, Kernel, KirProgram, LinearLayout, ParAttr, SSABlock, SSANode, SSAOp, SSAOpCode,
     },
     passes::utils::ceil_log2,
 };
@@ -138,7 +138,15 @@ enum Plan {
 struct Promotion {
     buf: BufId,
     /// Register layout `g_w ∘ f_w`: physical index to buffer index.
+    /// Its `bases.len()` equals `log2(block) + log2(seq_size)` — the
+    /// writer par's full phys input width — while its output width is
+    /// `kb = log2(tile_size)`. The two differ under warp-aligned
+    /// launches (Gap 1) when the tile is sub-block; codegen indexes
+    /// on `kb`.
     l: LinearLayout,
+    /// Bit count of the tile's logical domain (`log2(n)`), independent
+    /// of `l`'s input width.
+    kb: usize,
     readers: Vec<(SSANode, usize, Plan)>,
     alloc_at: StmtLoc,
     convert_at: StmtLoc,
@@ -199,13 +207,16 @@ fn promote_tiles(p: &mut KirProgram, ki: usize) {
             continue;
         }
         // Register layout: physical x runs logical f_w(x) and writes buffer
-        // index g_w(f_w(x)). Explicit par layouts are lowering-validated
-        // bijections, so `l` is invertible iff the access map is.
+        // index g_w(f_w(x)). Under Gap 1+2 the writer par-attr may be
+        // replicated (zero-column) when its bound < block, so `l` is a
+        // surjection onto the kb-bit tile logical space, not a bijection.
+        // Use the right inverse to keep sub-block tiles register-promoted
+        // instead of silently falling back to a shared mirror.
         let l = match wattr {
             Some(a) => f.compose(&a.layout),
             None => f.clone(),
         };
-        let Some(l_inv) = l.inverse() else {
+        let Some(l_inv) = l.right_inverse(kb) else {
             continue;
         };
 
@@ -260,10 +271,22 @@ fn promote_tiles(p: &mut KirProgram, ki: usize) {
                         }
                         None => g_padded.clone(),
                     };
-                    match classify_convert(&l_inv.compose(&eff), k.block) {
-                        ConvertKind::Copy => Plan::Direct(Some(g_padded)),
-                        ConvertKind::Slot | ConvertKind::Shuffle => Plan::View { eff, g_padded },
-                        ConvertKind::Bounce => Plan::Mirror,
+                    // Gap 3 amendment: under replication `C = l_inv ∘ l`
+                    // is the projector onto canonical replicas, not the
+                    // identity — `classify(C) == Copy` misses the case
+                    // where the reader wants exactly the producer's
+                    // layout. Test function equality first; classify the
+                    // residue only when the eff genuinely differs.
+                    if maps_agree(&eff, &l) {
+                        Plan::Direct(Some(g_padded))
+                    } else {
+                        match classify_convert(&l_inv.compose(&eff), k.block) {
+                            ConvertKind::Copy => Plan::Direct(Some(g_padded)),
+                            ConvertKind::Slot | ConvertKind::Shuffle => {
+                                Plan::View { eff, g_padded }
+                            }
+                            ConvertKind::Bounce => Plan::Mirror,
+                        }
                     }
                 }
                 _ => Plan::Mirror,
@@ -273,6 +296,7 @@ fn promote_tiles(p: &mut KirProgram, ki: usize) {
         promotions.push(Promotion {
             buf,
             l,
+            kb,
             readers,
             alloc_at,
             convert_at,
@@ -286,7 +310,7 @@ fn promote_tiles(p: &mut KirProgram, ki: usize) {
         decl.kind = BufferKind::Register;
         decl.space = AddressSpace::Register;
         decl.layout = Some(pr.l.clone());
-        let kb = pr.l.bases.len();
+        let kb = pr.kb;
 
         let mut allocs = Vec::new();
         let mut converts = Vec::new();
@@ -555,10 +579,13 @@ mod tests {
         assert!(!source.contains("__syncthreads"), "{source}");
     }
 
-    /// A non-linear reader of a promoted tile goes through a shared-memory
-    /// mirror, and the mirror write still gets a barrier before the reader.
+    /// A many-to-one reader of a promoted tile (`tile[j % (t/2)]` folds
+    /// pairs of lanes onto one slot) becomes a `__shfl_sync` broadcast
+    /// under Gap 4 — the singular lane block still classifies as
+    /// `Shuffle` when the sender-slot function is constant across
+    /// receivers. No shared mirror, no barrier.
     #[test]
-    fn non_linear_reader_gets_shared_mirror() {
+    fn non_linear_reader_gets_shuffle_view() {
         let (blocks, t) = (2usize, 8usize);
         let mut b = IRBuilder::new();
         let a = b.input("a", ScalarType::BabyBear, vec![blocks * t]);
@@ -566,9 +593,9 @@ mod tests {
             let tile = own_index_tile(b, a, i, t);
             b.bind(tile, |b, tile| {
                 b.compute(t, |b, j| {
-                    let last = b.const_u32(t as u32 - 1);
-                    let rev = b.sub(last, j);
-                    let x = b.index(tile, &[rev]);
+                    let half = b.const_u32((t / 2) as u32);
+                    let fold = b.rem(j, half);
+                    let x = b.index(tile, &[fold]);
                     let y = b.index(tile, &[j]);
                     b.add(x, y)
                 })
@@ -583,16 +610,14 @@ mod tests {
 
         assert_eq!(
             stmt_kinds(&kprog.kernels[0]),
-            ["alloc", "alloc", "par", "convert", "sync", "par"]
+            ["alloc", "alloc", "par", "convert", "par"]
         );
-        let tile = kprog.buffers.iter().find(|b| b.name.ends_with("_sm"));
-        let mirror = tile.expect("mirror buffer");
-        assert_eq!(mirror.kind, BufferKind::Shared);
-        assert_eq!(mirror.shape, vec![SizeExpr::from(t)]);
+        assert!(!kprog.buffers.iter().any(|b| b.name.ends_with("_sm")));
 
         let source = codegen(&kprog).unwrap();
-        assert!(source.contains("__shared__"), "{source}");
-        assert_eq!(source.matches("__syncthreads();").count(), 1, "{source}");
+        assert!(source.contains("__shfl_sync"), "{source}");
+        assert!(!source.contains("__shared__"), "{source}");
+        assert!(!source.contains("__syncthreads"), "{source}");
     }
 
     /// A tile read whose index contains a symbolic constant lowers to an
