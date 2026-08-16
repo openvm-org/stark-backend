@@ -830,13 +830,23 @@ fn dump_stmts(s: &mut String, k: &Kernel, stmts: &[SSANode], depth: usize) {
             SSAOpCode::Sync => {
                 writeln!(s, "{pad}sync").unwrap();
             }
-            SSAOpCode::ConvertLayout { dst, src, map } => {
+            SSAOpCode::ConvertLayout {
+                dst,
+                src,
+                scratch,
+                map,
+            } => {
                 let map = if map.is_identity() {
                     "id".to_string()
                 } else {
                     ll_str(map)
                 };
-                writeln!(s, "{pad}convert_layout b{} <- b{} map={map}", dst.0, src.0).unwrap();
+                writeln!(
+                    s,
+                    "{pad}convert_layout b{} <- b{} scratch=b{} map={map}",
+                    dst.0, src.0, scratch.0
+                )
+                .unwrap();
             }
             SSAOpCode::Loop { bound } => {
                 writeln!(s, "{pad}loop[{bound}]{} {{", captures_str(op, 0)).unwrap();

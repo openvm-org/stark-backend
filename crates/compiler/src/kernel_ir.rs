@@ -85,7 +85,7 @@ impl std::fmt::Display for KBound {
 pub struct SSARes(pub u32);
 
 /// Id of an [`SSAOp`] in the kernel's op arena.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct SSANode(pub u32);
 
 /// Id of a [`BufferDecl`] in the program's buffer table.
@@ -187,16 +187,22 @@ impl LinearLayout {
         // current column c).
         let mut m: Vec<u64> = self.bases.clone();
         let mut inv: Vec<u64> = (0..k).map(|i| 1u64 << i).collect();
-        // For each output bit r, the input-space vector whose image is
-        // `e_r`. `None` means no such vector exists ⇒ not surjective.
-        let mut preimage: Vec<Option<u64>> = vec![None; out_bits];
+        // Pivot column chosen for each output bit r. `None` return ⇒ some
+        // bit has no pivot ⇒ not surjective.
+        let mut pivot_for: Vec<usize> = Vec::with_capacity(out_bits);
         // Columns already used as pivots.
         let mut used: Vec<bool> = vec![false; k];
         for r in 0..out_bits {
             let pivot = (0..k).find(|&c| !used[c] && (m[c] >> r) & 1 == 1)?;
             used[pivot] = true;
-            preimage[r] = Some(inv[pivot]);
-            // Zero bit r out of all other columns using the pivot.
+            pivot_for.push(pivot);
+            // Zero bit r out of all other columns using the pivot. The
+            // pivot column itself still carries bits other than r; those
+            // are cleaned by *later* rounds (each bit r' is eliminated
+            // from every column except its own pivot), so the preimages
+            // must be read off only after the elimination completes —
+            // snapshotting `inv[pivot]` here would invert the partially
+            // reduced column, not `e_r`.
             let piv_m = m[pivot];
             let piv_inv = inv[pivot];
             for c in 0..k {
@@ -206,7 +212,7 @@ impl LinearLayout {
                 }
             }
         }
-        let new_bases: Vec<u64> = preimage.into_iter().map(|p| p.unwrap()).collect();
+        let new_bases: Vec<u64> = pivot_for.into_iter().map(|p| inv[p]).collect();
         // Affine: `T⁺(y) = M⁺(y ^ offset)`. Represent as a `LinearLayout`
         // with linear part `M⁺` and offset `M⁺(self.offset)`, so
         // `result.apply(y) = M⁺(y) ^ M⁺(self.offset) = M⁺(y ^ self.offset)`.
@@ -598,26 +604,8 @@ pub fn maps_agree(a: &LinearLayout, b: &LinearLayout) -> bool {
             .all(|i| a.bases.get(i).copied().unwrap_or(0) == b.bases.get(i).copied().unwrap_or(0))
 }
 
-/// How a layout-conversion map `C` (destination physical index to source
-/// physical index, both flattened as `slot * blockDim + thread` with the
-/// lane in the low 5 thread bits) can be realized. Classified by
-/// [`classify_convert`].
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ConvertKind {
-    /// `C` is the identity: no data movement at all.
-    Copy,
-    /// `C` fixes the thread bits and its slot bits depend only on slot
-    /// bits: each thread permutes its own register slots.
-    Slot,
-    /// `C` fixes the warp bits and its lane-to-lane block is invertible:
-    /// one `__shfl_sync` per destination slot.
-    Shuffle,
-    /// Anything else: the conversion has to go through shared memory.
-    Bounce,
-}
-
 /// Whether the "sender slot" a shuffle would consume for each destination
-/// slot `s'` is thread-independent. Fast path in [`ConvertKind::Shuffle`]:
+/// slot `s'` is thread-independent. Fast path in `Strategy::Shuffle`:
 /// no lane- or warp-input base of `C` writes into slot output positions,
 /// so `C(s' << tb ^ tid) >> tb` collapses to `C(s' << tb) >> tb`. Under
 /// this condition a shuffle can broadcast from a canonical source slot
@@ -634,90 +622,63 @@ pub fn const_src_slot(c: &LinearLayout, tb: usize) -> bool {
         .all(|&b| b & slot_mask == 0)
 }
 
-/// Classifies the conversion map `C` over `k = C.bases.len()` input bits for
-/// a block of `block` threads. `C` maps dst physical → src physical, with
-/// the low `min(k, log2(block))` bits being thread bits (lane in the low 5,
-/// warp above) and the rest slot bits.
-///
-/// Under Gap 4 (surjective source layouts), `Shuffle` no longer requires
-/// the lane block to be invertible: the fast path through `const_src_slot`
-/// covers replicated senders where multiple destination lanes broadcast
-/// from one canonical source.
-pub fn classify_convert(c: &LinearLayout, block: usize) -> ConvertKind {
-    if c.is_identity() {
-        return ConvertKind::Copy;
-    }
-    let k = c.bases.len();
-    // The bit decomposition of the physical index assumes a power-of-two
-    // block; the domain must span whole warps for a shuffle.
-    if !block.is_power_of_two() {
-        return ConvertKind::Bounce;
-    }
-    let tb = k.min(block.trailing_zeros() as usize);
-    let thread_mask = (1u64 << tb) - 1;
+/// The lane→slot mixing directions of `c : phys → phys`: the reduced
+/// basis of `{ (c.bases[i] >> tb) : i < tb }` — the slot-output
+/// components contributed by thread inputs. Under warp-column identity
+/// the warp columns contribute zero, so this is exactly the span of
+/// `C(tid) >> tb` over all `tid`. Empty iff [`const_src_slot`] holds.
+pub fn lane_slot_mix_dirs(c: &LinearLayout, tb: usize) -> Vec<u64> {
+    f2::reduce(
+        c.bases[..tb.min(c.bases.len())]
+            .iter()
+            .map(|&b| b >> tb)
+            .collect(),
+    )
+}
 
-    let slot_only = c.offset & thread_mask == 0
-        && c.bases.iter().enumerate().all(|(i, &b)| {
-            if i < tb {
-                b == 1 << i
-            } else {
-                b & thread_mask == 0
-            }
-        });
-    if slot_only {
-        return ConvertKind::Slot;
-    }
-
-    if tb == 0 {
-        // No thread bits ⇒ nothing to shuffle; the legitimate within-thread
-        // cases were caught by `slot_only` above.
-        return ConvertKind::Bounce;
-    }
-    // Lane bits are the low `min(tb, 5)` thread bits; the remaining thread
-    // bits (bits 5..tb, only if the CTA spans multiple warps) are warp
-    // bits. Sub-warp CTAs (tb < 5, e.g. Poseidon2-16 at block=16) have no
-    // warp bits — the checks below collapse to trivialities but the same
-    // code covers them.
-    let lane_bits = tb.min(5);
-    let lane_mask = (1u64 << lane_bits) - 1;
-    let warp_mask = thread_mask & !lane_mask;
-    // Offset bits in the lane fold into a lane XOR and slot bits into the
-    // per-slot constants, but warp bits would cross warps.
-    if c.offset & warp_mask != 0 {
-        return ConvertKind::Bounce;
-    }
-    let warp_fixed = c.bases.iter().enumerate().all(|(i, &b)| {
-        let want = if (lane_bits..tb).contains(&i) {
-            1 << i
-        } else {
-            0
-        };
-        b & warp_mask == want
-    });
-    if !warp_fixed {
-        return ConvertKind::Bounce;
-    }
-    let lane_block = LinearLayout {
-        bases: c.bases[..lane_bits]
+/// Whether the lane-input → lane-output sub-block of `c` is invertible.
+/// Gates `gen_shuffle`'s sender-side ternary path (one `__shfl_sync` per
+/// destination slot even when the sender slot varies per lane).
+pub fn lane_block_invertible(c: &LinearLayout, tb: usize) -> bool {
+    let lane_bits = 5.min(tb);
+    let lane_mask = if lane_bits == 0 {
+        0
+    } else {
+        (1u64 << lane_bits) - 1
+    };
+    LinearLayout {
+        bases: c.bases[..lane_bits.min(c.bases.len())]
             .iter()
             .map(|&b| b & lane_mask)
             .collect(),
         offset: 0,
-    };
-    // Shuffle-fast-path: sender slot constant across the warp. Covers the
-    // whole XOR-offset butterfly family AND the replicated broadcasts
-    // introduced by Gap 2 (non-invertible lane blocks from zero-column
-    // par-attrs), which are exactly the cases where a full-mask shuffle
-    // broadcasts one source lane's value to many receivers.
-    //
-    // Bijective lane block AND non-const src slot is the general shuffle
-    // path (transpose-style): `gen_shuffle` inverts the lane block to
-    // route each destination slot from a per-tid computed source.
-    if const_src_slot(c, tb) || lane_block.inverse().is_some() {
-        ConvertKind::Shuffle
-    } else {
-        ConvertKind::Bounce
     }
+    .inverse()
+    .is_some()
+}
+
+/// Number of `__shfl_sync` instructions `gen_shuffle` emits for the
+/// composite `c : phys → phys` under a `block`-thread CTA, mirroring its
+/// dispatch:
+///
+/// - **Constant sender slot** ([`const_src_slot`]) — one shuffle per destination slot at a
+///   compile-time-constant source slot: `slots`.
+/// - **Invertible lane block** — sender-side ternary path, one shuffle per destination slot:
+///   `slots`.
+/// - **Multi-round** (everything else under warp-column identity, paper §5.4 page 8) — per
+///   destination slot, one shuffle per candidate sender slot `σ` in the affine subspace `(C(s' <<
+///   tb) >> tb) ^ span(dirs)`: `slots · 2^|dirs|` with `dirs =` [`lane_slot_mix_dirs`].
+///
+/// The caller (`best_decomposition`) checks `is_warp_column_identity`.
+pub fn shuffle_rounds(c: &LinearLayout, block: usize) -> u64 {
+    let kb = c.bases.len();
+    let tb = kb.min(block.trailing_zeros() as usize);
+    let slots = 1u64 << (kb - tb);
+    if slots == 1 || const_src_slot(c, tb) || lane_block_invertible(c, tb) {
+        return slots;
+    }
+    let dirs = lane_slot_mix_dirs(c, tb);
+    slots << dirs.len().min(63)
 }
 
 /// Compute layout of a `par [N]`: a factorization of the logical iteration
@@ -880,9 +841,20 @@ pub enum SSAOpCode {
     /// shared-memory staging loop depending on the buffers' address
     /// spaces and [`classify_convert`]. Inserted by `passes::layout_infer`
     /// right after the op writing `src`.
+    ///
+    /// `scratch` names a companion [`AddressSpace::Shared`] buffer allocated
+    /// by `layout_infer` alongside every `ConvertLayout`. Its byte size is
+    /// filled in by `passes::allocate_convert_scratch` from the `(src, dst)`
+    /// layout pair (Phase B.2); pure register→register shuffles need no
+    /// scratch and the buffer stays 0-byte, but the BufId is always present
+    /// so codegen and the shared-memory packer see one uniform interface.
+    /// The register→register bounce and shared→shared paths (Phase B.4-full)
+    /// stage through `scratch` under a bank-conflict-minimizing swizzle
+    /// picked at codegen time from the two accesses that touch it.
     ConvertLayout {
         dst: BufId,
         src: BufId,
+        scratch: BufId,
         map: LinearLayout,
     },
     /// No operands; one result.
@@ -1396,11 +1368,11 @@ mod tests {
             assert!(w[0].trailing_zeros() < w[1].trailing_zeros());
         }
         // Each pivot bit is present in exactly one basis vector (RREF).
-        for i in 0..r.len() {
-            let pb = r[i].trailing_zeros();
-            for j in 0..r.len() {
+        for (i, &ri) in r.iter().enumerate() {
+            let pb = ri.trailing_zeros();
+            for (j, &rj) in r.iter().enumerate() {
                 if i != j {
-                    assert_eq!((r[j] >> pb) & 1, 0);
+                    assert_eq!((rj >> pb) & 1, 0);
                 }
             }
         }
@@ -1509,103 +1481,5 @@ mod tests {
         let cands = f2::standard_basis(5);
         let added = f2::extend_with(&current, &cands, 2);
         assert_eq!(added, vec![1, 2]);
-    }
-
-    #[test]
-    fn classify_convert_cases() {
-        let block = 256usize;
-        assert_eq!(
-            classify_convert(&LinearLayout::identity(9), block),
-            ConvertKind::Copy
-        );
-        // Slot-bit swap over k = 10, tb = 8: threads fixed, slots permuted.
-        let mut slot_swap = LinearLayout::identity(10);
-        slot_swap.bases[8] = 1 << 9;
-        slot_swap.bases[9] = 1 << 8;
-        assert_eq!(classify_convert(&slot_swap, block), ConvertKind::Slot);
-        // Lane rotation over k = 9: warps fixed, lane block invertible.
-        let mut lane_rot = LinearLayout::identity(9);
-        lane_rot.bases[..5].copy_from_slice(&rotation5().bases);
-        assert_eq!(classify_convert(&lane_rot, block), ConvertKind::Shuffle);
-        // Slot bit XOR-ed into the lane path stays a shuffle (lane block
-        // is still the identity).
-        let mut slot_xor = LinearLayout::identity(10);
-        slot_xor.bases[0] = 1 | (1 << 9);
-        assert_eq!(classify_convert(&slot_xor, block), ConvertKind::Shuffle);
-        // Warp bit moved into the lanes cannot be shuffled.
-        let mut warp_mix = LinearLayout::identity(9);
-        warp_mix.bases[5] = 1;
-        warp_mix.bases[0] = 1 << 5;
-        assert_eq!(classify_convert(&warp_mix, block), ConvertKind::Bounce);
-        // Singular lane block with `const_src_slot`: bit-0 lane input maps
-        // to no output, so pairs of receiver lanes broadcast the same
-        // sender slot. Under Gap 4 this is a Shuffle, not a Bounce —
-        // `__shfl_sync` handles many-to-one lane routing natively.
-        let mut fold = LinearLayout::identity(9);
-        fold.bases[0] = 0;
-        assert_eq!(classify_convert(&fold, block), ConvertKind::Shuffle);
-        // Singular lane block *with* lane→slot mixing: a lane input maps
-        // into a slot output bit, so the sender slot is thread-dependent
-        // even though the lane block is non-invertible. Fast path (const
-        // src slot) fails and the general path can't invert → Bounce.
-        let mut fold_slot = LinearLayout::identity(9);
-        fold_slot.bases[0] = 1 << 8; // bit-0 lane → bit-8 (a slot bit)
-        assert_eq!(classify_convert(&fold_slot, block), ConvertKind::Bounce);
-        // Pure XOR offsets: slot bits permute registers, lane bits shuffle
-        // (a butterfly partner read), warp bits cross warps.
-        let mut slot_off = LinearLayout::identity(10);
-        slot_off.offset = 1 << 9;
-        assert_eq!(classify_convert(&slot_off, block), ConvertKind::Slot);
-        let mut lane_off = LinearLayout::identity(9);
-        lane_off.offset = 16;
-        assert_eq!(classify_convert(&lane_off, block), ConvertKind::Shuffle);
-        let mut warp_off = LinearLayout::identity(9);
-        warp_off.offset = 1 << 6;
-        assert_eq!(classify_convert(&warp_off, block), ConvertKind::Bounce);
-        // Non-power-of-two blocks cannot be bit-decomposed.
-        assert_eq!(
-            classify_convert(&lane_rot, 100),
-            ConvertKind::Bounce,
-            "non-pow2 block"
-        );
-
-        // Sub-warp block (WIDTH=16 sponge / Poseidon2-16 pattern): tb = k = 4,
-        // no warp bits. XOR-stride partner reads are invertible lane
-        // permutations and must classify as Shuffle.
-        let sub_warp_block = 16usize;
-        for stride in [1u64, 2, 4, 8] {
-            let mut xor_stride = LinearLayout::identity(4);
-            xor_stride.offset = stride;
-            assert_eq!(
-                classify_convert(&xor_stride, sub_warp_block),
-                ConvertKind::Shuffle,
-                "sub-warp XOR-stride {stride}",
-            );
-        }
-        // Sub-warp non-invertible lane block (apply_mat4's `j - j%4 + r`
-        // access: bits 0 and 1 collapse). Under Gap 4 this is a Shuffle —
-        // 4 receivers per canonical sender, all resolved to the same
-        // register slot (fast path).
-        let mat4_read = LinearLayout {
-            bases: vec![0, 0, 4, 8],
-            offset: 1,
-        };
-        assert_eq!(
-            classify_convert(&mat4_read, sub_warp_block),
-            ConvertKind::Shuffle,
-            "sub-warp non-invertible lane block with const src slot",
-        );
-        // Sub-warp k=6 (kb-tb=2 slot bits) with a lane→slot cross-term
-        // and a singular lane block: no fast path *and* no general
-        // path. Bounce.
-        let mat4_hard = LinearLayout {
-            bases: vec![16, 0, 4, 8, 0, 32],
-            offset: 0,
-        };
-        assert_eq!(
-            classify_convert(&mat4_hard, sub_warp_block),
-            ConvertKind::Bounce,
-            "sub-warp singular lane block with lane→slot cross-term",
-        );
     }
 }

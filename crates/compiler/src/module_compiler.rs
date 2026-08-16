@@ -143,6 +143,7 @@ impl ModuleCompiler {
 
         let mut kp = passes::lower_to_kir(&program)?;
         passes::layout_infer(&mut kp);
+        passes::allocate_convert_scratch(&mut kp);
         passes::insert_sync(&mut kp);
         Ok(kp)
     }
@@ -150,6 +151,9 @@ impl ModuleCompiler {
     /// KIR → dlopen'd CUDA artifact (source emission + verify + nvcc + dlopen).
     pub fn codegen(&self, kp: KirProgram) -> Result<KernelProgram, CompileError> {
         let source = passes::codegen(&kp)?;
+        if let Some(dir) = &self.dump_dir {
+            crate::dump::write_cuda_dump(dir, &kp.name, &source)?;
+        }
         passes::verify(&kp)?;
         let opts = self.to_compile_options();
         let name = kp.name.clone();
@@ -161,7 +165,13 @@ impl ModuleCompiler {
     /// Callers must supply a canonical, single-kernel, monomorphized module
     /// (the graph compiler passes produce these).
     pub fn compile(&self, m: ir::Module) -> Result<KernelProgram, CompileError> {
+        let hir = self.dump_dir.as_ref().map(|_| crate::dump::dump_hir(&m));
         let kp = self.lower(m)?;
+        if let (Some(dir), Some(hir)) = (&self.dump_dir, hir) {
+            let plan = passes::plan_shared_mem(&kp);
+            let kir = crate::dump::dump_kernel_ir(&kp, &plan);
+            crate::dump::write_ir_dumps(dir, &kp.name, &hir, &kir)?;
+        }
         self.codegen(kp)
     }
 

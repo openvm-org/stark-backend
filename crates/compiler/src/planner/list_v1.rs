@@ -695,7 +695,7 @@ fn offline_repack(state: &mut SchedState, ctx: &PlanCtx) {
     // because `commit()` only emits cross-stream events for RAW on the
     // same BufId, so a WAW/WAR at the pool-slot level would race.
     let mut buf_stream: Vec<Option<u32>> = vec![None; n_bufs];
-    for b in 0..n_bufs {
+    for (b, slot) in buf_stream.iter_mut().enumerate() {
         if !ctx.packable(b) {
             continue;
         }
@@ -712,7 +712,7 @@ fn offline_repack(state: &mut SchedState, ctx: &PlanCtx) {
                 _ => {}
             }
         }
-        buf_stream[b] = if multi { None } else { chosen };
+        *slot = if multi { None } else { chosen };
     }
 
     // Two buffers "overlap" (cannot share pool bytes) iff their

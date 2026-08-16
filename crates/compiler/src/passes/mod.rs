@@ -15,6 +15,7 @@
 //! validates the memory accesses of a concrete instantiation without
 //! compiling anything.
 
+pub mod allocate_convert_scratch;
 pub mod canonicalize;
 pub mod check_accesses;
 pub mod codegen;
@@ -39,6 +40,7 @@ pub mod utils;
 pub mod verify;
 
 pub use self::{
+    allocate_convert_scratch::allocate_convert_scratch,
     canonicalize::{canonicalize, is_canonicalized},
     check_accesses::{check_module_accesses, check_program_accesses},
     codegen::codegen,

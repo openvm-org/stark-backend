@@ -730,6 +730,47 @@ fn macro_register_shuffle_slot_xor() {
     assert_eq!(outs[0], want);
 }
 
+/// Warp-crossing bit permutation via reg→reg Bounce (Phase B.4-full).
+/// With `t = 128` and no `#[grid(threads=…)]` the block is 128, giving
+/// 5 lane bits + 2 warp bits. The reader's index `j % 32 * 4 + j / 32`
+/// moves warp bits into lane positions, failing `is_warp_column_identity`
+/// and forcing `Strategy::Bounce`. The explicit `#[par((th, s) -> th)]`
+/// stops `infer_par_attr` from picking a rotated par-attr that would
+/// eliminate the mismatch.
+///
+/// Runtime verification: functional correctness of `gen_reg_bounce`'s
+/// store→sync→load through a swizzled scratch buffer (paper §5.4
+/// Optimal Swizzling).
+#[test]
+fn macro_reg_reg_bounce_warp_crossing() {
+    let (blocks, t) = (5usize, 128usize);
+    let n = blocks * t;
+    let a = pseudo_field_elems(n, 41);
+
+    let mut ib = IRBuilder::new();
+    let a_in = ib.input("a", ScalarType::BabyBear, vec![n]);
+    let body = kernel!(ib,
+        compute [blocks] |i| {
+            let buf = compute [t] |j| { a_in[i * #t + j] * 2bb };
+            #[par((th, s) -> th + s * 128)]
+            compute [t] |j| { buf[j % 32 * 4 + j / 32] + 1bb }
+        }
+    );
+    let module = ib.finish("bounce_warp_crossing", body);
+
+    let outs = run_module(module, std::slice::from_ref(&a));
+    assert_eq!(outs.len(), 1);
+
+    let mut want = vec![0u32; n];
+    for i in 0..blocks {
+        for j in 0..t {
+            let src = (j % 32) * 4 + j / 32;
+            want[i * t + j] = (bb(a[i * t + src]) * bb(2) + bb(1)).as_canonical_u32();
+        }
+    }
+    assert_eq!(outs[0], want);
+}
+
 /// Mixed readers force the shared bounce: one reader matches the register
 /// layout, the other reads a reversal (not XOR-linear), so the promoted tile
 /// is mirrored back through shared memory for it.
@@ -2475,4 +2516,73 @@ fn data_dependent_gather() {
         let want = (input[perm[i] as usize] as u64 + input[i] as u64) % P;
         assert_eq!(outs[0][i] as u64, want, "mismatch at {i}");
     }
+}
+
+/// A register-tile transpose read under a rotated par layout drives the
+/// general multi-round pull shuffle. Both pars use `(th, s) -> th * 4 + s`
+/// (logical = rot-left-2 of physical on 7 bits); the reader's
+/// `tile[j % 32 * 4 + j / 32]` is another rot-left-2, so the composite
+/// register↔register conversion has a singular lane block with slot
+/// mixing dirs {1, 2}: 4 slots × 4 senders = exactly 16 unconditional
+/// `__shfl_sync`s and no shared-memory staging.
+#[test]
+fn multi_round_shuffle_transpose_read() {
+    use crypto_compiler::passes::{
+        canonicalize, codegen, insert_sync, layout_infer, lower_to_kir, type_infer,
+    };
+    let (blocks, t) = (5usize, 128usize);
+    let n = blocks * t;
+    let a = pseudo_field_elems(n, 77);
+
+    let build = |ib: &mut IRBuilder| {
+        let a_in = ib.input("a", ScalarType::BabyBear, vec![n]);
+        kernel!(ib,
+            #[grid(threads = 32)]
+            compute [blocks] |i| {
+                let tile =
+                    #[par((th, s) -> th * 4 + s)]
+                    compute [t] |j| { a_in[i * #t + j] };
+                #[par((th, s) -> th * 4 + s)]
+                compute [t] |j| { tile[j % 32 * 4 + j / 32] + tile[j] * 2bb }
+            }
+        )
+    };
+
+    let mut ib = IRBuilder::new();
+    let body = build(&mut ib);
+    let module = ib.finish("multi_round_transpose", body);
+
+    let types = type_infer(&module).unwrap();
+    let program = canonicalize(module, types).unwrap();
+    let mut kprog = lower_to_kir(&program).unwrap();
+    layout_infer(&mut kprog);
+    insert_sync(&mut kprog);
+    let source = codegen(&kprog).unwrap();
+    let body_start = source.find("__global__").unwrap();
+    let kernel_body = &source[body_start..];
+    assert_eq!(
+        kernel_body.matches("__shfl_sync").count(),
+        16,
+        "expected the 16-shuffle multi-round pull:\n{kernel_body}"
+    );
+    assert_eq!(
+        kernel_body.matches("__syncthreads").count(),
+        0,
+        "multi-round pull must not stage through shared:\n{kernel_body}"
+    );
+
+    let mut ib = IRBuilder::new();
+    let body = build(&mut ib);
+    let module = ib.finish("multi_round_transpose", body);
+    let outs = run_module(module, std::slice::from_ref(&a));
+    assert_eq!(outs.len(), 1);
+
+    let mut want = vec![0u32; n];
+    for bi in 0..blocks {
+        let tile: Vec<BabyBear> = (0..t).map(|j| bb(a[bi * t + j])).collect();
+        for j in 0..t {
+            want[bi * t + j] = (tile[j % 32 * 4 + j / 32] + tile[j] * bb(2)).as_canonical_u32();
+        }
+    }
+    assert_eq!(outs[0], want);
 }

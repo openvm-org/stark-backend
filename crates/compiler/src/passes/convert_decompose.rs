@@ -14,7 +14,10 @@
 //! Two strategies land in Phase B initial:
 //!
 //! - **A (pure shuffle)** — paper §5.4 Intra-warp Data Exchange. Applicable iff `(C)_Wrp = I`
-//!   ([`LinearLayout::is_warp_column_identity`]); rounds = `2^|R|` per paper page 8.
+//!   ([`LinearLayout::is_warp_column_identity`]); rounds = the exact `__shfl_sync` count
+//!   `gen_shuffle` will emit ([`crate::kernel_ir::shuffle_rounds`]): `slots` on the
+//!   constant-sender-slot and invertible-lane paths, `slots · 2^|dirs|` on the multi-round pull
+//!   path (paper page 8's `2^|R|` exchange).
 //! - **B (pure bounce)** — paper §5.4 Optimal Swizzling. Always applicable. Store to a scratch
 //!   shared buffer under [`shared_swizzle::optimal_shared_swizzle`]'s partition, sync, load.
 //!
@@ -32,7 +35,7 @@ use super::{
     layout_cost::ConversionCostModel,
     shared_swizzle::{optimal_shared_swizzle, Access, SharedLayout},
 };
-use crate::kernel_ir::{f2, LinearLayout};
+use crate::kernel_ir::LinearLayout;
 
 /// The decomposition strategy for one `ConvertLayout` op.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -47,9 +50,9 @@ pub enum Strategy {
     /// Exchange (§5.4) special case of Strategy A with zero shuffle
     /// rounds.
     Slot,
-    /// Paper §5.4 Intra-warp Data Exchange. `rounds = 2^|R|` from the
-    /// `V ∪ I ∪ G` basis-extension count; each round is one
-    /// `__shfl_sync(0xFFFFFFFFu, …)`.
+    /// Paper §5.4 Intra-warp Data Exchange. `rounds` is the exact number
+    /// of `__shfl_sync(0xFFFFFFFFu, …)` instructions `gen_shuffle` emits
+    /// ([`crate::kernel_ir::shuffle_rounds`]).
     Shuffle { rounds: u64 },
     /// Paper §5.4 Optimal Swizzling. `swizzle` is the scratch buffer's
     /// `(vec, bank, idx)` partition from
@@ -93,55 +96,6 @@ fn is_slot_only(c: &LinearLayout, block: usize) -> bool {
 pub struct DecompositionResult {
     pub strategy: Strategy,
     pub cost: u64,
-}
-
-/// Basis-extension count `|R| = d - rank(V ∪ I ∪ G)` from paper §5.4
-/// page 8. Reused by the shuffle round formula.
-fn extension_rank(v: &[u64], i: &[u64], g: &[u64], ambient_dim: usize) -> usize {
-    let mut vig = f2::sum(v, i);
-    vig = f2::sum(&vig, g);
-    ambient_dim.saturating_sub(f2::rank(&vig))
-}
-
-/// Number of `__shfl_sync` rounds needed for Strategy A: `2^|R|` with R
-/// the basis extension of `V ∪ I ∪ G` to `F₂^ambient_dim`. Assumes
-/// `(C)_Wrp = I` (the caller checks).
-fn shuffle_rounds(src: &LinearLayout, dst: &LinearLayout, block: usize, ambient_dim: usize) -> u64 {
-    let src_p = src.phys_partition(block);
-    let dst_p = dst.phys_partition(block);
-    let src_reg: Vec<u64> = src
-        .bases
-        .iter()
-        .skip(src_p.thread_bits())
-        .copied()
-        .collect();
-    let dst_reg: Vec<u64> = dst
-        .bases
-        .iter()
-        .skip(dst_p.thread_bits())
-        .copied()
-        .collect();
-    let src_thr: Vec<u64> = src
-        .bases
-        .iter()
-        .take(src_p.thread_bits())
-        .copied()
-        .collect();
-    let dst_thr: Vec<u64> = dst
-        .bases
-        .iter()
-        .take(dst_p.thread_bits())
-        .copied()
-        .collect();
-
-    let v = f2::intersection(&src_reg, &dst_reg);
-    let i = f2::intersection(&src_thr, &dst_thr);
-    let e = f2::complement_within(&i, &src_thr);
-    let f = f2::complement_within(&i, &dst_thr);
-    let g: Vec<u64> = e.iter().zip(f.iter()).map(|(&x, &y)| x ^ y).collect();
-
-    let r = extension_rank(&v, &i, &g, ambient_dim);
-    1u64 << r.min(63)
 }
 
 /// The receiver-driven composite `C = src⁺ ∘ dst` — `None` when `src`
@@ -198,7 +152,7 @@ pub fn best_decomposition(
         if is_slot_only(&c, block) {
             candidates.push((Strategy::Slot, 0));
         } else if c.is_warp_column_identity(block) {
-            let rounds = shuffle_rounds(src, dst, block, logical_bits);
+            let rounds = crate::kernel_ir::shuffle_rounds(&c, block);
             let raw = cost.shuffle_round_cost().saturating_mul(rounds);
             candidates.push((Strategy::Shuffle { rounds }, weight.saturating_mul(raw)));
         }
@@ -340,11 +294,28 @@ mod tests {
     }
 
     #[test]
-    fn extension_rank_zero_for_matching_thread_partitions() {
-        // src and dst share the full thread partition and reg partition
-        // — everything falls into V ∪ I, so |R| = 0, rounds = 1.
-        let src = LinearLayout::identity(9);
-        let rounds = shuffle_rounds(&src, &src, 256, 9);
-        assert_eq!(rounds, 1);
+    fn shuffle_rounds_is_slots_for_const_sender_slot() {
+        // Identity composite: constant sender slot, one shuffle per dst
+        // slot. kb=9, tb=8 → slots=2.
+        let c = LinearLayout::identity(9);
+        assert_eq!(crate::kernel_ir::shuffle_rounds(&c, 256), 2);
+    }
+
+    #[test]
+    fn multi_round_composite_picks_shuffle_with_exact_count() {
+        // Lane bit 0 feeds slot bit 5 and slot bit 5 feeds lane bit 0 —
+        // the lane block [0,2,4,8,16] is singular and the sender slot
+        // varies per lane, so the multi-round pull path applies:
+        // slots=2, |dirs|=1 → 4 shuffles. Still far cheaper than a
+        // bounce (2 shared rounds + sync).
+        let src = LinearLayout::identity(6);
+        let dst = LinearLayout {
+            bases: vec![32, 2, 4, 8, 16, 1],
+            offset: 0,
+        };
+        assert_eq!(crate::kernel_ir::shuffle_rounds(&dst, 32), 4);
+        let d = best_decomposition(&cost(), &src, &dst, 32, 6, &[]);
+        assert_eq!(d.strategy, Strategy::Shuffle { rounds: 4 });
+        assert!(d.cost < 2 * cost().shared_round_cost(1) + cost().sync_cost());
     }
 }

@@ -36,8 +36,8 @@ use std::{
 use crate::{
     ir::{BinOp, ScalarType, SizeExpr, VarId},
     kernel_ir::{
-        const_src_slot, maps_agree, Access, BufId, BufferKind, IndexMap, KBound, Kernel,
-        KirProgram, LinearLayout, ParAttr, SSABlock, SSANode, SSAOpCode, SSARes,
+        const_src_slot, maps_agree, Access, AddressSpace, BufId, BufferKind, IndexMap, KBound,
+        Kernel, KirProgram, LinearLayout, ParAttr, SSABlock, SSANode, SSAOpCode, SSARes,
     },
     passes::{
         convert_decompose::{best_decomposition, Strategy},
@@ -466,6 +466,14 @@ fn gen_stmts(
                 let decl = p.buffer(*buf);
                 match decl.kind {
                     BufferKind::Shared => {
+                        // Zero-byte shared buffers (Phase B.2 placeholder
+                        // scratch that no strategy consumed) get no pointer
+                        // — `_sh_pool` isn't even declared when the peak
+                        // per-kernel shared is 0, so referencing it would
+                        // be an undefined symbol.
+                        if decl.is_empty() {
+                            continue;
+                        }
                         // Unused shared buffers still emit a pointer for
                         // symmetry; they're pinned to offset 0 since their
                         // memory is never touched. FpExt buffers alias
@@ -494,8 +502,13 @@ fn gen_stmts(
             SSAOpCode::Sync => {
                 writeln!(s, "{pad}__syncthreads();").unwrap();
             }
-            SSAOpCode::ConvertLayout { dst, src, map } => {
-                gen_convert(s, p, k, *dst, *src, map, depth)?;
+            SSAOpCode::ConvertLayout {
+                dst,
+                src,
+                scratch,
+                map,
+            } => {
+                gen_convert(s, p, k, *dst, *src, *scratch, map, depth)?;
             }
             SSAOpCode::Loop { bound } => {
                 let v = val(op.block.operands[0]);
@@ -999,14 +1012,18 @@ fn gen_par_body(
 /// Emits a [`SSAOpCode::ConvertLayout`]: `dst[i] = src[map(i)]` over `dst`'s
 /// logical domain. Register-to-register conversions reduce to the map
 /// `C = f_src^-1 ∘ map ∘ f_dst` from dst physical to src physical index and
-/// become slot permutations or warp shuffles per [`classify_convert`];
-/// register-to-shared stages the registers out through shared memory.
+/// become slot permutations, warp shuffles, or (Phase B.4-full) a
+/// shared-memory bounce through `scratch` (paper §5.4 Optimal
+/// Swizzling); register-to-shared stages the registers out through
+/// shared memory directly.
+#[allow(clippy::too_many_arguments)]
 fn gen_convert(
     s: &mut String,
     p: &KirProgram,
     k: &Kernel,
     dst: BufId,
     src: BufId,
+    scratch: BufId,
     map: &LinearLayout,
     depth: usize,
 ) -> Result<(), CompileError> {
@@ -1053,10 +1070,7 @@ fn gen_convert(
                     gen_shuffle(s, &c, &dst_reg, &src_reg, dst.0, kb, k.block, depth)
                 }
                 Strategy::Bounce { .. } => {
-                    return Err(CompileError::Codegen(format!(
-                        "register conversion {} <- {} needs a shared-memory bounce",
-                        dd.name, sd.name
-                    )))
+                    gen_reg_bounce(s, p, k, dst, src, scratch, &f, &ld, kb, depth)?;
                 }
             }
         }
@@ -1090,6 +1104,62 @@ fn gen_convert(
             .unwrap();
             writeln!(s, "{pad}}}").unwrap();
         }
+        (BufferKind::Register, BufferKind::Shared) => {
+            // Load from shared source into register destination. For each
+            // dst physical `x = s * blockDim + t`:
+            //   dst_reg[s] = b<src>[f(map(ld(x)))]
+            // where `ld = dd.layout` (phys → dst logical), `map` = op's map,
+            // and `f = sd.layout` (src logical → src physical address).
+            let ld = dd.layout.clone().unwrap_or_else(id);
+            let f = sd.layout.clone().unwrap_or_else(id);
+            let g = f.compose(&map.compose(&ld));
+            let x = format!("_cv{}_x", dst.0);
+            let sl = format!("_cv{}_s", dst.0);
+            writeln!(
+                s,
+                "{pad}for (uint32_t {x} = threadIdx.x, {sl} = 0u; {x} < {n}u; \
+                 {x} += blockDim.x, ++{sl}) {{"
+            )
+            .unwrap();
+            writeln!(
+                s,
+                "{pad}    {dst_reg}[{sl}] = b{}[{}];",
+                src.0,
+                ll_apply_str(&g, &x),
+            )
+            .unwrap();
+            writeln!(s, "{pad}}}").unwrap();
+        }
+        (BufferKind::Shared, BufferKind::Shared) => {
+            // Shared → Shared: one read-then-write loop over *logical*
+            // indices x. Dst logical x lives at address `ld(x)` and takes
+            // src logical `map(x)`, which lives at address `f(map(x))`:
+            //   b<dst>[ld(x)] = b<src>[f(map(x))]
+            // No syncthreads is needed because each thread only touches
+            // one src address and one dst address per iteration; the
+            // outer op-level sync (insert_sync) fences the whole op if
+            // the dst is aliased.
+            let ld = dd.layout.clone().unwrap_or_else(id);
+            let f = sd.layout.clone().unwrap_or_else(id);
+            let g_read = f.compose(map);
+            let x = format!("_cv{}_x", dst.0);
+            writeln!(
+                s,
+                "{pad}for (uint32_t {x} = threadIdx.x; {x} < {n}u; \
+                 {x} += blockDim.x) {{"
+            )
+            .unwrap();
+            writeln!(
+                s,
+                "{pad}    b{}[{}] = b{}[{}];",
+                dst.0,
+                ll_apply_str(&ld, &x),
+                src.0,
+                ll_apply_str(&g_read, &x),
+            )
+            .unwrap();
+            writeln!(s, "{pad}}}").unwrap();
+        }
         _ => {
             return Err(CompileError::Codegen(format!(
                 "unsupported convert_layout between buffer kinds {:?} <- {:?}",
@@ -1100,13 +1170,102 @@ fn gen_convert(
     Ok(())
 }
 
-/// One `__shfl_sync` per destination slot. `c` maps dst physical to src
-/// physical over `kb` bits; [`classify_convert`] guaranteed its warp bits
-/// are fixed and its lane-to-lane block `M` is invertible.
+/// Reg→Reg bounce through shared `scratch` (paper §5.4 Optimal
+/// Swizzling). Emitted when [`best_decomposition`] picks
+/// [`Strategy::Bounce`] — a warp-crossing composite that a single-pass
+/// warp shuffle can't handle. Sequence:
 ///
-/// **Sender-slot handling.** At dst slot `s'` this thread needs src physical
-/// `C(s' << tb ^ tid)`, living in lane `(C(s' << tb) ^ C(tid)) & 31`. The
-/// sender's own slot to provide, `(C(s' << tb ^ tid)) >> tb`, is a
+/// 1. Store each `src` slot into `scratch` at address `scratch_layout(f(phys))` — `f` is src's
+///    `phys → logical` map, `scratch_layout` is scratch's `logical → phys` map (identity if unset).
+/// 2. `__syncthreads()`.
+/// 3. Load each `dst` slot from `scratch` at address `scratch_layout(ld(phys))`.
+///
+/// The scratch buffer must have non-zero size — [`allocate_convert_scratch`]
+/// ensures this: it runs the same [`best_decomposition`] and sizes
+/// scratch to a full tile exactly when `Strategy::Bounce` wins.
+#[allow(clippy::too_many_arguments)]
+fn gen_reg_bounce(
+    s: &mut String,
+    p: &KirProgram,
+    _k: &Kernel,
+    dst: BufId,
+    src: BufId,
+    scratch: BufId,
+    f: &LinearLayout,
+    ld: &LinearLayout,
+    kb: usize,
+    depth: usize,
+) -> Result<(), CompileError> {
+    let pad = "    ".repeat(depth);
+    let n = 1usize << kb;
+    let dst_reg = reg_name(dst);
+    let src_reg = reg_name(src);
+    let scratch_decl = p.buffer(scratch);
+    if scratch_decl.space != AddressSpace::Shared {
+        return Err(CompileError::Codegen(format!(
+            "reg→reg bounce needs a Shared scratch buffer; {} is {:?}",
+            scratch_decl.name, scratch_decl.space
+        )));
+    }
+    if scratch_decl.is_empty() {
+        return Err(CompileError::Codegen(format!(
+            "reg→reg bounce needs a non-zero scratch buffer; {} has shape=[0]. \
+             allocate_convert_scratch should have sized this.",
+            scratch_decl.name
+        )));
+    }
+    let identity = LinearLayout::identity(kb);
+    let scratch_layout = scratch_decl.layout.as_ref().unwrap_or(&identity);
+    let g_store = scratch_layout.compose(f);
+    let g_load = scratch_layout.compose(ld);
+    let x = format!("_cv{}_x", dst.0);
+    let sl = format!("_cv{}_s", dst.0);
+
+    // Store src to scratch.
+    writeln!(
+        s,
+        "{pad}for (uint32_t {x} = threadIdx.x, {sl} = 0u; {x} < {n}u; \
+         {x} += blockDim.x, ++{sl}) {{"
+    )
+    .unwrap();
+    writeln!(
+        s,
+        "{pad}    b{}[{}] = {src_reg}[{sl}];",
+        scratch.0,
+        ll_apply_str(&g_store, &x)
+    )
+    .unwrap();
+    writeln!(s, "{pad}}}").unwrap();
+
+    // Barrier.
+    writeln!(s, "{pad}__syncthreads();").unwrap();
+
+    // Load scratch to dst.
+    writeln!(
+        s,
+        "{pad}for (uint32_t {x} = threadIdx.x, {sl} = 0u; {x} < {n}u; \
+         {x} += blockDim.x, ++{sl}) {{"
+    )
+    .unwrap();
+    writeln!(
+        s,
+        "{pad}    {dst_reg}[{sl}] = b{}[{}];",
+        scratch.0,
+        ll_apply_str(&g_load, &x)
+    )
+    .unwrap();
+    writeln!(s, "{pad}}}").unwrap();
+    Ok(())
+}
+
+/// Warp-shuffle emitter for a composite `c : phys_dst → phys_src` over
+/// `kb` bits with identity warp column ([`LinearLayout::is_warp_column_identity`],
+/// guaranteed by [`best_decomposition`] before it picks `Strategy::Shuffle`).
+/// Three paths, mirrored by [`crate::kernel_ir::shuffle_rounds`]:
+///
+/// **Fast path (constant sender slot).** At dst slot `s'` this thread needs
+/// src physical `C(s' << tb ^ tid)`, living in lane `(C(s' << tb) ^ C(tid)) &
+/// 31`. The sender's own slot to provide, `(C(s' << tb ^ tid)) >> tb`, is a
 /// compile-time constant iff no lane- or warp-input base of `C` has slot
 /// output bits — i.e. no `C.bases[i] & slot_mask` for `i < tb` — since
 /// then `C(x) >> tb` collapses to `C(x & slot_mask) >> tb` and the tid
@@ -1114,13 +1273,26 @@ fn gen_convert(
 /// family, including every stage of the register NTT — emits one
 /// `__shfl_sync` per slot with a constant source-slot index.
 ///
-/// **General path.** When the sender-slot does depend on tid (e.g. a
-/// laned-in transpose), we synthesize it: as a sender the thread computes
-/// which receiver lane needs it, `l = M^-1(lane ^ (C(s' << tb) ^ C(warp)) &
-/// 31)`, and offers `(C(s' << tb) ^ C(warp) ^ C(l)) >> tb`. That slot index
-/// varies per lane, so a nested `?:` chain over the `slots`-many
-/// possibilities keeps every read at a compile-time-constant index into the
-/// register array.
+/// **Sender-side ternary path.** When the sender-slot does depend on tid
+/// (e.g. a laned-in transpose) but the lane block `M` is invertible, we
+/// synthesize it: as a sender the thread computes which receiver lane needs
+/// it, `l = M^-1(lane ^ (C(s' << tb) ^ C(warp)) & 31)`, and offers
+/// `(C(s' << tb) ^ C(warp) ^ C(l)) >> tb`. That slot index varies per lane,
+/// so a nested `?:` chain over the `slots`-many possibilities keeps every
+/// read at a compile-time-constant index into the register array. One
+/// `__shfl_sync` per destination slot.
+///
+/// **Multi-round path** (paper §5.4 page 8's `2^|R|` exchange). When the
+/// lane block is singular (replicated lane inputs feeding slot outputs) the
+/// sender can't resolve a unique receiver, so the receiver pulls instead:
+/// its needed src physical is `q = C(s' << tb) ^ C_lin(tid)`, whose slot
+/// part ranges over the affine subspace `(C(s' << tb) >> tb) ^ span(dirs)`
+/// with `dirs = lane_slot_mix_dirs(C)`. We emit one unconditional
+/// `__shfl_sync` per candidate slot `σ` (all lanes present `src_reg[σ]`,
+/// each pulls from lane `q & 31`) and keep the round whose `σ` matches
+/// `q >> tb` — exactly one per `(tid, s')`. `slots · 2^|dirs|` shuffles.
+/// Shuffles stay outside the conditional (no divergence); only the
+/// register write is guarded.
 #[allow(clippy::too_many_arguments)]
 fn gen_shuffle(
     s: &mut String,
@@ -1157,30 +1329,57 @@ fn gen_shuffle(
         bases: c.bases[..5.min(kb)].to_vec(),
         offset: 0,
     };
-    // General path only when the sender slot varies per receiver — it
-    // needs the lane-block inverse to turn a receiver lane into the
-    // sender lane whose slot to present. Classify_convert admits either
-    // `const_src_slot` (multi-source broadcast, fast path) or invertible
-    // lane block (transpose-style, general path); when the former is
-    // true the general path is unused and the inverse never touched.
+    // Sender-side ternary path only when the sender slot varies per
+    // receiver — it needs the lane-block inverse to turn a receiver lane
+    // into the sender lane whose slot to present. A singular lane block
+    // routes to the multi-round path instead.
     let m_inv = if slots > 1 && !src_slot_const {
+        LinearLayout {
+            bases: c_lane.bases.iter().map(|&b| b & 31).collect(),
+            offset: 0,
+        }
+        .inverse()
+    } else {
+        None
+    };
+    if slots > 1 && !src_slot_const && m_inv.is_none() {
+        // Multi-round pull path.
+        let dirs = crate::kernel_ir::lane_slot_mix_dirs(c, tb);
+        for sp in 0..slots {
+            let cs = c.apply((sp as u64) << tb);
+            let q = format!("{pre}_q{sp}");
+            writeln!(s, "{pad}const uint32_t {q} = {cs}u ^ {pre}_ct;").unwrap();
+            for j in 0..(1usize << dirs.len()) {
+                let mut sigma = cs >> tb;
+                for (bit, &d) in dirs.iter().enumerate() {
+                    if (j >> bit) & 1 == 1 {
+                        sigma ^= d;
+                    }
+                }
+                let v = format!("{pre}_v{sp}_{j}");
+                writeln!(
+                    s,
+                    "{pad}const auto {v} = __shfl_sync(0xffffffffu, {src_reg}[{sigma}], \
+                     {q} & 31u);"
+                )
+                .unwrap();
+                writeln!(
+                    s,
+                    "{pad}if (({q} >> {tb}) == {sigma}u) {{ {dst_reg}[{sp}] = {v}; }}"
+                )
+                .unwrap();
+            }
+        }
+        return;
+    }
+    if m_inv.is_some() {
         writeln!(
             s,
             "{pad}const uint32_t {pre}_cw = {pre}_ct ^ {};",
             ll_apply_str(&c_lane, "(threadIdx.x & 31u)")
         )
         .unwrap();
-        Some(
-            LinearLayout {
-                bases: c_lane.bases.iter().map(|&b| b & 31).collect(),
-                offset: 0,
-            }
-            .inverse()
-            .expect("classify_convert admitted this via invertible-lane path"),
-        )
-    } else {
-        None
-    };
+    }
     for sp in 0..slots {
         let cs = c.apply((sp as u64) << tb);
         let val = if slots == 1 || src_slot_const {

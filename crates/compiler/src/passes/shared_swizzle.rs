@@ -263,6 +263,35 @@ pub fn choose_shared_layout(
     best
 }
 
+/// Project a [`SharedLayout`] partition to a [`LinearLayout`] mapping
+/// buffer-logical index → phys address in the shared buffer.
+///
+/// The resulting `LinearLayout` has `output_dim` bases; each basis
+/// vector is one of the partition's subspace bases, in the order
+/// `[vec, bank, idx]`:
+///
+/// - The first `|vec|` logical bits map to the vec subspace — the "vectorization" bits that are
+///   constant within a warp's transaction.
+/// - The next `|bank|` bits map to the bank subspace — the bits that distinguish across the 32
+///   banks in a warp transaction.
+/// - The remaining `|idx|` bits map to the idx (transaction-index) subspace.
+///
+/// Interpretation: logical bit `j` is stored at the phys address given
+/// by `bases[j]` (XOR-affine). For a canonically-chosen partition, the
+/// resulting phys addresses are bank-conflict-minimizing for the
+/// accesses that produced this `SharedLayout` via
+/// [`choose_shared_layout`] / [`optimal_shared_swizzle`].
+///
+/// Callers wire this into buffer-layout assignment (Phase B.1 (b)) and
+/// scratch-swizzle picking (Phase B.4-full's Bounce path).
+pub fn to_linear_layout(sh: &SharedLayout) -> LinearLayout {
+    let mut bases = Vec::with_capacity(sh.output_dim);
+    bases.extend_from_slice(&sh.vec);
+    bases.extend_from_slice(&sh.bank);
+    bases.extend_from_slice(&sh.idx);
+    LinearLayout { bases, offset: 0 }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -374,5 +403,68 @@ mod tests {
         let a = access_identity(5, 32);
         let sh = choose_shared_layout(&cost, &[a], 5, 4, 32);
         assert_eq!(sh, row_major_default(5, 4));
+    }
+
+    #[test]
+    fn to_linear_layout_of_row_major_is_identity_permutation() {
+        // Row-major default with 5 output bits, 4-byte elements: vec=∅,
+        // bank=e_0..e_4, idx=∅. Projection concatenates as [vec | bank |
+        // idx] = [e_0..e_4] = identity(5).
+        let sh = row_major_default(5, 4);
+        let ll = to_linear_layout(&sh);
+        assert_eq!(ll.bases.len(), 5);
+        assert!(ll.is_identity());
+    }
+
+    #[test]
+    fn to_linear_layout_preserves_output_dim() {
+        // For any SharedLayout, the projection has `output_dim` bases.
+        let sh = row_major_default(9, 4);
+        let ll = to_linear_layout(&sh);
+        assert_eq!(ll.bases.len(), 9);
+        assert_eq!(ll.offset, 0);
+    }
+
+    #[test]
+    fn to_linear_layout_of_swizzle_is_bijection() {
+        // Feed the transpose case to optimal_shared_swizzle and verify the
+        // projected LinearLayout is a bijection (bases span F₂^output_dim,
+        // so `inverse()` succeeds).
+        let a = Access {
+            layout: LinearLayout::identity(6),
+            loop_iters: Vec::new(),
+            thread_bits: 5,
+        };
+        let b = Access {
+            layout: LinearLayout {
+                bases: vec![2, 4, 8, 16, 32, 1],
+                offset: 0,
+            },
+            loop_iters: Vec::new(),
+            thread_bits: 5,
+        };
+        let sh = optimal_shared_swizzle(&a, &b, 6, 4);
+        let ll = to_linear_layout(&sh);
+        assert_eq!(ll.bases.len(), 6);
+        // Bijection: `.inverse()` succeeds iff the bases span F₂^6.
+        assert!(
+            ll.inverse().is_some(),
+            "swizzle projection should be a bijection: bases = {:?}",
+            ll.bases
+        );
+    }
+
+    #[test]
+    fn to_linear_layout_bases_come_from_partition_in_order() {
+        // Construct a SharedLayout with distinctive vec/bank/idx bases and
+        // verify the concatenation order in the projection.
+        let sh = SharedLayout {
+            vec: vec![0b0001],
+            bank: vec![0b0010, 0b0100],
+            idx: vec![0b1000],
+            output_dim: 4,
+        };
+        let ll = to_linear_layout(&sh);
+        assert_eq!(ll.bases, vec![0b0001, 0b0010, 0b0100, 0b1000]);
     }
 }

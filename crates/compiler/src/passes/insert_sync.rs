@@ -72,12 +72,30 @@ pub fn insert_sync(p: &mut KirProgram) {
                         }
                     }
                 }
-                SSAOpCode::ConvertLayout { dst, src, .. } => {
+                SSAOpCode::ConvertLayout {
+                    dst, src, scratch, ..
+                } => {
                     if dirty.contains(src) {
                         sync_here(dirty, reads_since_sync);
                     }
                     if p.buffer(*dst).space == AddressSpace::Shared && *reads_since_sync {
                         sync_here(dirty, reads_since_sync);
+                    }
+                    // Scratch is a shared buffer used strictly inside this
+                    // op (Phase B.4-full's bounce: store → __syncthreads →
+                    // load). The inner sync is codegen-emitted; the outer
+                    // walk still marks scratch as both read and written so
+                    // the packer's aliasing (`plan_shared_mem`) can't
+                    // schedule an unrelated shared buffer to overlap this
+                    // op's scratch region without a proper barrier.
+                    if p.buffer(*scratch).space == AddressSpace::Shared
+                        && !p.buffer(*scratch).is_empty()
+                    {
+                        if *reads_since_sync {
+                            sync_here(dirty, reads_since_sync);
+                        }
+                        *reads_since_sync = true;
+                        dirty.insert(*scratch);
                     }
                     if p.buffer(*src).space == AddressSpace::Shared {
                         *reads_since_sync = true;
@@ -135,9 +153,14 @@ fn collect_shared_writes(p: &KirProgram, k: &Kernel, stmts: &[SSANode], out: &mu
                     }
                 }
             }
-            SSAOpCode::ConvertLayout { dst, .. } => {
+            SSAOpCode::ConvertLayout { dst, scratch, .. } => {
                 if p.buffer(*dst).space == AddressSpace::Shared {
                     out.insert(*dst);
+                }
+                if p.buffer(*scratch).space == AddressSpace::Shared
+                    && !p.buffer(*scratch).is_empty()
+                {
+                    out.insert(*scratch);
                 }
             }
             SSAOpCode::Loop { .. } => collect_shared_writes(p, k, &op.block.body, out),
@@ -206,7 +229,7 @@ mod tests {
         assert_eq!(kernel.block, 32);
         assert_eq!(
             stmt_kinds(kernel),
-            ["alloc", "alloc", "par", "convert", "sync", "par"]
+            ["alloc", "alloc", "alloc", "par", "convert", "sync", "par"]
         );
 
         // The producer par writes the register tile; its grid-var capture
@@ -222,10 +245,12 @@ mod tests {
             assert_eq!(op.results.len(), op.block.yields.len());
         }
 
+        // Phase B.2 attaches a 0-byte scratch buffer to every
+        // ConvertLayout; filter to the real mirror by non-zero size.
         let shared: Vec<_> = kprog
             .buffers
             .iter()
-            .filter(|b| b.space == AddressSpace::Shared)
+            .filter(|b| b.space == AddressSpace::Shared && !b.is_empty())
             .collect();
         assert_eq!(shared.len(), 1, "the bouncing consumer gets one mirror");
         assert_eq!(shared[0].shape, vec![crate::ir::SizeExpr::from(t)]);
@@ -287,15 +312,75 @@ mod tests {
         verify(&kprog).unwrap();
 
         // Each tile becomes register + mirror; only one barrier is needed
-        // before the reader that bounces both mirrors.
+        // before the reader that bounces both mirrors. Each ConvertLayout
+        // gets an extra 0-byte scratch alloc (Phase B.2 placeholder).
         assert_eq!(
             stmt_kinds(&kprog.kernels[0]),
             [
-                "alloc", "alloc", "par", "convert", "alloc", "alloc", "par", "convert", "sync",
-                "par"
+                "alloc", "alloc", "alloc", "par", "convert", "alloc", "alloc", "alloc", "par",
+                "convert", "sync", "par"
             ]
         );
         let source = codegen(&kprog).unwrap();
         assert_eq!(source.matches("__syncthreads();").count(), 1);
+    }
+
+    /// Phase B.3: a ConvertLayout with a non-zero scratch buffer is
+    /// treated by the dirty walk as both reading and writing shared
+    /// memory. Today's layout_infer never sizes scratch > 0 (every
+    /// emitted convert is a pure shuffle or a direct mirror), so we
+    /// simulate the future B.4-full bounce path by force-resizing the
+    /// scratch buffer after layout_infer.
+    ///
+    /// The check is that the walk terminates cleanly, verify passes,
+    /// and codegen still succeeds — a smoke test that the extended
+    /// dirty walk handles the non-zero-scratch case without regressing
+    /// today's shuffle-view output.
+    #[test]
+    fn nonzero_scratch_survives_dirty_walk() {
+        let (blocks, t) = (2usize, 8usize);
+        let mut b = IRBuilder::new();
+        let a = b.input("a", ScalarType::BabyBear, vec![blocks * t]);
+        let body = b.compute(blocks, |b, i| {
+            // Own-index producer promotes to registers, `tile[j % (t/2)]`
+            // reader forces a ConvertLayout emission (View path).
+            let tile = b.compute(t, |b, j| {
+                let tc = b.const_u32(t as u32);
+                let base = b.mul(i, tc);
+                let ix = b.add(base, j);
+                b.index(a, &[ix])
+            });
+            b.bind(tile, |b, tile| {
+                b.compute(t, |b, j| {
+                    let half = b.const_u32((t / 2) as u32);
+                    let fold = b.rem(j, half);
+                    let x = b.index(tile, &[fold]);
+                    let y = b.index(tile, &[j]);
+                    b.add(x, y)
+                })
+            })
+        });
+        let module = b.finish("nonzero_scratch", body);
+
+        let mut kprog = lowered(module);
+        layout_infer(&mut kprog);
+        // Force the scratch buffer(s) non-zero to exercise the B.3
+        // dirty-walk extension. In real B.4-full runs
+        // `allocate_convert_scratch` sizes them.
+        for buf in kprog.buffers.iter_mut() {
+            if buf.name.contains("_cs") {
+                buf.shape = vec![crate::ir::SizeExpr::from(t)];
+                buf.layout = Some(crate::kernel_ir::LinearLayout::identity(
+                    t.trailing_zeros() as usize
+                ));
+            }
+        }
+        insert_sync(&mut kprog);
+        verify(&kprog).unwrap();
+        // Convert is still a pure shuffle at emission time, but the
+        // dirty walk must not have added spurious syncs from the
+        // scratch handling.
+        let source = codegen(&kprog).unwrap();
+        assert!(source.contains("__shfl_sync"));
     }
 }

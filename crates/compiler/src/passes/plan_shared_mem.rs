@@ -57,9 +57,18 @@ fn compute_liveness(p: &KirProgram, k: &Kernel) -> Vec<Interval> {
             *pos += 1;
             match &op.opcode {
                 SSAOpCode::Alloc { .. } | SSAOpCode::Sync => {}
-                SSAOpCode::ConvertLayout { dst, src, .. } => {
+                SSAOpCode::ConvertLayout {
+                    dst, src, scratch, ..
+                } => {
                     note(p, *dst, at, true, ranges);
                     note(p, *src, at, false, ranges);
+                    // Scratch is written and read within the op (Phase
+                    // B.4-full's bounce); noting both at the same point
+                    // gives it a single-position liveness interval,
+                    // enough for the packer to reserve non-aliasing
+                    // space.
+                    note(p, *scratch, at, true, ranges);
+                    note(p, *scratch, at, false, ranges);
                 }
                 SSAOpCode::Par { reads, writes, .. } => {
                     for a in reads.iter() {
