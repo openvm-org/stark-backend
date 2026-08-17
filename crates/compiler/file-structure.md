@@ -518,6 +518,16 @@ Then the objective is to minimize the max end time of all vertices, while also m
 
 The current algorithm is very ad-hoc and is a greedy algorithm with constant look ahead. At least that's the idea. Don't ask me too much about it, it's AI generated.
 
+### Problem update:
+
+It should be possible decompose the problem to a memory aware multi-processor scheduling problem. In this formulation we assign each vertex a stream (a processor), and start times, and capture the requirement that overlapping buffers cannot share memory (stated informally), but without specifying the scheduling on the memory.
+
+Then once we have a satisfying assignment, the schedule, which specifies an ordering of nodes over all the streams. Then we can pack memory using cuda VMM API. To be more precise, the schedule admits a sequence of `alloc` and `free` statements at various times, and it is possible to pack all the memory without fragmentation due to paging, with some amount of internal fragmentation due to page size. So for each buffer we can reserve a VPMM address range, alias the right physical pages to it, and don't worry about freeing the virtual address range.
+- a possible optimization is to first pack large buffers above the page size, then do another round either with ILP or heuristics that pack small buffers into gaps
+
+Even with this formulation the problem is still NP-hard. 
+
+
 ## 3 
 Integrate IR framework within openvm's stark-backend
 

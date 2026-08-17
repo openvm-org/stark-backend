@@ -184,6 +184,7 @@ mod tests {
             name: Some(name.to_string()),
             device_type: DeviceType::Cuda(0),
             size: Quast::cst(size),
+            concrete_size: size as usize,
             elem_size: 4,
         })
     }

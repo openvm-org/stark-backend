@@ -969,6 +969,7 @@ mod tests {
                 name: Some(format!("b{i}")),
                 device_type: DeviceType::Cuda(0),
                 size: Quast::cst(s),
+                concrete_size: s as usize,
                 elem_size: 4,
             })
             .collect()

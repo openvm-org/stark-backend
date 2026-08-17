@@ -115,7 +115,9 @@ use crate::{
     },
     ir::{self, VarId},
     kernel_cache::KernelCache,
+    kernel_ir::KirProgram,
     module_compiler::ModuleCompiler,
+    module_hash::module_hash,
     passes::{
         check_accesses::check_module_accesses,
         fusion::{fuse_graph, FusionOptions, FusionReport},
@@ -676,8 +678,38 @@ impl GraphCompiler {
     /// read at least once; outputs must exist on the target device, be
     /// distinct and be written at least once; any unregistered buffer that
     /// is read but never written is an error.
-    pub fn compile(self, mut graph: GraphBuilder) -> Result<GraphExe, CompileError> {
+    pub fn compile(self, graph: GraphBuilder) -> Result<GraphExe, CompileError> {
+        self.compile_with_post_fuse_hook(graph, |_| Ok(()))
+    }
+
+    /// Same as [`Self::compile`] but invokes `hook` on the graph state
+    /// *after* `restore_ssa → fuse → dce`, right before the compile
+    /// pipeline drains nodes into the exe. That handoff point is the
+    /// same graph the exe's `ExeNode`s mirror index-by-index: node `i`
+    /// on the hook side becomes exe node `i`, which is also the
+    /// [`crate::graph_info::GraphInfo::nodes`] index a subsequent
+    /// [`GraphExe::collect_graph_info`] populates.
+    ///
+    /// Callers therefore use the hook to serialize the post-fuse+dce
+    /// `GraphBuilder` (see [`crate::graph_serializer`]) without having
+    /// to re-run fusion themselves — the fusion-v2 solver isn't
+    /// deterministic under multi-worker CP-SAT, so a re-fused graph
+    /// may pick a different solution and shift node indices.
+    pub fn compile_with_post_fuse_hook<F>(
+        self,
+        mut graph: GraphBuilder,
+        hook: F,
+    ) -> Result<GraphExe, CompileError>
+    where
+        F: FnOnce(&GraphBuilder) -> Result<(), CompileError>,
+    {
         validate_interface(&graph, self.device)?;
+        // Snapshot the caller-visible content hash *before* any pass rewrites
+        // the graph — the graph serializer pairs a payload with a
+        // structurally-equivalent `GraphBuilder` (possibly one that has
+        // since gone through fusion), so both sides must expose the same
+        // pre-pass fingerprint via `original_hash`.
+        let graph_hash = graph.original_hash();
         let nodes_before = graph.nodes.len();
 
         // Stage 0: restore SSA at the graph-BufId level. Rewrites every
@@ -722,10 +754,18 @@ impl GraphCompiler {
             graph.nodes.len(),
         );
 
+        // Hand the caller a peek at the post-fuse+dce graph state
+        // before any kernel compilation or planning happens. This is
+        // the exact graph shape that maps 1:1 into `exe.nodes` further
+        // down (`graph.nodes.drain(..)` preserves order).
+        hook(&graph)?;
+
         // Stage 2: compile every unique kernel module in parallel.
         let t_kernels = std::time::Instant::now();
         let CompiledKernels {
             mut kernels,
+            kirs,
+            module_hashes,
             kernel_of_ptr,
             num_unique_modules,
             num_cached_modules,
@@ -773,7 +813,12 @@ impl GraphCompiler {
             exe_nodes.len(),
         );
 
+        // KIR and module hashes are no longer retained on the exe — the
+        // graph serializer snapshots the pre-pass `GraphBuilder` instead.
+        drop((kirs, module_hashes));
+
         Ok(GraphExe {
+            graph_hash,
             plan,
             sizes,
             kernels,
@@ -804,6 +849,8 @@ impl GraphCompiler {
         &self,
         graph: &GraphBuilder,
     ) -> Result<CompiledKernels, CompileError> {
+        use rayon::prelude::*;
+
         // Collect unique modules by Arc pointer in first-seen order.
         let mut unique_modules: Vec<Arc<ir::Module>> = Vec::new();
         let mut kernel_of_ptr: HashMap<*const ir::Module, usize> = HashMap::new();
@@ -822,14 +869,19 @@ impl GraphCompiler {
             }
         }
 
+        // Per-module structural hashes: cache key today, serialized-payload
+        // key tomorrow (the graph serializer emits these so a loaded payload
+        // can hit the same on-disk cache entry).
+        let module_hashes: Vec<[u8; 32]> = unique_modules.iter().map(|m| module_hash(m)).collect();
+
         // Probe the on-disk cache before spawning nvcc.
         let mut compiled: Vec<Option<KernelProgram>> =
             (0..unique_modules.len()).map(|_| None).collect();
         let mut misses: Vec<usize> = Vec::new();
         let mut num_cached_modules = 0usize;
-        for (i, module) in unique_modules.iter().enumerate() {
+        for (i, hash) in module_hashes.iter().enumerate() {
             let hit = match &self.kernel_cache {
-                Some(cache) => cache.get(module)?,
+                Some(cache) => cache.get_by_hash(hash)?,
                 None => None,
             };
             match hit {
@@ -841,9 +893,19 @@ impl GraphCompiler {
             }
         }
 
-        for res in jit_kernel_misses(
+        // Lower every unique module to KIR in parallel. Cache hits pay a
+        // small lower cost here (no codegen/nvcc) so the graph serializer
+        // has KIR ready to emit without ever revisiting the HIR module.
+        let kirs: Vec<KirProgram> = unique_modules
+            .par_iter()
+            .map(|m| self.module_compiler.lower((**m).clone()))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        // Codegen the miss set in parallel, using each miss's already-lowered KIR.
+        for res in codegen_kernel_misses(
             &misses,
-            &unique_modules,
+            &kirs,
+            &module_hashes,
             &self.module_compiler,
             self.kernel_cache.as_deref(),
             num_cached_modules,
@@ -859,6 +921,8 @@ impl GraphCompiler {
         let num_unique_modules = kernels.len();
         Ok(CompiledKernels {
             kernels,
+            kirs,
+            module_hashes,
             kernel_of_ptr,
             num_unique_modules,
             num_cached_modules,
@@ -871,6 +935,15 @@ struct CompiledKernels {
     /// One artifact per unique `Arc<ir::Module>`, indexed by first-seen
     /// order in `graph.nodes`.
     kernels: Vec<KernelProgram>,
+    /// KIR for each unique module, parallel to [`Self::kernels`]. Preserved
+    /// on [`GraphExe`] for the graph serializer to emit; a fresh load runs
+    /// [`ModuleCompiler::codegen`] on the KIR when the on-disk kernel cache
+    /// misses.
+    kirs: Vec<KirProgram>,
+    /// Stable structural hash of each unique HIR module, parallel to
+    /// [`Self::kernels`]. Used as the on-disk kernel-cache key and preserved
+    /// through the graph serializer.
+    module_hashes: Vec<[u8; 32]>,
     /// Maps a kernel node's `Arc::as_ptr(&module)` to its index in
     /// [`Self::kernels`]. Every kernel node in the graph appears here.
     kernel_of_ptr: HashMap<*const ir::Module, usize>,
@@ -878,12 +951,16 @@ struct CompiledKernels {
     num_cached_modules: usize,
 }
 
-/// Parallel JIT for the given cache-miss indices, with periodic progress
-/// output and a post-run summary of failures/timeouts. Best-effort insert
-/// into `cache` when supplied — an insert failure never fails the compile.
-fn jit_kernel_misses(
+/// Parallel codegen for the given cache-miss indices, with periodic progress
+/// output and a post-run summary of failures/timeouts. Uses each miss's
+/// already-lowered KIR (produced up-front so cache hits and misses share
+/// the same lowering path) plus its precomputed HIR `module_hash` for the
+/// cache insert. Best-effort insert into `cache` when supplied — an insert
+/// failure never fails the compile.
+fn codegen_kernel_misses(
     misses: &[usize],
-    unique_modules: &[Arc<ir::Module>],
+    kirs: &[KirProgram],
+    module_hashes: &[[u8; 32]],
     module_compiler: &ModuleCompiler,
     cache: Option<&KernelCache>,
     num_cached_modules: usize,
@@ -909,10 +986,9 @@ fn jit_kernel_misses(
     let out: Vec<Result<(usize, KernelProgram), CompileError>> = misses
         .par_iter()
         .map(|&i| {
-            let module = &unique_modules[i];
-            let km = module_compiler.compile((**module).clone())?;
+            let km = module_compiler.codegen(kirs[i].clone())?;
             if let Some(c) = cache {
-                let _ = c.insert(module, &km);
+                let _ = c.insert_by_hash(&module_hashes[i], &km);
             }
             let d = done.fetch_add(1, Ordering::Relaxed) + 1;
             // Advance past every 5% tick we crossed; whoever CAS's past a
@@ -1217,38 +1293,38 @@ fn validate_interface(graph: &GraphBuilder, device: DeviceType) -> Result<(), Co
     Ok(())
 }
 
-struct ExeKernel {
-    name: String,
+pub(crate) struct ExeKernel {
+    pub(crate) name: String,
     /// Index into [`GraphExe::kernels`]: the compiled artifact this node
     /// launches. Multiple `ExeKernel`s can share a `kernel_idx` (when their
     /// source modules dedup to the same residual hash); execution is
     /// sequential so each node re-binds `set_params` / inputs / outputs on
     /// the shared program before its launch.
-    kernel_idx: usize,
-    inputs: Vec<BufId>,
-    outputs: Vec<BufId>,
+    pub(crate) kernel_idx: usize,
+    pub(crate) inputs: Vec<BufId>,
+    pub(crate) outputs: Vec<BufId>,
     /// Positional values for the kernel's runtime parameters, aligned with
     /// [`KernelProgram::params()`]'s name order. The launch loop pairs each
     /// value with its corresponding name and calls `set_symbol` before
     /// launching.
-    set_params: Vec<i64>,
+    pub(crate) set_params: Vec<i64>,
     /// Stream index this kernel launches on. `0` is `ctx.stream`; higher
     /// indices are internally-owned auxiliary streams.
-    stream: u32,
+    pub(crate) stream: u32,
     /// Original (post-fusion, pre-lower) source module for this node.
     /// Kept for debug tooling: the run-time trace can dump the module's
     /// HIR + the compiled `.cu` source when a specific instruction stalls,
     /// so we can identify which fused kernel is misbehaving without a
     /// separate lookup table.
-    debug_module: Arc<ir::Module>,
+    pub(crate) debug_module: Arc<ir::Module>,
 }
 
-struct ExeBlackbox {
-    kernel: KernelNode,
-    stream: u32,
+pub(crate) struct ExeBlackbox {
+    pub(crate) kernel: KernelNode,
+    pub(crate) stream: u32,
 }
 
-enum ExeNode {
+pub(crate) enum ExeNode {
     Kernel(ExeKernel),
     Blackbox(ExeBlackbox),
     Const(ConstNode),
@@ -1275,6 +1351,11 @@ enum ExeNode {
 /// [`Self::get_output`]. Because every node always resolves the same
 /// device addresses, a run is CUDA-graph capturable and replayable.
 pub struct GraphExe {
+    /// Deterministic fingerprint of the source [`GraphBuilder`] computed
+    /// *before* any pass ran (see [`GraphBuilder::content_hash`]). The
+    /// graph serializer stamps this on every payload and verifies it
+    /// matches on the partial-restore path.
+    pub(crate) graph_hash: [u8; 32],
     plan: StreamMemoryPlan,
     /// Auxiliary CUDA streams for `stream_idx >= 1`. `streams[0]` is the
     /// caller's `ctx.stream`, so it's stored as `None` and resolved at
@@ -1324,6 +1405,14 @@ pub struct GraphExe {
 }
 
 impl GraphExe {
+    /// Structural fingerprint of the source [`GraphBuilder`], computed
+    /// before any pass ran. Round-trips through the graph serializer;
+    /// used to bind a partial payload to the [`GraphBuilder`] whose
+    /// closures re-populate it on load.
+    pub fn graph_hash(&self) -> &[u8; 32] {
+        &self.graph_hash
+    }
+
     pub fn num_inputs(&self) -> usize {
         self.input_bufs.len()
     }
@@ -2290,6 +2379,314 @@ impl GraphExe {
         Ok(())
     }
 
+    /// Time each exe node's dispatch on `ctx.stream` and return a
+    /// [`GraphInfo`] with per-node sample mean + sample standard
+    /// deviation (in ms) across `num_iters` iterations. `num_warmup`
+    /// un-timed iterations precede the timed pass so first-launch driver
+    /// init doesn't leak into the samples.
+    ///
+    /// The `set_inputs` closure is called once before warmup so the
+    /// caller can bind graph inputs (or leave them bound from a prior
+    /// run). It receives the exe by mutable reference so it can call
+    /// [`Self::set_input`] / [`Self::get_input_ptr`] etc.
+    ///
+    /// # Timing model
+    ///
+    /// Each node's cost is measured with a pair of CUDA events
+    /// straddling its dispatch — `cudaEventElapsedTime` reports the
+    /// device-side interval between them, so per-node numbers reflect
+    /// GPU work exclusive of Rust host overhead. All dispatches happen
+    /// on `ctx.stream` in [`crate::planner::StreamMemoryPlan::instructions`]
+    /// order (with `WaitOn` entries skipped — the single serial stream
+    /// makes cross-stream syncs unnecessary). Multi-stream plans still
+    /// work, but the per-node timings reflect isolated cost, not the
+    /// overlapped multi-stream schedule.
+    ///
+    /// The `total_ms_*` fields are host wall-clock per iteration, which
+    /// includes event record overhead and the final `stream.synchronize`.
+    pub fn collect_graph_info<F>(
+        &mut self,
+        ctx: &GpuDeviceCtx,
+        set_inputs: F,
+        num_warmup: usize,
+        num_iters: usize,
+    ) -> Result<crate::graph_info::GraphInfo, CompileError>
+    where
+        F: FnOnce(&mut GraphExe, &GpuDeviceCtx) -> Result<(), CompileError>,
+    {
+        use openvm_cuda_common::stream::CudaEvent;
+
+        use crate::graph_info::{mean_and_sample_std, GraphInfo, NodeKind, NodeTiming};
+
+        set_inputs(self, ctx)?;
+        if let Some(i) = self.inputs_bound.iter().position(|&b| !b) {
+            return Err(CompileError::Runtime(format!(
+                "graph exe: input {i} was never bound; set_inputs must bind every input"
+            )));
+        }
+        self.ensure_pool(ctx);
+
+        // Ordered list of (instr_pos, node_idx). Skip WaitOn: single-
+        // stream dispatch subsumes cross-stream syncs.
+        let node_order: Vec<usize> = self
+            .plan
+            .instructions
+            .iter()
+            .filter_map(|i| match i {
+                StreamInstr::Node(idx) => Some(*idx),
+                StreamInstr::WaitOn(_, _) => None,
+            })
+            .collect();
+        let n_nodes = node_order.len();
+
+        // Warmup — silence stream and driver init before the timed pass.
+        for _ in 0..num_warmup {
+            for &node_idx in &node_order {
+                self.dispatch_node_on_stream(ctx, node_idx)?;
+            }
+            ctx.stream.synchronize().map_err(|e| {
+                CompileError::Runtime(format!("collect_graph_info warmup sync: {e:?}"))
+            })?;
+        }
+
+        // Timed pass. Per-node CUDA event pairs are freshly allocated
+        // each iteration; samples are indexed by exe-node index (which
+        // is also the source `GraphBuilder.nodes` index at compile
+        // time), so a cytoscape dump can attach each `NodeTiming` by
+        // index directly.
+        let n_exe_nodes = self.nodes.len();
+        let mut per_node_samples: Vec<Vec<f64>> = vec![Vec::with_capacity(num_iters); n_exe_nodes];
+        let mut total_samples: Vec<f64> = Vec::with_capacity(num_iters);
+        for _iter in 0..num_iters {
+            let starts: Vec<CudaEvent> = (0..n_nodes)
+                .map(|_| {
+                    CudaEvent::new().map_err(|e| {
+                        CompileError::Runtime(format!(
+                            "collect_graph_info start event alloc: {e:?}"
+                        ))
+                    })
+                })
+                .collect::<Result<_, _>>()?;
+            let ends: Vec<CudaEvent> = (0..n_nodes)
+                .map(|_| {
+                    CudaEvent::new().map_err(|e| {
+                        CompileError::Runtime(format!("collect_graph_info end event alloc: {e:?}"))
+                    })
+                })
+                .collect::<Result<_, _>>()?;
+
+            let iter_t0 = std::time::Instant::now();
+            for (i, &node_idx) in node_order.iter().enumerate() {
+                starts[i]
+                    .record_on(&ctx.stream)
+                    .map_err(|e| CompileError::Runtime(format!("record start event: {e:?}")))?;
+                self.dispatch_node_on_stream(ctx, node_idx)?;
+                ends[i]
+                    .record_on(&ctx.stream)
+                    .map_err(|e| CompileError::Runtime(format!("record end event: {e:?}")))?;
+            }
+            ctx.stream.synchronize().map_err(|e| {
+                CompileError::Runtime(format!("collect_graph_info timed sync: {e:?}"))
+            })?;
+            total_samples.push(iter_t0.elapsed().as_secs_f64() * 1e3);
+
+            for (i, &node_idx) in node_order.iter().enumerate() {
+                let ms = starts[i]
+                    .elapsed_ms(&ends[i])
+                    .map_err(|e| CompileError::Runtime(format!("cudaEventElapsedTime: {e:?}")))?;
+                per_node_samples[node_idx].push(ms as f64);
+            }
+        }
+
+        let (total_mean, total_std) = mean_and_sample_std(&total_samples);
+        let nodes = (0..n_exe_nodes)
+            .map(|node_idx| {
+                let (kind, name) = match &self.nodes[node_idx] {
+                    ExeNode::Kernel(k) => (NodeKind::Kernel, k.name.clone()),
+                    ExeNode::Blackbox(bb) => (NodeKind::Blackbox, bb.kernel.name.clone()),
+                    ExeNode::Const(_) => (NodeKind::Const, String::from("const")),
+                    ExeNode::Memcpy { .. } => (NodeKind::Memcpy, String::from("memcpy")),
+                    ExeNode::Memset { .. } => (NodeKind::Memset, String::from("memset")),
+                };
+                let (mean, std) = mean_and_sample_std(&per_node_samples[node_idx]);
+                NodeTiming {
+                    kind,
+                    name,
+                    mean_ms: mean,
+                    std_ms: std,
+                }
+            })
+            .collect();
+        Ok(GraphInfo {
+            graph_hash: self.graph_hash,
+            num_warmup,
+            num_iters,
+            nodes,
+            total_ms_mean: total_mean,
+            total_ms_std: total_std,
+        })
+    }
+
+    /// Dispatches exe node `node_idx` on `ctx.stream`. Mirrors the per-
+    /// variant work in [`Self::run`] but ignores the plan's stream
+    /// assignments so [`Self::collect_graph_info`] can measure each
+    /// node's isolated cost.
+    fn dispatch_node_on_stream(
+        &mut self,
+        ctx: &GpuDeviceCtx,
+        node_idx: usize,
+    ) -> Result<(), CompileError> {
+        let GraphExe {
+            nodes,
+            kernels,
+            plan,
+            pool,
+            device,
+            sizes,
+            ..
+        } = self;
+        let pool = pool.as_ref().expect("pool ensured by caller");
+        let device = *device;
+        let bufid_ptr = |b: BufId| resolve_ptr(pool, &plan.offsets, device, b);
+        let s_raw = ctx.stream.as_raw();
+        match &mut nodes[node_idx] {
+            ExeNode::Kernel(k) => {
+                let m = &mut kernels[k.kernel_idx];
+                let names: Vec<String> = m.params().to_vec();
+                for (name, &v) in names.iter().zip(k.set_params.iter()) {
+                    m.set_symbol(name, v);
+                }
+                for (i, &bid) in k.inputs.iter().enumerate() {
+                    let ptr = bufid_ptr(bid)?;
+                    let expected = m.input_size(i);
+                    let fake = ManuallyDrop::new(unsafe {
+                        DeviceBuffer::<u8>::from_raw_parts(ptr, expected)
+                    });
+                    m.set_input(i, &fake)?;
+                }
+                for (i, &bid) in k.outputs.iter().enumerate() {
+                    let ptr = bufid_ptr(bid)?;
+                    let expected = m.output_size(i);
+                    let fake = ManuallyDrop::new(unsafe {
+                        DeviceBuffer::<u8>::from_raw_parts(ptr, expected)
+                    });
+                    m.set_output(i, &fake)?;
+                }
+                m.run(&ctx.stream)?;
+            }
+            ExeNode::Blackbox(bb) => {
+                let k = &bb.kernel;
+                let ins: Vec<*mut ()> = k
+                    .inputs
+                    .iter()
+                    .map(|&b| bufid_ptr(b).map(|p| p as *mut ()))
+                    .collect::<Result<_, _>>()?;
+                let outs: Vec<*mut ()> = k
+                    .outputs
+                    .iter()
+                    .map(|&b| bufid_ptr(b).map(|p| p as *mut ()))
+                    .collect::<Result<_, _>>()?;
+                (k.func)(&ins, &outs, s_raw);
+            }
+            ExeNode::Const(c) => {
+                let dst = bufid_ptr(c.buf)?;
+                let n = sizes[c.buf.0];
+                match &c.data {
+                    ConstBuf::HostBuf(bytes) => {
+                        if bytes.len() != n {
+                            return Err(CompileError::Runtime(format!(
+                                "Const HostBuf for {:?} is {} bytes, buffer is {n}",
+                                c.buf,
+                                bytes.len()
+                            )));
+                        }
+                        let code = unsafe {
+                            cuda_memcpy_async_on_raw(
+                                dst as *mut c_void,
+                                bytes.as_ptr() as *const c_void,
+                                n,
+                                CUDA_MEMCPY_HOST_TO_DEVICE,
+                                s_raw,
+                            )
+                        };
+                        if code != 0 {
+                            return Err(CompileError::Runtime(format!(
+                                "cudaMemcpyAsync H2D failed with code {code}"
+                            )));
+                        }
+                    }
+                    ConstBuf::DeviceBuf(src) => {
+                        let code = unsafe {
+                            cuda_memcpy_async_on_raw(
+                                dst as *mut c_void,
+                                src.as_raw_ptr(),
+                                n,
+                                CUDA_MEMCPY_DEVICE_TO_DEVICE,
+                                s_raw,
+                            )
+                        };
+                        if code != 0 {
+                            return Err(CompileError::Runtime(format!(
+                                "cudaMemcpyAsync D2D failed with code {code}"
+                            )));
+                        }
+                    }
+                }
+            }
+            ExeNode::Memcpy {
+                src,
+                src_offset,
+                dst,
+                dst_offset,
+                num_bytes,
+            } => {
+                let src_ptr = bufid_ptr(*src)?;
+                let dst_ptr = bufid_ptr(*dst)?;
+                let code = unsafe {
+                    openvm_cuda_common::error::check(cuda_memcpy_async_on_raw(
+                        dst_ptr.add(*dst_offset) as *mut c_void,
+                        src_ptr.add(*src_offset) as *const c_void,
+                        *num_bytes,
+                        CUDA_MEMCPY_DEVICE_TO_DEVICE,
+                        s_raw,
+                    ))
+                };
+                code.map_err(|e| CompileError::Runtime(format!("cudaMemcpyAsync D2D: {e:?}")))?;
+            }
+            ExeNode::Memset {
+                buf,
+                offset,
+                num_bytes,
+                val,
+            } => {
+                let val_bytes = val.to_le_bytes();
+                if val_bytes[0] != val_bytes[1]
+                    || val_bytes[0] != val_bytes[2]
+                    || val_bytes[0] != val_bytes[3]
+                {
+                    return Err(CompileError::Runtime(format!(
+                        "Memset value {val:#x} is not byte-uniform"
+                    )));
+                }
+                let ptr = bufid_ptr(*buf)?;
+                let code = unsafe {
+                    cudaMemsetAsync(
+                        ptr.add(*offset) as *mut c_void,
+                        val_bytes[0] as i32,
+                        *num_bytes,
+                        s_raw,
+                    )
+                };
+                if code != 0 {
+                    return Err(CompileError::Runtime(format!(
+                        "cudaMemsetAsync failed with code {code}"
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Allocates auxiliary streams and events lazily on the first
     /// [`Self::run`]. Slot 0 stays `None` and resolves to `ctx.stream` at
     /// run-time; slots >= 1 are internally-owned non-blocking streams.
@@ -2636,6 +3033,7 @@ mod tests {
                 name: Some(name.to_string()),
                 device_type: DeviceType::Cuda(0),
                 size: Quast::cst(bytes),
+                concrete_size: bytes as usize,
                 elem_size: 4,
             })
         };
@@ -2746,6 +3144,7 @@ mod tests {
                 name: Some(name.to_string()),
                 device_type: DeviceType::Cuda(0),
                 size: Quast::cst(bytes),
+                concrete_size: bytes as usize,
                 elem_size: 4,
             })
         };
@@ -2823,6 +3222,7 @@ mod tests {
                 name: Some(name.to_string()),
                 device_type: DeviceType::Cuda(0),
                 size: Quast::cst(bytes),
+                concrete_size: bytes as usize,
                 elem_size: 4,
             })
         };
@@ -2903,6 +3303,7 @@ mod tests {
             name: Some(name.into()),
             device_type: DeviceType::Cuda(0),
             size: Quast::cst(bytes),
+            concrete_size: bytes as usize,
             elem_size: 4,
         })
     }
@@ -3179,5 +3580,87 @@ mod tests {
         // The intermediate is on the parent's device.
         let mid = k0.outputs[0];
         assert_eq!(g.buf_info(mid).device_type, DeviceType::Cuda(0));
+    }
+
+    /// `collect_graph_info` runs the graph `num_iters` times, records
+    /// per-node CUDA-event timings, and returns a snapshot whose
+    /// `graph_hash` matches the source exe and whose per-node kinds line
+    /// up with the plan's Node instructions.
+    #[test]
+    fn collect_graph_info_produces_per_node_timings() {
+        use crate::graph_info::NodeKind;
+
+        const N: usize = 64;
+        let bytes = (N * 4) as i64;
+        let mut g = GraphBuilder::new();
+        let mk = |g: &mut GraphBuilder, name: &str| -> BufId {
+            g.add_buf(BufInfo {
+                name: Some(name.into()),
+                device_type: DeviceType::Cuda(0),
+                size: Quast::cst(bytes),
+                concrete_size: bytes as usize,
+                elem_size: 4,
+            })
+        };
+        let x = mk(&mut g, "x");
+        let y = mk(&mut g, "y");
+        let out = mk(&mut g, "out");
+        g.register_input(x);
+        g.register_output(out);
+        // Memcpy x -> y, then scale-by-two kernel: y -> out.
+        g.insert_memcpy(x, y);
+        let module = {
+            let mut b = IRBuilder::new();
+            let a = b.input("a", ScalarType::BabyBear, vec![N]);
+            let body = b.compute(N, |b, i| {
+                let ai = b.index(a, &[i]);
+                let two = b.const_field(2);
+                b.mul(ai, two)
+            });
+            Arc::new(b.finish("scale_by_two_info", body))
+        };
+        g.insert_kernel(module, [y], [out], &[]);
+
+        let mut exe = GraphCompiler::new()
+            .device(DeviceType::Cuda(0))
+            .compile(g)
+            .expect("graph compile");
+        let expected_hash = *exe.graph_hash();
+
+        let ctx = GpuDeviceCtx::for_current_device().expect("GPU ctx");
+        let host: Vec<u32> = (0..N as u32).map(|i| i + 1).collect();
+        let host_bytes: Vec<u8> = host.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let d_input = host_bytes.as_slice().to_device_on(&ctx).unwrap();
+
+        let info = exe
+            .collect_graph_info(
+                &ctx,
+                |exe, ctx| exe.set_input(ctx, 0, &d_input),
+                /* num_warmup= */ 2,
+                /* num_iters= */ 5,
+            )
+            .expect("collect_graph_info");
+
+        assert_eq!(info.graph_hash, expected_hash);
+        assert_eq!(info.num_warmup, 2);
+        assert_eq!(info.num_iters, 5);
+        assert_eq!(info.nodes.len(), exe.num_nodes());
+        // We inserted memcpy first, kernel second.
+        assert_eq!(info.nodes[0].kind, NodeKind::Memcpy);
+        assert_eq!(info.nodes[1].kind, NodeKind::Kernel);
+        assert_eq!(info.nodes[1].name, "scale_by_two_info");
+        for nt in &info.nodes {
+            // GPU work is strictly positive; sample std is non-negative.
+            assert!(nt.mean_ms >= 0.0, "mean must be non-negative");
+            assert!(nt.std_ms >= 0.0, "std must be non-negative");
+        }
+        assert!(info.total_ms_mean > 0.0);
+        assert!(info.total_ms_std >= 0.0);
+
+        // Snapshot survives a bincode round-trip.
+        let bytes = bincode::serialize(&info).unwrap();
+        let round: crate::graph_info::GraphInfo = bincode::deserialize(&bytes).unwrap();
+        assert_eq!(round.graph_hash, info.graph_hash);
+        assert_eq!(round.nodes.len(), info.nodes.len());
     }
 }

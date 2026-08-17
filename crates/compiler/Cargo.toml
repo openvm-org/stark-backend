@@ -18,14 +18,15 @@ libloading = { workspace = true }
 p3-baby-bear = { workspace = true }
 p3-field = { workspace = true }
 rustc-hash = { workspace = true }
-smallvec = { workspace = true }
+smallvec = { workspace = true, features = ["serde"] }
 tempfile = { workspace = true }
 thiserror = { workspace = true }
 hex = { workspace = true, default-features = false, features = ["std"] }
 sha3 = { workspace = true }
 rayon = { workspace = true }
-serde = { workspace = true, features = ["derive"] }
+serde = { workspace = true, features = ["derive", "rc"] }
 serde_json = { workspace = true }
+bincode = "1"
 parking_lot = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
@@ -73,3 +74,7 @@ required-features = ["planner"]
 [[example]]
 name = "planner_bench"
 required-features = ["planner-ortools"]
+
+[[example]]
+name = "bench_abstract_planners"
+required-features = ["planner"]

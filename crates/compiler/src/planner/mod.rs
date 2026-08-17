@@ -28,13 +28,21 @@ use crate::{
     ir::VarId,
 };
 
+pub mod abstract_timing;
 #[cfg(feature = "planner-ortools")]
 pub mod cpsat;
 mod ctx;
 pub mod heuristic;
 pub mod list_v1;
+pub mod list_v2;
 mod plan;
 
+#[cfg(feature = "planner-ortools")]
+pub use abstract_timing::plan_cpsat_v2;
+pub use abstract_timing::{
+    load_abstract_timing_graph, perf_est, plan_heuristic_v2, plan_list_v1_v2, plan_v2,
+    AbstractTimingGraph, LoadError as AbstractLoadError, PerfEst, PlanFn,
+};
 pub use ctx::{
     access_from_node, align_up, eval_size, propagate_alias_offsets, NodeAccess, PlanCtx, PlanError,
 };
@@ -146,6 +154,7 @@ mod tests {
             name: Some(name.to_string()),
             device_type: DeviceType::Cuda(0),
             size: Quast::cst(size),
+            concrete_size: size as usize,
             elem_size: 4,
         })
     }
@@ -261,6 +270,7 @@ mod tests {
             name: Some("a".into()),
             device_type: DeviceType::Cuda(0),
             size: Quast::sym(n).mul_c(4),
+            concrete_size: 0,
             elem_size: 4,
         });
         g.insert_blackbox_kernel(
@@ -285,6 +295,7 @@ mod tests {
             name: Some("a".into()),
             device_type: DeviceType::Cuda(0),
             size: Quast::sym(n),
+            concrete_size: 0,
             elem_size: 4,
         });
         let err = plan(&g, &BTreeMap::new(), DeviceType::Cuda(0)).unwrap_err();

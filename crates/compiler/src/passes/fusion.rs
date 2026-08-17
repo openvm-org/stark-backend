@@ -2589,6 +2589,7 @@ mod tests {
                 name: Some(name),
                 device_type: DeviceType::Cuda(0),
                 size: Quast::cst(bytes),
+                concrete_size: bytes as usize,
                 elem_size: 4,
             })
         };
@@ -3200,6 +3201,7 @@ mod tests {
             name: Some(name.into()),
             device_type: DeviceType::Cuda(0),
             size: Quast::cst(elems * 4),
+            concrete_size: (elems as usize) * 4,
             elem_size: 4,
         })
     }
@@ -3365,6 +3367,7 @@ mod tests {
             name: Some(name.into()),
             device_type: DeviceType::Cuda(0),
             size: Quast::cst(64),
+            concrete_size: 64,
             elem_size: 4,
         })
     }

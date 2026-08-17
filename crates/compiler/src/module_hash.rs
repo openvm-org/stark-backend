@@ -140,31 +140,36 @@ pub(crate) fn children_of(node: &Node) -> Vec<NodeId> {
     }
 }
 
-struct Hasher(Sha3_256);
+pub(crate) struct Hasher(Sha3_256);
 
 impl Hasher {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Hasher(Sha3_256::new())
     }
 
-    fn tag(&mut self, t: u8) {
+    pub(crate) fn tag(&mut self, t: u8) {
         self.0.update([t]);
     }
 
-    fn u64(&mut self, v: u64) {
+    pub(crate) fn u64(&mut self, v: u64) {
         self.0.update(v.to_le_bytes());
     }
 
-    fn i64(&mut self, v: i64) {
+    pub(crate) fn i64(&mut self, v: i64) {
         self.0.update(v.to_le_bytes());
     }
 
-    fn str(&mut self, s: &str) {
+    pub(crate) fn bytes(&mut self, b: &[u8]) {
+        self.u64(b.len() as u64);
+        self.0.update(b);
+    }
+
+    pub(crate) fn str(&mut self, s: &str) {
         self.u64(s.len() as u64);
         self.0.update(s.as_bytes());
     }
 
-    fn scalar_ty(&mut self, t: ScalarType) {
+    pub(crate) fn scalar_ty(&mut self, t: ScalarType) {
         let byte: u8 = match t {
             ScalarType::BabyBear => 0,
             ScalarType::FpExt => 1,
@@ -196,7 +201,7 @@ impl Hasher {
         self.0.update([byte]);
     }
 
-    fn sym_const(&mut self, c: &SymConst) {
+    pub(crate) fn sym_const(&mut self, c: &SymConst) {
         match c {
             SymConst::Lit(l) => {
                 self.tag(0);
@@ -209,7 +214,7 @@ impl Hasher {
         }
     }
 
-    fn sexpr(&mut self, e: &SExpr) {
+    pub(crate) fn sexpr(&mut self, e: &SExpr) {
         match e {
             SExpr::Sym(v) => {
                 self.tag(0);
@@ -241,7 +246,7 @@ impl Hasher {
         }
     }
 
-    fn quast(&mut self, q: &Quast) {
+    pub(crate) fn quast(&mut self, q: &Quast) {
         match q {
             Quast::Sym(v) => {
                 self.tag(0);
@@ -444,7 +449,7 @@ impl Hasher {
         }
     }
 
-    fn finish(self) -> [u8; 32] {
+    pub(crate) fn finish(self) -> [u8; 32] {
         self.0.finalize().into()
     }
 }

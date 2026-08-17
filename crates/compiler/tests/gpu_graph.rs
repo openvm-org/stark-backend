@@ -75,6 +75,7 @@ fn add_buf(g: &mut GraphBuilder, name: &str, bytes: usize) -> BufId {
         name: Some(name.into()),
         device_type: DeviceType::Cuda(0),
         size: Quast::cst(bytes as i64),
+        concrete_size: bytes,
         elem_size: 4,
     })
 }

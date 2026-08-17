@@ -69,6 +69,11 @@ pub(crate) mod batch_mle_monomial;
 mod block_ctxs;
 mod errors;
 pub(crate) mod fold_ple;
+/// Test-only helpers for the fractional-sumcheck benches/dumps: unified
+/// `CC_*` compiler-tuning env vars, `FRAC_LOG_N` input size, and the
+/// `CC_GRAPH_DUMP_PATH` compile-or-load driver.
+#[cfg(all(test, feature = "graph-ir"))]
+pub(crate) mod frac_bench_utils;
 /// Fraction sumcheck via GKR
 mod fractional;
 /// Graph-IR mirror of [`fractional::fractional_sumcheck_gpu`].

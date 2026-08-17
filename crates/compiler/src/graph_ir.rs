@@ -22,10 +22,11 @@ use std::{
 };
 
 use openvm_cuda_common::{d_buffer::DeviceBuffer, stream::cudaStream_t};
+use serde::{Deserialize, Serialize};
 
 use crate::{
     ir::{self, Node, VarId},
-    module_hash::{children_of, module_hash},
+    module_hash::{children_of, module_hash, Hasher},
     passes::{
         fusion::renumber_module,
         split_module::{ModuleSubgraph, SubgraphValue},
@@ -35,7 +36,7 @@ use crate::{
 };
 
 /// Index of a buffer in the graph's buffer table.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct BufId(pub usize);
 
 /// Per-node buffer accesses `(reads, writes)`, where each read carries a
@@ -43,7 +44,7 @@ pub struct BufId(pub usize);
 /// [`GraphBuilder::node_reads_writes`].
 type NodeReadsWrites = (Vec<(BufId, bool)>, Vec<BufId>);
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DeviceType {
     /// CUDA device with the given ordinal.
     Cuda(usize),
@@ -51,12 +52,13 @@ pub enum DeviceType {
     CpuPaged,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BufInfo {
     pub name: Option<String>,
     pub device_type: DeviceType,
     /// Symbolic size in bytes.
     pub size: Quast,
+    pub concrete_size: usize,
     pub elem_size: usize,
 }
 
@@ -86,6 +88,35 @@ pub struct KernelNode {
     pub name: String,
 }
 
+impl KernelNode {
+    /// Structural key used to match this blackbox node against a
+    /// [`KernelNode`] in a separately-constructed [`GraphBuilder`] on
+    /// the graph serializer's partial-restore path. The [`KernelFn`]
+    /// closure itself never contributes to the key — pointer identity
+    /// isn't stable across processes and closures aren't serializable.
+    pub fn key(&self) -> BlackboxKey {
+        BlackboxKey {
+            name: self.name.clone(),
+            inputs: self.inputs.clone(),
+            outputs: self.outputs.clone(),
+            carried_outputs: self.carried_outputs.clone(),
+        }
+    }
+}
+
+/// Structural identity of a blackbox kernel node — the name plus its
+/// buffer wiring. Two [`KernelNode`]s with the same [`BlackboxKey`] are
+/// interchangeable from the graph-topology perspective; the graph
+/// serializer relies on this to pair a deserialized partial payload with
+/// the closures held by a live [`GraphBuilder`].
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct BlackboxKey {
+    pub name: String,
+    pub inputs: Vec<BufId>,
+    pub outputs: Vec<BufId>,
+    pub carried_outputs: Vec<BufId>,
+}
+
 impl fmt::Debug for KernelNode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("KernelNode")
@@ -105,7 +136,7 @@ impl fmt::Debug for KernelNode {
 /// copy use [`GraphBuilder::insert_memcpy`], which sets both offsets to 0
 /// and `num_bytes` to `dst`'s declared size; for partial copies use
 /// [`GraphBuilder::insert_memcpy_range`].
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MemcpyNode {
     pub src: BufId,
     pub src_offset: Quast,
@@ -117,7 +148,7 @@ pub struct MemcpyNode {
 /// Byte-pattern fill of `buf[offset .. offset + num_bytes]` with the
 /// low-byte of `val` (see [`crate::graph_exe::GraphExe::run`] for the
 /// byte-uniformity check).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MemSetNode {
     pub node: BufId,
     pub offset: Quast,
@@ -147,6 +178,7 @@ pub struct MemSetNode {
 /// (see `graph_exe`) deduplicates JIT builds keyed on that pointer. `Arc`
 /// (rather than `Rc`) also lets modules cross thread boundaries during
 /// parallel JIT.
+#[derive(Serialize, Deserialize)]
 pub struct KernelModuleNode {
     pub module: Arc<ir::Module>,
     /// Concrete value of each `module.builder.params()` entry for *this*
@@ -162,7 +194,10 @@ pub struct KernelModuleNode {
     /// [`Self::replace_module`] swaps the module out. `None` on `types`
     /// / `hash` means "not yet computed"; `canonical = false` means
     /// "not yet canonicalized" (a fresh insertion can be arbitrary HIR
-    /// until the canonicalize pass runs).
+    /// until the canonicalize pass runs). Not serialized: rederived by
+    /// the graph compiler passes when the module first flows through
+    /// them.
+    #[serde(skip)]
     pub types: Option<Arc<crate::passes::TypeMap>>,
     pub hash: Option<[u8; 32]>,
     pub canonical: bool,
@@ -170,6 +205,7 @@ pub struct KernelModuleNode {
     /// un-fused, freshly-lowered kernels; `Some` after
     /// [`crate::passes::fusion::apply_fusion`] merges two kernels. Metadata
     /// only — not part of [`module_hash`], and not read by the runtime.
+    #[serde(skip)]
     pub fusion_history: Option<Arc<FusionHistory>>,
 }
 
@@ -493,6 +529,7 @@ pub(crate) fn split_kernel_node(
                     name: Some(format!("{}.k{ki}.o{oi}", subgraph.name)),
                     device_type: device,
                     size: Quast::cst(num_elems * spec.elem.size_bytes() as i64),
+                    concrete_size: (num_elems as usize) * spec.elem.size_bytes(),
                     elem_size: spec.elem.size_bytes(),
                 })
             })
@@ -946,6 +983,14 @@ pub struct GraphBuilder {
     /// mutation (`insert_*`, splits, fusion, dce-removal) resets this to
     /// `None`; the compile driver reuses it when already populated.
     pub plan: Option<StreamMemoryPlan>,
+    /// Cached "original" content hash — snapshotted on the *first* call
+    /// to [`Self::original_hash`] and preserved verbatim through every
+    /// pass (fusion, DCE, `restore_ssa`, etc.). Compilation triggers the
+    /// snapshot at its entry point, so downstream code (e.g. the graph
+    /// serializer's `attach_closures` sanity check) can compare the
+    /// pre-pass fingerprint of two independently-built graphs even
+    /// after one of them has been compiled in place.
+    pub original_hash: Option<[u8; 32]>,
 }
 
 impl GraphBuilder {
@@ -1026,6 +1071,42 @@ impl GraphBuilder {
     /// Registered graph outputs, in registration order.
     pub fn output_bufs(&self) -> &[BufId] {
         &self.output_bufs
+    }
+
+    /// One past the highest [`VarId`] allocated by this builder. Used
+    /// by [`crate::graph_serializer::SerializableGraphBuilder`] to
+    /// snapshot the fresh-variable watermark.
+    pub fn next_var(&self) -> u32 {
+        self.next_var
+    }
+
+    /// Assemble a [`GraphBuilder`] from the parts recovered by
+    /// [`crate::graph_serializer::SerializableGraphBuilder::into_graph_builder`].
+    /// `plan` is reset to `None` and will be regenerated by the compile
+    /// pipeline; `original_hash` is populated with the pre-pass
+    /// fingerprint carried by the snapshot.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_serialized_parts(
+        bufs: Vec<BufInfo>,
+        nodes: Vec<GraphNode>,
+        symbols: BTreeMap<VarId, String>,
+        next_var: u32,
+        input_bufs: Vec<BufId>,
+        output_bufs: Vec<BufId>,
+        aliases: Vec<Option<BufId>>,
+        original_hash: Option<[u8; 32]>,
+    ) -> Self {
+        Self {
+            bufs,
+            nodes,
+            symbols,
+            next_var,
+            input_bufs,
+            output_bufs,
+            aliases,
+            plan: None,
+            original_hash,
+        }
     }
 
     /// Whether `id` is part of the registered graph interface (input or
@@ -1416,6 +1497,29 @@ impl GraphBuilder {
     /// two kernels sharing the same module share one dump). Overall shape:
     /// `{"elements": {"nodes": [..], "edges": [..]}, "modules": {..}}`.
     pub fn to_cytoscape_json(&self) -> String {
+        self.to_cytoscape_json_with_timings(None)
+    }
+
+    /// Variant of [`Self::to_cytoscape_json`] that embeds per-node
+    /// timings from a [`crate::graph_info::GraphInfo`].
+    ///
+    /// When `timings` is `Some(info)`:
+    /// - Each cytoscape node whose graph index has a matching [`crate::graph_info::NodeTiming`]
+    ///   gets `timing_mean_ms`, `timing_std_ms`, `timing_kind`, `timing_name` fields.
+    /// - The top-level JSON gains a `timings` section with [`crate::graph_info::GraphInfo`]
+    ///   metadata (iter counts, total ms) plus a `per_kernel` map from kernel/blackbox name to
+    ///   cumulative mean-ms and dispatch count. The frontend (`scripts/serve_graph.py`) uses this
+    ///   to render a stats overview and per-node timing chips.
+    ///
+    /// When `info.nodes.len()` doesn't match `self.nodes.len()` (e.g.
+    /// the timings were collected from a differently-fused exe) the
+    /// timing block is included as-is at the top level but per-node
+    /// fields are omitted — the viewer degrades gracefully rather than
+    /// misattributing costs to the wrong nodes.
+    pub fn to_cytoscape_json_with_timings(
+        &self,
+        timings: Option<&crate::graph_info::GraphInfo>,
+    ) -> String {
         // First pass: compute per-node reads/writes so we can reuse the
         // classification for edges and dataflow stats.
         let node_rw: Vec<NodeReadsWrites> = self
@@ -1675,6 +1779,20 @@ impl GraphBuilder {
                     fields.push(("fusion_history", fusion_history_json(history)));
                 }
             }
+            // Per-node timing when the caller supplied a matching
+            // `GraphInfo`. `NodeTiming.name`/`kind` come from the exe
+            // node this timing was measured on; when they diverge from
+            // the graph node's label the frontend uses the exe-side
+            // label (matches the compiled artifact).
+            if let Some(nt) = timings
+                .filter(|t| t.nodes.len() == self.nodes.len())
+                .and_then(|t| t.nodes.get(n))
+            {
+                fields.push(("timing_mean_ms", format!("{:.6}", nt.mean_ms)));
+                fields.push(("timing_std_ms", format!("{:.6}", nt.std_ms)));
+                fields.push(("timing_kind", format!("\"{}\"", node_kind_str(&nt.kind))));
+                fields.push(("timing_name", format!("\"{}\"", json_escape(&nt.name))));
+            }
             push_node(&mut nodes_json, fields);
         }
         for buf in &input_bufs {
@@ -1735,12 +1853,16 @@ impl GraphBuilder {
             .map(|(k, v)| format!("    \"{}\":\"{}\"", json_escape(k), json_escape(v)))
             .collect::<Vec<_>>()
             .join(",\n");
+        let timings_json = timings
+            .map(|t| format!(",\n\"timings\":{}", graph_info_json(t)))
+            .unwrap_or_default();
         format!(
             "{{\"elements\":{{\n  \"nodes\":[\n{}\n  ],\n  \"edges\":[\n{}\n  ]\n}},\n\
-             \"modules\":{{\n{}\n}}}}\n",
+             \"modules\":{{\n{}\n}}{}}}\n",
             nodes_json.join(",\n"),
             edges_json.join(",\n"),
             modules_json,
+            timings_json,
         )
     }
 
@@ -1859,6 +1981,167 @@ impl GraphBuilder {
             ),
         }
     }
+
+    /// Cache-lazy accessor for the pre-pass content fingerprint.
+    ///
+    /// On the first call this snapshots [`Self::content_hash`] into
+    /// [`Self::original_hash`] and returns it; subsequent calls return
+    /// the cached value regardless of any mutation the graph has since
+    /// undergone. Called by [`crate::graph_exe::GraphCompiler::compile`]
+    /// before any pass mutates the builder, so a `GraphBuilder` handed
+    /// to `compile` always ends the compile with its pre-fusion hash
+    /// available for later comparison (e.g. by
+    /// [`crate::graph_serializer::SerializableGraphBuilder::attach_closures`]).
+    pub fn original_hash(&mut self) -> [u8; 32] {
+        if let Some(h) = self.original_hash {
+            return h;
+        }
+        let h = self.content_hash();
+        self.original_hash = Some(h);
+        h
+    }
+
+    /// Deterministic SHA-3-256 fingerprint of this builder's observable
+    /// structure. Used by [`crate::graph_serializer`] to bind a serialized
+    /// executable to the [`GraphBuilder`] it was produced from — the same
+    /// value must reappear when a partial payload is paired with a live
+    /// builder for blackbox-closure re-attachment.
+    ///
+    /// The hash *never* incorporates a blackbox [`KernelFn`]: closure
+    /// pointer identity isn't stable across processes and closures aren't
+    /// serializable, so hashing them would spuriously invalidate every
+    /// round-trip.
+    pub fn content_hash(&self) -> [u8; 32] {
+        let mut h = Hasher::new();
+
+        h.u64(self.bufs.len() as u64);
+        for buf in &self.bufs {
+            match &buf.name {
+                None => h.tag(0),
+                Some(n) => {
+                    h.tag(1);
+                    h.str(n);
+                }
+            }
+            hash_device_type(&mut h, buf.device_type);
+            h.quast(&buf.size);
+            h.u64(buf.elem_size as u64);
+        }
+
+        h.u64(self.nodes.len() as u64);
+        for node in &self.nodes {
+            hash_graph_node(&mut h, node);
+        }
+
+        h.u64(self.input_bufs.len() as u64);
+        for b in &self.input_bufs {
+            h.u64(b.0 as u64);
+        }
+        h.u64(self.output_bufs.len() as u64);
+        for b in &self.output_bufs {
+            h.u64(b.0 as u64);
+        }
+
+        h.u64(self.aliases.len() as u64);
+        for a in &self.aliases {
+            match a {
+                None => h.tag(0),
+                Some(b) => {
+                    h.tag(1);
+                    h.u64(b.0 as u64);
+                }
+            }
+        }
+
+        h.u64(self.symbols.len() as u64);
+        for (v, name) in &self.symbols {
+            h.u64(v.0 as u64);
+            h.str(name);
+        }
+
+        h.finish()
+    }
+}
+
+fn hash_device_type(h: &mut Hasher, d: DeviceType) {
+    match d {
+        DeviceType::Cuda(ord) => {
+            h.tag(0);
+            h.u64(ord as u64);
+        }
+        DeviceType::CpuPinned => h.tag(1),
+        DeviceType::CpuPaged => h.tag(2),
+    }
+}
+
+fn hash_graph_node(h: &mut Hasher, node: &GraphNode) {
+    match node {
+        GraphNode::Kernel(k) => {
+            h.tag(0);
+            let mod_hash = k.hash.unwrap_or_else(|| module_hash(&k.module));
+            h.bytes(&mod_hash);
+            h.u64(k.param_bindings.len() as u64);
+            for (name, val) in &k.param_bindings {
+                h.str(name);
+                h.i64(*val);
+            }
+            h.u64(k.inputs.len() as u64);
+            for b in &k.inputs {
+                h.u64(b.0 as u64);
+            }
+            h.u64(k.outputs.len() as u64);
+            for b in &k.outputs {
+                h.u64(b.0 as u64);
+            }
+        }
+        GraphNode::BlackboxKernel(k) => {
+            h.tag(1);
+            // Deliberately excludes `k.func`: closure pointer identity is
+            // unstable across processes and closures aren't serializable.
+            h.str(&k.name);
+            h.u64(k.inputs.len() as u64);
+            for b in &k.inputs {
+                h.u64(b.0 as u64);
+            }
+            h.u64(k.outputs.len() as u64);
+            for b in &k.outputs {
+                h.u64(b.0 as u64);
+            }
+            h.u64(k.carried_outputs.len() as u64);
+            for b in &k.carried_outputs {
+                h.u64(b.0 as u64);
+            }
+        }
+        GraphNode::Const(c) => {
+            h.tag(2);
+            h.u64(c.buf.0 as u64);
+            match &c.data {
+                ConstBuf::DeviceBuf(d) => {
+                    h.tag(0);
+                    h.u64(d.len() as u64);
+                }
+                ConstBuf::HostBuf(v) => {
+                    h.tag(1);
+                    h.bytes(v);
+                }
+            }
+        }
+        GraphNode::Memcpy(m) => {
+            h.tag(3);
+            h.u64(m.src.0 as u64);
+            h.u64(m.dst.0 as u64);
+            h.quast(&m.src_offset);
+            h.quast(&m.dst_offset);
+            h.quast(&m.num_bytes);
+        }
+        GraphNode::Memset(m) => {
+            h.tag(4);
+            h.u64(m.node.0 as u64);
+            h.quast(&m.offset);
+            h.quast(&m.num_bytes);
+            h.u64(m.val as u64);
+        }
+    }
 }
 
 /// Serializes a [`FusionHistory`] tree into JSON. Leaves carry the
@@ -1955,6 +2238,81 @@ fn solve_size_expr(e: &SExpr, target: i64, env: &mut BTreeMap<VarId, i64>) -> bo
         // Loop vars can't appear in input shapes; FloorDiv is lossy.
         SExpr::Sym(_) | SExpr::FloorDiv(..) => false,
     }
+}
+
+fn node_kind_str(k: &crate::graph_info::NodeKind) -> &'static str {
+    match k {
+        crate::graph_info::NodeKind::Kernel => "Kernel",
+        crate::graph_info::NodeKind::Blackbox => "Blackbox",
+        crate::graph_info::NodeKind::Const => "Const",
+        crate::graph_info::NodeKind::Memcpy => "Memcpy",
+        crate::graph_info::NodeKind::Memset => "Memset",
+    }
+}
+
+/// Cytoscape-side representation of a [`crate::graph_info::GraphInfo`].
+///
+/// Includes the raw run metadata (warmup / iters / total wall clock) plus
+/// a `per_kernel` map — cumulative mean-ms and dispatch count keyed by
+/// `NodeTiming.name` — that the browser stats panel renders as an
+/// overview of the timing budget by variant. When two ExeNodes share a
+/// `name` (fusion-deduped kernels compiled into one artifact) their
+/// per-dispatch means combine as (count, sum_of_means) so the overview
+/// shows total contribution across all dispatches.
+fn graph_info_json(info: &crate::graph_info::GraphInfo) -> String {
+    use std::collections::BTreeMap;
+    let mut per_kernel: BTreeMap<(String, String), (usize, f64, f64)> = BTreeMap::new();
+    for nt in &info.nodes {
+        let key = (node_kind_str(&nt.kind).to_string(), nt.name.clone());
+        let entry = per_kernel.entry(key).or_insert((0, 0.0, 0.0));
+        entry.0 += 1;
+        entry.1 += nt.mean_ms;
+        // Aggregate variance: for independent dispatches we sum
+        // std_ms^2 to get total variance, then sqrt at emission time.
+        // This is an approximation (the per-dispatch samples aren't
+        // truly independent inside one exe run) but it's the same
+        // approximation the frontend would compute from per-node stats,
+        // so we compute it once here.
+        entry.2 += nt.std_ms * nt.std_ms;
+    }
+    let per_kernel_json: Vec<String> = per_kernel
+        .into_iter()
+        .map(|((kind, name), (count, sum_mean, sum_var))| {
+            let std_ms = sum_var.sqrt();
+            format!(
+                "\"{}\":{{\"count\":{count},\"cumulative_mean_ms\":{:.6},\
+                 \"cumulative_std_ms\":{:.6},\"kind\":\"{kind}\"}}",
+                json_escape(&name),
+                sum_mean,
+                std_ms,
+            )
+        })
+        .collect();
+    let per_node_json: Vec<String> = info
+        .nodes
+        .iter()
+        .map(|nt| {
+            format!(
+                "{{\"kind\":\"{}\",\"name\":\"{}\",\"mean_ms\":{:.6},\"std_ms\":{:.6}}}",
+                node_kind_str(&nt.kind),
+                json_escape(&nt.name),
+                nt.mean_ms,
+                nt.std_ms,
+            )
+        })
+        .collect();
+    format!(
+        "{{\"graph_hash\":\"{}\",\"num_warmup\":{},\"num_iters\":{},\
+         \"total_ms_mean\":{:.6},\"total_ms_std\":{:.6},\
+         \"per_kernel\":{{{}}},\"per_node\":[{}]}}",
+        hex::encode(info.graph_hash),
+        info.num_warmup,
+        info.num_iters,
+        info.total_ms_mean,
+        info.total_ms_std,
+        per_kernel_json.join(","),
+        per_node_json.join(","),
+    )
 }
 
 fn json_escape(s: &str) -> String {
@@ -2097,6 +2455,7 @@ impl GraphModule {
                 name: Some(decl.name.clone()),
                 device_type: DeviceType::Cuda(0),
                 size: Quast::cst(byte_size),
+                concrete_size: byte_size as usize,
                 elem_size: decl.elem.size_bytes(),
             });
             input_bufs.push(buf);
@@ -2129,6 +2488,7 @@ impl GraphModule {
                 name: Some(format!("out{i}")),
                 device_type: DeviceType::Cuda(0),
                 size: Quast::cst(byte_size),
+                concrete_size: byte_size as usize,
                 elem_size: elem.size_bytes(),
             });
             output_bufs.push(buf);
@@ -2372,10 +2732,15 @@ mod tests {
     }
 
     fn buf(builder: &mut GraphBuilder, name: &str, device_type: DeviceType, size: Quast) -> BufId {
+        let concrete_size = match &size {
+            Quast::Const(c) => *c as usize,
+            _ => 0,
+        };
         builder.add_buf(BufInfo {
             name: Some(name.to_string()),
             device_type,
             size,
+            concrete_size,
             elem_size: 4,
         })
     }
@@ -2928,6 +3293,80 @@ mod tests {
         // The module name appears exactly once as a key in the map (dedup).
         let occurrences = json.matches(r#""shared_mod":"module"#).count();
         assert_eq!(occurrences, 1, "module dedup failed: {json}");
+    }
+
+    #[test]
+    fn cytoscape_json_with_timings_embeds_per_node_and_overview() {
+        use crate::graph_info::{GraphInfo, NodeKind, NodeTiming};
+
+        let mut b = GraphBuilder::new();
+        let sz = Quast::cst(64);
+        let x = buf(&mut b, "x", DeviceType::Cuda(0), sz.clone());
+        let y = buf(&mut b, "y", DeviceType::Cuda(0), sz.clone());
+        let z = buf(&mut b, "z", DeviceType::Cuda(0), sz.clone());
+        b.insert_memcpy(x, y);
+        b.insert_blackbox_kernel(
+            "add",
+            [y].into_iter(),
+            [z].into_iter(),
+            [false].into_iter(),
+            |_, _, _| {},
+        );
+        // Two entries — one per graph node, in the same order.
+        let info = GraphInfo {
+            graph_hash: [0u8; 32],
+            num_warmup: 3,
+            num_iters: 7,
+            nodes: vec![
+                NodeTiming {
+                    kind: NodeKind::Memcpy,
+                    name: "memcpy".into(),
+                    mean_ms: 0.5,
+                    std_ms: 0.05,
+                },
+                NodeTiming {
+                    kind: NodeKind::Blackbox,
+                    name: "add".into(),
+                    mean_ms: 1.25,
+                    std_ms: 0.1,
+                },
+            ],
+            total_ms_mean: 1.8,
+            total_ms_std: 0.12,
+        };
+        let json = b.to_cytoscape_json_with_timings(Some(&info));
+        // Per-node timing fields ride the node data.
+        assert!(json.contains(r#""timing_mean_ms":0.500000"#));
+        assert!(json.contains(r#""timing_mean_ms":1.250000"#));
+        assert!(json.contains(r#""timing_kind":"Memcpy""#));
+        assert!(json.contains(r#""timing_kind":"Blackbox""#));
+        // Top-level timings block, plus the per-variant cumulative table.
+        assert!(json.contains(r#""timings":{"#));
+        assert!(json.contains(r#""num_warmup":3"#));
+        assert!(json.contains(r#""num_iters":7"#));
+        assert!(json.contains(r#""total_ms_mean":1.800000"#));
+        assert!(json.contains(r#""memcpy":{"count":1,"cumulative_mean_ms":0.500000"#));
+        assert!(json.contains(r#""add":{"count":1,"cumulative_mean_ms":1.250000"#));
+        assert!(json.contains(r#""kind":"Blackbox""#));
+
+        // When timings.len() ≠ nodes.len(), per-node fields are omitted
+        // but the top-level block still lands (viewer degrades gracefully).
+        let mismatched = GraphInfo {
+            graph_hash: [0u8; 32],
+            num_warmup: 0,
+            num_iters: 0,
+            nodes: vec![],
+            total_ms_mean: 0.0,
+            total_ms_std: 0.0,
+        };
+        let json2 = b.to_cytoscape_json_with_timings(Some(&mismatched));
+        assert!(!json2.contains("timing_mean_ms"));
+        assert!(json2.contains(r#""timings":{"#));
+
+        // Baseline: no timings at all → no `timings` block, no per-node fields.
+        let json0 = b.to_cytoscape_json();
+        assert!(!json0.contains("timing_mean_ms"));
+        assert!(!json0.contains(r#""timings":{"#));
     }
 
     #[test]

@@ -9,16 +9,17 @@
 //! `NodeId`, which gives CSE for free downstream.
 
 use rustc_hash::FxHashMap;
+use serde::{Deserialize, Serialize};
 
 use crate::quast::{ParSpec, Quast, SExpr, Scatter, SymConst};
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct NodeId(pub(crate) u32);
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct VarId(pub(crate) u32);
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ScalarType {
     /// BabyBear field element, canonical `u32` representation.
     BabyBear,
@@ -268,7 +269,7 @@ impl IntoShape for Vec<SymExpr> {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Type {
     Scalar(ScalarType),
     Tensor(ScalarType, Shape),
@@ -307,7 +308,7 @@ impl Type {
     }
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum BinOp {
     /// Field or u32 addition.
     Add,
@@ -325,13 +326,13 @@ pub enum BinOp {
     Eq,
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ReduceOp {
     Add,
     Mul,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Node {
     /// Reference to module input `k`.
     Input(usize),
@@ -393,7 +394,7 @@ pub enum Node {
     Pack(Vec<NodeId>),
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct InputDecl {
     pub name: String,
     pub elem: ScalarType,
@@ -401,12 +402,20 @@ pub struct InputDecl {
 }
 
 /// Arena of hash-consed IR nodes plus module-level input declarations.
-#[derive(Clone, Default)]
+///
+/// The `dedup` hash-cons cache is rebuilt lazily on `intern`; it is not
+/// serialized (a deserialized builder starts with an empty cache and
+/// repopulates it as `intern` is called). `pending_lets` is always empty
+/// on a builder inside a [`Module`] (drained by [`Self::finish`]), so it
+/// is likewise skipped.
+#[derive(Clone, Default, Serialize, Deserialize)]
 pub struct IRBuilder {
     nodes: Vec<Node>,
+    #[serde(skip)]
     dedup: FxHashMap<Node, NodeId>,
     next_var: u32,
     inputs: Vec<InputDecl>,
+    #[serde(skip)]
     pending_lets: Vec<(VarId, NodeId)>,
     params: Vec<(VarId, String)>,
     block_hint: Option<usize>,
@@ -856,7 +865,7 @@ impl IRBuilder {
 
 /// A complete kernel module: declared inputs and the expression that
 /// represents the entire sequence of computations.
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Module {
     pub name: String,
     pub builder: IRBuilder,

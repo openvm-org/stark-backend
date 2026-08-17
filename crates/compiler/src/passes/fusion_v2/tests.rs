@@ -20,6 +20,7 @@ fn sized_buf(g: &mut GraphBuilder, name: &str, bytes: i64) -> BufId {
         name: Some(name.into()),
         device_type: DeviceType::Cuda(0),
         size: Quast::cst(bytes),
+        concrete_size: bytes as usize,
         elem_size: 4,
     })
 }
@@ -4385,12 +4386,14 @@ mod graph_compiler_tests {
                 name: Some("x".into()),
                 device_type: DeviceType::Cuda(0),
                 size: Quast::sym(nsym),
+                concrete_size: 0,
                 elem_size: 4,
             });
             let y = g.add_buf(BufInfo {
                 name: Some("y".into()),
                 device_type: DeviceType::Cuda(0),
                 size: Quast::sym(nsym),
+                concrete_size: 0,
                 elem_size: 4,
             });
             g.register_input(x);

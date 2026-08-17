@@ -18,6 +18,8 @@ use std::{
     sync::Arc,
 };
 
+use serde::{Deserialize, Serialize};
+
 use crate::{
     ir::{NodeId, VarId},
     kernel_ir::LinearLayout,
@@ -34,7 +36,7 @@ fn err(msg: impl Into<String>) -> CompileError {
 /// `T = i64` is the classic quasi-affine [`Quast`]; `T = SymConst` is
 /// [`SExpr`], whose "constants" may be symbolic module parameters that only
 /// resolve to numbers at kernel-instantiation time.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum Expr<T> {
     Sym(VarId),
     Const(T),
@@ -51,7 +53,7 @@ pub type Quast = Expr<i64>;
 
 /// A constant term of an [`SExpr`]: a literal or a symbolic module
 /// parameter.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum SymConst {
     Lit(i64),
     Sym(VarId),
@@ -966,7 +968,7 @@ pub(crate) const EXHAUSTIVE_LIMIT: usize = 1 << 16;
 /// The `#[scatter(...)]` attribute of a compute: a bijective quasi-affine map
 /// from the logical output coordinates to physical coordinates, together
 /// with its author-supplied inverse (physical back to logical).
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Scatter {
     /// One symbol per logical dimension, outermost first.
     pub params: Vec<VarId>,
@@ -1171,7 +1173,7 @@ pub struct ScatterStore {
 /// sequential (repeat) index `s` — to the logical compute index. Must be
 /// convertible to a [`LinearLayout`](crate::kernel_ir::LinearLayout) once the
 /// bounds are known.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ParSpec {
     /// Thread-index symbol; allocated before `seq` so that it occupies the
     /// low bits of the physical index in [`Quast::to_linear_layout`].

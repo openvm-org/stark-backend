@@ -263,6 +263,18 @@ impl CudaEvent {
     pub fn completed(&self) -> bool {
         self.status() == CudaEventStatus::Completed
     }
+
+    /// Wall-clock time in milliseconds between `self` (start) and `end`
+    /// (stop), as measured by `cudaEventElapsedTime`. Both events must
+    /// have been recorded on the same or synchronizable streams; the
+    /// caller is responsible for ensuring both have completed (either by
+    /// synchronizing the recording stream or [`Self::synchronize`]-ing
+    /// `end`).
+    pub fn elapsed_ms(&self, end: &CudaEvent) -> Result<f32, CudaError> {
+        let mut ms = 0f32;
+        check(unsafe { cudaEventElapsedTime(&mut ms, self.event, end.event) })?;
+        Ok(ms)
+    }
 }
 
 impl Drop for CudaEvent {

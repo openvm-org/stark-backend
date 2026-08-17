@@ -29,6 +29,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 
 use crate::{
@@ -41,7 +42,7 @@ use crate::{
 /// bounds and grid-spanning par bounds may be symbolic; everything inner
 /// (loops, tile shapes, `ParAttr::seq_size`) is concrete by construction
 /// (guaranteed by monomorphization).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum KBound {
     Const(usize),
     Expr(SizeExpr),
@@ -80,22 +81,22 @@ impl std::fmt::Display for KBound {
 }
 
 /// SSA value inside one kernel (a single kernel-wide id space).
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct SSARes(pub u32);
 
 /// Id of an [`SSAOp`] in the kernel's op arena.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SSANode(pub u32);
 
 /// Id of a [`BufferDecl`] in the program's buffer table.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct BufId(pub u32);
 
 /// An XOR-affine map `T: Z_2^k -> Z_2^k`, `T(x) = M(x) ^ offset`, with the
 /// linear part `M` represented by its images of the basis vectors:
 /// `bases[i] = M(1 << i)`. `M(x)` is the XOR of the bases selected by the
 /// set bits of `x`.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LinearLayout {
     pub bases: Vec<u64>,
     pub offset: u64,
@@ -725,13 +726,13 @@ pub fn classify_convert(c: &LinearLayout, block: usize) -> ConvertKind {
 /// sequential index `s` in the most significant bits) to the logical index;
 /// out-of-range logical indices are masked by an `x < N` guard. The identity
 /// layout is the strided factorization `i = s * blockDim + t`.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ParAttr {
     pub seq_size: usize,
     pub layout: LinearLayout,
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AddressSpace {
     Global,
     /// Block-local shared memory.
@@ -741,7 +742,7 @@ pub enum AddressSpace {
     Register,
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BufferKind {
     /// Bound at runtime via `set_input(i, ptr)`.
     Input(usize),
@@ -755,7 +756,7 @@ pub enum BufferKind {
     Register,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BufferDecl {
     pub name: String,
     pub elem: ScalarType,
@@ -832,7 +833,7 @@ impl BufferDecl {
 
 /// Opcode of an [`SSAOp`]. Operands and results live in
 /// [`SSAOp::operands`] / [`SSAOp::results`].
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum SSAOpCode {
     /// Sequential loop over `0..bound`; the block's first operand is the
     /// induction variable. At the statement level (grid or loop block) it
@@ -910,7 +911,7 @@ pub enum SSAOpCode {
     Select { else_block: SSABlock },
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SSAOp {
     pub operands: SmallVec<[SSARes; 2]>,
     pub results: SmallVec<[SSARes; 1]>,
@@ -922,7 +923,7 @@ pub struct SSAOp {
 
 /// A region of SSA ops. Loads are not representable inside a par's block:
 /// its memory reads enter through the block operands.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct SSABlock {
     /// Values bound on entry. For a par block: `[par index, one value per
     /// read, in order]`. For a loop block: `[induction var, carried...]`.
@@ -935,7 +936,7 @@ pub struct SSABlock {
 }
 
 /// How an access maps a par's logical index to a buffer's logical index.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum IndexMap {
     /// `index = layout(par index)`.
     Linear(LinearLayout),
@@ -961,7 +962,7 @@ pub enum IndexMap {
 }
 
 /// One declared memory access of a par.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Access {
     pub buf: BufId,
     pub index: IndexMap,
@@ -985,13 +986,13 @@ impl Access {
 
 /// The kernel body: `bound` blocks (`gridDim.x`), with the block's first
 /// operand bound to `blockIdx.x` as a kernel-level SSA value.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Grid {
     pub bound: KBound,
     pub block: SSABlock,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Kernel {
     pub name: String,
     pub grid: Grid,
@@ -1052,7 +1053,7 @@ impl Kernel {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct KirProgram {
     pub name: String,
     pub buffers: Vec<BufferDecl>,

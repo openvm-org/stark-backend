@@ -483,6 +483,25 @@ function wireFusionTree(bodyDiv, nodes) {
   });
 }
 
+function fmtMs(v) {
+  if (v === undefined || v === null || Number.isNaN(v)) return "";
+  if (v === 0) return "0";
+  const abs = Math.abs(v);
+  if (abs >= 100)  return v.toFixed(1);
+  if (abs >= 10)   return v.toFixed(2);
+  if (abs >= 1)    return v.toFixed(3);
+  if (abs >= 0.01) return v.toFixed(4);
+  return v.toExponential(2);
+}
+
+// Compact "mean ± std ms" chip content for the node panel + stats table.
+function fmtTiming(mean, std) {
+  const m = fmtMs(mean);
+  if (m === "") return "";
+  const s = std !== undefined && std > 0 ? ` ± ${fmtMs(std)}` : "";
+  return `${m}${s} ms`;
+}
+
 function renderNodePanel(data, modules) {
   const title = data.name || data.id;
   const type = data.type || "";
@@ -494,6 +513,9 @@ function renderNodePanel(data, modules) {
     ["producers", data.producers],
     ["consumers", data.consumers],
   ].filter(([, v]) => v !== undefined);
+  if (data.timing_mean_ms !== undefined) {
+    stats.push(["timing", fmtTiming(data.timing_mean_ms, data.timing_std_ms)]);
+  }
   const statsHtml = stats.length
     ? `<div class="stats">${stats.map(([k, v]) =>
         `<span class="k">${k}</span><span>${v}</span>`).join("")}</div>`
@@ -592,6 +614,57 @@ function renderStatsPanel(data) {
       `<tbody>${blackboxRowsHtml}</tbody></table>`
     : `<h4>BlackboxKernel — (none)</h4>`;
 
+  // Timing overview — populated only when the dump embedded a
+  // `timings` block (via `to_cytoscape_json_with_timings`).
+  //
+  // The top summary shows warmup / iters / total ms; the per-variant
+  // table lists each kernel/blackbox name with its dispatch count and
+  // cumulative mean-ms across dispatches, sorted by descending cost so
+  // the biggest contributors surface first.
+  let timingSummaryHtml = "";
+  let timingTableHtml = "";
+  if (data.timings) {
+    const t = data.timings;
+    const rows = [
+      ["warmup iters", t.num_warmup],
+      ["timed iters",  t.num_iters],
+      ["total (mean)", fmtTiming(t.total_ms_mean, t.total_ms_std)],
+    ];
+    timingSummaryHtml =
+      `<h4>Timings</h4><div class="stats">` +
+      rows.map(([k, v]) => `<span class="k">${k}</span><span>${v}</span>`).join("") +
+      `</div>`;
+    const per = t.per_kernel || {};
+    const entries = Object.entries(per)
+      .map(([name, e]) => ({
+        name,
+        kind: e.kind || "?",
+        count: e.count || 0,
+        mean: e.cumulative_mean_ms || 0,
+        std: e.cumulative_std_ms || 0,
+      }))
+      .sort((a, b) => b.mean - a.mean || a.name.localeCompare(b.name));
+    if (entries.length) {
+      const totalMean = entries.reduce((s, e) => s + e.mean, 0);
+      const bodyRows = entries.map(e => {
+        const share = totalMean > 0 ? (100 * e.mean / totalMean) : 0;
+        return `<tr>` +
+               `<td class="n">${e.count}</td>` +
+               `<td>${escHtml(e.name)}` +
+                 ` <span class="hint">(${escHtml(e.kind)})</span></td>` +
+               `<td class="n">${fmtMs(e.mean)}</td>` +
+               `<td class="n">${share.toFixed(1)}%</td>` +
+               `</tr>`;
+      }).join("");
+      timingTableHtml =
+        `<h4>Cumulative cost per variant (mean ms across dispatches)</h4>` +
+        `<table class="freq"><thead><tr>` +
+        `<th class="n">n</th><th>name</th>` +
+        `<th class="n">Σ mean</th><th class="n">%</th>` +
+        `</tr></thead><tbody>${bodyRows}</tbody></table>`;
+    }
+  }
+
   const spBody = document.getElementById("sp-body");
   spBody.innerHTML =
     `<div class="stats">` +
@@ -599,6 +672,7 @@ function renderStatsPanel(data) {
     `<span class="k">total edges</span><span>${totalEdges}</span>` +
     summaryRows +
     `</div>` +
+    timingSummaryHtml + timingTableHtml +
     kernelTable + blackboxTable +
     `<div class="sp-detail"><span class="hint">` +
     `Click a row to show its body IR.</span></div>`;

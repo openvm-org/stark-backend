@@ -39,9 +39,11 @@ use crate::{
         const_src_slot, maps_agree, Access, BufId, BufferKind, IndexMap, KBound, Kernel,
         KirProgram, LinearLayout, ParAttr, SSABlock, SSANode, SSAOpCode, SSARes,
     },
-    passes::convert_decompose::{best_decomposition, Strategy},
-    passes::layout_cost::ConversionCostModel,
-    passes::plan_shared_mem::{plan_shared_mem, SharedMemPlan},
+    passes::{
+        convert_decompose::{best_decomposition, Strategy},
+        layout_cost::ConversionCostModel,
+        plan_shared_mem::{plan_shared_mem, SharedMemPlan},
+    },
     quast::{CStrEmitter, Expr, Quast, SymConst},
     CompileError,
 };

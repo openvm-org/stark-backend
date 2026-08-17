@@ -10,8 +10,10 @@
 //! `stream[..] = 0`, and no `WaitOn` instructions — equivalent to the
 //! prior `MemoryPlan` shape.
 
+use serde::{Deserialize, Serialize};
+
 /// One issued instruction in a plan's execution sequence.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StreamInstr {
     /// Execute graph node `node_idx` on its assigned stream
     /// (`StreamMemoryPlan::stream[node_idx]`). Immediately after the launch
@@ -38,7 +40,7 @@ pub enum StreamInstr {
 /// For a single-stream plan: `num_streams = 1`, `num_events = 0`,
 /// `stream = vec![0; n_nodes]`, `record_event = vec![None; n_nodes]`, and
 /// `instructions` is just `Node(order[i])` in execution order.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StreamMemoryPlan {
     pub instructions: Vec<StreamInstr>,
     pub stream: Vec<u32>,

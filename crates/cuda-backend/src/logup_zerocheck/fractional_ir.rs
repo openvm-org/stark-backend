@@ -3056,7 +3056,6 @@ mod tests {
     use crypto_compiler::{
         graph_exe::GraphCompiler,
         graph_ir::{DeviceType, GraphBuilder},
-        passes::fusion_v2::FusionOptionsV2,
         planner::SchedulerMode,
     };
     use openvm_cuda_common::{
@@ -3073,6 +3072,9 @@ mod tests {
         cuda::{
             logup_zerocheck::{frac_add_alpha, frac_build_tree_layer, frac_build_tree_two_layers},
             ntt::{bit_rev_frac_ext, bit_rev_frac_ext_build_k2},
+        },
+        logup_zerocheck::frac_bench_utils::{
+            cc_compiler, cc_graph_dump_path, frac_log_n_single, frac_log_ns,
         },
         prelude::{EF, SC},
         sponge::DuplexSpongeGpu,
@@ -3532,115 +3534,6 @@ mod tests {
         buf
     }
 
-    /// Fusion-v2 options driven by the `FRAC_V2_BENCH_*` environment (same
-    /// names and semantics as `fractional_sumcheck_gpu_irv2::tests::
-    /// fusion_v2_options_from_env`, so a single set of env exports drives
-    /// both benches). Consumed by [`compiler_from_env`] when
-    /// `FRAC_IR_FUSION=v2` is set.
-    ///
-    /// - `FRAC_V2_BENCH_SOLVER_SECS` — CP-SAT wall-time per lex stage (default 120; the crate
-    ///   default of 5s returns `SolverStatusUnknown` on large graphs and falls back to the original
-    ///   unfused extraction).
-    /// - `FRAC_V2_BENCH_MAX_ALTS` — total cap on inserted alternatives across every saturation
-    ///   round of one outer iteration (default 10_000).
-    /// - `FRAC_V2_BENCH_MAX_ROUNDS` — saturation round bound (default from
-    ///   `FusionOptionsV2::default`).
-    /// - `FRAC_V2_BENCH_MAX_ENUM_MS` — per-round enumeration wall-time budget in milliseconds
-    ///   (default from `FusionOptionsV2::default`).
-    /// - `FRAC_V2_BENCH_OUTER_ITERS` — number of outer fusion iterations (default from
-    ///   `FusionOptionsV2::default`).
-    /// - `FRAC_V2_BENCH_HORIZONTAL=1` — re-enable horizontal fusion (off by default).
-    /// - `FRAC_V2_BENCH_SOLVER_WORKERS` — CP-SAT workers (default: all cores).
-    ///
-    /// Individual synthesis passes can additionally be turned off via
-    /// `FRAC_IR_FUSION_DISABLE=<pass,...>` (handled by
-    /// [`compiler_from_env`]).
-    fn fusion_v2_options_from_env() -> FusionOptionsV2 {
-        let defaults = FusionOptionsV2::default();
-        let solver_secs = std::env::var("FRAC_V2_BENCH_SOLVER_SECS")
-            .ok()
-            .and_then(|s| s.parse::<f64>().ok())
-            .unwrap_or(120.0);
-        let max_alts = std::env::var("FRAC_V2_BENCH_MAX_ALTS")
-            .ok()
-            .and_then(|s| s.parse::<usize>().ok())
-            .unwrap_or(10_000);
-        let max_rounds = std::env::var("FRAC_V2_BENCH_MAX_ROUNDS")
-            .ok()
-            .and_then(|s| s.parse::<usize>().ok())
-            .unwrap_or(defaults.max_rounds);
-        let horizontal = std::env::var_os("FRAC_V2_BENCH_HORIZONTAL").is_some();
-        let solver_workers = std::env::var("FRAC_V2_BENCH_SOLVER_WORKERS")
-            .ok()
-            .and_then(|s| s.parse::<usize>().ok())
-            .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get()));
-        let max_enum = std::env::var("FRAC_V2_BENCH_MAX_ENUM_MS")
-            .ok()
-            .and_then(|s| s.parse::<u64>().ok())
-            .map(std::time::Duration::from_millis)
-            .unwrap_or(defaults.max_enumeration_time_per_round);
-        let outer_iters = std::env::var("FRAC_V2_BENCH_OUTER_ITERS")
-            .ok()
-            .and_then(|s| s.parse::<usize>().ok())
-            .unwrap_or(defaults.max_outer_iterations);
-        FusionOptionsV2 {
-            verbose: true,
-            solver_time_limit_secs: solver_secs,
-            solver_num_workers: solver_workers,
-            max_total_alternatives: max_alts,
-            max_rounds,
-            max_enumeration_time_per_round: max_enum,
-            max_outer_iterations: outer_iters,
-            enable_horizontal: horizontal,
-            ..defaults
-        }
-    }
-
-    /// Builds a `GraphCompiler` honoring the `FRAC_IR_FUSION` env var:
-    /// `v2` enables fusion v2 with the tunables from
-    /// [`fusion_v2_options_from_env`] (with `FRAC_IR_FUSION_DISABLE=<pass,...>`
-    /// to turn off individual synthesis passes), `off` disables fusion
-    /// entirely, anything else uses the default (v1) pipeline.
-    ///
-    /// `FRAC_BENCH_STREAMS=<n>` overrides `ListSchedulerV1::max_concurrency`;
-    /// use `1` to force single-stream execution when debugging cross-stream
-    /// sync bugs.
-    fn compiler_from_env() -> GraphCompiler {
-        use crypto_compiler::planner::ListSchedulerV1;
-        let mut compiler = GraphCompiler::new().device(DeviceType::Cuda(0));
-        if let Ok(s) = std::env::var("FRAC_BENCH_STREAMS") {
-            let max_concurrency: u32 = s.trim().parse().expect("FRAC_BENCH_STREAMS must be u32");
-            compiler = compiler.scheduler(SchedulerMode::ListV1 {
-                params: ListSchedulerV1 {
-                    max_concurrency,
-                    ..ListSchedulerV1::default()
-                },
-            });
-        }
-        match std::env::var("FRAC_IR_FUSION").as_deref() {
-            Ok("v2") => {
-                let mut opts = fusion_v2_options_from_env();
-                if let Ok(disable) = std::env::var("FRAC_IR_FUSION_DISABLE") {
-                    for pass in disable.split(',') {
-                        match pass.trim() {
-                            "producer_consumer" => opts.enable_producer_consumer = false,
-                            "fanout" => opts.enable_fanout = false,
-                            "small_kernel" => opts.enable_small_kernel = false,
-                            "horizontal" => opts.enable_horizontal = false,
-                            "epilogue" => opts.enable_epilogue = false,
-                            "" => {}
-                            other => panic!("unknown fusion pass `{other}`"),
-                        }
-                    }
-                }
-                compiler = compiler.fusion_v2_options(opts)
-            }
-            Ok("off") => compiler = compiler.without_fusion(),
-            _ => {}
-        }
-        compiler
-    }
-
     /// Compile a graph with no runtime inputs, run it, and read back the
     /// given buffers as raw bytes. Each buffer is registered as a graph
     /// output here, so it must have a writer (e.g. be an `insert_memcpy`
@@ -3653,7 +3546,9 @@ mod tests {
         for &b in bufs {
             g.register_output(b);
         }
-        let mut exe = compiler_from_env().compile(g).expect("graph compile");
+        let mut exe = cc_compiler(DeviceType::Cuda(0))
+            .compile(g)
+            .expect("graph compile");
         if let Some(v2) = exe.fusion_report().and_then(|r| r.v2.as_ref()) {
             eprintln!(
                 "[frac-ir-fusion-v2] nodes {} -> {}, inserted={}, selected={}, fallback={:?}",
@@ -4780,7 +4675,7 @@ mod tests {
     /// compiles it, and writes the planner-ordered `GraphExe` dump plus
     /// per-structured-kernel `.hir` / `.cu` dumps.
     ///
-    /// Input size via `FRAC_DUMP_LOG_N` (log2 leaf count, default 8);
+    /// Input size via `FRAC_LOG_N` (log2 leaf count, default 8);
     /// output directory via `CRYPTO_COMPILER_DUMP_IR` (default
     /// `target/ir_dump/`).
     ///
@@ -4799,10 +4694,7 @@ mod tests {
             std::env::set_var("SWIRL_CUDA_GKR_PRECOMPUTE_M_MIN_N", "4");
         }
 
-        let log_n: usize = std::env::var("FRAC_DUMP_LOG_N")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(8);
+        let log_n: usize = frac_log_n_single(8);
         let real_len = 1usize << log_n;
         let device = DeviceType::Cuda(0);
         let mut rng = StdRng::seed_from_u64(0x5EED_00D0);
@@ -4864,20 +4756,37 @@ mod tests {
         println!("IR dumps written to {}", dir.display());
     }
 
-    /// Artifact generator, not a correctness test: builds the composed
-    /// fractional-sumcheck graph (PrecomputeM forced on via env) and writes
-    /// a Cytoscape.js elements-JSON dump for browser visualization. No
-    /// compilation happens, so this runs in seconds at any size.
+    /// Artifact generator, not a correctness test: emits a Cytoscape.js
+    /// elements-JSON dump for browser visualization of the fractional-
+    /// sumcheck graph.
     ///
-    /// Input size via `FRAC_DUMP_LOG_N` (log2 leaf count, default 8);
-    /// output directory via `CRYPTO_COMPILER_DUMP_IR` (default
-    /// `target/ir_dump/`). View with:
-    ///     python3 scripts/serve_graph.py \
-    ///         target/ir_dump/fractional_sumcheck_n256.cy.json
+    /// Two input paths:
+    ///
+    /// - **Fresh build (default).** Constructs the graph from source, runs fusion via
+    ///   `cc_compiler(device)` and dumps the fused graph. Deterministic in `FRAC_LOG_N`.
+    /// - **Preloaded graph** (`CC_GRAPH_INPUT_PATH=<file>`). Loads a bincode-encoded
+    ///   [`SerializableGraphBuilder`] from `<file>` and dumps it directly — skipping the build +
+    ///   fusion steps. The file is typically produced by `bench_fractional_sumcheck_eager_vs_ir`
+    ///   under `CC_CY_DUMP_PATH`.
+    ///
+    /// Optional overlay: `CC_TIMING_JSON_PATH=<file>` loads a
+    /// [`crypto_compiler::graph_info::GraphInfo`] JSON and embeds it in
+    /// the dump so the browser viewer surfaces per-node timings and a
+    /// per-variant cumulative overview.
+    ///
+    /// Inputs:
+    /// - `FRAC_LOG_N` — log2 leaf count (default 8). Ignored when `CC_GRAPH_INPUT_PATH` is set.
+    /// - `CRYPTO_COMPILER_DUMP_IR` — output directory (default `target/ir_dump/`).
+    /// - `CC_GRAPH_INPUT_PATH` — optional preloaded graph.
+    /// - `CC_TIMING_JSON_PATH` — optional timings overlay.
+    ///
+    /// View with:
+    ///     python3 scripts/serve_graph.py --port 8086 \
+    ///         target/ir_dump/fractional_sumcheck_n{N}.cy.json
     #[test]
     #[ignore = "artifact generator; run explicitly to produce the Cytoscape dump"]
     fn dump_fractional_sumcheck_cytoscape() {
-        let _ctx = test_ctx();
+        let ctx = test_ctx();
         // SAFETY: nextest runs each test binary invocation in its own
         // process, so setting the process env only affects this test.
         unsafe {
@@ -4886,34 +4795,93 @@ mod tests {
             std::env::set_var("SWIRL_CUDA_GKR_PRECOMPUTE_M_MIN_N", "4");
         }
 
-        let log_n: usize = std::env::var("FRAC_DUMP_LOG_N")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(8);
-        let real_len = 1usize << log_n;
         let device = DeviceType::Cuda(0);
-        let mut rng = StdRng::seed_from_u64(0x5EED_00D0);
-        let alpha: EF = rng.random();
-        let leaves = make_host_leaves(real_len, 0x5EED_00D1);
 
-        let mut g = GraphBuilder::new();
-        let mut transcript = DuplexSpongeGpuIR::new(&mut g, device);
-        let layer = frac_const_buf(&mut g, "leaves", &leaves);
-        let proof = fractional_sumcheck_gpu_ir(
-            &mut g,
-            &mut transcript,
-            layer,
-            FractionalInputSize::new(real_len, real_len),
-            alpha,
-            false,
-            device,
-        )
-        .expect("fractional_sumcheck_gpu_ir");
-        let (root_p, root_q) = proof.fractional_sum;
-        for (src, name) in [(root_p, "out_root_p"), (root_q, "out_root_q")] {
-            let out = add_ext_scalar_buf(&mut g, device, name);
-            g.insert_memcpy(src, out);
-        }
+        // Load a preloaded fused graph if `CC_GRAPH_INPUT_PATH` points
+        // at an existing file. Skips the build + fusion path entirely;
+        // blackbox closures come back as panic-placeholders (fine — the
+        // cytoscape emitter never invokes them).
+        let preloaded = std::env::var_os("CC_GRAPH_INPUT_PATH")
+            .map(std::path::PathBuf::from)
+            .filter(|p| p.exists());
+        let (g, real_len) = match preloaded {
+            Some(path) => {
+                let bytes = std::fs::read(&path).expect("read CC_GRAPH_INPUT_PATH");
+                let ser: crypto_compiler::graph_serializer::SerializableGraphBuilder =
+                    bincode::deserialize(&bytes).expect("bincode: SerializableGraphBuilder");
+                let restored = ser
+                    .into_graph_builder(None, &ctx)
+                    .expect("into_graph_builder (placeholder blackboxes)");
+                println!(
+                    "loaded fused GraphBuilder from {} ({} nodes)",
+                    path.display(),
+                    restored.nodes.len()
+                );
+                // Preloaded graphs bring their own size implicitly; use
+                // the node count as a stand-in for the filename since
+                // FRAC_LOG_N doesn't apply.
+                let n = restored.nodes.len();
+                (restored, n)
+            }
+            None => {
+                let log_n: usize = frac_log_n_single(8);
+                let real_len = 1usize << log_n;
+                let mut rng = StdRng::seed_from_u64(0x5EED_00D0);
+                let alpha: EF = rng.random();
+                let leaves = make_host_leaves(real_len, 0x5EED_00D1);
+
+                let mut g = GraphBuilder::new();
+                let mut transcript = DuplexSpongeGpuIR::new(&mut g, device);
+                let layer = frac_const_buf(&mut g, "leaves", &leaves);
+                let proof = fractional_sumcheck_gpu_ir(
+                    &mut g,
+                    &mut transcript,
+                    layer,
+                    FractionalInputSize::new(real_len, real_len),
+                    alpha,
+                    false,
+                    device,
+                )
+                .expect("fractional_sumcheck_gpu_ir");
+                let (root_p, root_q) = proof.fractional_sum;
+                for (src, name) in [(root_p, "out_root_p"), (root_q, "out_root_q")] {
+                    let out = add_ext_scalar_buf(&mut g, device, name);
+                    g.insert_memcpy(src, out);
+                }
+                // Snapshot the pre-fusion hash so a downstream
+                // `attach_closures` step can still verify against a
+                // fresh source builder.
+                let _ = g.original_hash();
+                let fuse_compiler = cc_compiler(device);
+                let _ = fuse_compiler
+                    .fuse(&mut g)
+                    .expect("fuse pass")
+                    .expect("fusion enabled");
+                (g, real_len)
+            }
+        };
+
+        // Optional timings overlay.
+        let timings: Option<crypto_compiler::graph_info::GraphInfo> =
+            std::env::var_os("CC_TIMING_JSON_PATH").and_then(|p| {
+                let path = std::path::PathBuf::from(p);
+                match std::fs::read_to_string(&path) {
+                    Ok(s) => match serde_json::from_str(&s) {
+                        Ok(info) => {
+                            println!("loaded GraphInfo from {}", path.display());
+                            Some(info)
+                        }
+                        Err(e) => {
+                            eprintln!("failed to parse GraphInfo at {}: {e}", path.display());
+                            None
+                        }
+                    },
+                    Err(e) => {
+                        eprintln!("failed to read {}: {e}", path.display());
+                        None
+                    }
+                }
+            });
 
         let dir = std::env::var_os("CRYPTO_COMPILER_DUMP_IR")
             .map(std::path::PathBuf::from)
@@ -4922,7 +4890,8 @@ mod tests {
             });
         std::fs::create_dir_all(&dir).expect("create dump dir");
         let path = dir.join(format!("fractional_sumcheck_n{real_len}.cy.json"));
-        std::fs::write(&path, g.to_cytoscape_json()).expect("write cytoscape dump");
+        std::fs::write(&path, g.to_cytoscape_json_with_timings(timings.as_ref()))
+            .expect("write cytoscape dump");
 
         unsafe {
             std::env::remove_var("SWIRL_CUDA_GKR_PRECOMPUTE_M");
@@ -4942,8 +4911,27 @@ mod tests {
     /// must not have writers).
     ///
     /// The round strategy follows the ambient `SWIRL_CUDA_GKR_PRECOMPUTE_M*`
-    /// env on both sides. Sizes via `FRAC_BENCH_LOG_N` (comma-separated
-    /// log2 leaf counts, default `16,20`).
+    /// env on both sides. Sizes via `FRAC_LOG_N` (comma-separated log2
+    /// leaf counts, default `16,20`); compiler tuning via `CC_*` (see
+    /// [`super::frac_bench_utils`]). Setting `CC_GRAPH_DUMP_PATH` caches
+    /// the compiled `GraphExe` to disk and reuses it on subsequent runs.
+    ///
+    /// Setting `CC_CY_DUMP_PATH=<dir>` triggers the fused-graph dump: the
+    /// bench rebuilds each size's graph, re-runs fusion (matching the
+    /// compile's config so the fused shape lines up), collects per-node
+    /// CUDA-event timings from the compiled exe, and writes
+    /// `<dir>/frac_ir.n{n}.cy.json` (cytoscape elements + embedded
+    /// timings for the browser viewer) plus `<dir>/frac_ir.n{n}.timings.json`
+    /// (the raw `GraphInfo` for offline analysis). Recommended
+    /// invocation for the fusion-v2 pipeline at `LOG_N=26`:
+    ///
+    ///     FRAC_LOG_N=26 CC_FUSION=v2 CC_FUSION_OUTER_ITERS=2 \
+    ///         CC_FUSION_MAX_ALTS=10000 CC_FUSION_MAX_ENUM_MS=2000 \
+    ///         CC_FUSION_SOLVER_SECS=15 \
+    ///         CC_CY_DUMP_PATH=target/frac_ir_dump \
+    ///         cargo nextest run -p openvm-cuda-backend --features graph-ir \
+    ///             --run-ignored all --no-capture \
+    ///             -E 'test(bench_fractional_sumcheck_eager_vs_ir)'
     ///
     /// Run explicitly:
     ///     cargo nextest run -p openvm-cuda-backend --features graph-ir \
@@ -4990,11 +4978,7 @@ mod tests {
 
         let ctx = test_ctx();
         let device = DeviceType::Cuda(0);
-        let log_ns: Vec<usize> = std::env::var("FRAC_BENCH_LOG_N")
-            .unwrap_or_else(|_| "16,20".into())
-            .split(',')
-            .map(|s| s.trim().parse().expect("FRAC_BENCH_LOG_N entry"))
-            .collect();
+        let log_ns: Vec<usize> = frac_log_ns("16,20");
 
         let nsys_enabled = std::env::var_os("NSYS_ENABLED").is_some();
 
@@ -5044,38 +5028,59 @@ mod tests {
             };
             let eager_sum = eager_proof.fractional_sum;
 
-            // Graph build + compile — never inside an NVTX range or profile.
-            let t0 = Instant::now();
-            let mut g = GraphBuilder::new();
-            let mut transcript = DuplexSpongeGpuIR::new(&mut g, device);
-            let input = add_frac_ef_buf(&mut g, device, "leaves_in", n);
-            let layer = add_frac_ef_buf(&mut g, device, "leaves_work", n);
-            g.insert_memcpy(input, layer);
-            g.register_input(input);
-            let proof_ir = fractional_sumcheck_gpu_ir(
-                &mut g,
-                &mut transcript,
-                layer,
-                sizes,
-                alpha,
-                false,
-                device,
-            )
-            .expect("fractional_sumcheck_gpu_ir");
-            // Export every proof artifact so this same exe feeds both the
-            // timed runs and the full e2e correctness check below
-            // (exports[0..2] are root_p/root_q for the post-timing sanity
-            // check).
-            let exports = export_proof_artifacts(&mut g, &proof_ir, device);
-            for &b in &exports {
-                g.register_output(b);
-            }
-            let build_ms = t0.elapsed().as_secs_f64() * 1e3;
-            let n_nodes = g.nodes.len();
-
-            let t0 = Instant::now();
-            let mut exe = compiler_from_env().compile(g).expect("graph compile");
-            let compile_ms = t0.elapsed().as_secs_f64() * 1e3;
+            // Graph build + compile-or-load — never inside an NVTX range
+            // or profile. `CC_GRAPH_DUMP_PATH`-controlled: a cache hit
+            // skips the full compile/optimize pipeline entirely.
+            let build_graph = || {
+                let t0 = Instant::now();
+                let mut g = GraphBuilder::new();
+                let mut transcript = DuplexSpongeGpuIR::new(&mut g, device);
+                let input = add_frac_ef_buf(&mut g, device, "leaves_in", n);
+                let layer = add_frac_ef_buf(&mut g, device, "leaves_work", n);
+                g.insert_memcpy(input, layer);
+                g.register_input(input);
+                let proof_ir = fractional_sumcheck_gpu_ir(
+                    &mut g,
+                    &mut transcript,
+                    layer,
+                    sizes,
+                    alpha,
+                    false,
+                    device,
+                )
+                .expect("fractional_sumcheck_gpu_ir");
+                // Export every proof artifact so this same exe feeds both
+                // the timed runs and the full e2e correctness check below
+                // (exports[0..2] are root_p/root_q for the post-timing
+                // sanity check).
+                let exports = export_proof_artifacts(&mut g, &proof_ir, device);
+                for &b in &exports {
+                    g.register_output(b);
+                }
+                let build_ms = t0.elapsed().as_secs_f64() * 1e3;
+                let n_nodes = g.nodes.len();
+                (g, (proof_ir, exports, build_ms, n_nodes))
+            };
+            // If the caller has opted into the cytoscape dump path,
+            // arrange for `compile` to also serialize the post-fuse+dce
+            // graph state to a bin file. That snapshot is what
+            // `dump_fractional_sumcheck_cytoscape` will load; it lines
+            // up index-by-index with the compiled exe's `ExeNode` list
+            // (and therefore with the `GraphInfo::nodes` collected
+            // later), which is what makes per-node timing overlays
+            // work without re-running fusion.
+            let fused_snapshot_path = std::env::var_os("CC_CY_DUMP_PATH")
+                .map(|d| std::path::PathBuf::from(d).join(format!("frac_ir.n{n}.graph.bin")));
+            let t_prep = Instant::now();
+            let (mut exe, (proof_ir, exports, build_ms, n_nodes)) =
+                super::super::frac_bench_utils::load_or_compile_and_dump_with_hook(
+                    build_graph,
+                    cc_compiler(device),
+                    &ctx,
+                    cc_graph_dump_path(log_n),
+                    fused_snapshot_path,
+                );
+            let compile_ms = t_prep.elapsed().as_secs_f64() * 1e3 - build_ms;
             if let Some(v2) = exe.fusion_report().and_then(|r| r.v2.as_ref()) {
                 println!(
                     "fusion v2: nodes {} -> {}, inserted={}, selected={}, fallback={:?}",
@@ -5087,8 +5092,9 @@ mod tests {
                 );
             }
             println!(
-                "graph build: {build_ms:>8.2} ms ({n_nodes} nodes); compile: {compile_ms:>8.2} \
-                 ms ({} unique modules, {} loaded from cache, scratch pool {} bytes)",
+                "graph build: {build_ms:>8.2} ms ({n_nodes} nodes); compile-or-load: \
+                 {compile_ms:>8.2} ms ({} unique modules, {} loaded from cache, scratch pool {} \
+                 bytes)",
                 exe.num_unique_modules(),
                 exe.num_cached_modules(),
                 exe.scratch_bytes(),
@@ -5286,6 +5292,68 @@ mod tests {
                 "fractional_sum mismatch at 2^{}",
                 st.log_n
             );
+        }
+
+        // Optional fused-graph + timings dump; opt-in via
+        // `CC_CY_DUMP_PATH=<dir>` (see this test's docstring for the
+        // recommended full invocation).
+        //
+        // The `graph.bin` was already emitted by the post-fuse+dce
+        // hook wired into `load_or_compile_and_dump_with_hook` above;
+        // this block just adds the browser-facing artifacts (cy.json
+        // with embedded timings, timings.json) by loading the fused
+        // graph back from disk. That round-trip guarantees the
+        // cytoscape node order matches the exe's `ExeNode` order (and
+        // therefore the `GraphInfo::nodes` order) so per-node timing
+        // overlays actually attach.
+        if let Some(dump_root) = std::env::var_os("CC_CY_DUMP_PATH") {
+            let dump_root = std::path::PathBuf::from(dump_root);
+            std::fs::create_dir_all(&dump_root).expect("create CC_CY_DUMP_PATH dir");
+            for st in states.iter_mut() {
+                let graph_path = dump_root.join(format!("frac_ir.n{}.graph.bin", st.n));
+                let cy_path = dump_root.join(format!("frac_ir.n{}.cy.json", st.n));
+                let timings_path = dump_root.join(format!("frac_ir.n{}.timings.json", st.n));
+
+                let fused_g = {
+                    let bytes = std::fs::read(&graph_path).expect("read fused graph.bin");
+                    let ser: crypto_compiler::graph_serializer::SerializableGraphBuilder =
+                        bincode::deserialize(&bytes).expect("bincode: SerializableGraphBuilder");
+                    ser.into_graph_builder(None, &ctx)
+                        .expect("into_graph_builder (placeholder blackboxes)")
+                };
+
+                // Collect per-node timings from the already-compiled
+                // exe. Its input was bound above; skip the closure's
+                // work by returning `Ok(())`.
+                let info = st
+                    .exe
+                    .collect_graph_info(
+                        &ctx,
+                        |_exe, _ctx| Ok(()),
+                        /* num_warmup = */ 2,
+                        /* num_iters  = */ ITERS,
+                    )
+                    .expect("collect_graph_info");
+
+                std::fs::write(
+                    &cy_path,
+                    fused_g.to_cytoscape_json_with_timings(Some(&info)),
+                )
+                .expect("write fused cy.json");
+                std::fs::write(
+                    &timings_path,
+                    serde_json::to_string_pretty(&info).expect("serialize GraphInfo"),
+                )
+                .expect("write timings.json");
+                eprintln!(
+                    "[bench] dumped fused cytoscape + timings for n=2^{} to {}, {} (fused \
+                     graph.bin at {})",
+                    st.log_n,
+                    cy_path.display(),
+                    timings_path.display(),
+                    graph_path.display(),
+                );
+            }
         }
     }
 }

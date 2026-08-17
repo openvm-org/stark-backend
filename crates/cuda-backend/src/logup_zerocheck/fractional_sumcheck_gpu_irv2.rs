@@ -471,7 +471,7 @@ mod tests {
         graph_exe::GraphCompiler,
         graph_ir::{DeviceType, GraphBuilder},
         passes::fusion::FusionOptions,
-        planner::{ListSchedulerV1, SchedulerMode},
+        planner::SchedulerMode,
     };
     use openvm_cuda_common::{
         common::get_device,
@@ -485,6 +485,10 @@ mod tests {
     use super::*;
     use crate::{
         logup_zerocheck::{
+            frac_bench_utils::{
+                cc_compiler, cc_graph_dump_path, frac_log_n_single, frac_log_ns,
+                load_or_compile_and_dump,
+            },
             fractional::{fractional_sumcheck_gpu, FractionalInputSize},
             fractional_ir::{add_frac_ef_buf, GKR_S_DEG},
         },
@@ -784,81 +788,23 @@ mod tests {
         assert_irv2_matches_eager(1024, 0x5EED_D010);
     }
 
-    /// Fusion-v2 options shared by the bench and the graph dump, read from
-    /// the `FRAC_V2_BENCH_*` environment:
-    ///
-    /// - `FRAC_V2_BENCH_SOLVER_SECS` — CP-SAT wall-time per lex stage (default 120; the option's 5s
-    ///   default returns SolverStatusUnknown on the full graph's ~7.6k-variable model and falls
-    ///   back to the original unfused extraction).
-    /// - `FRAC_V2_BENCH_MAX_ALTS` — total cap on inserted alternatives across every saturation
-    ///   round of one outer iteration (default 10_000). Enforced level-by-level after impact
-    ///   ranking.
-    /// - `FRAC_V2_BENCH_MAX_ROUNDS` — saturation round bound (default 4,
-    ///   `FusionOptionsV2::default`).
-    /// - `FRAC_V2_BENCH_MAX_ENUM_MS` — per-round enumeration wall-time budget in milliseconds
-    ///   (default 2000). Passes past the deadline are skipped for the round.
-    /// - `FRAC_V2_BENCH_OUTER_ITERS` — number of outer fusion iterations (default 1). Each outer
-    ///   iteration runs a full enumeration + saturation + extraction cycle on the graph produced by
-    ///   the previous iteration.
-    /// - `FRAC_V2_BENCH_HORIZONTAL=1` — re-enable horizontal fusion. Off by default: on this graph
-    ///   it costs ~99% of enumeration time for a handful of launch-quantum savings.
-    /// - `FRAC_V2_BENCH_SOLVER_WORKERS` — CP-SAT workers (default: all cores; neither caller needs
-    ///   the deterministic single-worker solve, and one worker is Feasible-not-Optimal even at
-    ///   120s/stage).
-    ///
-    /// Stage 2 of the lex objective (artifact count) stays off —
-    /// `optimize_artifact_count` defaults to `false`.
-    fn fusion_v2_options_from_env() -> crypto_compiler::passes::fusion_v2::FusionOptionsV2 {
-        let defaults = crypto_compiler::passes::fusion_v2::FusionOptionsV2::default();
-        let solver_secs = std::env::var("FRAC_V2_BENCH_SOLVER_SECS")
-            .ok()
-            .and_then(|s| s.parse::<f64>().ok())
-            .unwrap_or(120.0);
-        let max_alts = std::env::var("FRAC_V2_BENCH_MAX_ALTS")
-            .ok()
-            .and_then(|s| s.parse::<usize>().ok())
-            .unwrap_or(10_000);
-        let max_rounds = std::env::var("FRAC_V2_BENCH_MAX_ROUNDS")
-            .ok()
-            .and_then(|s| s.parse::<usize>().ok())
-            .unwrap_or(defaults.max_rounds);
-        let horizontal = std::env::var_os("FRAC_V2_BENCH_HORIZONTAL").is_some();
-        let solver_workers = std::env::var("FRAC_V2_BENCH_SOLVER_WORKERS")
-            .ok()
-            .and_then(|s| s.parse::<usize>().ok())
-            .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get()));
-        let max_enum = std::env::var("FRAC_V2_BENCH_MAX_ENUM_MS")
-            .ok()
-            .and_then(|s| s.parse::<u64>().ok())
-            .map(std::time::Duration::from_millis)
-            .unwrap_or(defaults.max_enumeration_time_per_round);
-        let outer_iters = std::env::var("FRAC_V2_BENCH_OUTER_ITERS")
-            .ok()
-            .and_then(|s| s.parse::<usize>().ok())
-            .unwrap_or(defaults.max_outer_iterations);
-        crypto_compiler::passes::fusion_v2::FusionOptionsV2 {
-            verbose: true,
-            solver_time_limit_secs: solver_secs,
-            solver_num_workers: solver_workers,
-            max_total_alternatives: max_alts,
-            max_rounds,
-            max_enumeration_time_per_round: max_enum,
-            max_outer_iterations: outer_iters,
-            enable_horizontal: horizontal,
-            ..defaults
-        }
-    }
-
     /// Dump the v2 graph as text (both the pre-compile `GraphBuilder` and the
     /// planner-scheduled `GraphExe`), plus per-module HIR/KIR/CUDA for every
     /// unique DSL module. Ignored by default so it doesn't fire in CI.
     ///
-    /// Input size via `FRAC_V2_DUMP_LOG_N` (log2 leaf count, default 6);
-    /// output dir via `CRYPTO_COMPILER_DUMP_IR` (default `target/ir_dump_v2/`).
-    /// `FRAC_V2_BENCH_FUSION_V2=1` runs the fusion-v2 pipeline instead of
-    /// v1 (same `FRAC_V2_BENCH_*` knobs as the bench — see
-    /// [`fusion_v2_options_from_env`]; build with
-    /// `--features crypto-compiler/planner-ortools`).
+    /// Input size via `FRAC_LOG_N` (log2 leaf count, default 6); output
+    /// dir via `CRYPTO_COMPILER_DUMP_IR` (default `target/ir_dump_v2/`).
+    /// Fusion strategy and tunables via `CC_FUSION*` (see
+    /// [`super::frac_bench_utils`]); build with
+    /// `--features crypto-compiler/planner-ortools`.
+    ///
+    /// Setting `CC_TIMING_JSON_PATH=<file>` merges the
+    /// [`crypto_compiler::graph_info::GraphInfo`] JSON at `<file>`
+    /// into the fused cytoscape dump (`*.cy.fused.json`). Produce that
+    /// JSON with `bench_fractional_sumcheck_eager_vs_ir` +
+    /// `CC_CY_DUMP_PATH=…`; each per-node timing lines up with the
+    /// fused graph's node indices when the same `FRAC_LOG_N` +
+    /// `CC_FUSION*` env are supplied on both sides.
     ///
     /// Run:
     ///
@@ -871,10 +817,7 @@ mod tests {
     fn dump_fractional_sumcheck_gpu_irv2_graph() {
         let _ctx = test_ctx();
 
-        let log_n: usize = std::env::var("FRAC_V2_DUMP_LOG_N")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(6);
+        let log_n: usize = frac_log_n_single(6);
         let n = 1usize << log_n;
         let device = DeviceType::Cuda(0);
 
@@ -917,16 +860,20 @@ mod tests {
         );
 
         // Run the normalize + fusion passes without compiling, and dump
-        // the post-fusion graph alongside per-round stats.
-        let compiler = GraphCompiler::new().device(device);
-        let compiler = if std::env::var_os("FRAC_V2_BENCH_FUSION_V2").is_some() {
-            compiler.fusion_v2_options(fusion_v2_options_from_env())
+        // the post-fusion graph alongside per-round stats. Honor
+        // `CC_FUSION` for strategy selection; the dump path defaults to a
+        // verbose v1 configuration so the on-disk artifacts capture the
+        // per-round stats useful for offline analysis.
+        let compiler = if std::env::var_os("CC_FUSION").is_some() {
+            cc_compiler(device)
         } else {
-            compiler.fusion_options(FusionOptions {
-                verbose: true,
-                max_iterations: 50,
-                ..FusionOptions::default()
-            })
+            GraphCompiler::new()
+                .device(device)
+                .fusion_options(FusionOptions {
+                    verbose: true,
+                    max_iterations: 50,
+                    ..FusionOptions::default()
+                })
         };
         let mut g_fused = g;
         let report = compiler
@@ -938,9 +885,32 @@ mod tests {
             g_fused.print(),
         )
         .expect("write fused graph dump");
+        // Load an optional `GraphInfo` JSON — if `CC_TIMING_JSON_PATH` is
+        // set, its `nodes` line up with `g_fused`'s post-fusion indices
+        // (see this test's docstring) and get embedded into the cy.json.
+        let timings: Option<crypto_compiler::graph_info::GraphInfo> =
+            std::env::var_os("CC_TIMING_JSON_PATH").and_then(|p| {
+                let path = std::path::PathBuf::from(p);
+                match std::fs::read_to_string(&path) {
+                    Ok(s) => match serde_json::from_str(&s) {
+                        Ok(info) => {
+                            println!("loaded GraphInfo from {}", path.display());
+                            Some(info)
+                        }
+                        Err(e) => {
+                            eprintln!("failed to parse GraphInfo at {}: {e}", path.display());
+                            None
+                        }
+                    },
+                    Err(e) => {
+                        eprintln!("failed to read {}: {e}", path.display());
+                        None
+                    }
+                }
+            });
         std::fs::write(
             dir.join(format!("fractional_sumcheck_v2_n{n}.cy.fused.json")),
-            g_fused.to_cytoscape_json(),
+            g_fused.to_cytoscape_json_with_timings(timings.as_ref()),
         )
         .expect("write fused cytoscape dump");
         if let Some(v2) = report.v2.as_ref() {
@@ -1017,10 +987,12 @@ mod tests {
     /// End-to-end wall-time benchmark of v2 (the DSL-first, no-PrecomputeM,
     /// full-tree prover) against the eager `fractional_sumcheck_gpu`.
     ///
-    /// Sizes controlled by `FRAC_V2_BENCH_LOG_N` (comma-separated `log2`
-    /// leaf counts; default `16,20,22,24`). Byte-equality on `fractional_sum`
+    /// Sizes controlled by `FRAC_LOG_N` (comma-separated `log2` leaf
+    /// counts; default `16,20,22,24`). Byte-equality on `fractional_sum`
     /// is asserted per size — the bench doubles as a correctness check.
-    /// Set `FRAC_V2_BENCH_NO_FUSION=1` to benchmark the raw (unfused) graph.
+    /// Compiler tuning via `CC_*` (see [`super::frac_bench_utils`]);
+    /// setting `CC_GRAPH_DUMP_PATH` caches the compiled `GraphExe` to
+    /// disk and reuses it on subsequent runs.
     ///
     /// Three workloads are timed per size:
     /// - `eager`: reference `fractional_sumcheck_gpu`.
@@ -1048,7 +1020,7 @@ mod tests {
     /// readback fall outside the range. Suggested invocation for `LOG_N=20`:
     ///
     /// ```sh
-    /// FRAC_V2_BENCH_LOG_N=20 NSYS_ENABLED=1 nsys profile \
+    /// FRAC_LOG_N=20 NSYS_ENABLED=1 nsys profile \
     ///     --capture-range=cudaProfilerApi \
     ///     --trace=cuda,nvtx --cuda-graph-trace=node \
     ///     --gpu-metrics-devices=cuda-visible \
@@ -1064,7 +1036,7 @@ mod tests {
         // above; kept as a plain comment here so it's visible from the
         // function body without navigating up through the doc block):
         //
-        //   FRAC_V2_BENCH_LOG_N=20 NSYS_ENABLED=1 nsys profile \
+        //   FRAC_LOG_N=20 NSYS_ENABLED=1 nsys profile \
         //       --capture-range=cudaProfilerApi \
         //       --trace=cuda,nvtx --cuda-graph-trace=node \
         //       --gpu-metrics-devices=cuda-visible \
@@ -1072,14 +1044,9 @@ mod tests {
         //       cargo nextest run -p openvm-cuda-backend --features graph-ir \
         //           --run-ignored all --no-capture \
         //           -E 'test(bench_fractional_sumcheck_eager_vs_irv2)'
-        use std::{
-            sync::Arc,
-            time::{Duration, Instant},
-        };
+        use std::time::Instant;
 
-        use crypto_compiler::{
-            graph_exe::GraphExe, kernel_cache::KernelCache, passes::fusion::FusionOptions,
-        };
+        use crypto_compiler::graph_exe::GraphExe;
         use openvm_cuda_common::memory_manager::MemTracker;
 
         const ITERS: usize = 5;
@@ -1108,11 +1075,7 @@ mod tests {
 
         let ctx = test_ctx();
         let device = DeviceType::Cuda(0);
-        let log_ns: Vec<usize> = std::env::var("FRAC_V2_BENCH_LOG_N")
-            .unwrap_or_else(|_| "16,20,22,24".into())
-            .split(',')
-            .map(|s| s.trim().parse().expect("FRAC_V2_BENCH_LOG_N entry"))
-            .collect();
+        let log_ns: Vec<usize> = frac_log_ns("16,20,22,24");
 
         let nsys_enabled = std::env::var_os("NSYS_ENABLED").is_some();
 
@@ -1128,82 +1091,28 @@ mod tests {
             // v2 graph build. The shared `build_v2_graph` also derives the
             // alpha (as a deterministic function of `log_n`); the eager
             // reference below reuses that same alpha.
-            let t0 = Instant::now();
-            let V2GraphBundle {
-                mut g,
-                proof: proof_ir,
-                alpha,
-            } = build_v2_graph(log_n);
-            let root_exports: [BufId; 2] = [proof_ir.fractional_sum.0, proof_ir.fractional_sum.1];
-            register_all_proof_outputs(&mut g, &proof_ir);
-            let build_ms = t0.elapsed().as_secs_f64() * 1e3;
-            let n_nodes = g.nodes.len();
-
-            // Larger kernel cache — the default 300-entry / 10 GiB cap
-            // evicts previously-compiled kernels when a fresh run produces
-            // >300 unique modules (which the log_n=20 v2 graph does),
-            // forcing repeated nvcc invocations across benchmark runs.
-            let kernel_cache = Arc::new(
-                KernelCache::new()
-                    .max_kernels(4096)
-                    .storage_size(200 * 1024 * 1024 * 1024),
-            );
-            let scheduler_mode = match std::env::var("FRAC_V2_BENCH_SCHEDULER")
-                .unwrap_or_else(|_| "list_v1".into())
-                .as_str()
-            {
-                "heuristic" => SchedulerMode::Heuristic,
-                _ => {
-                    let max_conc: u32 = std::env::var("FRAC_V2_BENCH_STREAMS")
-                        .ok()
-                        .and_then(|v| v.parse().ok())
-                        .unwrap_or(4);
-                    SchedulerMode::ListV1 {
-                        params: ListSchedulerV1 {
-                            max_concurrency: max_conc,
-                            ..ListSchedulerV1::default()
-                        },
-                    }
-                }
+            let build_graph = || {
+                let t0 = Instant::now();
+                let V2GraphBundle {
+                    mut g,
+                    proof: proof_ir,
+                    alpha,
+                } = build_v2_graph(log_n);
+                let root_exports: [BufId; 2] =
+                    [proof_ir.fractional_sum.0, proof_ir.fractional_sum.1];
+                register_all_proof_outputs(&mut g, &proof_ir);
+                let build_ms = t0.elapsed().as_secs_f64() * 1e3;
+                let n_nodes = g.nodes.len();
+                (g, (root_exports, alpha, build_ms, n_nodes))
             };
-            println!("scheduler: {scheduler_mode:?}");
-            let t0 = Instant::now();
-            let mut compiler = GraphCompiler::new()
-                .device(device)
-                .scheduler(scheduler_mode)
-                .kernel_cache(kernel_cache)
-                .fusion_options(FusionOptions {
-                    verbose: true,
-                    max_iterations: 20,
-                    ..FusionOptions::default()
-                });
-            // `FRAC_V2_BENCH_NO_FUSION=1` benchmarks the raw (unfused) graph.
-            if std::env::var_os("FRAC_V2_BENCH_NO_FUSION").is_some() {
-                compiler = compiler.without_fusion();
-            }
-            // `FRAC_V2_BENCH_FUSION_V2=1` benchmarks the fusion-v2
-            // pipeline instead (knobs read from the environment — see
-            // `fusion_v2_options_from_env`). Build with
-            // `--features crypto-compiler/planner-ortools`; without it,
-            // graphs beyond the 32-alt-node brute-force cap fall back to
-            // the original (unfused) extraction and the comparison is
-            // meaningless.
-            if std::env::var_os("FRAC_V2_BENCH_FUSION_V2").is_some() {
-                compiler = compiler.fusion_v2_options(fusion_v2_options_from_env());
-            }
-            let exe = compiler
-                .nvcc_timeout(Some(Duration::from_secs(900)))
-                .dump_dir(
-                    std::env::var_os("FRAC_V2_BENCH_DUMP_IR")
-                        .map(std::path::PathBuf::from)
-                        .unwrap_or_else(|| {
-                            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                                .join("../../target/frac_v2_bench_timeouts")
-                        }),
-                )
-                .compile(g)
-                .expect("graph compile");
-            let compile_ms = t0.elapsed().as_secs_f64() * 1e3;
+            let t_prep = Instant::now();
+            let (exe, (root_exports, alpha, build_ms, n_nodes)) = load_or_compile_and_dump(
+                build_graph,
+                cc_compiler(device),
+                &ctx,
+                cc_graph_dump_path(log_n),
+            );
+            let compile_ms = t_prep.elapsed().as_secs_f64() * 1e3 - build_ms;
             let (n_nodes_post_fusion, fusion_rounds, fused_total) = exe
                 .fusion_report()
                 .map(|r| (r.nodes_after, r.rounds, r.fused.len()))
@@ -1213,7 +1122,7 @@ mod tests {
                 "graph build: {build_ms:>8.2} ms ({n_nodes} nodes pre-fusion, \
                  {n_nodes_post_fusion} post-fusion via {fusion_rounds} rounds, \
                  {fused_total} fusions applied); \
-                 compile: {compile_ms:>8.2} ms ({unique_modules} unique modules, \
+                 compile-or-load: {compile_ms:>8.2} ms ({unique_modules} unique modules, \
                  {} loaded from cache, scratch pool {} bytes)",
                 exe.num_cached_modules(),
                 exe.scratch_bytes(),
@@ -1484,12 +1393,15 @@ mod tests {
     /// with 1/2/3 streams — every workload wrapped in an NVTX range inside
     /// one `cudaProfilerStart/Stop` window per AGENTS.md profiling guide.
     ///
-    /// Size controlled by `FRAC_V2_BENCH_LOG_N` (single value, defaults 20).
+    /// Size controlled by `FRAC_LOG_N` (single value, defaults 20).
+    /// Compiler tuning via `CC_*` (see [`super::frac_bench_utils`]); the
+    /// stream-count sweep uses its own `CC_STREAMS_SWEEP` env var
+    /// (comma-separated `max_concurrency` values, defaults `1,2,3`).
     ///
     /// Recommended invocation (matches AGENTS.md profile requirements):
     ///
     /// ```text
-    /// FRAC_V2_BENCH_LOG_N=20 NSYS_ENABLED=1 nsys profile \
+    /// FRAC_LOG_N=20 NSYS_ENABLED=1 nsys profile \
     ///     --capture-range=cudaProfilerApi \
     ///     --trace=cuda,nvtx --cuda-graph-trace=node \
     ///     --gpu-metrics-devices=visible \
@@ -1501,14 +1413,10 @@ mod tests {
     #[test]
     #[ignore]
     fn bench_fractional_sumcheck_all_schedulers_nsys() {
-        use std::{
-            sync::Arc,
-            time::{Duration, Instant},
-        };
+        use std::{sync::Arc, time::Instant};
 
         use crypto_compiler::{
-            graph_exe::GraphExe, kernel_cache::KernelCache, passes::fusion::FusionOptions,
-            planner::ListSchedulerV1,
+            graph_exe::GraphExe, kernel_cache::KernelCache, planner::ListSchedulerV1,
         };
         use openvm_cuda_common::memory_manager::MemTracker;
 
@@ -1517,13 +1425,10 @@ mod tests {
 
         let ctx = test_ctx();
         let device = DeviceType::Cuda(0);
-        let log_n: usize = std::env::var("FRAC_V2_BENCH_LOG_N")
-            .ok()
-            .and_then(|s| s.trim().parse().ok())
-            .unwrap_or(20);
+        let log_n: usize = frac_log_n_single(20);
         let n = 1usize << log_n;
         let nsys_enabled = std::env::var_os("NSYS_ENABLED").is_some();
-        let no_fusion = std::env::var_os("FRAC_V2_BENCH_NO_FUSION").is_some();
+        let no_fusion = matches!(std::env::var("CC_FUSION").as_deref(), Ok("off"));
 
         // ---------- Setup phase (excluded from cudaProfilerStart window) ----------
 
@@ -1584,10 +1489,10 @@ mod tests {
 
         // Stream counts for list_v1 sweep — env-var-driven so the same
         // test doubles as a spot-check (1,2,3) or a full sweep (1..=8).
-        let stream_sweep: Vec<u32> = std::env::var("FRAC_V2_BENCH_STREAM_SWEEP")
+        let stream_sweep: Vec<u32> = std::env::var("CC_STREAMS_SWEEP")
             .unwrap_or_else(|_| "1,2,3".into())
             .split(',')
-            .map(|s| s.trim().parse().expect("FRAC_V2_BENCH_STREAM_SWEEP entry"))
+            .map(|s| s.trim().parse().expect("CC_STREAMS_SWEEP entry"))
             .collect();
 
         let mut configs: Vec<(String, SchedulerMode)> =
@@ -1612,27 +1517,19 @@ mod tests {
 
         // Compile every scheduler variant, upload the input, warm each up
         // and pre-capture their CUDA graphs — all before cudaProfilerStart.
+        // Fusion strategy and nvcc timeout come from `cc_compiler`; the
+        // scheduler is overridden per sweep entry and the kernel cache is
+        // shared across variants so only the first compile pays nvcc.
         let mut compiled: Vec<Compiled> = Vec::with_capacity(configs.len());
         for (name, mode) in configs {
+            let _ = no_fusion; // recorded above; cc_compiler applied CC_FUSION already
             println!("[setup] compiling scheduler={name} ...");
             let t0 = Instant::now();
-            let mut compiler = GraphCompiler::new()
-                .device(device)
+            let compiler = cc_compiler(device)
                 .scheduler(mode)
-                .kernel_cache(kernel_cache.clone())
-                .fusion_options(FusionOptions {
-                    verbose: false,
-                    max_iterations: 20,
-                    ..FusionOptions::default()
-                });
-            if no_fusion {
-                compiler = compiler.without_fusion();
-            }
+                .kernel_cache(kernel_cache.clone());
             let (g, _, _) = make_graph(log_n);
-            let mut exe = compiler
-                .nvcc_timeout(Some(Duration::from_secs(900)))
-                .compile(g)
-                .expect("graph compile");
+            let mut exe = compiler.compile(g).expect("graph compile");
             let peak_bytes = exe.scratch_bytes();
             let compile_ms = t0.elapsed().as_secs_f64() * 1e3;
             println!(

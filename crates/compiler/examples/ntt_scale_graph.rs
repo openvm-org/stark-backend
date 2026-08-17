@@ -128,10 +128,15 @@ fn main() {
 }
 
 fn add_dev_buf(g: &mut GraphBuilder, name: &str, size: Quast) -> BufId {
+    let concrete_size = match &size {
+        Quast::Const(c) => *c as usize,
+        _ => 0,
+    };
     g.add_buf(BufInfo {
         name: Some(name.to_string()),
         device_type: DeviceType::Cuda(0),
         size,
+        concrete_size,
         elem_size: 4,
     })
 }

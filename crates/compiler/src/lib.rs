@@ -30,7 +30,11 @@ pub mod dump;
 pub mod field_ext;
 #[cfg(feature = "planner")]
 pub mod graph_exe;
+#[cfg(feature = "planner")]
+pub mod graph_info;
 pub mod graph_ir;
+#[cfg(feature = "planner")]
+pub mod graph_serializer;
 pub mod ir;
 #[cfg(feature = "planner")]
 pub mod kernel_cache;

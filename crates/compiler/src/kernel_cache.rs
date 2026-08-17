@@ -99,8 +99,18 @@ impl KernelCache {
     /// dlopen, corrupt artifacts) is treated as a miss rather than an error —
     /// the caller falls back to a fresh compile.
     pub fn get(&self, module: &Module) -> Result<Option<KernelProgram>, CompileError> {
-        let key = module_hash_hex(module);
-        let dir = self.entry_dir(&key);
+        self.get_by_key(&module_hash_hex(module))
+    }
+
+    /// Hash-keyed variant of [`Self::get`]. Used by the graph serializer,
+    /// which knows a kernel's `module_hash` from the serialized payload
+    /// without needing the source [`Module`].
+    pub fn get_by_hash(&self, hash: &[u8; 32]) -> Result<Option<KernelProgram>, CompileError> {
+        self.get_by_key(&hex::encode(hash))
+    }
+
+    fn get_by_key(&self, key: &str) -> Result<Option<KernelProgram>, CompileError> {
+        let dir = self.entry_dir(key);
         if !dir.join(KERNEL_MODULE_SO).is_file() || !dir.join(KERNEL_MODULE_METADATA).is_file() {
             return Ok(None);
         }
@@ -134,9 +144,19 @@ impl KernelCache {
     /// mid-way we still return the compiled module — the cache is an
     /// optimization, not a correctness guarantee.
     pub fn insert(&self, module: &Module, km: &KernelProgram) -> Result<(), CompileError> {
+        self.insert_by_key(&module_hash_hex(module), km)
+    }
+
+    /// Hash-keyed variant of [`Self::insert`]. Used by the graph serializer
+    /// on the recompile-from-KIR path, where the caller only has the
+    /// precomputed `module_hash`, not the source [`Module`].
+    pub fn insert_by_hash(&self, hash: &[u8; 32], km: &KernelProgram) -> Result<(), CompileError> {
+        self.insert_by_key(&hex::encode(hash), km)
+    }
+
+    fn insert_by_key(&self, key: &str, km: &KernelProgram) -> Result<(), CompileError> {
         let _guard = self.lock.lock();
-        let key = module_hash_hex(module);
-        let dir = self.entry_dir(&key);
+        let dir = self.entry_dir(key);
         let stage = self
             .directory
             .join(format!(".{key}.tmp-{}", std::process::id()));
