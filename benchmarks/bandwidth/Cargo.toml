@@ -1,0 +1,11 @@
+[package]
+name = "openvm-benchmarks-bandwidth"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "bandwidth_bench"
+path = "src/main.rs"
+
+[dependencies]
+openvm-cuda-common = { path = "../../crates/cuda-common" }

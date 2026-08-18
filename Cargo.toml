@@ -21,6 +21,7 @@ members = [
   "crates/compiler/macros",
   "benchmarks/fields",
   "benchmarks/synthetic",
+  "benchmarks/bandwidth",
 ]
 # Only these build by default
 default-members = [

@@ -106,6 +106,7 @@ pub(crate) fn add_frac_ef_buf(
         name: Some(name.to_string()),
         device_type: device,
         size: crypto_compiler::quast::Quast::cst((n * FRAC_EF_BYTES) as i64),
+        concrete_size: n * FRAC_EF_BYTES,
         elem_size: FRAC_EF_BYTES,
     })
 }
@@ -117,6 +118,7 @@ pub(crate) fn add_ef_buf(g: &mut GraphBuilder, device: DeviceType, name: &str, n
         name: Some(name.to_string()),
         device_type: device,
         size: crypto_compiler::quast::Quast::cst((n * EF_BYTES) as i64),
+        concrete_size: n * EF_BYTES,
         elem_size: EF_BYTES,
     })
 }
@@ -138,6 +140,7 @@ pub(crate) fn add_ext_scalar_buf(g: &mut GraphBuilder, device: DeviceType, name:
         name: Some(name.to_string()),
         device_type: device,
         size: crypto_compiler::quast::Quast::cst((D_EF as i64) * 4),
+        concrete_size: D_EF * 4,
         elem_size: (D_EF * 4),
     })
 }

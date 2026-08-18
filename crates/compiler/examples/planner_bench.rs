@@ -56,6 +56,7 @@ fn random_graph(n: usize, fanin: usize, size_range: (i64, i64), seed: u64) -> Gr
             name: Some(format!("out{i}")),
             device_type: DeviceType::Cuda(0),
             size: Quast::cst(sz),
+            concrete_size: sz as usize,
             elem_size: 4,
         });
         // Inputs: for i > 0 pick between 1 and min(fanin, i) distinct

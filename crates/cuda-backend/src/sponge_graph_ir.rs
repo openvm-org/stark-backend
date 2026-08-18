@@ -355,6 +355,7 @@ fn alloc_state_buf(g: &mut GraphBuilder, device: DeviceType, name: &str) -> BufI
         name: Some(name.to_string()),
         device_type: device,
         size: Quast::cst((WIDTH as i64) * 4),
+        concrete_size: WIDTH * 4,
         elem_size: 4,
     })
 }
@@ -364,6 +365,7 @@ fn alloc_single_f_buf(g: &mut GraphBuilder, device: DeviceType, name: &str) -> B
         name: Some(name.to_string()),
         device_type: device,
         size: Quast::cst(4),
+        concrete_size: 4,
         elem_size: 4,
     })
 }
@@ -373,6 +375,7 @@ fn alloc_ext_buf(g: &mut GraphBuilder, device: DeviceType, name: &str) -> BufId 
         name: Some(name.to_string()),
         device_type: device,
         size: Quast::cst((D_EF as i64) * 4),
+        concrete_size: D_EF * 4,
         elem_size: 4,
     })
 }
@@ -715,6 +718,7 @@ mod tests {
             name: Some(name.to_string()),
             device_type: DeviceType::Cuda(0),
             size: Quast::cst(4),
+            concrete_size: 4,
             elem_size: 4,
         })
     }
@@ -724,6 +728,7 @@ mod tests {
             name: Some(name.to_string()),
             device_type: DeviceType::Cuda(0),
             size: Quast::cst((D_EF as i64) * 4),
+            concrete_size: D_EF * 4,
             elem_size: 4,
         })
     }

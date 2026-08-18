@@ -36,6 +36,7 @@ pub mod heuristic;
 pub mod list_v1;
 pub mod list_v2;
 mod plan;
+pub mod validate;
 
 #[cfg(feature = "planner-ortools")]
 pub use abstract_timing::plan_cpsat_v2;
@@ -48,6 +49,7 @@ pub use ctx::{
 };
 pub use list_v1::ListSchedulerV1;
 pub use plan::{StreamInstr, StreamMemoryPlan};
+pub use validate::{validate_plan, ValidationError};
 
 /// Memory-planner backend selector. See [`plan_raw`].
 #[derive(Debug, Clone)]

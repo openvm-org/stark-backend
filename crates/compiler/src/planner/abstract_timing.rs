@@ -6,7 +6,7 @@
 //! output surface as the existing [`super::plan_raw`].
 
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, HashMap},
     path::Path,
 };
 
@@ -99,11 +99,10 @@ impl AbstractTimingGraph {
         // graphs that already went through `restore_ssa` (each buffer
         // has ≤1 writer, and if it's rewritten in-place the same node
         // both reads and writes), so a single pass suffices.
-        let n_bufs = graph.bufs.len();
         let mut buf_users: HashMap<BufId, Vec<usize>> = HashMap::new();
+        let mut buf_producers: HashMap<BufId, Vec<usize>> = HashMap::new();
         let mut node_consumes: Vec<Vec<BufId>> = vec![Vec::new(); num_nodes];
         let mut node_produces: Vec<Vec<BufId>> = vec![Vec::new(); num_nodes];
-        let mut has_producer: Vec<bool> = vec![false; n_bufs];
 
         for (v, node) in graph.nodes.iter().enumerate() {
             let (reads, writes) = graph.node_reads_writes(node);
@@ -113,8 +112,8 @@ impl AbstractTimingGraph {
             }
             for &buf in &writes {
                 buf_users.entry(buf).or_default().push(v);
+                buf_producers.entry(buf).or_default().push(v);
                 node_produces[v].push(buf);
-                has_producer[buf.0] = true;
             }
         }
 
@@ -122,6 +121,10 @@ impl AbstractTimingGraph {
         for users in buf_users.values_mut() {
             users.sort_unstable();
             users.dedup();
+        }
+        for prods in buf_producers.values_mut() {
+            prods.sort_unstable();
+            prods.dedup();
         }
         for consumes in node_consumes.iter_mut() {
             consumes.sort_unstable_by_key(|b| b.0);
@@ -132,22 +135,18 @@ impl AbstractTimingGraph {
             produces.dedup();
         }
 
-        // `node_requires[v]` = bufs `v` consumes that some *other* node
-        // produces. Excludes graph inputs (no producer) and bufs `v`
-        // produces itself (intra-node read+write). This is the set of
-        // dataflow deps the scheduler must clear before `v` can run.
-        let node_requires: Vec<HashSet<BufId>> = (0..num_nodes)
-            .map(|v| {
-                node_consumes[v]
-                    .iter()
-                    .copied()
-                    .filter(|bid| has_producer[bid.0] && !node_produces[v].contains(bid))
-                    .collect()
-            })
-            .collect();
-
+        // A node is initially ready if every buf it consumes either has
+        // no producer (graph input) or is produced by itself (in-place
+        // read+write). Any cross-node dep prevents it from starting.
         let inital_ready_nodes: Vec<usize> = (0..num_nodes)
-            .filter(|&v| node_requires[v].is_empty())
+            .filter(|&v| {
+                node_consumes[v].iter().all(|bid| {
+                    buf_producers
+                        .get(bid)
+                        .map(|ps| ps.iter().all(|&p| p == v))
+                        .unwrap_or(true)
+                })
+            })
             .collect();
 
         let node_times: Vec<f64> = info.nodes.iter().map(|nt| nt.mean_ms).collect();
@@ -162,10 +161,10 @@ impl AbstractTimingGraph {
             inputs,
             outputs,
             buf_users,
+            buf_producers,
             node_consumes,
             node_produces,
             inital_ready_nodes,
-            node_requires,
         }
     }
 
@@ -484,9 +483,9 @@ mod tests {
         assert_eq!(atg.node_produces[2], vec![c]);
         // Only n0 has no producer dep; n1 waits on a, n2 waits on b.
         assert_eq!(atg.inital_ready_nodes, vec![0]);
-        assert!(atg.node_requires[0].is_empty());
-        assert_eq!(atg.node_requires[1], HashSet::from([a]));
-        assert_eq!(atg.node_requires[2], HashSet::from([b]));
+        assert_eq!(atg.buf_producers[&a], vec![0]);
+        assert_eq!(atg.buf_producers[&b], vec![1]);
+        assert_eq!(atg.buf_producers[&c], vec![2]);
         assert!(atg.inputs.is_empty());
         assert_eq!(atg.outputs, vec![c]);
     }
@@ -551,11 +550,11 @@ mod tests {
         assert_eq!(atg.node_consumes[3], vec![b]);
         assert_eq!(atg.node_produces[3], vec![d]);
 
-        // Dependency state.
-        assert!(atg.node_requires[0].is_empty());
-        assert_eq!(atg.node_requires[1], HashSet::from([a]));
-        assert_eq!(atg.node_requires[2], HashSet::from([a, b]));
-        assert_eq!(atg.node_requires[3], HashSet::from([b]));
+        // buf_producers: exactly one writer per buf under SSA.
+        assert_eq!(atg.buf_producers[&a], vec![0]);
+        assert_eq!(atg.buf_producers[&b], vec![1]);
+        assert_eq!(atg.buf_producers[&c], vec![2]);
+        assert_eq!(atg.buf_producers[&d], vec![3]);
         assert_eq!(atg.inital_ready_nodes, vec![0]);
     }
 
@@ -609,10 +608,10 @@ mod tests {
             inputs: Vec::new(),
             outputs: Vec::new(),
             buf_users: HashMap::new(),
+            buf_producers: HashMap::new(),
             node_consumes: vec![Vec::new(); 3],
             node_produces: vec![Vec::new(); 3],
             inital_ready_nodes: (0..3).collect(),
-            node_requires: vec![HashSet::new(); 3],
         };
         let plan = StreamMemoryPlan {
             instructions: vec![
@@ -644,10 +643,10 @@ mod tests {
             inputs: Vec::new(),
             outputs: Vec::new(),
             buf_users: HashMap::new(),
+            buf_producers: HashMap::new(),
             node_consumes: vec![Vec::new(); 2],
             node_produces: vec![Vec::new(); 2],
             inital_ready_nodes: (0..2).collect(),
-            node_requires: vec![HashSet::new(); 2],
         };
         let plan = StreamMemoryPlan {
             instructions: vec![
@@ -800,7 +799,7 @@ mod tests {
         assert_eq!(direct.node_consumes, atg.node_consumes);
         assert_eq!(direct.node_produces, atg.node_produces);
         assert_eq!(direct.buf_users, atg.buf_users);
-        assert_eq!(direct.node_requires, atg.node_requires);
+        assert_eq!(direct.buf_producers, atg.buf_producers);
         assert_eq!(direct.inital_ready_nodes, atg.inital_ready_nodes);
         assert_eq!(direct.inputs, atg.inputs);
         assert_eq!(direct.outputs, atg.outputs);

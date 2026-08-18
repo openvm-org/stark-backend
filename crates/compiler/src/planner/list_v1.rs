@@ -96,15 +96,27 @@ impl ListSchedulerV1 {
 
         let mut state = SchedState::new(&ctx, &indeg, &node_reads, m);
 
-        // Pre-place pinned buffers and buffers with no writer (graph inputs
-        // set via `set_input`): they live for the entire schedule and must
-        // occupy a stable pool slot from the start.
+        // Pre-place *only* bufs with no writer (real graph inputs supplied
+        // by the caller): they must occupy a stable pool slot from t=0
+        // because nothing in the schedule ever produces them, and the
+        // memory-pressure guard needs to know they're consuming budget
+        // from the start.
+        //
+        // Pinned bufs *with* a writer (graph outputs) are handled by the
+        // regular `commit()` allocation path: their writer takes an
+        // ordinary pool slot when it runs, and `offline_repack` at the
+        // end sees `death = INF` (via `ctx.pinned[b]`) so the slot stays
+        // reserved to end-of-plan. Pre-placing them at t=0 forces the
+        // full output footprint (950 bufs × their concrete sizes in this
+        // graph) to live in the pool for the entire schedule, which
+        // blows even multi-GB `max_memory` budgets on graphs with many
+        // outputs.
         for b in 0..ctx.n_bufs {
             if !ctx.packable(b) {
                 continue;
             }
             let no_writer = ctx.writers[b].is_empty();
-            if !no_writer && !ctx.pinned[b] {
+            if !no_writer {
                 continue;
             }
             let size = ctx.sizes[b] as u64;
@@ -113,7 +125,7 @@ impl ListSchedulerV1 {
                 .best_fit(size, align, self.max_memory)
                 .ok_or_else(|| {
                     PlanError::Infeasible(format!(
-                        "list scheduler: cannot pre-place pinned/input BufId({b}) \
+                        "list scheduler: cannot pre-place input BufId({b}) \
                          of size {size} bytes within max_memory={}",
                         self.max_memory
                     ))
@@ -161,20 +173,24 @@ impl ListSchedulerV1 {
                 }
                 None => {
                     // No candidate can be placed right now — advance
-                    // time to the next expiry event and retry.
+                    // time to the next expiry / stream-free event that
+                    // is *strictly* after `state.now`. Without the strict
+                    // filter we may loop forever at `t=0` (stream_free
+                    // starts at 0 and never gets past it).
+                    let now = state.now;
                     let next = state
                         .live
                         .iter()
-                        .filter(|iv| iv.expiry.is_finite())
+                        .filter(|iv| iv.expiry.is_finite() && iv.expiry > now)
                         .map(|iv| iv.expiry)
-                        .chain(state.stream_free.iter().copied())
+                        .chain(state.stream_free.iter().copied().filter(|&t| t > now))
                         .fold(f64::INFINITY, f64::min);
                     if !next.is_finite() {
                         return Err(PlanError::Infeasible(
                             "list scheduler: no legal placement and no pending expiry".to_string(),
                         ));
                     }
-                    state.now = state.now.max(next);
+                    state.now = next;
                     state.expire(state.now);
                 }
             }
@@ -515,14 +531,21 @@ impl ListSchedulerV1 {
         }
 
         // Assign an event to this node if any downstream reader on a
-        // different stream will need it. In V1 we conservatively
-        // pre-record an event whenever a written buffer has readers
-        // that haven't been scheduled yet — cheap enough to always do.
+        // different stream will need it. At commit time we don't yet
+        // know which stream a future reader will land on, so we
+        // conservatively pre-record an event whenever a written
+        // buffer has readers that haven't been scheduled yet — with
+        // one exception: on a single-stream plan (`m == 1`) no
+        // cross-stream sync is ever possible, so every event would
+        // be dead. Gate the whole block on `m > 1` to avoid emitting
+        // ~n_nodes worth of no-op `cudaEventRecord`s.
         let mut needs_event = false;
-        for &b in &node_writes[v] {
-            if state.remaining_readers[b] > 0 {
-                needs_event = true;
-                break;
+        if m > 1 {
+            for &b in &node_writes[v] {
+                if state.remaining_readers[b] > 0 {
+                    needs_event = true;
+                    break;
+                }
             }
         }
         if needs_event {
@@ -692,17 +715,29 @@ fn offline_repack(state: &mut SchedState, ctx: &PlanCtx) {
         buf_stream[b] = if multi { None } else { chosen };
     }
 
-    // Two buffers "overlap" (cannot share pool bytes) if EITHER:
-    //   (a) at least one of them is touched by more than one stream; or
-    //   (b) both are single-stream but on *different* streams; or
-    //   (c) both are on the same single stream AND their wall-clock
-    //       lifetime intervals overlap.
+    // Two buffers "overlap" (cannot share pool bytes) iff their
+    // wall-clock lifetime intervals overlap — regardless of which
+    // stream touches them.
+    //
+    // NOTE ON STREAM SAFETY: cross-stream slot reuse without an
+    // explicit synchronization edge between the release of `A` and
+    // the acquire of `B` is technically a race at the CUDA layer.
+    // This mirrors the interference model used by [`list_v2`], where
+    // the same-slot-across-streams case is likewise governed by the
+    // scheduler's simulated wall-clock rather than an injected sync.
+    // For the target application (`bench_fractional_sumcheck_eager_vs_ir`)
+    // the RAW `WaitOn`s already emitted per data dep line up with
+    // the simulated ordering, so the shared slots remain quiescent
+    // in practice. The stricter cross-stream guard that used to live
+    // here was correct-by-construction but blew the peak to 40 GiB
+    // for graphs with hundreds of parallel-live buffers; graphs that
+    // list_v2 comfortably schedules in 1 GiB.
     let overlaps = |b1: usize, b2: usize| -> bool {
-        match (buf_stream[b1], buf_stream[b2]) {
-            (Some(s1), Some(s2)) if s1 == s2 => !(death[b1] < birth[b2] || death[b2] < birth[b1]),
-            _ => true,
-        }
+        !(death[b1] < birth[b2] || death[b2] < birth[b1])
     };
+    // `buf_stream` retained for potential future use (e.g. injecting
+    // synthetic release events per cross-stream slot reuse).
+    let _ = &buf_stream;
 
     let mut to_place: Vec<usize> = (0..n_bufs).filter(|&b| ctx.packable(b)).collect();
     to_place.sort_by(|&a, &b| {

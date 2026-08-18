@@ -27,6 +27,7 @@ rayon = { workspace = true }
 serde = { workspace = true, features = ["derive", "rc"] }
 serde_json = { workspace = true }
 bincode = "1"
+im = "15"
 parking_lot = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
@@ -77,4 +78,8 @@ required-features = ["planner-ortools"]
 
 [[example]]
 name = "bench_abstract_planners"
+required-features = ["planner"]
+
+[[example]]
+name = "bench_list_v2_ops"
 required-features = ["planner"]
