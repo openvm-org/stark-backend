@@ -134,6 +134,17 @@ pub fn plan_raw(
         #[cfg(feature = "planner-ortools")]
         SchedulerMode::CpSat { max_secs } => cpsat::plan_cpsat(bufs, &ctx, *max_secs),
         SchedulerMode::Heuristic => heuristic::plan_heuristic(bufs, &ctx),
+        // Uniform per-node cost: the beam's bottom-level priority then
+        // reduces to chain depth, which tracks the true critical path
+        // when it is a long serial chain of tiny launch-latency-bound
+        // kernels (e.g. transcript sponge ops in the GKR drivers). A
+        // bytes-touched cost proxy was tried and regressed the 2^24
+        // pipelined GKR replay ~5%: it rates bulk prefetch work
+        // (eq chains, next-window builds) as critical and delays the
+        // claim-producing folds the transcript actually waits on.
+        // Same-stream serialization of independent work under uniform
+        // costs is instead handled by the chain-affinity tiebreak in
+        // `ListSchedulerV1::commit`.
         SchedulerMode::ListV1 { params } => params.clone().schedule(ctx, |_| 1.0),
     }?;
     // Backends assigned offsets only for canonical entries — alias

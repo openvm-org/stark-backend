@@ -718,10 +718,11 @@ impl GraphCompiler {
         // canonical's pool slot. Downstream passes then see a graph
         // where every buffer has ≤1 writer.
         let ssa_report = crate::passes::restore_ssa(&mut graph)?;
-        if ssa_report.renamed_carried > 0 {
+        if ssa_report.aliases_added > 0 {
             eprintln!(
-                "[compile] restore_ssa: renamed {} carried outputs ({} aliases added)",
-                ssa_report.renamed_carried, ssa_report.aliases_added,
+                "[compile] restore_ssa: renamed {} carried outputs, {} repeated writes \
+                 ({} aliases added)",
+                ssa_report.renamed_carried, ssa_report.renamed_writes, ssa_report.aliases_added,
             );
         }
 
@@ -788,6 +789,9 @@ impl GraphCompiler {
             plan.num_events,
             plan.peak_bytes,
         );
+        if std::env::var("GRAPH_EXE_DUMP_SCHEDULE").ok().as_deref() == Some("1") {
+            dump_schedule(&graph, &plan);
+        }
 
         // Stage 4: derive `ExeNode`s in the graph's insertion order.
         // Execution order comes from `plan.order` at runtime.
@@ -873,6 +877,17 @@ impl GraphCompiler {
         // key tomorrow (the graph serializer emits these so a loaded payload
         // can hit the same on-disk cache entry).
         let module_hashes: Vec<[u8; 32]> = unique_modules.iter().map(|m| module_hash(m)).collect();
+
+        if std::env::var("GRAPH_EXE_DUMP_MODULES").ok().as_deref() == Some("1") {
+            let mut by_name: BTreeMap<&str, usize> = BTreeMap::new();
+            for m in &unique_modules {
+                *by_name.entry(m.name.as_str()).or_default() += 1;
+            }
+            eprintln!("[compile] {} unique modules by name:", unique_modules.len());
+            for (name, count) in by_name {
+                eprintln!("[compile]   {count:4}  {name}");
+            }
+        }
 
         // Probe the on-disk cache before spawning nvcc.
         let mut compiled: Vec<Option<KernelProgram>> =
@@ -1171,6 +1186,76 @@ fn build_exe_node(
     })
 }
 
+/// `GRAPH_EXE_DUMP_SCHEDULE=1`: prints the planned instruction stream —
+/// per-node stream assignment, alias-resolved buffer reads/writes, the
+/// event each node records, and every cross-stream wait with the event's
+/// producer. This is the ground truth for "why didn't X overlap Y":
+/// same-stream program order and `wait` lines are the only two ways the
+/// plan serializes nodes.
+fn dump_schedule(g: &GraphBuilder, plan: &StreamMemoryPlan) {
+    let node_name = |i: usize| -> &str {
+        match &g.nodes[i] {
+            GraphNode::Kernel(k) => &k.module.name,
+            GraphNode::BlackboxKernel(k) => &k.name,
+            GraphNode::Const(_) => "const",
+            GraphNode::Memcpy(_) => "memcpy",
+            GraphNode::Memset(_) => "memset",
+        }
+    };
+    let buf_name = |b: BufId| -> String {
+        let mut canon = b;
+        while let Some(next) = g.aliases[canon.0] {
+            canon = next;
+        }
+        let name = g.bufs[canon.0].name.as_deref().unwrap_or("?");
+        if canon == b {
+            format!("b{}:{name}", b.0)
+        } else {
+            format!("b{}~b{}:{name}", b.0, canon.0)
+        }
+    };
+    let mut event_owner: Vec<usize> = vec![usize::MAX; plan.num_events as usize];
+    for (i, ev) in plan.record_event.iter().enumerate() {
+        if let Some(e) = ev {
+            event_owner[*e as usize] = i;
+        }
+    }
+    eprintln!(
+        "[schedule] {} instruction(s), {} stream(s), {} event(s):",
+        plan.instructions.len(),
+        plan.num_streams,
+        plan.num_events,
+    );
+    for instr in &plan.instructions {
+        match *instr {
+            StreamInstr::Node(i) => {
+                let acc = access_from_node(&g.nodes[i]);
+                let reads: Vec<String> = acc.reads.iter().map(|b| buf_name(*b)).collect();
+                let writes: Vec<String> = acc.writes.iter().map(|b| buf_name(*b)).collect();
+                let ev = match plan.record_event[i] {
+                    Some(e) => format!(" -> ev{e}"),
+                    None => String::new(),
+                };
+                eprintln!(
+                    "[schedule] s{}: #{i} {} r[{}] w[{}]{ev}",
+                    plan.stream[i],
+                    node_name(i),
+                    reads.join(","),
+                    writes.join(","),
+                );
+            }
+            StreamInstr::WaitOn(s, e) => {
+                let owner = event_owner[e];
+                eprintln!(
+                    "[schedule] s{s}: wait ev{e} (#{owner} {} on s{})",
+                    node_name(owner),
+                    plan.stream[owner],
+                );
+            }
+        }
+    }
+}
+
 /// Validates the registered graph interface against the raw (pre-fusion)
 /// graph. See [`GraphCompiler::compile`] for the rules enforced here.
 fn validate_interface(graph: &GraphBuilder, device: DeviceType) -> Result<(), CompileError> {
@@ -1451,6 +1536,14 @@ impl GraphExe {
     /// Target device the plan was built for.
     pub fn device(&self) -> DeviceType {
         self.device
+    }
+
+    /// Planner output — stream/event assignment and per-buffer offsets.
+    /// Consumed by
+    /// [`crate::planner::abstract_timing::perf_est`] to estimate this
+    /// plan's execution time under a captured [`crate::graph_info::GraphInfo`].
+    pub fn plan(&self) -> &StreamMemoryPlan {
+        &self.plan
     }
 
     /// Number of execution nodes in the planner-chosen order.

@@ -436,18 +436,33 @@ impl ListSchedulerV1 {
         node_reads: &[Vec<usize>],
         m: usize,
     ) -> Result<(), PlanError> {
-        let t_reads = node_reads[v]
-            .iter()
-            .filter_map(|&b| state.buf_ready.get(&b).map(|(t, _)| *t))
-            .fold(0.0, f64::max);
+        // `pred_stream` is the stream of the latest-arriving input's
+        // producer — the node's chain predecessor.
+        let mut t_reads = 0.0f64;
+        let mut pred_stream = None;
+        for &b in &node_reads[v] {
+            if let Some(&(t, ps)) = state.buf_ready.get(&b) {
+                if t >= t_reads {
+                    t_reads = t;
+                    pred_stream = Some(ps as usize);
+                }
+            }
+        }
 
-        // Pick the stream that minimizes start time. Ties broken by
-        // lowest stream index for determinism.
+        // Pick the stream that minimizes start time. Ties prefer the
+        // chain predecessor's stream, then lowest index for
+        // determinism. Chain affinity matters because cost estimates
+        // are coarse (uniform): on a start-time tie against a stream
+        // holding a queued heavy kernel, the old lowest-index pick
+        // would FIFO-queue this node behind that kernel, serializing
+        // independent work at runtime — observed with transcript
+        // sponge chains queued behind precompute-M builds in the GKR
+        // pipelined driver.
         let mut s = 0usize;
         let mut best_start = f64::INFINITY;
         for i in 0..m {
             let start = state.stream_free[i].max(t_reads);
-            if start < best_start {
+            if start < best_start || (start == best_start && Some(i) == pred_stream) {
                 best_start = start;
                 s = i;
             }
@@ -493,7 +508,7 @@ impl ListSchedulerV1 {
             }
         }
 
-        // Emit cross-stream wait instructions before this node's launch.
+        // Emit cross-stream RAW wait instructions before this node's launch.
         for &b in &node_reads[v] {
             let Some(&(_t_ready, producer_stream)) = state.buf_ready.get(&b) else {
                 continue;
@@ -504,15 +519,34 @@ impl ListSchedulerV1 {
                     // skip. This can happen for graph inputs (no writer).
                     continue;
                 };
-                // De-dup: don't wait on the same event twice.
-                let dup = state.instructions.iter().any(|instr| {
-                    matches!(instr, StreamInstr::WaitOn(ss, ee) if *ss == s && *ee == event_idx as usize)
-                });
                 let _ = producer_node;
-                if !dup {
-                    state
-                        .instructions
-                        .push(StreamInstr::WaitOn(s, event_idx as usize));
+                state.push_wait(s, event_idx);
+            }
+        }
+
+        // Cross-stream WAR/WAW waits: a writer of `b` must not launch
+        // until every earlier reader of the current version (WAR) and the
+        // previous writer (WAW) have finished on their streams. The
+        // in-order edges from `PlanCtx::edges` only constrain *commit*
+        // order; without an event the GPU streams still race. This
+        // matters for in-place SSA alias classes (`restore_ssa` carried
+        // outputs), where the new version overwrites the exact bytes the
+        // old version's readers are consuming.
+        for &b in &node_writes[v] {
+            if let Some(&(_t, ws)) = state.buf_ready.get(&b) {
+                if ws as usize != s {
+                    if let Some(&(_pn, event_idx)) = state.event_of_buf.get(&b) {
+                        state.push_wait(s, event_idx);
+                    }
+                }
+            }
+            if let Some(readers) = state.readers_since_write.remove(&b) {
+                for r in readers {
+                    if state.stream[r] as usize != s {
+                        if let Some(event_idx) = state.record_event[r] {
+                            state.push_wait(s, event_idx);
+                        }
+                    }
                 }
             }
         }
@@ -525,24 +559,34 @@ impl ListSchedulerV1 {
         state.t_start[v] = t_start;
         state.t_finish[v] = t_finish;
 
-        // Every write becomes ready at finish on this stream.
+        // Every write becomes ready at finish on this stream; the writer
+        // count drops so `remaining_writers` means "writers not yet
+        // scheduled" below.
         for &b in &node_writes[v] {
             state.buf_ready.insert(b, (t_finish, s as u32));
+            state.remaining_writers[b] = state.remaining_writers[b].saturating_sub(1);
         }
 
-        // Assign an event to this node if any downstream reader on a
-        // different stream will need it. At commit time we don't yet
-        // know which stream a future reader will land on, so we
-        // conservatively pre-record an event whenever a written
-        // buffer has readers that haven't been scheduled yet — with
-        // one exception: on a single-stream plan (`m == 1`) no
-        // cross-stream sync is ever possible, so every event would
-        // be dead. Gate the whole block on `m > 1` to avoid emitting
+        // Assign an event to this node if a downstream node on a
+        // different stream may need it: an unscheduled reader of a
+        // written buffer (RAW), an unscheduled writer of a written buffer
+        // (WAW), or an unscheduled writer of a read buffer (WAR — a
+        // future in-place mutation must wait for this read). On a
+        // single-stream plan (`m == 1`) no cross-stream sync is ever
+        // possible, so gate the whole block on `m > 1` to avoid emitting
         // ~n_nodes worth of no-op `cudaEventRecord`s.
         let mut needs_event = false;
         if m > 1 {
             for &b in &node_writes[v] {
-                if state.remaining_readers[b] > 0 {
+                if state.remaining_readers[b] > 0 || state.remaining_writers[b] > 0 {
+                    needs_event = true;
+                    break;
+                }
+            }
+        }
+        if !needs_event {
+            for &b in &node_reads[v] {
+                if state.remaining_writers[b] > 0 {
                     needs_event = true;
                     break;
                 }
@@ -553,10 +597,19 @@ impl ListSchedulerV1 {
             state.num_events += 1;
             state.record_event[v] = Some(event_idx);
             for &b in &node_writes[v] {
-                if state.remaining_readers[b] > 0 {
+                if state.remaining_readers[b] > 0 || state.remaining_writers[b] > 0 {
                     state.event_of_buf.insert(b, (v, event_idx));
                 }
             }
+        }
+
+        // Register this node as a reader of the current version of every
+        // buffer it reads, so a future writer can WAR-wait on it. (For
+        // in-place nodes the write above already cleared the list; adding
+        // `v` here just makes future writers wait on `v` itself, which
+        // the WAW path covers anyway.)
+        for &b in &node_reads[v] {
+            state.readers_since_write.entry(b).or_default().push(v);
         }
 
         // Decrement reader counts; mark expiries for buffers whose last
@@ -692,8 +745,9 @@ fn offline_repack(state: &mut SchedState, ctx: &PlanCtx) {
     // For each packable canonical, the set of streams that touch it.
     // `Some(s)`: every access is on stream `s`. `None`: the buffer sees
     // multiple streams — it can never share pool bytes with anyone,
-    // because `commit()` only emits cross-stream events for RAW on the
-    // same BufId, so a WAW/WAR at the pool-slot level would race.
+    // because `commit()` only emits cross-stream events for hazards on
+    // the same canonical BufId; a WAW/WAR between *different* canonicals
+    // sharing a pool slot would race.
     let mut buf_stream: Vec<Option<u32>> = vec![None; n_bufs];
     for (b, slot) in buf_stream.iter_mut().enumerate() {
         if !ctx.packable(b) {
@@ -847,6 +901,12 @@ struct SchedState {
 
     /// Reader countdown for buffer death.
     remaining_readers: Vec<usize>,
+    /// Writer countdown per buffer (canonical ids). Non-zero means a
+    /// future writer exists that must WAR/WAW-wait on current accesses.
+    remaining_writers: Vec<usize>,
+    /// Nodes that read each buffer since its last writer was scheduled —
+    /// the WAR-wait set for the next writer of that buffer.
+    readers_since_write: HashMap<usize, Vec<usize>>,
     /// In-degree per node (predecessors still to schedule).
     indeg: Vec<usize>,
     ready: BTreeSetLike,
@@ -903,11 +963,24 @@ impl SchedState {
             live_bytes: 0,
             peak_bytes: 0,
             remaining_readers: ctx.readers.iter().map(|r| r.len()).collect(),
+            remaining_writers: ctx.writers.iter().map(|w| w.len()).collect(),
+            readers_since_write: HashMap::new(),
             indeg: indeg.to_vec(),
             ready,
             done: vec![false; n],
             t_start: vec![0.0; n],
             t_finish: vec![0.0; n],
+        }
+    }
+
+    /// Emit a de-duplicated `WaitOn(s, event)` instruction.
+    fn push_wait(&mut self, s: usize, event_idx: u32) {
+        let dup = self.instructions.iter().any(|instr| {
+            matches!(instr, StreamInstr::WaitOn(ss, ee) if *ss == s && *ee == event_idx as usize)
+        });
+        if !dup {
+            self.instructions
+                .push(StreamInstr::WaitOn(s, event_idx as usize));
         }
     }
 

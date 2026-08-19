@@ -1859,8 +1859,11 @@ fn rewrite_body(
 ///
 /// Returns the number of nodes removed.
 pub fn dce(g: &mut GraphBuilder) -> usize {
+    // Seed through the alias table: an SSA rename of an interface
+    // buffer (see `restore_ssa`) shares its pool slot, so a write to
+    // any version of the class is observable by the caller.
     let mut needed: Vec<bool> = (0..g.bufs.len())
-        .map(|b| g.buf_is_interface(BufId(b)))
+        .map(|b| g.buf_is_interface(g.canonical_buf(BufId(b))))
         .collect();
     let mut live = vec![false; g.nodes.len()];
     for (n, node) in g.nodes.iter().enumerate().rev() {

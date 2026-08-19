@@ -344,3 +344,56 @@ Total GPU memory required (workspace + input leaves `2^n * |Frac| = 2^(n+1) * |E
   - `n = 30`: `M_total < 33.25 GiB`
 
 Dominant term is the input leaves (`2^(n+1) * |EF|`). Workspace overhead is ~4%.
+
+#### Small-round overlap driver (graph-IR only)
+
+`fractional_sumcheck_gpu_ir_overlap` (see
+`crates/compiler/gkr-small-round-overlap-plan.md`) restructures outer rounds
+with pq buffer `<= SWIRL_CUDA_GKR_SMALL_M_MAX_PQ` (default 4096, i.e. rounds
+`R <= 11`) around a challenge-free precompute-M stage with full-round window
+`w = R`. Extra graph buffers, dense inputs only:
+
+- `pq_side_R`: one per small round, `2^(R+1) * |Frac|` each; total `< 2 * 4096 * |Frac| = 256 KiB`
+- `m_ab_R`: `4^R * 2 * |EF|` each (interleaved `M_a`/`M_b`); dominated by the
+  largest round, `4^11 * 32 B = 128 MiB` at the default knob
+- per-eval-round `eq_r_prefix`/`eq_suffix` tables and `d_sum_evals`: `< 2^R * |EF|`
+
+These are graph-IR buffer declarations; actual footprint depends on the graph
+memory planner's aliasing (the `m_ab_R` live ranges are disjoint across B-chain
+rounds except where the A-chain runs ahead). The driver is not used by the
+eager production prover, so `FractionalGkrMemoryModel` /
+`memory_metering.rs` are unaffected.
+
+#### Pipelined windowed driver (graph-IR only)
+
+`fractional_sumcheck_gpu_ir_pipelined` (same plan doc) keeps the eager
+skeleton's blackbox CUDA kernels but expresses each outer round as a graph so
+the planner's two streams can overlap the next window's invert/precompute-M
+build with the current window's transcript observes. Window size
+`W = SWIRL_CUDA_GKR_PIPELINE_WINDOW` (default 5, clamped to `[1, 5]`). Extra
+graph buffers per outer round `j` (with `n_j = 2^j` pq entries), dense inputs
+only:
+
+- window-0 λ-split halves and their partial-M scratch: two
+  `n_j / 2 * |Frac|` halves plus `num_blocks * 4^W * 2 * |EF|` partials,
+  merged with a host-λ lerp (`frac_m_lerp`)
+- per-window dev-challenge build: `m_total` (`4^W * 2 * |EF|`) and
+  `m_partial` (`num_blocks * 4^W * 2 * |EF|`) with `num_blocks <=
+  ceil(n_j / 2^(2W+2))`
+- out-of-place fold chain `pipe_fold_{j}_{t}`: one buffer of `n_j / 2^(t+1) *
+  |Frac|` per inner round, a geometric series summing to `< n_j * |Frac|`
+- eq-table chains (prefix/suffix per stage): `< 2^ceil(j/2) * |EF|` per round
+
+All heavy compute stays in precompiled blackbox kernels; only tiny scalar
+glue is JIT'd (15 unique modules total, independent of `n`). Measured planner
+peak pool at `n = 24` is ~1.9 GiB with 2 streams (~2.0 GiB at 8 streams),
+versus ~3.8 GiB for the base graph-IR driver — the fold chains are
+out-of-place per inner round but geometric, so they alias into roughly one
+extra layer's worth of scratch instead of the base driver's per-round full
+layers. Like the overlap driver, this one is not used
+by the eager production prover, so `FractionalGkrMemoryModel` /
+`memory_metering.rs` are unaffected. The only eager-kernel change it required
+is `__launch_bounds__(2^(2W))` on `precompute_m_build_partial_kernel`
+(register cap so the `DEV_CH=true` instantiation launches at `W = 5`'s
+1024-thread blocks), which does not alter any buffer layout or scratch
+allocation.

@@ -806,8 +806,11 @@ constexpr uint32_t PRECOMPUTE_M_TAIL_BATCH = 16;
 // Shared memory uses +1 padding on the m-dimension stride to avoid bank conflicts.
 // When DEV_CH, lambda / r_prev are read on-device from lambda_dev / r_prev_dev
 // (graph-IR path) and the by-value params are ignored.
+// __launch_bounds__ caps the register allocation so the (2^W, 2^W) block
+// always launches: at W=5 (1024 threads) the DEV_CH=true instantiation
+// otherwise exceeds the per-block register file (cudaErrorLaunchOutOfResources).
 template <bool inline_fold, bool DEV_CH, uint32_t W>
-__global__ void precompute_m_build_partial_kernel(
+__global__ void __launch_bounds__((1u << W) * (1u << W)) precompute_m_build_partial_kernel(
     const FracExt *__restrict__ pq,
     uint32_t real_len,
     uint32_t logical_len,
