@@ -26,7 +26,7 @@ const MID_B: Id = "mid.b";
 const MID_JOIN: Id = "mid.join";
 
 /// The two nodes that must survive subdivision untouched. `produces` is the id
-/// the consumer waits for — the only thing that differs between the two graphs,
+/// the consumer waits for — the only thing that differs between the graphs below,
 /// and it is a dependency id: graph data the caller already owns, not part of any
 /// interface.
 fn boundary(produces: Id) -> (Node<Id>, Node<Id>) {
@@ -36,19 +36,10 @@ fn boundary(produces: Id) -> (Node<Id>, Node<Id>) {
     )
 }
 
-/// `UP -> MID -> DOWN`, one coarse GPU node in the middle.
-fn coarse() -> Vec<Node<Id>> {
-    let (up, down) = boundary(MID);
-    vec![up, Node::new(MID, vec![UP], GPU_BOUND), down]
-}
-
-/// [`MID`] replaced by two heterogeneous stages and a join. Nothing else moves,
-/// and the stages' GPU peaks sum to [`MID`]'s, so the same budget describes the
-/// same machine.
-fn subdivided() -> Vec<Node<Id>> {
-    let (up, down) = boundary(MID_JOIN);
+/// The heterogeneous sub-graph that replaces [`MID`]. Its GPU peaks sum to
+/// [`MID`]'s, so the same budget describes the same machine.
+fn replacement() -> Vec<Node<Id>> {
     vec![
-        up,
         Node::new(MID_A, vec![UP], ResourceProfile::new(4 * GB, 2 * GB, 1)),
         Node::new(MID_B, vec![UP], ResourceProfile::new(6 * GB, 3 * GB, 1)),
         Node::new(
@@ -56,8 +47,32 @@ fn subdivided() -> Vec<Node<Id>> {
             vec![MID_A, MID_B],
             ResourceProfile::new(6 * GB, 3 * GB, 2),
         ),
-        down,
     ]
+}
+
+/// `UP -> MID -> DOWN`, one coarse GPU node in the middle.
+fn coarse() -> Vec<Node<Id>> {
+    let (up, down) = boundary(MID);
+    vec![up, Node::new(MID, vec![UP], GPU_BOUND), down]
+}
+
+/// [`MID`] replaced by [`replacement`], with the consumer waiting on the join.
+fn subdivided() -> Vec<Node<Id>> {
+    let (up, down) = boundary(MID_JOIN);
+    let mut graph = vec![up];
+    graph.extend(replacement());
+    graph.push(down);
+    graph
+}
+
+/// The same replacement, with the consumer wired to an interior node instead of
+/// the join. Used as the control below.
+fn subdivided_past_the_join() -> Vec<Node<Id>> {
+    let (up, down) = boundary(MID_A);
+    let mut graph = vec![up];
+    graph.extend(replacement());
+    graph.push(down);
+    graph
 }
 
 #[test]
@@ -84,16 +99,14 @@ fn subdividing_one_node_keeps_the_boundary_around_it_intact() {
     let coarse_run = drive(budget, coarse_graph);
     let fine_run = drive(budget, fine_graph);
 
-    assert_eq!(coarse_run.rounds, vec![vec![UP], vec![MID], vec![DOWN]]);
-    assert_eq!(
-        fine_run.rounds,
-        vec![vec![UP], vec![MID_B, MID_A], vec![MID_JOIN], vec![DOWN],]
-    );
-
     // The external boundary still holds. The consumer waits for the whole
     // replacement sub-graph, not just the join it names, and the producer still
-    // precedes every one of the finer nodes.
-    assert!(fine_run.round_of(DOWN) > fine_run.round_of(MID_JOIN));
+    // precedes every one of the finer nodes. Asserted before the exact schedule
+    // below so that a wiring change fails here, where the claim lives.
+    assert!(
+        fine_run.round_of(DOWN) > fine_run.round_of(MID_JOIN),
+        "the consumer must wait for the join that closes the sub-graph"
+    );
     assert!(fine_run.round_of(MID_JOIN) > fine_run.round_of(MID_A));
     assert!(fine_run.round_of(MID_JOIN) > fine_run.round_of(MID_B));
     assert!(fine_run.round_of(MID_A) > fine_run.round_of(UP));
@@ -101,9 +114,37 @@ fn subdividing_one_node_keeps_the_boundary_around_it_intact() {
     assert_eq!(fine_run.rounds.first().unwrap(), &vec![UP]);
     assert_eq!(fine_run.rounds.last().unwrap(), &vec![DOWN]);
 
+    assert_eq!(coarse_run.rounds, vec![vec![UP], vec![MID], vec![DOWN]]);
+    assert_eq!(
+        fine_run.rounds,
+        vec![vec![UP], vec![MID_B, MID_A], vec![MID_JOIN], vec![DOWN]]
+    );
+
     // Subdivision buys concurrency the coarse node could not express, without
     // moving the boundary or exceeding the same budget.
     assert_eq!(coarse_run.widest_round(), 1);
     assert_eq!(fine_run.widest_round(), 2);
     assert!(fine_run.peak.gpu_bytes <= budget.gpu_bytes);
+}
+
+/// Control for the boundary assertions above. Wiring the consumer to an interior
+/// node of the sub-graph instead of its join stops it waiting for the whole
+/// replacement: it is admitted in the *same* pass as the join. So
+/// `round_of(DOWN) > round_of(MID_JOIN)` is exactly what separates a preserved
+/// boundary from a broken one, rather than holding for any wiring at all.
+#[test]
+fn a_consumer_wired_past_the_join_stops_waiting_for_the_sub_graph() {
+    let budget = Budget::new(16 * GB, 32 * GB, 16);
+
+    let run = drive(budget, subdivided_past_the_join());
+
+    assert_eq!(
+        run.rounds,
+        vec![vec![UP], vec![MID_B, MID_A], vec![MID_JOIN, DOWN]]
+    );
+    assert_eq!(
+        run.round_of(DOWN),
+        run.round_of(MID_JOIN),
+        "the consumer no longer waits for the join"
+    );
 }

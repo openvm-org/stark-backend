@@ -175,10 +175,13 @@ impl<I: Clone + Eq + Hash> Engine<I> {
     /// Admit every ready node that still fits, GPU-first.
     ///
     /// A ready node that does not fit is skipped rather than reserved, so a
-    /// smaller node behind it can still be admitted. Over a finite graph whose
-    /// admitted nodes are all eventually completed, every node is therefore
-    /// admitted in the end; a caller that keeps registering new work can starve a
-    /// large node indefinitely, and this admits no fairness rule against that.
+    /// smaller node behind it can still be admitted. Over a finite graph, a
+    /// caller that completes what it admits *and* keeps calling this after each
+    /// completion admits every node in the end — the engine is passive and makes
+    /// no progress on its own, so a caller that stops asking leaves ready work
+    /// unadmitted forever. A caller that keeps registering new work can also
+    /// starve a large node indefinitely; this admits no fairness rule against
+    /// that.
     pub fn admit(&mut self) -> Admission<I> {
         let mut ready: Vec<usize> = (0..self.nodes.len())
             .filter(|&idx| self.nodes[idx].is_ready())
