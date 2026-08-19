@@ -30,9 +30,7 @@ After all the graph passes run, we have a list of kernels in HIR that we want to
 - gets a type map and canonicalizes the HIR into the canonical form. The canonical form is a HIR that only contains 1 level of compute or 2 level of compute. I.e. `compute [N] |i| { elemwise-expr }` or `compute [N] |i| { let a = compute [M] |j| { elemwise-expr }; let b = compute [M1] { elemwise-expr }; ... }`. Where `elemwise-expr` are indexing expressions and arithmetic operations. 
 2. lower-to-kir
 - lowers to KIR. Which captures the GPU parallel hierarchy strictly in it's definition, with only two-levels of granularity in the parallelism: blocks and threads.
-3. infer layout
-- infers the layout of the buffers. Whether to put buffers distributed among registers in a block, or on shared memory. 
-- currently it's a very naive algorithm
+3. infer layout: see Layout Inference doc
 4. insert sync
 - performs an overly conservative analysis and inserts `__syncthreads` where necessary.
 5. plan shared
@@ -233,7 +231,6 @@ For example, if a kernel computes something with a lot of stages, like Bn254 pos
 # TODO and future work
 
 ## 1
-make the kernel IR backend better. Currently the heuristics there are very naive and doesn't generate performant kernels for non-trivial nested kernels (such as NTT)
 
 roughly what's missing is: 
 - automatic vectorization (detect when vectorized loads are possible and emit wide instructions)
@@ -242,13 +239,6 @@ roughly what's missing is:
 
 ## 2 
 Better scheduling algorithm for concurrency and memory. 
-The problem of co-scheduling streams and memory is stated more formally as follows: given a $$G = (V, E)$$, a DAG. There's a time $$t: V \to \mathbb R$$, and edge identity $$B: E \to \textbf{Buf}$$ that associates each edge with a buffer of some size in $$\mathbb N$$. The task is to produce a satisfying assignment on $$\textbf{Buf}$$, assignment each buf an offset, on $$V$$, assigning each vertex a stream id in $$S = \{1, ..., K\}$$, and assigning each vertex a start time. Such that the 
-1. if two vertices overlap, then over every one of their bufs, the assigned intervals must not overlap. 
-2. for every edge $$(u,v)$$, the end time of $$u$$ (which is the start time of $$u$$ plus $$t(u)$$) must be less than the start time of $$v$$. (order of vertices is a valid topological order over the DAG)
-
-Then the objective is to minimize the max end time of all vertices, while also maintaining that the max end interval of all buffers by under a constant `M`. 
-
-The current algorithm is very ad-hoc and is a greedy algorithm with constant look ahead. At least that's the idea. Don't ask me too much about it, it's AI generated.
 
 ## 3 
 Integrate IR framework within openvm's stark-backend
