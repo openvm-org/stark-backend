@@ -32,7 +32,7 @@ fn budget_safety_defers_a_node_that_does_not_fit() {
 
 /// A serial CPU chain with a fan-out of independent GPU nodes. Under a budget
 /// wide enough to hold the whole graph at once, admission order is decided purely
-/// by dependencies — and a predecessor that is merely *in flight* still blocks.
+/// by dependencies.
 #[test]
 fn dependency_safety_holds_under_an_unconstrained_budget() {
     let budget = Budget::new(1024 * GB, 1024 * GB, 1024);
@@ -52,10 +52,45 @@ fn dependency_safety_holds_under_an_unconstrained_budget() {
         vec![vec!["c0"], vec!["g0", "c1"], vec!["g1", "c2"], vec!["g2"]]
     );
     assert_eq!(run.admitted_count(), 6);
-    assert!(
-        run.blocked > 0,
-        "successors stayed unadmitted while a predecessor was in flight"
-    );
+}
+
+/// A predecessor that is merely *in flight* still blocks. The budget is wide
+/// enough that backpressure is impossible, so the only thing keeping the
+/// dependent out is its unfinished predecessor — and it is admitted on the very
+/// next pass after that predecessor completes.
+#[test]
+fn a_dependent_waits_while_its_predecessor_is_in_flight() {
+    let mut engine: Engine<Id> = Engine::new(Budget::new(1024 * GB, 1024 * GB, 1024));
+    engine.add_node(Node::new("c", vec![], CPU_BOUND)).unwrap();
+    engine
+        .add_node(Node::new("g", vec!["c"], GPU_BOUND))
+        .unwrap();
+
+    assert_eq!(engine.admit(), Admission::Admitted(vec!["c"]));
+    assert_eq!(engine.admit(), Admission::Blocked);
+
+    engine.complete(&"c").unwrap();
+
+    assert_eq!(engine.admit(), Admission::Admitted(vec!["g"]));
+}
+
+/// Repeating a pass over an already-admitted root reports `Blocked` and reserves
+/// nothing further. The root is unfinished but waits on no predecessor, so
+/// `Blocked` cannot be read as "some predecessor is in flight".
+#[test]
+fn a_second_admit_pass_over_a_running_root_reports_blocked() {
+    let mut engine: Engine<Id> = Engine::new(Budget::new(32 * GB, 64 * GB, 16));
+    engine
+        .add_node(Node::new("root", vec![], CPU_BOUND))
+        .unwrap();
+
+    assert_eq!(engine.admit(), Admission::Admitted(vec!["root"]));
+    assert_eq!(engine.admit(), Admission::Blocked);
+    assert_eq!(engine.admit(), Admission::Blocked);
+
+    engine.complete(&"root").unwrap();
+
+    assert_eq!(engine.admit(), Admission::AllComplete);
 }
 
 /// GPU-first: when a contended axis admits only one of two ready nodes, the GPU

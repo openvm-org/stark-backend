@@ -30,8 +30,10 @@ pub enum Admission<I> {
     /// A node is ready but does not fit what is left of the budget. Progress
     /// needs an in-flight node to complete first.
     Backpressure,
-    /// Nothing is ready: every unfinished node waits on a predecessor that is
-    /// still in flight.
+    /// No pending node is ready while registered work remains. A pending node may
+    /// be waiting on an unfinished predecessor, and an already-admitted node is
+    /// excluded from later passes until it completes — so a single running root
+    /// with no dependents also reports this.
     Blocked,
     /// Every registered node has completed. A caller that may still register
     /// more work reads this as idle rather than final.
@@ -171,6 +173,12 @@ impl<I: Clone + Eq + Hash> Engine<I> {
     }
 
     /// Admit every ready node that still fits, GPU-first.
+    ///
+    /// A ready node that does not fit is skipped rather than reserved, so a
+    /// smaller node behind it can still be admitted. Over a finite graph whose
+    /// admitted nodes are all eventually completed, every node is therefore
+    /// admitted in the end; a caller that keeps registering new work can starve a
+    /// large node indefinitely, and this admits no fairness rule against that.
     pub fn admit(&mut self) -> Admission<I> {
         let mut ready: Vec<usize> = (0..self.nodes.len())
             .filter(|&idx| self.nodes[idx].is_ready())

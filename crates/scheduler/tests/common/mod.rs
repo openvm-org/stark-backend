@@ -22,8 +22,6 @@ pub struct Run {
     pub rounds: Vec<Vec<Id>>,
     /// Passes that reported [`Admission::Backpressure`].
     pub backpressure: usize,
-    /// Passes that reported [`Admission::Blocked`].
-    pub blocked: usize,
     /// Largest simultaneous occupancy the driver itself summed.
     pub peak: ResourceProfile,
 }
@@ -67,7 +65,6 @@ pub fn drive(budget: Budget, nodes: Vec<Node<Id>>) -> Run {
     let mut run = Run {
         rounds: Vec::new(),
         backpressure: 0,
-        blocked: 0,
         peak: ResourceProfile::ZERO,
     };
     let mut resident = ResourceProfile::ZERO;
@@ -79,7 +76,7 @@ pub fn drive(budget: Budget, nodes: Vec<Node<Id>>) -> Run {
         match &admission {
             Admission::AllComplete => return run,
             Admission::Backpressure => run.backpressure += 1,
-            Admission::Blocked => run.blocked += 1,
+            Admission::Blocked => {}
             Admission::Admitted(ids) => {
                 for id in ids {
                     for dep in &deps[id] {
