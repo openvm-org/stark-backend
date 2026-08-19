@@ -32,7 +32,6 @@ pub mod monomorphize;
 pub mod par_attr_infer;
 pub mod parallel_reduce_rewrite;
 pub mod plan_shared_mem;
-pub mod restore_ssa;
 pub mod shared_swizzle;
 pub mod split_module;
 pub mod type_infer;
@@ -50,7 +49,6 @@ pub use self::{
     monomorphize::{monomorphize, monomorphize_for_graph, required_params, GraphMono},
     parallel_reduce_rewrite::rewrite_parallel_reduce,
     plan_shared_mem::{plan_shared_mem, SharedMemPlan},
-    restore_ssa::restore_ssa,
     split_module::{
         split_module, split_program, ModuleSubgraph, OutputSpec, SubgraphKernel, SubgraphValue,
     },

@@ -342,15 +342,53 @@ impl<'a> ScheduleState<'a> {
                     && death[b] > birth[b] - 1.0
             })
             .collect();
+
+        // Per-buffer stream signature: `Some(s)` if every producer and
+        // user of the buffer runs on stream `s`; `None` if multiple
+        // streams touch it. Wall-clock-disjoint slot reuse *across*
+        // streams is a data race at the CUDA layer — `make_schedule`
+        // only emits `WaitOn`s for same-canonical RAW deps, not for
+        // slot handoffs between different canonicals that happen to
+        // share an offset. Same-stream slot reuse is safe because
+        // stream ordering guarantees release-before-acquire.
+        let mut buf_stream: Vec<Option<usize>> = vec![None; n_bufs];
+        for (b, slot) in buf_stream.iter_mut().enumerate() {
+            let bid = BufId(b);
+            let mut chosen: Option<usize> = None;
+            let mut multi = false;
+            let touches = g
+                .buf_producers
+                .get(&bid)
+                .into_iter()
+                .flatten()
+                .chain(g.buf_users.get(&bid).into_iter().flatten())
+                .copied();
+            for v in touches {
+                let s = *self.stream_of.get(&v).unwrap_or(&0);
+                match chosen {
+                    None => chosen = Some(s),
+                    Some(prev) if prev != s => {
+                        multi = true;
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            *slot = if multi { None } else { chosen };
+        }
+
         let mut interf: HashMap<BufId, Vec<BufId>> = HashMap::new();
         for i in 0..packable.len() {
             let a = packable[i];
             for &b in &packable[i + 1..] {
-                // Wall-clock overlap: intervals [birth, death]
-                // intersect with non-zero measure. Exactly-touching
-                // intervals (a's death == b's birth) don't overlap.
-                let overlap = birth[a].max(birth[b]) + 1e-9 < death[a].min(death[b]);
-                if overlap {
+                let intersects = match (buf_stream[a], buf_stream[b]) {
+                    (Some(sa), Some(sb)) if sa == sb => {
+                        // Exactly-touching intervals (a's death == b's birth) don't overlap.
+                        birth[a].max(birth[b]) + 1e-9 < death[a].min(death[b])
+                    }
+                    _ => true,
+                };
+                if intersects {
                     interf.entry(BufId(a)).or_default().push(BufId(b));
                     interf.entry(BufId(b)).or_default().push(BufId(a));
                 }
@@ -850,30 +888,39 @@ pub fn plan_v2(
     // so far in this rollout, cumulative action cost).
     type Beam<'a> = (ScheduleState<'a>, Vec<(usize, usize)>, f64);
 
+    let trace = std::env::var("LIST_V2_TRACE").is_ok();
+    let t_plan_start = std::time::Instant::now();
+    let mut commits_since_report: u64 = 0;
+    let mut expand_ns_since: u128 = 0;
+    let mut sort_ns_since: u128 = 0;
+    let mut commit_ns_since: u128 = 0;
+    let mut cartprod_ns_since: u128 = 0;
+    let mut max_ready_seen: usize = 0;
+
     while !current.done() {
+        let ready_len = current.ready_queue.len();
+        if ready_len > max_ready_seen {
+            max_ready_seen = ready_len;
+        }
+        let t_clone = std::time::Instant::now();
         let mut beams: Vec<Beam<'_>> = vec![(current.clone(), Vec::new(), 0.0)];
+        let clone_ns = t_clone.elapsed().as_nanos();
 
         for _ in 0..beam_depth.max(1) {
-            // Parallel fan-out across CPU cores over parent beams.
-            // Each parent beam expands its full `ready × streams`
-            // candidate set sequentially inside the closure; the
-            // parallelism comes only from the outer `flat_map` over
-            // beams. `mem::take` moves the beams out while leaving an
-            // empty Vec behind, so the `beams` binding stays valid on
-            // the `break` path below.
+            let t_cart = std::time::Instant::now();
             let this_beams = beams
                 .drain(..)
                 .cartesian_product(0..num_streams)
                 .collect::<Vec<_>>();
+            cartprod_ns_since += t_cart.elapsed().as_nanos();
+
+            let t_expand = std::time::Instant::now();
             let expanded: Vec<Beam<'_>> = this_beams
                 .into_par_iter()
                 .flat_map(|((state, traj, cum), stream)| -> Vec<Beam<'_>> {
                     if state.done() {
                         return vec![(state, traj, cum)];
                     }
-                    // Trim the frontier by `bl[node]` descending
-                    // (critical-path priority) before the cost eval.
-                    // `frontier_cap == 0` disables the cap.
                     let mut ready: Vec<usize> = state.ready_queue.iter().copied().collect();
                     if frontier_cap > 0 && ready.len() > frontier_cap {
                         let bl = &state.bl;
@@ -884,7 +931,7 @@ pub fn plan_v2(
                     for &node in &ready {
                         let action_cost = state.cost(node, stream);
                         if !action_cost.is_finite() {
-                            continue; // exceeds max_memory_bound
+                            continue;
                         }
                         let mut new_state = state.clone();
                         new_state.put_on(node, stream);
@@ -895,28 +942,65 @@ pub fn plan_v2(
                     children
                 })
                 .collect();
+            expand_ns_since += t_expand.elapsed().as_nanos();
+
             if expanded.is_empty() {
                 break;
             }
-            // Merge-sort the parallel results back into a single
-            // ranked list. `par_sort_by` uses rayon internally.
+            let t_sort = std::time::Instant::now();
             let mut expanded = expanded;
             expanded.sort_by(|a, b| a.2.total_cmp(&b.2));
             if expanded.len() > num_beams {
                 expanded.truncate(num_beams);
             }
+            sort_ns_since += t_sort.elapsed().as_nanos();
             beams = expanded;
         }
 
-        // Commit the first action of the best beam.
+        let t_commit = std::time::Instant::now();
         let best = beams.get(0);
         match best {
             Some((_, traj, _)) if !traj.is_empty() => {
                 let (node, s) = traj[0];
+                let already = current.stream_of.contains_key(&node);
+                if trace && already && commits_since_report < 5 {
+                    eprintln!(
+                        "[list_v2] RE-COMMIT node={node} (already scheduled), ready_queue.len={}",
+                        current.ready_queue.len()
+                    );
+                }
                 current.put_on(node, s);
             }
-            _ => break, // no progress possible — bail
+            _ => break,
         }
+        commit_ns_since += t_commit.elapsed().as_nanos() + clone_ns;
+
+        commits_since_report += 1;
+        if trace && commits_since_report >= 100 {
+            let scheduled = current.stream_of.len();
+            let total_ms = t_plan_start.elapsed().as_secs_f64() * 1e3;
+            eprintln!(
+                "[list_v2] scheduled {scheduled}/{} in {total_ms:.1} ms | last 100 commits: \
+                 cart={:.2}ms expand={:.2}ms sort={:.2}ms commit+clone={:.2}ms | max_ready={max_ready_seen}",
+                g.num_nodes,
+                cartprod_ns_since as f64 / 1e6,
+                expand_ns_since as f64 / 1e6,
+                sort_ns_since as f64 / 1e6,
+                commit_ns_since as f64 / 1e6,
+            );
+            commits_since_report = 0;
+            expand_ns_since = 0;
+            sort_ns_since = 0;
+            commit_ns_since = 0;
+            cartprod_ns_since = 0;
+        }
+    }
+    if trace {
+        eprintln!(
+            "[list_v2] finished {} commits in {:.2} s (max_ready {max_ready_seen})",
+            current.stream_of.len(),
+            t_plan_start.elapsed().as_secs_f64(),
+        );
     }
 
     Ok(current.make_schedule())

@@ -712,20 +712,6 @@ impl GraphCompiler {
         let graph_hash = graph.original_hash();
         let nodes_before = graph.nodes.len();
 
-        // Stage 0: restore SSA at the graph-BufId level. Rewrites every
-        // blackbox `carried_outputs` mutation into a fresh SSA output
-        // and records an alias so the planner packs it onto the
-        // canonical's pool slot. Downstream passes then see a graph
-        // where every buffer has ≤1 writer.
-        let ssa_report = crate::passes::restore_ssa(&mut graph)?;
-        if ssa_report.aliases_added > 0 {
-            eprintln!(
-                "[compile] restore_ssa: renamed {} carried outputs, {} repeated writes \
-                 ({} aliases added)",
-                ssa_report.renamed_carried, ssa_report.renamed_writes, ssa_report.aliases_added,
-            );
-        }
-
         // Stage 1: normalize the graph. Post-passes every Kernel node's
         // module is a canonical, monomorphized, single-kernel residual
         // with `hash` set; `kernel_dedup` has collapsed structurally
@@ -1290,13 +1276,11 @@ fn validate_interface(graph: &GraphBuilder, device: DeviceType) -> Result<(), Co
             )));
         }
         seen[b.0] = true;
-        if !writers[b.0].is_empty() {
-            return Err(CompileError::Type(format!(
-                "graph interface: input {} is written by node {}; inputs must only be read",
-                name_of(b),
-                writers[b.0][0]
-            )));
-        }
+        // Inputs may be written in-place by graph kernels (blackbox
+        // `carried_outputs`): the caller populates the initial value
+        // before each launch, kernels then read + mutate it. This is
+        // the "graph launch skips the initial H2D" pattern — H2D goes
+        // to the input's pool slot outside the captured CUDA graph.
         if readers[b.0].is_empty() {
             return Err(CompileError::Type(format!(
                 "graph interface: input {} is never read by any node",
@@ -2500,12 +2484,12 @@ impl GraphExe {
     pub fn collect_graph_info<F>(
         &mut self,
         ctx: &GpuDeviceCtx,
-        set_inputs: F,
+        mut set_inputs: F,
         num_warmup: usize,
         num_iters: usize,
     ) -> Result<crate::graph_info::GraphInfo, CompileError>
     where
-        F: FnOnce(&mut GraphExe, &GpuDeviceCtx) -> Result<(), CompileError>,
+        F: FnMut(&mut GraphExe, &GpuDeviceCtx) -> Result<(), CompileError>,
     {
         use openvm_cuda_common::stream::CudaEvent;
 
@@ -2533,7 +2517,11 @@ impl GraphExe {
         let n_nodes = node_order.len();
 
         // Warmup — silence stream and driver init before the timed pass.
+        // Re-run `set_inputs` before each iteration in case the graph
+        // mutates any of its registered inputs in place (blackbox
+        // `carried_outputs`); the closure is a no-op for pure inputs.
         for _ in 0..num_warmup {
+            set_inputs(self, ctx)?;
             for &node_idx in &node_order {
                 self.dispatch_node_on_stream(ctx, node_idx)?;
             }
@@ -2551,6 +2539,9 @@ impl GraphExe {
         let mut per_node_samples: Vec<Vec<f64>> = vec![Vec::with_capacity(num_iters); n_exe_nodes];
         let mut total_samples: Vec<f64> = Vec::with_capacity(num_iters);
         for _iter in 0..num_iters {
+            // Same rationale as the warmup loop above — refresh any
+            // in-place-mutated inputs between iterations.
+            set_inputs(self, ctx)?;
             let starts: Vec<CudaEvent> = (0..n_nodes)
                 .map(|_| {
                     CudaEvent::new().map_err(|e| {

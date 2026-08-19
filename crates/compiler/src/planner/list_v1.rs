@@ -40,18 +40,25 @@ pub struct ListSchedulerV1 {
     /// Fraction of `max_memory` above which the memory-pressure penalty
     /// starts contributing (`0.9` = last 10% of the pool is expensive).
     pub mem_target_frac: f64,
+    /// Per-node runtime cost in milliseconds, indexed by
+    /// `plan_raw` node index. Length must equal the input `nodes.len()`
+    /// at plan time — populated from a prior
+    /// [`crate::graph_exe::GraphExe::collect_graph_info`]. An empty vec
+    /// degrades to uniform `1.0` for first-compile bootstrapping.
+    pub node_times: Vec<f64>,
 }
 
 impl Default for ListSchedulerV1 {
     fn default() -> Self {
         Self {
-            max_concurrency: 2,
+            max_concurrency: 8,
             max_memory: u64::MAX,
             lookahead_k: 3,
             beam: 2,
             w_cp: 1.0,
             w_mem: 1e-3,
             mem_target_frac: 0.9,
+            node_times: Vec::new(),
         }
     }
 }
@@ -769,29 +776,24 @@ fn offline_repack(state: &mut SchedState, ctx: &PlanCtx) {
         *slot = if multi { None } else { chosen };
     }
 
-    // Two buffers "overlap" (cannot share pool bytes) iff their
-    // wall-clock lifetime intervals overlap — regardless of which
-    // stream touches them.
+    // Two buffers "overlap" (cannot share pool bytes) if EITHER:
+    //   (a) at least one of them is touched by more than one stream; or
+    //   (b) both are single-stream but on *different* streams; or
+    //   (c) both are on the same single stream AND their wall-clock lifetime intervals overlap.
     //
-    // NOTE ON STREAM SAFETY: cross-stream slot reuse without an
-    // explicit synchronization edge between the release of `A` and
-    // the acquire of `B` is technically a race at the CUDA layer.
-    // This mirrors the interference model used by [`list_v2`], where
-    // the same-slot-across-streams case is likewise governed by the
-    // scheduler's simulated wall-clock rather than an injected sync.
-    // For the target application (`bench_fractional_sumcheck_eager_vs_ir`)
-    // the RAW `WaitOn`s already emitted per data dep line up with
-    // the simulated ordering, so the shared slots remain quiescent
-    // in practice. The stricter cross-stream guard that used to live
-    // here was correct-by-construction but blew the peak to 40 GiB
-    // for graphs with hundreds of parallel-live buffers; graphs that
-    // list_v2 comfortably schedules in 1 GiB.
+    // A cross-stream release/acquire without an injected sync edge is
+    // a data race at the CUDA layer: `commit()` emits `WaitOn`s for
+    // data deps on the *same* canonical BufId, not for slot reuse
+    // across different canonicals that happen to alias into one
+    // offset. The pipelined GKR driver at `max_concurrency >= 2` was
+    // producing wrong claims until this guard was restored (previously
+    // relaxed to lifetime-only overlap for peak-memory reasons).
     let overlaps = |b1: usize, b2: usize| -> bool {
-        !(death[b1] < birth[b2] || death[b2] < birth[b1])
+        match (buf_stream[b1], buf_stream[b2]) {
+            (Some(s1), Some(s2)) if s1 == s2 => !(death[b1] < birth[b2] || death[b2] < birth[b1]),
+            _ => true,
+        }
     };
-    // `buf_stream` retained for potential future use (e.g. injecting
-    // synthetic release events per cross-stream slot reuse).
-    let _ = &buf_stream;
 
     let mut to_place: Vec<usize> = (0..n_bufs).filter(|&b| ctx.packable(b)).collect();
     to_place.sort_by(|&a, &b| {

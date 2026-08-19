@@ -188,7 +188,6 @@ impl SerializableGraphBuilder {
     /// at snapshot time; their bytes are re-uploaded via `ctx`.
     ///
     /// # Panics
-    /// - The snapshot has blackbox nodes but `existing` is `None`.
     /// - `existing.original_hash()` differs from `self.original_hash`.
     /// - `existing`'s registered inputs / outputs, or their `BufInfo`s, differ from the snapshot's.
     /// - `existing.nodes[i]` isn't a blackbox where the snapshot has a blackbox at index `i` (would

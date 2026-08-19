@@ -1,30 +1,29 @@
 //! Memory & stream planner.
 //!
 //! Picks an execution order for graph nodes and a byte offset per buffer
-//! on the target device such that:
-//! - peak bytes on that device are minimized (single-stream backends), or
-//! - execution time is minimized under an optional memory + concurrency budget (multi-stream list
-//!   scheduler).
+//! on the target device that minimizes execution time under an optional
+//! memory + concurrency budget.
 //!
 //! Backends are selected via [`SchedulerMode`]:
 //!
 //! - [`SchedulerMode::CpSat`] — joint CP-SAT solve, feature-gated behind `planner-ortools`.
-//! - [`SchedulerMode::Heuristic`] — solver-free three-phase heuristic (memory-aware greedy topo +
-//!   BFD packing + adjacent-swap hill climb).
-//! - [`SchedulerMode::ListV1`] — depth-`k` beam-search list scheduler that assigns each node to one
-//!   of `max_concurrency` streams and inserts `WaitOn` sync instructions.
+//! - [`SchedulerMode::ListV1`] — profile-guided beam-search list scheduler with depth-`k`
+//!   look-ahead. Assigns each node to one of `params.max_concurrency` streams and inserts `WaitOn`
+//!   sync instructions.
+//! - [`SchedulerMode::ListV2`] — profile-guided persistent-beam list scheduler over
+//!   [`AbstractTimingGraph`]; see [`ListSchedulerV2`].
 //!
-//! The single-stream backends and the list scheduler both emit the
-//! unified [`StreamMemoryPlan`]. Single-stream plans put every node on
-//! stream 0 with no `WaitOn` instructions, so downstream consumers (e.g.
-//! `GraphExe`) treat them identically to the pre-refactor `MemoryPlan`.
+//! Both list schedulers require per-node timings in ms (`params.node_times`);
+//! an empty vec is treated as uniform `1.0` for bootstrapping the first
+//! compile — subsequent compiles feed timings from
+//! [`crate::graph_exe::GraphExe::collect_graph_info`].
 //!
 //! Feature-gated behind `planner`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use crate::{
-    graph_ir::{BufInfo, DeviceType, GraphBuilder},
+    graph_ir::{BufId, BufInfo, DeviceType, GraphBuilder},
     ir::VarId,
 };
 
@@ -32,7 +31,6 @@ pub mod abstract_timing;
 #[cfg(feature = "planner-ortools")]
 pub mod cpsat;
 mod ctx;
-pub mod heuristic;
 pub mod list_v1;
 pub mod list_v2;
 mod plan;
@@ -41,8 +39,8 @@ pub mod validate;
 #[cfg(feature = "planner-ortools")]
 pub use abstract_timing::plan_cpsat_v2;
 pub use abstract_timing::{
-    load_abstract_timing_graph, perf_est, plan_heuristic_v2, plan_list_v1_v2, plan_v2,
-    AbstractTimingGraph, LoadError as AbstractLoadError, PerfEst, PlanFn,
+    load_abstract_timing_graph, perf_est, plan_list_v1_v2, plan_v2, AbstractTimingGraph,
+    LoadError as AbstractLoadError, PerfEst, PlanFn,
 };
 pub use ctx::{
     access_from_node, align_up, eval_size, propagate_alias_offsets, NodeAccess, PlanCtx, PlanError,
@@ -58,11 +56,59 @@ pub enum SchedulerMode {
     /// Only available with the `planner-ortools` feature.
     #[cfg(feature = "planner-ortools")]
     CpSat { max_secs: f64 },
-    /// Solver-free heuristic pipeline.
-    Heuristic,
-    /// Stream-aware list scheduler with depth-`k` look-ahead. Assigns
-    /// each node to one of `params.max_concurrency` streams.
+    /// Profile-guided list scheduler with depth-`k` beam look-ahead.
+    /// Consumes per-node timings from `params.node_times`.
     ListV1 { params: ListSchedulerV1 },
+    /// Profile-guided list scheduler v2 (persistent-beam, parallel
+    /// fan-out). Consumes per-node timings from `params.node_times`
+    /// (length must equal the input `nodes.len()` at plan time,
+    /// typically populated from a prior
+    /// [`crate::graph_exe::GraphExe::collect_graph_info`]).
+    ListV2 { params: ListSchedulerV2 },
+}
+
+/// Tunables for [`SchedulerMode::ListV2`].
+#[derive(Debug, Clone)]
+pub struct ListSchedulerV2 {
+    pub num_streams: usize,
+    pub max_memory_bound: usize,
+    pub num_beams: usize,
+    pub beam_depth: usize,
+    pub frontier_cap: usize,
+    pub w_m: f64,
+    pub w_t: f64,
+    pub w_c: f64,
+    /// Per-node runtime cost in milliseconds. Length must equal the
+    /// `nodes.len()` at plan time. Empty means "not profiled yet" —
+    /// [`plan_raw`] treats an empty vec as uniform 1.0 like v1 so the
+    /// scheduler can still return a plan on the first compile.
+    pub node_times: Vec<f64>,
+}
+
+impl Default for ListSchedulerV2 {
+    fn default() -> Self {
+        Self {
+            num_streams: 8,
+            // Effectively unlimited pool: v2 gates candidates against
+            // this via a hard `f64::INFINITY` cost. Using `usize::MAX`
+            // would wrap `m_bound as i64` to `-1` and reject every
+            // candidate — plan_v2 exits with an empty `ready_queue`
+            // and a partial schedule.
+            max_memory_bound: i64::MAX as usize,
+            // Pure-greedy defaults sized for the fractional-sumcheck
+            // graphs (~4000 nodes, 8 streams). `num_beams=1`,
+            // `beam_depth=1`, `frontier_cap=1` — beam search adds
+            // cost quadratic in beam parameters × frontier and the
+            // observed win over greedy on these graphs is modest.
+            num_beams: 1,
+            beam_depth: 1,
+            frontier_cap: 1,
+            w_m: 1.0,
+            w_t: 1.0,
+            w_c: -2.0,
+            node_times: Vec::new(),
+        }
+    }
 }
 
 impl Default for SchedulerMode {
@@ -133,25 +179,163 @@ pub fn plan_raw(
     let mut plan = match scheduler {
         #[cfg(feature = "planner-ortools")]
         SchedulerMode::CpSat { max_secs } => cpsat::plan_cpsat(bufs, &ctx, *max_secs),
-        SchedulerMode::Heuristic => heuristic::plan_heuristic(bufs, &ctx),
-        // Uniform per-node cost: the beam's bottom-level priority then
-        // reduces to chain depth, which tracks the true critical path
-        // when it is a long serial chain of tiny launch-latency-bound
-        // kernels (e.g. transcript sponge ops in the GKR drivers). A
-        // bytes-touched cost proxy was tried and regressed the 2^24
-        // pipelined GKR replay ~5%: it rates bulk prefetch work
-        // (eq chains, next-window builds) as critical and delays the
-        // claim-producing folds the transcript actually waits on.
-        // Same-stream serialization of independent work under uniform
-        // costs is instead handled by the chain-affinity tiebreak in
-        // `ListSchedulerV1::commit`.
-        SchedulerMode::ListV1 { params } => params.clone().schedule(ctx, |_| 1.0),
+        // Profile-guided list_v1: uses `params.node_times` from a prior
+        // `collect_graph_info`. Empty `node_times` degrades to uniform
+        // 1.0 for bootstrapping the first compile (chain-depth priority
+        // matches the true critical path when it's a long serial chain
+        // of launch-latency-bound kernels).
+        SchedulerMode::ListV1 { params } => {
+            let node_times = params.node_times.clone();
+            params.clone().schedule(ctx, move |v| {
+                node_times.get(v).copied().unwrap_or(1.0).max(0.0)
+            })
+        }
+        SchedulerMode::ListV2 { params } => {
+            // NOTE: [`list_v2::plan_v2`]'s dep model assumes SSA (each
+            // BufId has ≤1 writer). Blackbox kernels with
+            // `carried_outputs` violate that — they read+write the
+            // same BufId, and long carry chains produce multi-writer
+            // buffers that make `plan_v2` loop re-committing already-
+            // scheduled nodes (see `LIST_V2_TRACE=1`). Until the
+            // dep model is fixed to consume the WAW/WAR edges
+            // [`PlanCtx::edges`] generates, we route the
+            // profile-guided timings through [`ListSchedulerV1`] —
+            // same `node_times` input, same critical-path priority,
+            // proven correctness on in-place graphs, sub-second plan
+            // times. `CC_LIST_V2_STRICT=1` forces the raw v2 beam
+            // solver (mainly for planner testing on synthetic ATGs
+            // that satisfy the SSA invariant).
+            let strict = std::env::var("CC_LIST_V2_STRICT").is_ok();
+            if strict {
+                let atg = build_atg_for_plan_raw(bufs, nodes, &ctx, &params.node_times);
+                list_v2::plan_v2(
+                    &atg,
+                    params.num_streams,
+                    params.max_memory_bound,
+                    params.num_beams,
+                    params.beam_depth,
+                    params.frontier_cap,
+                    params.w_m,
+                    params.w_t,
+                    params.w_c,
+                )
+            } else {
+                let params_v1 = ListSchedulerV1 {
+                    max_concurrency: params.num_streams as u32,
+                    node_times: params.node_times.clone(),
+                    ..ListSchedulerV1::default()
+                };
+                let node_times = params_v1.node_times.clone();
+                params_v1.schedule(ctx, move |v| {
+                    node_times.get(v).copied().unwrap_or(1.0).max(0.0)
+                })
+            }
+        }
     }?;
     // Backends assigned offsets only for canonical entries — alias
     // members need to inherit the same slot so mutating blackbox
     // closures and downstream readers hit the same pool address.
     propagate_alias_offsets(&mut plan.offsets, &canon);
     Ok(plan)
+}
+
+/// Build an [`AbstractTimingGraph`] view matching [`plan_raw`]'s
+/// `(bufs, nodes)` inputs, for [`SchedulerMode::ListV2`] dispatch.
+///
+/// - **Inputs**: buffers with no writer in the current schedule
+///   (matches `GraphBuilder::input_bufs`).
+/// - **Outputs**: pinned buffers with at least one writer
+///   (`ctx.pinned` excluding inputs).
+/// - **Timings**: `node_times` verbatim when its length equals
+///   `nodes.len()`; else uniform `1.0` (first-compile bootstrapping).
+fn build_atg_for_plan_raw(
+    bufs: &[BufInfo],
+    nodes: &[NodeAccess],
+    ctx: &PlanCtx,
+    node_times: &[f64],
+) -> AbstractTimingGraph {
+    let num_nodes = nodes.len();
+    let mut buf_users: HashMap<BufId, Vec<usize>> = HashMap::new();
+    let mut buf_producers: HashMap<BufId, Vec<usize>> = HashMap::new();
+    let mut node_consumes: Vec<Vec<BufId>> = vec![Vec::new(); num_nodes];
+    let mut node_produces: Vec<Vec<BufId>> = vec![Vec::new(); num_nodes];
+    // Canonicalize BufIds through the alias table so aliased buffers
+    // (post-`restore_ssa`) map to the same key throughout: they must
+    // share a pool slot, and `list_v2`'s interference/schedule logic
+    // is BufId-keyed. Without this the aliased pair would appear as
+    // two distinct buffers, get non-overlapping offsets that the
+    // downstream `propagate_alias_offsets` then collapses onto the
+    // canonical's — a data race between disjoint canonicals aliased
+    // to the same slot.
+    let canonize = |b: BufId| -> BufId { BufId(ctx.canon[b.0]) };
+    for (v, na) in nodes.iter().enumerate() {
+        for &b in &na.reads {
+            let cb = canonize(b);
+            buf_users.entry(cb).or_default().push(v);
+            node_consumes[v].push(cb);
+        }
+        for &b in &na.writes {
+            let cb = canonize(b);
+            buf_users.entry(cb).or_default().push(v);
+            buf_producers.entry(cb).or_default().push(v);
+            node_produces[v].push(cb);
+        }
+    }
+    for users in buf_users.values_mut() {
+        users.sort_unstable();
+        users.dedup();
+    }
+    for prods in buf_producers.values_mut() {
+        prods.sort_unstable();
+        prods.dedup();
+    }
+    for c in node_consumes.iter_mut() {
+        c.sort_unstable_by_key(|b| b.0);
+        c.dedup();
+    }
+    for p in node_produces.iter_mut() {
+        p.sort_unstable_by_key(|b| b.0);
+        p.dedup();
+    }
+    let mut inputs: Vec<BufId> = (0..bufs.len())
+        .filter(|&b| ctx.canon[b] == b && ctx.writers[b].is_empty())
+        .map(BufId)
+        .collect();
+    inputs.sort_unstable_by_key(|b| b.0);
+    inputs.dedup();
+    let mut outputs: Vec<BufId> = (0..bufs.len())
+        .filter(|&b| ctx.pinned[b] && ctx.canon[b] == b && !ctx.writers[b].is_empty())
+        .map(BufId)
+        .collect();
+    outputs.sort_unstable_by_key(|b| b.0);
+    outputs.dedup();
+    let inital_ready_nodes: Vec<usize> = (0..num_nodes)
+        .filter(|&v| {
+            node_consumes[v].iter().all(|bid| {
+                buf_producers
+                    .get(bid)
+                    .map(|ps| ps.iter().all(|&p| p == v))
+                    .unwrap_or(true)
+            })
+        })
+        .collect();
+    let node_times_vec: Vec<f64> = if node_times.len() == num_nodes {
+        node_times.to_vec()
+    } else {
+        vec![1.0; num_nodes]
+    };
+    AbstractTimingGraph {
+        num_nodes,
+        buf_info: bufs.to_vec(),
+        node_times: node_times_vec,
+        inputs,
+        outputs,
+        buf_users,
+        buf_producers,
+        node_consumes,
+        node_produces,
+        inital_ready_nodes,
+    }
 }
 
 #[cfg(test)]
@@ -225,11 +409,19 @@ mod tests {
             DeviceType::Cuda(0),
             &[],
             &[],
-            &SchedulerMode::Heuristic,
+            &SchedulerMode::ListV1 {
+                params: ListSchedulerV1 {
+                    max_concurrency: 1,
+                    ..ListSchedulerV1::default()
+                },
+            },
         )
         .unwrap();
         assert_eq!(plan.order(), vec![0, 1, 2]);
-        assert_eq!(plan.peak_bytes, 500);
+        // `c` has no reader and isn't pinned, so `offline_repack` conservatively
+        // extends its death to `+inf` — it overlaps with every other buf.
+        // Peak = a + b + c = 100 + 200 + 300 = 600.
+        assert_eq!(plan.peak_bytes, 600);
         assert!(plan.offsets.iter().all(Option::is_some));
         assert_eq!(plan.num_streams, 1);
         assert!(plan

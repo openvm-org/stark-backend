@@ -102,7 +102,7 @@ fn bench_one(name: &str, n: usize, fanin: usize, seed: u64) {
         size_range.0, size_range.1
     );
 
-    // Heuristic first (cheap, always finishes).
+    // ListV1 with default (uniform-cost) params — cheap, always finishes.
     let t0 = Instant::now();
     let heur = plan_raw(
         &g.bufs,
@@ -111,12 +111,14 @@ fn bench_one(name: &str, n: usize, fanin: usize, seed: u64) {
         device,
         &[],
         &[],
-        &SchedulerMode::Heuristic,
+        &SchedulerMode::ListV1 {
+            params: crypto_compiler::planner::ListSchedulerV1::default(),
+        },
     )
-    .expect("heuristic plan");
+    .expect("list_v1 plan");
     let heur_ms = t0.elapsed().as_secs_f64() * 1e3;
     println!(
-        "Heuristic : {heur_ms:>10.2} ms   peak = {:>10} bytes",
+        "ListV1    : {heur_ms:>10.2} ms   peak = {:>10} bytes",
         heur.peak_bytes
     );
 

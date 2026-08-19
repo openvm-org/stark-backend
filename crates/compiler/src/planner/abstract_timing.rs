@@ -11,8 +11,8 @@ use std::{
 };
 
 use super::{
-    heuristic::plan_heuristic, list_v1::ListSchedulerV1, NodeAccess, PlanCtx, PlanError,
-    SchedulerMode, StreamInstr, StreamMemoryPlan,
+    list_v1::ListSchedulerV1, NodeAccess, PlanCtx, PlanError, SchedulerMode, StreamInstr,
+    StreamMemoryPlan,
 };
 use crate::{
     graph_info::GraphInfo,
@@ -217,19 +217,6 @@ fn build_ctx(graph: &AbstractTimingGraph) -> Result<(PlanCtx, Vec<NodeAccess>), 
     Ok((ctx, nodes))
 }
 
-/// Heuristic single-stream packer over an `AbstractTimingGraph`. See
-/// [`super::heuristic::plan_heuristic`].
-pub fn plan_heuristic_v2(graph: &AbstractTimingGraph) -> Result<StreamMemoryPlan, PlanError> {
-    let (ctx, _nodes) = build_ctx(graph)?;
-    if ctx.n_nodes == 0 {
-        return Ok(empty_plan(ctx.n_bufs));
-    }
-    let canon = ctx.canon.clone();
-    let mut plan = plan_heuristic(&graph.buf_info, &ctx)?;
-    super::propagate_alias_offsets(&mut plan.offsets, &canon);
-    Ok(plan)
-}
-
 /// CP-SAT single-stream packer over an `AbstractTimingGraph`. Feature-
 /// gated behind `planner-ortools`. `max_secs` bounds the CP-SAT solve
 /// per-call.
@@ -337,8 +324,8 @@ pub fn perf_est(graph: &AbstractTimingGraph, plan: &StreamMemoryPlan) -> PerfEst
 }
 
 /// Legacy `plan_v2` entry point retained for existing callers.
-/// Delegates to [`plan_heuristic_v2`] regardless of the passed
-/// scheduler. New code should call the specific adapter directly.
+/// Delegates to [`plan_list_v1_v2`] with `ListSchedulerV1::default()`.
+/// New code should call the specific adapter directly.
 #[doc(hidden)]
 pub fn plan_v2(
     graph: &AbstractTimingGraph,
@@ -346,7 +333,7 @@ pub fn plan_v2(
     _device: DeviceType,
     _scheduler: &SchedulerMode,
 ) -> Result<StreamMemoryPlan, PlanError> {
-    plan_heuristic_v2(graph)
+    plan_list_v1_v2(graph, ListSchedulerV1::default())
 }
 
 /// Errors returned by [`load_abstract_timing_graph`].
@@ -588,7 +575,14 @@ mod tests {
             |_, _, _| {},
         );
         let atg = AbstractTimingGraph::from_graph_and_info(&g, &stub_info(&[1.0, 2.0, 4.0]));
-        let plan = plan_heuristic_v2(&atg).unwrap();
+        let plan = plan_list_v1_v2(
+            &atg,
+            ListSchedulerV1 {
+                max_concurrency: 1,
+                ..ListSchedulerV1::default()
+            },
+        )
+        .unwrap();
         let est = perf_est(&atg, &plan);
         assert!((est.time - 7.0).abs() < 1e-9, "time = {}", est.time);
         assert_eq!(est.peak_bytes, plan.peak_bytes);
@@ -701,7 +695,7 @@ mod tests {
             &atg,
             &BTreeMap::new(),
             DeviceType::Cuda(0),
-            &SchedulerMode::Heuristic,
+            &SchedulerMode::ListV1 { params: ListSchedulerV1::default() },
         )
         .expect("plan_v2");
         assert_eq!(plan.order(), vec![0, 1, 2]);
@@ -720,7 +714,11 @@ mod tests {
             "peak_bytes = {}",
             plan.peak_bytes
         );
-        assert_eq!(plan.num_streams, 1);
+        // `plan_v2` delegates to `plan_list_v1_v2(ListSchedulerV1::default())`,
+        // whose default `max_concurrency` is 8. The graph itself is a
+        // 3-node chain so only stream 0 gets used, but the plan's
+        // `num_streams` reflects the scheduler's budget.
+        assert_eq!(plan.num_streams, 8);
         // `c` was registered as a graph output; the planner assigned
         // it an offset (i.e. it stays pinned in the pool).
         assert!(plan.offsets[c.0].is_some());

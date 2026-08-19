@@ -22,8 +22,8 @@ use std::{
 };
 
 use crypto_compiler::planner::{
-    load_abstract_timing_graph, perf_est, plan_heuristic_v2, plan_list_v1_v2, validate_plan,
-    AbstractTimingGraph, ListSchedulerV1, PerfEst, PlanFn, StreamInstr, StreamMemoryPlan,
+    load_abstract_timing_graph, perf_est, plan_list_v1_v2, validate_plan, AbstractTimingGraph,
+    ListSchedulerV1, PerfEst, StreamInstr, StreamMemoryPlan,
 };
 
 /// Report the first few validation errors for `plan` on `atg`.
@@ -443,15 +443,6 @@ fn main() {
         }
     }
     let atg = Arc::try_unwrap(atg_arc).unwrap_or_else(|arc| (*arc).clone());
-
-    // Regular (heuristic) scheduler — single stream. On large graphs the
-    // MAX_PASSES=50 hill-climb repack cost can dominate; set
-    // `SKIP_HEURISTIC=1` to skip it.
-    if std::env::var_os("SKIP_HEURISTIC").is_some() {
-        println!("heuristic           skipped (SKIP_HEURISTIC set)");
-    } else {
-        run("heuristic", &atg, plan_heuristic_v2 as PlanFn);
-    }
 
     if let (Some(v1), Some(v2)) = (v1_s8, v2_s8) {
         analyze(&atg, &v1, &v2);

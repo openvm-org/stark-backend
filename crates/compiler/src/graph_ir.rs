@@ -2524,10 +2524,14 @@ impl GraphModule {
 ///    kernel. Blackbox / Const / Memcpy / Memset nodes are skipped (their buffer sizes are the
 ///    caller's responsibility).
 ///
-/// 2. **Write-before-read + single-writer.** Every buffer is written by at most one node (SSA); a
-///    read must precede a write of the same buffer in the node vector (which follows topological
-///    order for insertion-time-built graphs). A caller pushing raw `GraphNode::Kernel`s that read
-///    an unwritten buffer is treated as reading a graph input — no error.
+/// 2. **Write-before-read + single defining writer.** Every buffer has at most one *defining*
+///    writer — a node that writes it without reading it. In-place mutators (blackbox
+///    `carried_outputs`) read and write the same buffer and may repeat; the node vector's
+///    insertion order is their semantic order (the planner serializes same-buffer access with
+///    events). If a defining writer exists it must precede every other use — a read or in-place
+///    mutation before it would observe garbage. A caller pushing raw `GraphNode::Kernel`s that
+///    read a never-defined buffer is treated as reading a graph input — no error, including when
+///    that input is later mutated in place.
 pub fn verify_graph(g: &GraphBuilder) -> Result<(), crate::CompileError> {
     let n_bufs = g.bufs.len();
     let env: BTreeMap<VarId, i64> = BTreeMap::new();
@@ -2657,29 +2661,45 @@ pub fn verify_graph(g: &GraphBuilder) -> Result<(), crate::CompileError> {
         }
     }
 
-    // (2) Write-before-read + single-writer.
+    // (2) Write-before-read + single defining writer. `classify_buf_uses`
+    // lists an in-place mutator (blackbox `carried_outputs`) on both the
+    // reader and writer side, and pushes node indices in insertion
+    // order, so both `writers[b]` and `readers[b]` are sorted.
     let (writers, readers) = classify_buf_uses(&g.nodes, n_bufs);
     for (b, ws) in writers.iter().enumerate() {
-        if ws.len() > 1 {
+        let defining: Vec<usize> = ws
+            .iter()
+            .copied()
+            .filter(|w| readers[b].binary_search(w).is_err())
+            .collect();
+        if defining.len() > 1 {
             return Err(crate::CompileError::Verify(format!(
-                "verify_graph: buffer {:?} written by {} nodes: {:?}",
+                "verify_graph: buffer {:?} has {} defining (non-read-modify-write) \
+                 writers: {:?}",
                 BufId(b),
-                ws.len(),
-                ws,
+                defining.len(),
+                defining,
             )));
         }
-    }
-    for (b, rs) in readers.iter().enumerate() {
-        let Some(&w) = writers[b].first() else {
+        let Some(&d) = defining.first() else {
+            // Only in-place mutators: the buffer acts as a graph input
+            // (or caller-initialized scratch); insertion order sequences
+            // the reads and mutations.
             continue;
         };
-        for &r in rs {
-            if r < w {
-                return Err(crate::CompileError::Verify(format!(
-                    "verify_graph: buffer {:?} read at node {r} before its writer node {w}",
-                    BufId(b),
-                )));
-            }
+        if let Some(&w) = ws.iter().find(|&&w| w < d) {
+            return Err(crate::CompileError::Verify(format!(
+                "verify_graph: buffer {:?} mutated in place at node {w} before its \
+                 defining writer node {d}",
+                BufId(b),
+            )));
+        }
+        if let Some(&r) = readers[b].iter().find(|&&r| r < d) {
+            return Err(crate::CompileError::Verify(format!(
+                "verify_graph: buffer {:?} read at node {r} before its defining \
+                 writer node {d}",
+                BufId(b),
+            )));
         }
     }
     Ok(())
