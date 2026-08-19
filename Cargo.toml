@@ -9,6 +9,7 @@ license = "MIT OR Apache-2.0"
 
 [workspace]
 members = [
+    "crates/scheduler",
     "crates/stark-backend",
     "crates/stark-backend/codec-derive",
     "crates/stark-sdk",
@@ -22,6 +23,7 @@ members = [
 ]
 # Only these build by default
 default-members = [
+    "crates/scheduler",
     "crates/stark-backend",
     "crates/stark-backend/codec-derive",
     "crates/stark-sdk",

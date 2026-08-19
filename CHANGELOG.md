@@ -7,6 +7,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 ## Unreleased
 
 ### Added
+- (Scheduler) `openvm-scheduler` crate: a resource-aware DAG scheduling engine that admits ready nodes whose declared resource profile fits a per-axis budget, GPU-first, and releases on completion.
 - (CUDA common) `DeviceBuffer::mut_slice(range)` returning a `DeviceBufferMutSlice<'_, T>` with a `copy_from_host` method for overwriting a subrange of a device buffer from a host slice on a caller-supplied stream.
 
 ## v2.0.0 (2026-07-06)

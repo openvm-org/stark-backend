@@ -19,6 +19,7 @@ The backend is designed to be modular and compatible with different proof system
 - [`openvm-cuda-common`](crates/cuda-common): Shared headers (`.cuh/.h` files) and CUDA utilities library.
 - [`openvm-cuda-backend`](crates/cuda-backend): CUDA implementation of a STARK prover backend using all of the previous crates.
 - [`openvm-backend-tests`](crates/backend-tests): Shared backend-generic test suite for the SWIRL proof system.
+- [`openvm-scheduler`](crates/scheduler): Resource-aware DAG scheduling engine that admits abstract units of work against per-axis resource budgets.
 
 Contributors should read [Development without CUDA](./docs/README.md#development-without-cuda) and [Development with CUDA](./docs/README.md#development-with-cuda) for instructions on how to set up their development environments.
 

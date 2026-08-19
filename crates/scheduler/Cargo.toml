@@ -1,0 +1,14 @@
+[package]
+name = "openvm-scheduler"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+homepage.workspace = true
+repository.workspace = true
+license.workspace = true
+description = "Resource-aware DAG scheduling engine"
+
+# Intentionally empty: the engine schedules abstract nodes and depends on
+# nothing, which is what keeps it reusable outside this workspace.
+[dependencies]

@@ -30,13 +30,14 @@ cargo +nightly fmt -- --check  # check only
 
 ## Project Structure
 
-Rust workspace with 5 default-member crates:
+Rust workspace with 6 default-member crates:
 
 - **`openvm-stark-backend`** (`crates/stark-backend`): Core SWIRL proof system — prover, verifier, AIR builders, interactions, keygen, PCS. Re-exports Plonky3 crates.
 - **`openvm-codec-derive`** (`crates/stark-backend/codec-derive`): Proc macro for serialization codegen.
 - **`openvm-stark-sdk`** (`crates/stark-sdk`): Concrete configs (`BabyBearPoseidon2Config`, `BabyBearBn254Poseidon2Config`), tracing/metrics, benchmarks.
 - **`openvm-backend-tests`** (`crates/backend-tests`): Shared backend-generic test suite for the SWIRL proof system.
 - **`openvm-cpu-backend`** (`crates/cpu-backend`): Optimized row-major CPU prover backend.
+- **`openvm-scheduler`** (`crates/scheduler`): Resource-aware DAG scheduling engine. Admits abstract nodes against per-axis resource budgets; depends on nothing.
 
 Non-default CUDA support members (require GPU/CUDA toolchain — don't add to default-members):
 - **`openvm-cuda-builder`** (`crates/cuda-builder`): Build-time utility for compiling `.cu` files via `nvcc`/`cc`. Used as a `[build-dependency]` by CUDA crates.
