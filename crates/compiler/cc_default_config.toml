@@ -1,0 +1,145 @@
+# Default GraphCompiler config (crypto-compiler).
+#
+# Load with:
+#     GraphCompiler::from_toml("crates/compiler/cc_default_config.toml")
+# or via the frac_bench_utils `CC_CONFIG` env var (`cc_compiler(device)`).
+#
+# Every section can be partially specified: any field omitted here falls
+# back to `GraphCompilerConfig::default()` (which itself matches
+# `GraphCompiler::new()`).
+#
+# Fields NOT in this file (they stay on the builder API):
+#   - Symbol bindings (graph-specific; use `GraphCompiler::symbol(...)`)
+#   - Fusion v2 estimator / artifact / graph_symbols (hardware- and
+#     graph-specific; overridden by the caller when needed)
+#   - Per-node timings for the list schedulers (populated from profiling
+#     via `GraphExe::collect_graph_info`)
+
+# ---------- Device ----------
+#
+# `kind` = "cuda" (with `ordinal`), "cpu_pinned", or "cpu_paged".
+[device]
+kind = "cuda"
+ordinal = 0
+
+# ---------- ModuleCompiler passthrough ----------
+#
+# These knobs also honor env-var fallbacks in `CompileOptions::default`
+# (`NVCC`, `CRYPTO_COMPILER_CUDA_ARCH`, `CRYPTO_COMPILER_DUMP_IR`,
+# `CRYPTO_COMPILER_VERBOSITY`, `CRYPTO_COMPILER_CHECK_ACCESSES`,
+# `NVCC_TIMEOUT_SECS`) — anything set here overrides the env.
+#
+# `verbosity` ∈ { "none", "basic", "verbose" } gates how much IR is
+# dumped when `dump_dir` is set. `dump_dir` and `nvcc_timeout_secs` are
+# omitted below to inherit the default behavior (no dumping, no timeout);
+# uncomment to enable.
+[module_compiler]
+arch = "native"
+nvcc = "nvcc"
+extra_nvcc_flags = []
+verbosity = "basic"
+check_accesses = false
+# dump_dir = "/tmp/crypto-compiler-dumps"
+# nvcc_timeout_secs = 900
+
+# ---------- Scheduler ----------
+#
+# `mode` = "list_v1" (default), "list_v2", or "cp_sat" (requires the
+# `planner-ortools` feature). Per-mode tunables live in the same table.
+#
+# ListV1 (profile-guided list scheduler with beam look-ahead):
+#   max_concurrency        — number of concurrent CUDA streams.
+#   max_memory_bytes       — cap on the pool; omit / set to null for "no cap".
+#   lookahead_k, beam      — beam-search depth × width (0/1 is greedy).
+#   w_cp, w_mem            — critical-path vs memory-pressure weights.
+#   mem_target_frac        — fraction of pool above which mem penalty kicks in.
+#
+# ListV2 (persistent-beam, parallel fan-out): num_streams,
+# max_memory_bound, num_beams, beam_depth, frontier_cap, w_m, w_t, w_c.
+#
+# CpSat: max_secs (wall-time cap for the CP-SAT joint solve).
+[scheduler]
+mode = "list_v1"
+max_concurrency = 8
+lookahead_k = 3
+beam = 2
+w_cp = 1.0
+w_mem = 0.001
+mem_target_frac = 0.9
+# max_memory_bytes = ...
+
+# Example: switch to list_v2 by replacing the block above with:
+#
+# [scheduler]
+# mode = "list_v2"
+# num_streams = 8
+# max_memory_bound = 9223372036854775807
+# num_beams = 1
+# beam_depth = 1
+# frontier_cap = 1
+# w_m = 1.0
+# w_t = 1.0
+# w_c = -2.0
+
+# ---------- Kernel cache ----------
+#
+# `kind` = "enabled" (below) or "disabled" (drops the whole table). When
+# enabled, `directory` is optional — omit to use `KernelCache::new()`'s
+# platform default (`$HOME/.openvm/kernel_cache`, then
+# `$XDG_CACHE_HOME/openvm/kernel_cache`, then `./.openvm-kernel-cache`).
+[kernel_cache]
+kind = "enabled"
+max_kernels = 300
+max_bytes = 10737418240   # 10 GiB
+# directory = "/var/cache/openvm/kernel_cache"
+
+# ---------- Fusion ----------
+#
+# `kind` = "v2" (default), "off", or "v1" (deprecated — retained for
+# compatibility with old snapshots). New profiles should use v2; see
+# `passes/fusion_v2` for the DAG-hypergraph rewrite.
+#
+# The v2 knobs below mirror `FusionOptionsV2`; fields outside the TOML
+# surface (`estimator`, `artifact`, `graph_symbols`) keep the crate
+# defaults.
+[fusion]
+kind = "v2"
+max_total_alternatives = 5000
+max_enumeration_time_per_round_ms = 2000
+max_outer_iterations = 1
+validate_alt_graph_acyclicity = true
+solver_time_limit_secs = 60.0
+solver_num_workers = 0            # 0 lets CP-SAT decide; 1 = deterministic
+enable_producer_consumer = true
+enable_fanout = true
+enable_small_kernel = true
+small_kernel_shared_bytes = 49152 # 48 KiB
+small_kernel_max_chain = 6
+enable_horizontal = false
+enable_epilogue = true
+enable_keep_variants = true
+enable_all_keep_variants = false
+cycle_quantum = 1
+blackbox_hint_cycles = 0.0
+max_rounds = 4
+max_alternatives_per_pass_per_round = 0
+optimize_artifact_count = false
+verbose = false
+
+# Example: disable fusion entirely with
+#
+# [fusion]
+# kind = "off"
+#
+# Example (deprecated): fall back to v1 with
+#
+# [fusion]
+# kind = "v1"
+# max_iterations = 10
+# max_body_ops = 1024
+# launch_cost = 0.000005
+# bw_eff = 2000000000000.0
+# flop_eff = 10000000000000.0
+# gamma = 0.5
+# per_thread_bw = 1000000000.0
+# verbose = false

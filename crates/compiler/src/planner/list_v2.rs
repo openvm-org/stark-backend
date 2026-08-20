@@ -292,11 +292,7 @@ impl<'a> ScheduleState<'a> {
     /// cross-stream `WaitOn`s already applied). `NaN` entries mean
     /// the node wasn't emitted; its buffers are dropped from the
     /// pack list.
-    fn make_interference_graph(
-        &self,
-        start: &[f64],
-        finish: &[f64],
-    ) -> MemoryInterferenceGraph {
+    fn make_interference_graph(&self, start: &[f64], finish: &[f64]) -> MemoryInterferenceGraph {
         let g = self.g;
         let n_bufs = g.buf_info.len();
 
@@ -405,13 +401,12 @@ impl<'a> ScheduleState<'a> {
     ///
     /// Steps:
     /// 1. Recover per-stream ordered node lists (Kahn's topo sort).
-    /// 2. Emit an interleaved instruction stream. For each cross-stream
-    ///    data dep `P → N` we insert `WaitOn(N.stream, event_of(P))`
-    ///    before `N`, unless the current stream has already synced past
-    ///    `P`'s position on `P`'s stream via an earlier `WaitOn` — in
-    ///    which case the sync is implied by transitive event ordering.
-    /// 3. Build the interference graph and assign each packable BufId
-    ///    a memory offset via best-fit-decreasing placement.
+    /// 2. Emit an interleaved instruction stream. For each cross-stream data dep `P → N` we insert
+    ///    `WaitOn(N.stream, event_of(P))` before `N`, unless the current stream has already synced
+    ///    past `P`'s position on `P`'s stream via an earlier `WaitOn` — in which case the sync is
+    ///    implied by transitive event ordering.
+    /// 3. Build the interference graph and assign each packable BufId a memory offset via
+    ///    best-fit-decreasing placement.
     fn make_schedule(&self) -> StreamMemoryPlan {
         let g = self.g;
         let n_nodes = g.num_nodes;

@@ -383,16 +383,14 @@ fn main() {
     // match list_v2's memory footprint for a fair time comparison.
     //
     // Tunings (over the default) to survive the tight budget:
-    // - `lookahead_k = 1`: rollout state.clone() is O(n_bufs) and
-    //   dominates under memory pressure (each pick triggers many).
-    // - `mem_target_frac = 0.0`: without this, the memory-pressure
-    //   penalty only kicks in at 90% of `max_memory`; by then the
-    //   greedy commit has already filled the pool with big writes
-    //   whose readers can't be scheduled next (their writes wouldn't
-    //   fit), and the loop deadlocks into Infeasible.
-    // - `w_mem` raised so mem_pen (bytes over target) has the same
-    //   magnitude as `w_cp * (bl + est_finish)` in ms — for a 1 GiB
-    //   budget, bytes over 0 target dominate node timings unless
+    // - `lookahead_k = 1`: rollout state.clone() is O(n_bufs) and dominates under memory pressure
+    //   (each pick triggers many).
+    // - `mem_target_frac = 0.0`: without this, the memory-pressure penalty only kicks in at 90% of
+    //   `max_memory`; by then the greedy commit has already filled the pool with big writes whose
+    //   readers can't be scheduled next (their writes wouldn't fit), and the loop deadlocks into
+    //   Infeasible.
+    // - `w_mem` raised so mem_pen (bytes over target) has the same magnitude as `w_cp * (bl +
+    //   est_finish)` in ms — for a 1 GiB budget, bytes over 0 target dominate node timings unless
     //   w_mem is around ~1e-8.
     // The online scheduler needs headroom to make progress on this
     // graph; `offline_repack` packs the final peak down afterwards.

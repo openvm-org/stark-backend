@@ -59,7 +59,8 @@ fn scalar_ty_from_tag(t: u8) -> Result<ScalarType, CompileError> {
 
 /// How much detail [`crate::compile_and_load`] should write into
 /// [`CompileOptions::dump_ir`].
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Verbosity {
     /// Write nothing.
     None,

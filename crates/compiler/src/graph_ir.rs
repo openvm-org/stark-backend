@@ -2526,12 +2526,12 @@ impl GraphModule {
 ///
 /// 2. **Write-before-read + single defining writer.** Every buffer has at most one *defining*
 ///    writer — a node that writes it without reading it. In-place mutators (blackbox
-///    `carried_outputs`) read and write the same buffer and may repeat; the node vector's
-///    insertion order is their semantic order (the planner serializes same-buffer access with
-///    events). If a defining writer exists it must precede every other use — a read or in-place
-///    mutation before it would observe garbage. A caller pushing raw `GraphNode::Kernel`s that
-///    read a never-defined buffer is treated as reading a graph input — no error, including when
-///    that input is later mutated in place.
+///    `carried_outputs`) read and write the same buffer and may repeat; the node vector's insertion
+///    order is their semantic order (the planner serializes same-buffer access with events). If a
+///    defining writer exists it must precede every other use — a read or in-place mutation before
+///    it would observe garbage. A caller pushing raw `GraphNode::Kernel`s that read a never-defined
+///    buffer is treated as reading a graph input — no error, including when that input is later
+///    mutated in place.
 pub fn verify_graph(g: &GraphBuilder) -> Result<(), crate::CompileError> {
     let n_bufs = g.bufs.len();
     let env: BTreeMap<VarId, i64> = BTreeMap::new();

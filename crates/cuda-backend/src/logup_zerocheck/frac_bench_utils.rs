@@ -2,67 +2,39 @@
 //!
 //! Two sibling files exercise the fractional-sumcheck compiler pipeline
 //! ([`super::fractional_ir`] and [`super::fractional_sumcheck_gpu_irv2`])
-//! and used to read their tunables from a mix of `FRAC_BENCH_*` /
-//! `FRAC_V2_BENCH_*` / `FRAC_IR_FUSION*` / `FRAC_DUMP_LOG_N` env vars.
-//! This module unifies that surface behind a single `CC_*` naming for
-//! compiler options and a single `FRAC_LOG_N` for input size, so a
-//! caller can flip a knob once and both benches respond.
+//! and share their compiler tunables through this module.
+//!
+//! All `GraphCompiler` knobs live in a single TOML config; see the
+//! [`GraphCompilerConfig`](crypto_compiler::graph_compiler_config::GraphCompilerConfig)
+//! docs plus `crates/compiler/cc_default_config.toml` for the full schema
+//! and defaults.
 //!
 //! # Env vars
 //!
-//! Compiler tuning (`CC_*` — same across both files):
-//!
-//! - `CC_FUSION` — `v1` (default), `v2`, or `off`.
-//! - `CC_FUSION_DISABLE` — comma-separated v2 pass names to disable (`producer_consumer`, `fanout`,
-//!   `small_kernel`, `horizontal`, `epilogue`).
-//! - `CC_FUSION_SOLVER_SECS` — CP-SAT wall-time per lex stage (default 120; the crate default of 5s
-//!   returns `SolverStatusUnknown` on large graphs and falls back to the original unfused
-//!   extraction).
-//! - `CC_FUSION_MAX_ALTS` — total cap on inserted alternatives per outer iteration (default
-//!   10_000).
-//! - `CC_FUSION_MAX_ROUNDS` — saturation round bound.
-//! - `CC_FUSION_MAX_ENUM_MS` — per-round enumeration wall-time budget.
-//! - `CC_FUSION_OUTER_ITERS` — number of outer fusion iterations.
-//! - `CC_FUSION_HORIZONTAL=1` — re-enable horizontal fusion.
-//! - `CC_FUSION_SOLVER_WORKERS` — CP-SAT workers (default: all cores).
-//! - `CC_SCHEDULER` — `list_v1` (default) or `list_v2`. `list_v2` selects
-//!   `SchedulerMode::ListV2` with default beam params (num_beams=1,
-//!   beam_depth=1, frontier_cap=1 — pure-greedy) and `num_streams=CC_STREAMS`.
-//!   By default `plan_v2` routes through v1 for our carry-chain graphs
-//!   (v2's SSA assumption is violated by blackbox kernels with
-//!   `carried_outputs`); set `CC_LIST_V2_STRICT=1` to force the raw v2
-//!   beam solver instead.
-//! - `CC_STREAMS` — `ListSchedulerV1::max_concurrency` (default 8).
-//! - `CC_KERNEL_CACHE_MAX_ENTRIES` — max entries in the on-disk kernel cache (default 4096, larger
-//!   than the crate default so the v2 graph's ~hundreds of modules survive across bench runs).
-//! - `CC_KERNEL_CACHE_MAX_BYTES` — max total on-disk bytes (default 200 GiB, matching the v2
-//!   bench's prior hard-coded value).
-//! - `CC_NVCC_TIMEOUT_SECS` — per-invocation nvcc timeout (default 900).
-//! - `CC_GRAPH_DUMP_PATH` — if set, compile-or-load the [`GraphExe`] to/from this path (see
-//!   [`load_or_compile_and_dump`]). The env value is treated as a *base path*: the utility appends
-//!   `.n{n}` where `n = 2^log_n` so multiple sizes coexist under one env value.
-//!
-//! Input size (`FRAC_LOG_N`): comma-separated log2 leaf counts, same
-//! name for benches and dumps. Callers pick the first entry for
-//! single-size use.
+//! - `CC_CONFIG` — path to the compiler-config TOML. When unset,
+//!   [`cc_compiler`] falls back to
+//!   [`GraphCompilerConfig::default`](crypto_compiler::graph_compiler_config::GraphCompilerConfig::default),
+//!   which mirrors the compiler's programmatic defaults.
+//! - `FRAC_LOG_N` — comma-separated `log2(leaves)` list. Not a compiler
+//!   flag: it's the bench input size and is orthogonal to the TOML.
+//! - `CC_GRAPH_DUMP_PATH` — optional base path for the pre-pass
+//!   `GraphBuilder` snapshot (see [`cc_graph_dump_path`] and
+//!   [`load_or_compile_and_dump`]). Not a compiler flag either: it toggles
+//!   the bench's compile-or-load driver, not the compiler itself.
 
 #![cfg(test)]
 
-use std::{
-    path::{Path, PathBuf},
-    sync::Arc,
-    time::Duration,
-};
+use std::path::{Path, PathBuf};
 
 use crypto_compiler::{
     graph_exe::{GraphCompiler, GraphExe},
     graph_ir::{DeviceType, GraphBuilder},
     graph_serializer::SerializableGraphBuilder,
-    kernel_cache::KernelCache,
-    passes::fusion_v2::FusionOptionsV2,
-    planner::{ListSchedulerV1, ListSchedulerV2, SchedulerMode},
 };
 use openvm_cuda_common::stream::GpuDeviceCtx;
+
+/// Env var pointing at the compiler-config TOML consumed by [`cc_compiler`].
+pub(crate) const CC_CONFIG_ENV: &str = "CC_CONFIG";
 
 /// Parses `FRAC_LOG_N` as a comma-separated list of `log2(leaves)`. If
 /// unset, `default` (also comma-separated) is used.
@@ -94,136 +66,24 @@ pub(crate) fn frac_log_n_single(default: usize) -> usize {
         .unwrap_or(default)
 }
 
-/// Fusion-v2 options driven by the `CC_FUSION_*` environment. Used by
-/// [`cc_compiler`] when `CC_FUSION=v2`; exposed so callers that need a
-/// customized `GraphCompiler` (e.g. dump paths that also set a
-/// dump_dir) can start from these defaults.
-#[allow(dead_code)]
-pub(crate) fn cc_fusion_v2_options() -> FusionOptionsV2 {
-    let defaults = FusionOptionsV2::default();
-    let solver_secs = std::env::var("CC_FUSION_SOLVER_SECS")
-        .ok()
-        .and_then(|s| s.parse::<f64>().ok())
-        .unwrap_or(120.0);
-    let max_alts = std::env::var("CC_FUSION_MAX_ALTS")
-        .ok()
-        .and_then(|s| s.parse::<usize>().ok())
-        .unwrap_or(10_000);
-    let max_rounds = std::env::var("CC_FUSION_MAX_ROUNDS")
-        .ok()
-        .and_then(|s| s.parse::<usize>().ok())
-        .unwrap_or(defaults.max_rounds);
-    let horizontal = std::env::var_os("CC_FUSION_HORIZONTAL").is_some();
-    let solver_workers = std::env::var("CC_FUSION_SOLVER_WORKERS")
-        .ok()
-        .and_then(|s| s.parse::<usize>().ok())
-        .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get()));
-    let max_enum = std::env::var("CC_FUSION_MAX_ENUM_MS")
-        .ok()
-        .and_then(|s| s.parse::<u64>().ok())
-        .map(Duration::from_millis)
-        .unwrap_or(defaults.max_enumeration_time_per_round);
-    let outer_iters = std::env::var("CC_FUSION_OUTER_ITERS")
-        .ok()
-        .and_then(|s| s.parse::<usize>().ok())
-        .unwrap_or(defaults.max_outer_iterations);
-    FusionOptionsV2 {
-        verbose: true,
-        solver_time_limit_secs: solver_secs,
-        solver_num_workers: solver_workers,
-        max_total_alternatives: max_alts,
-        max_rounds,
-        max_enumeration_time_per_round: max_enum,
-        max_outer_iterations: outer_iters,
-        enable_horizontal: horizontal,
-        ..defaults
-    }
-}
-
-fn apply_fusion_disable_env(opts: &mut FusionOptionsV2) {
-    let Ok(disable) = std::env::var("CC_FUSION_DISABLE") else {
-        return;
-    };
-    for pass in disable.split(',') {
-        match pass.trim() {
-            "producer_consumer" => opts.enable_producer_consumer = false,
-            "fanout" => opts.enable_fanout = false,
-            "small_kernel" => opts.enable_small_kernel = false,
-            "horizontal" => opts.enable_horizontal = false,
-            "epilogue" => opts.enable_epilogue = false,
-            "" => {}
-            other => panic!("CC_FUSION_DISABLE: unknown fusion pass `{other}`"),
-        }
-    }
-}
-
-fn cc_kernel_cache() -> Arc<KernelCache> {
-    let max_entries = std::env::var("CC_KERNEL_CACHE_MAX_ENTRIES")
-        .ok()
-        .and_then(|s| s.parse::<usize>().ok())
-        .unwrap_or(4096);
-    let max_bytes = std::env::var("CC_KERNEL_CACHE_MAX_BYTES")
-        .ok()
-        .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or(200 * 1024 * 1024 * 1024);
-    Arc::new(
-        KernelCache::new()
-            .max_kernels(max_entries)
-            .storage_size(max_bytes),
-    )
-}
-
-fn cc_nvcc_timeout() -> Duration {
-    Duration::from_secs(
-        std::env::var("CC_NVCC_TIMEOUT_SECS")
-            .ok()
-            .and_then(|s| s.parse::<u64>().ok())
-            .unwrap_or(900),
-    )
-}
-
-fn cc_scheduler_mode() -> SchedulerMode {
-    let max_conc: u32 = std::env::var("CC_STREAMS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(8);
-    match std::env::var("CC_SCHEDULER").as_deref() {
-        Ok("list_v2") => SchedulerMode::ListV2 {
-            params: ListSchedulerV2 {
-                num_streams: max_conc as usize,
-                ..ListSchedulerV2::default()
-            },
-        },
-        // "list_v1" or unset — default profile-guided beam-search list scheduler.
-        _ => SchedulerMode::ListV1 {
-            params: ListSchedulerV1 {
-                max_concurrency: max_conc,
-                ..ListSchedulerV1::default()
-            },
-        },
-    }
-}
-
-/// Builds a `GraphCompiler` from the unified `CC_*` env vars — scheduler,
-/// fusion strategy, kernel cache and nvcc timeout are all honored.
+/// Builds a `GraphCompiler` from `CC_CONFIG` (or defaults when unset) and
+/// binds it to `device`.
+///
+/// The caller-supplied `device` is authoritative: if the TOML sets a
+/// different device, this function overwrites it. That keeps the bench in
+/// control of which GPU ordinal it runs on regardless of the shared
+/// config.
+///
+/// Panics if `CC_CONFIG` is set but the file can't be read or parsed —
+/// silently falling back to defaults would hide a misconfigured bench.
 #[allow(dead_code)]
 pub(crate) fn cc_compiler(device: DeviceType) -> GraphCompiler {
-    let mut compiler = GraphCompiler::new()
-        .device(device)
-        .scheduler(cc_scheduler_mode())
-        .kernel_cache(cc_kernel_cache())
-        .nvcc_timeout(Some(cc_nvcc_timeout()));
-    match std::env::var("CC_FUSION").as_deref() {
-        Ok("v2") => {
-            let mut opts = cc_fusion_v2_options();
-            apply_fusion_disable_env(&mut opts);
-            compiler = compiler.fusion_v2_options(opts);
-        }
-        Ok("off") => compiler = compiler.without_fusion(),
-        // "v1" or unset uses the default v1 pipeline.
-        _ => {}
-    }
-    compiler
+    let compiler = match std::env::var_os(CC_CONFIG_ENV) {
+        Some(path) => GraphCompiler::from_toml(PathBuf::from(path))
+            .unwrap_or_else(|e| panic!("failed to load {CC_CONFIG_ENV}: {e}")),
+        None => GraphCompiler::new(),
+    };
+    compiler.device(device)
 }
 
 /// Resolves `CC_GRAPH_DUMP_PATH` into a size-suffixed file path.

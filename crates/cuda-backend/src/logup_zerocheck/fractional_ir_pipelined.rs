@@ -864,8 +864,7 @@ where
     // emitted for the seed — collapsing the ~30 seed_layer H2D copies
     // an internally-created seed would leave in the captured graph
     // down to zero.
-    let mut eq_buffer =
-        SqrtEqLayersIR::from_xi_with_seed(g, &xi_prev[1..], shared_seed, device);
+    let mut eq_buffer = SqrtEqLayersIR::from_xi_with_seed(g, &xi_prev[1..], shared_seed, device);
 
     let mut round_polys: Vec<[BufId; GKR_S_DEG]> = Vec::with_capacity(round);
     let mut r_vec: Vec<BufId> = Vec::with_capacity(round);
@@ -1017,8 +1016,7 @@ where
                         (2..=5).contains(&n_fold),
                         "slot {k}: multifold w = {n_fold} out of dispatch range {{2..=5}}"
                     );
-                    let eq_r_window =
-                        eq_mle_table_ir_with_seed(g, &pending, shared_seed, device);
+                    let eq_r_window = eq_mle_table_ir_with_seed(g, &pending, shared_seed, device);
                     frac_multifold_inplace_ir(
                         g,
                         work_buf,
@@ -1051,8 +1049,7 @@ where
                         (2..=5).contains(&n_fold),
                         "slot {k}: multifold w = {n_fold} out of dispatch range {{2..=5}}"
                     );
-                    let eq_r_window =
-                        eq_mle_table_ir_with_seed(g, &pending, shared_seed, device);
+                    let eq_r_window = eq_mle_table_ir_with_seed(g, &pending, shared_seed, device);
                     frac_multifold_ir(
                         g,
                         layer,
@@ -1122,7 +1119,12 @@ where
                 // Suffix: xi_prev at absolute inner rounds [pos + 2, m_base + 1 + w).
                 let suffix_start = pos + 2;
                 let suffix_end = m_base + 1 + w;
-                let eq_suffix = eq_mle_table_ir_with_seed(g, &xi_prev[suffix_start..suffix_end], shared_seed, device);
+                let eq_suffix = eq_mle_table_ir_with_seed(
+                    g,
+                    &xi_prev[suffix_start..suffix_end],
+                    shared_seed,
+                    device,
+                );
 
                 let d_sum = add_ef_buf(g, device, &format!("d_sum_pos{pos}"), GKR_S_DEG - 1);
                 frac_precompute_m_eval_round_ir(
@@ -1343,8 +1345,7 @@ where
     assert_eq!(real_len, logical_len, "dense-only path");
 
     let mut pq_size = 2usize << round;
-    let mut eq_buffer =
-        SqrtEqLayersIR::from_xi_with_seed(g, &xi_prev[1..], shared_seed, device);
+    let mut eq_buffer = SqrtEqLayersIR::from_xi_with_seed(g, &xi_prev[1..], shared_seed, device);
 
     let mut round_polys: Vec<[BufId; GKR_S_DEG]> = Vec::with_capacity(round);
     let mut r_vec: Vec<BufId> = Vec::with_capacity(round);
@@ -1353,8 +1354,7 @@ where
     // is expected: each outer round's revert consumes the previous
     // round's revert output and produces the next tree level's contents
     // at `layer[0..pq_size]`).
-    let tmp_cap =
-        unsafe { _frac_compute_round_temp_buffer_size((1 << round) as u32) } as usize;
+    let tmp_cap = unsafe { _frac_compute_round_temp_buffer_size((1 << round) as u32) } as usize;
     let d_sum_r0 = add_ef_buf(g, device, "d_sum_r0_fe", GKR_S_DEG - 1);
     let tmp_r0 = add_ef_buf(g, device, "tmp_r0_fe", tmp_cap.max(1));
     let out0 = do_sumcheck_round_and_revert_ir(
@@ -1402,8 +1402,7 @@ where
         let dst_real_len = src_pq_size >> 1;
         let dst_logical_len = src_pq_size >> 1;
         let tmp_cap_i =
-            unsafe { _frac_compute_round_temp_buffer_size((src_pq_size >> 2) as u32) }
-                as usize;
+            unsafe { _frac_compute_round_temp_buffer_size((src_pq_size >> 2) as u32) } as usize;
         let d_sum = add_ef_buf(g, device, "d_sum_fe", GKR_S_DEG - 1);
         let tmp = add_ef_buf(g, device, "tmp_fe", tmp_cap_i.max(1));
         let out = if iter_idx == 0 {
@@ -1467,7 +1466,13 @@ where
     // fold in-place on work_buf.
     let (claim_buf, claim_buf_len) = if in_work {
         fold_ef_frac_columns_inplace_ir_bufid(
-            g, work_buf, pq_size, source_real_len, source_logical_len, prev_r, alpha,
+            g,
+            work_buf,
+            pq_size,
+            source_real_len,
+            source_logical_len,
+            prev_r,
+            alpha,
         );
         (work_buf, work_len)
     } else {
@@ -1484,12 +1489,21 @@ where
         (work_buf, work_len)
     };
     pq_size >>= 1;
-    debug_assert_eq!(pq_size, 2, "post-fold pq_size must be 2 for claim extraction");
+    debug_assert_eq!(
+        pq_size, 2,
+        "post-fold pq_size must be 2 for claim extraction"
+    );
     // Silence unused-write warnings on the last iter's carry state.
     let _ = (prev_s_eval_cur, eq_r_acc_cur);
 
-    let claim =
-        extract_frac_pair_ir(g, claim_buf, claim_buf_len, pq_size / 2, device, "foldeval_claim");
+    let claim = extract_frac_pair_ir(
+        g,
+        claim_buf,
+        claim_buf_len,
+        pq_size / 2,
+        device,
+        "foldeval_claim",
+    );
     RoundOutputIR {
         round_polys,
         r_vec,
@@ -2121,8 +2135,7 @@ mod tests {
         };
         let d_xis: Vec<_> = xi_prev.iter().copied().map(ef_to_dev).collect();
         for (j, d) in d_xis.iter().enumerate() {
-            exe.set_input(&ctx, 1 + j, d)
-                .expect("set_input xi");
+            exe.set_input(&ctx, 1 + j, d).expect("set_input xi");
         }
         let d_lambda = ef_to_dev(lambda);
         let d_prev = ef_to_dev(prev_s_eval);
@@ -2143,9 +2156,7 @@ mod tests {
         // the eager reference artifact-by-artifact.
         exe.run(&ctx).expect("correctness graph run");
         ctx.stream.synchronize().expect("sync");
-        let read_ef_from_bufid = |bid: crypto_compiler::graph_ir::BufId,
-                                  exe: &GraphExe|
-         -> EF {
+        let read_ef_from_bufid = |bid: crypto_compiler::graph_ir::BufId, exe: &GraphExe| -> EF {
             let idx = (0..exe.num_outputs())
                 .find(|&i| exe.output_buf_id(i) == bid)
                 .expect("registered output BufId");
@@ -2457,10 +2468,7 @@ mod tests {
             std::slice::from_raw_parts(&one as *const EF as *const u8, std::mem::size_of::<EF>())
                 .to_vec()
         };
-        let d_seed = seed_bytes
-            .as_slice()
-            .to_device_on(&ctx)
-            .expect("H2D seed");
+        let d_seed = seed_bytes.as_slice().to_device_on(&ctx).expect("H2D seed");
         exe.set_input(&ctx, 1, &d_seed).expect("set_input seed");
         ctx.stream.synchronize().expect("sync after set_input");
 
@@ -2500,7 +2508,10 @@ mod tests {
             .map(|&b| read_ef_bid(b, &exe))
             .collect();
 
-        assert_eq!(got_sum, eager_proof.fractional_sum, "fractional_sum mismatch");
+        assert_eq!(
+            got_sum, eager_proof.fractional_sum,
+            "fractional_sum mismatch"
+        );
         assert_eq!(
             got_claims.len(),
             eager_proof.claims_per_layer.len(),
@@ -2517,7 +2528,10 @@ mod tests {
                 "layer {i} claims mismatch",
             );
         }
-        assert_eq!(got_polys, eager_proof.sumcheck_polys, "sumcheck_polys mismatch");
+        assert_eq!(
+            got_polys, eager_proof.sumcheck_polys,
+            "sumcheck_polys mismatch"
+        );
         assert_eq!(got_xi, eager_xi, "final_randomness mismatch");
         let total_rounds = log2_strict_usize(n);
         println!(
@@ -2535,8 +2549,9 @@ mod tests {
             let d_l: openvm_cuda_common::d_buffer::DeviceBuffer<Frac<EF>> =
                 leaves.as_slice().to_device_on(&ctx).expect("H2D warmup");
             let mut m = MemTracker::start("bench.full_warm");
-            let _ = fractional_sumcheck_gpu::<SC, _>(&mut sp, d_l, sizes, alpha, false, &mut m, &ctx)
-                .expect("eager warmup");
+            let _ =
+                fractional_sumcheck_gpu::<SC, _>(&mut sp, d_l, sizes, alpha, false, &mut m, &ctx)
+                    .expect("eager warmup");
             exe.run(&ctx).expect("graph warmup");
         }
         ctx.stream.synchronize().expect("sync post-warmup");
@@ -2568,8 +2583,9 @@ mod tests {
             if nsys_enabled {
                 nvtx::range_push!("eager log_n={log_n} iter={i}");
             }
-            let _ = fractional_sumcheck_gpu::<SC, _>(&mut sp, d_l, sizes, alpha, false, &mut m, &ctx)
-                .expect("eager iter");
+            let _ =
+                fractional_sumcheck_gpu::<SC, _>(&mut sp, d_l, sizes, alpha, false, &mut m, &ctx)
+                    .expect("eager iter");
             ctx.stream.synchronize().expect("sync post-eager");
             if nsys_enabled {
                 nvtx::range_pop!();
@@ -2804,8 +2820,7 @@ mod tests {
             };
             let d_xis: Vec<_> = xi_prev.iter().copied().map(ef_to_dev).collect();
             for (idx, d) in d_xis.iter().enumerate() {
-                exe.set_input(&ctx, 1 + idx, d)
-                    .expect("set_input xi");
+                exe.set_input(&ctx, 1 + idx, d).expect("set_input xi");
             }
             let d_lambda = ef_to_dev(lambda);
             let d_prev = ef_to_dev(prev_s_eval);
@@ -2817,8 +2832,7 @@ mod tests {
                 .expect("set_input prev_s_eval");
             exe.set_input(&ctx, 3 + j, &d_eqacc)
                 .expect("set_input eq_r_acc");
-            exe.set_input(&ctx, 4 + j, &d_seed)
-                .expect("set_input seed");
+            exe.set_input(&ctx, 4 + j, &d_seed).expect("set_input seed");
             ctx.stream.synchronize().expect("sync set_input");
 
             // Warmup (both to prime driver-side setup + to fault in
@@ -2958,8 +2972,6 @@ mod tests {
         use openvm_stark_backend::prover::fractional_sumcheck_gkr::FracSumcheckProof;
         use p3_util::log2_strict_usize;
 
-        use crypto_compiler::graph_serializer::SerializableGraphBuilder;
-
         use super::super::{
             frac_bench_utils::{cc_compiler, frac_log_ns},
             fractional::fractional_sumcheck_gpu,
@@ -2975,16 +2987,6 @@ mod tests {
         let device = DeviceType::Cuda(0);
         let log_ns: Vec<usize> = frac_log_ns("16,20,24");
         let nsys_enabled = std::env::var_os("NSYS_ENABLED").is_some();
-        // Optional artifact-dump root: writes `{ir,pipe}.n{n}.graph.bin`
-        // (post-fuse `SerializableGraphBuilder`) and
-        // `{ir,pipe}.n{n}.timings.json` (`GraphExe::collect_graph_info`)
-        // per case. Unset ⇒ no dumping (the timed pass is unaffected).
-        let dump_path: Option<std::path::PathBuf> = std::env::var_os("FULL_SWEEP_DUMP_PATH")
-            .map(std::path::PathBuf::from);
-        if let Some(dp) = dump_path.as_ref() {
-            std::fs::create_dir_all(dp).expect("create FULL_SWEEP_DUMP_PATH dir");
-            println!("[setup] dumping graphs + timings to {}", dp.display());
-        }
         use openvm_cuda_common::stream::device_synchronize;
 
         // Per-log_n state: three exes (eager reference proof lives on
@@ -3058,8 +3060,9 @@ mod tests {
             );
 
             // Persistent device snapshot for D2D resets in the timed loop.
-            let d_leaves_snapshot_bytes: DeviceBuffer<u8> =
-                frac_bytes(&leaves).to_device_on(&ctx).expect("H2D snapshot");
+            let d_leaves_snapshot_bytes: DeviceBuffer<u8> = frac_bytes(&leaves)
+                .to_device_on(&ctx)
+                .expect("H2D snapshot");
             device_synchronize().expect("sync snapshot");
 
             // ---- Default IR driver -----------------------------------
@@ -3087,23 +3090,7 @@ mod tests {
             let ir_n_nodes = g.nodes.len();
             let ir_build_ms = t_build.elapsed().as_secs_f64() * 1e3;
             let t_compile = Instant::now();
-            // Capture the post-fuse `SerializableGraphBuilder` via the
-            // hook — indices align 1:1 with `ir_exe.plan()` `ExeNode`s
-            // and with the `GraphInfo` produced by `collect_graph_info`
-            // below, so downstream tools can overlay per-node timings.
-            let ir_fused_cell: std::cell::RefCell<Option<SerializableGraphBuilder>> =
-                std::cell::RefCell::new(None);
-            let mut ir_exe: GraphExe = cc_compiler(device)
-                .compile_with_post_fuse_hook(g, |g_fused| {
-                    if dump_path.is_some() {
-                        *ir_fused_cell.borrow_mut() = Some(
-                            SerializableGraphBuilder::from_graph_builder(g_fused, &ctx)
-                                .expect("SerializableGraphBuilder::from_graph_builder(ir)"),
-                        );
-                    }
-                    Ok(())
-                })
-                .expect("compile ir");
+            let mut ir_exe: GraphExe = cc_compiler(device).compile(g).expect("compile ir");
             let ir_compile_ms = t_compile.elapsed().as_secs_f64() * 1e3;
             if let Some(v2) = ir_exe.fusion_report().and_then(|r| r.v2.as_ref()) {
                 println!(
@@ -3162,36 +3149,6 @@ mod tests {
             ir_exe.launch_graph(&ctx).expect("ir capture warmup launch");
             device_synchronize().expect("sync ir capture warmup");
             println!("[setup log_n={log_n} ir] capture {ir_capture_ms:>8.2} ms");
-            // Optional dump: serialize the post-fuse graph and collect
-            // per-node timings via `collect_graph_info` (reset layer
-            // before each internal iter so kernels see a clean input).
-            if let Some(dp) = dump_path.as_ref() {
-                let graph_bin = dp.join(format!("ir.n{}.graph.bin", n));
-                let ser = ir_fused_cell
-                    .borrow_mut()
-                    .take()
-                    .expect("post-fuse hook captured ir");
-                let bytes = bincode::serialize(&ser).expect("bincode serialize ir");
-                std::fs::write(&graph_bin, &bytes).expect("write ir graph.bin");
-                let d_snap = &d_leaves_snapshot_bytes;
-                let info = ir_exe
-                    .collect_graph_info(
-                        &ctx,
-                        |exe, ctx| exe.set_input(ctx, 0, d_snap),
-                        /* num_warmup */ 2,
-                        /* num_iters  */ 5,
-                    )
-                    .expect("collect_graph_info ir");
-                let json = serde_json::to_string_pretty(&info).expect("serialize GraphInfo ir");
-                let timings_path = dp.join(format!("ir.n{}.timings.json", n));
-                std::fs::write(&timings_path, json).expect("write ir timings.json");
-                println!(
-                    "[dump log_n={log_n} ir] graph.bin={} ({} bytes), timings.json={}",
-                    graph_bin.display(),
-                    bytes.len(),
-                    timings_path.display(),
-                );
-            }
 
             // ---- Pipelined driver ------------------------------------
             let t_build = Instant::now();
@@ -3216,19 +3173,7 @@ mod tests {
             let pipe_n_nodes = g.nodes.len();
             let pipe_build_ms = t_build.elapsed().as_secs_f64() * 1e3;
             let t_compile = Instant::now();
-            let pipe_fused_cell: std::cell::RefCell<Option<SerializableGraphBuilder>> =
-                std::cell::RefCell::new(None);
-            let mut pipe_exe: GraphExe = cc_compiler(device)
-                .compile_with_post_fuse_hook(g, |g_fused| {
-                    if dump_path.is_some() {
-                        *pipe_fused_cell.borrow_mut() = Some(
-                            SerializableGraphBuilder::from_graph_builder(g_fused, &ctx)
-                                .expect("SerializableGraphBuilder::from_graph_builder(pipe)"),
-                        );
-                    }
-                    Ok(())
-                })
-                .expect("compile pipe");
+            let mut pipe_exe: GraphExe = cc_compiler(device).compile(g).expect("compile pipe");
             let pipe_compile_ms = t_compile.elapsed().as_secs_f64() * 1e3;
             if let Some(v2) = pipe_exe.fusion_report().and_then(|r| r.v2.as_ref()) {
                 println!(
@@ -3240,7 +3185,11 @@ mod tests {
                 "[setup log_n={log_n} pipe] build {pipe_build_ms:>8.2} ms ({pipe_n_nodes} nodes); \
                  compile {pipe_compile_ms:>8.2} ms",
             );
-            assert_eq!(pipe_exe.num_inputs(), 2, "pipe_exe should have [layer, seed]");
+            assert_eq!(
+                pipe_exe.num_inputs(),
+                2,
+                "pipe_exe should have [layer, seed]"
+            );
             let seed_bytes: Vec<u8> = unsafe {
                 let one = EF::ONE;
                 std::slice::from_raw_parts(
@@ -3251,7 +3200,9 @@ mod tests {
             };
             let d_seed = seed_bytes.as_slice().to_device_on(&ctx).expect("H2D seed");
             // seed is read-only within the graph (const), set once.
-            pipe_exe.set_input(&ctx, 1, &d_seed).expect("set_input pipe seed");
+            pipe_exe
+                .set_input(&ctx, 1, &d_seed)
+                .expect("set_input pipe seed");
             device_synchronize().expect("sync pipe seed");
             for _ in 0..WARMUP {
                 pipe_exe
@@ -3288,36 +3239,11 @@ mod tests {
                 .set_input(&ctx, 0, &d_leaves_snapshot_bytes)
                 .expect("pipe capture warmup reset");
             device_synchronize().expect("sync pipe capture warmup reset");
-            pipe_exe.launch_graph(&ctx).expect("pipe capture warmup launch");
+            pipe_exe
+                .launch_graph(&ctx)
+                .expect("pipe capture warmup launch");
             device_synchronize().expect("sync pipe capture warmup");
             println!("[setup log_n={log_n} pipe] capture {pipe_capture_ms:>8.2} ms");
-            if let Some(dp) = dump_path.as_ref() {
-                let graph_bin = dp.join(format!("pipe.n{}.graph.bin", n));
-                let ser = pipe_fused_cell
-                    .borrow_mut()
-                    .take()
-                    .expect("post-fuse hook captured pipe");
-                let bytes = bincode::serialize(&ser).expect("bincode serialize pipe");
-                std::fs::write(&graph_bin, &bytes).expect("write pipe graph.bin");
-                let d_snap = &d_leaves_snapshot_bytes;
-                let info = pipe_exe
-                    .collect_graph_info(
-                        &ctx,
-                        |exe, ctx| exe.set_input(ctx, 0, d_snap),
-                        /* num_warmup */ 2,
-                        /* num_iters  */ 5,
-                    )
-                    .expect("collect_graph_info pipe");
-                let json = serde_json::to_string_pretty(&info).expect("serialize GraphInfo pipe");
-                let timings_path = dp.join(format!("pipe.n{}.timings.json", n));
-                std::fs::write(&timings_path, json).expect("write pipe timings.json");
-                println!(
-                    "[dump log_n={log_n} pipe] graph.bin={} ({} bytes), timings.json={}",
-                    graph_bin.display(),
-                    bytes.len(),
-                    timings_path.display(),
-                );
-            }
 
             cases.push(PerCase {
                 log_n,
@@ -3346,7 +3272,8 @@ mod tests {
         // Between iters we run a D2D reset (for IR + pipe) or a fresh H2D
         // clone (for eager) OUTSIDE the NVTX range, followed by
         // `cudaDeviceSynchronize` so the range starts cleanly.
-        let mut timings: Vec<(usize, Vec<f64>, Vec<f64>, Vec<f64>)> = Vec::with_capacity(cases.len());
+        let mut timings: Vec<(usize, Vec<f64>, Vec<f64>, Vec<f64>)> =
+            Vec::with_capacity(cases.len());
         if nsys_enabled {
             unsafe { cudaProfilerStart() };
         }
@@ -3507,8 +3434,14 @@ mod tests {
                 .expect("registered output BufId");
             ef_from_bytes(&exe.get_output(idx).to_host_on(ctx).expect("D2H"))
         };
-        let got_sum = (read_ef(proof.fractional_sum.0), read_ef(proof.fractional_sum.1));
-        assert_eq!(got_sum, eager_proof.fractional_sum, "[{label}] fractional_sum mismatch");
+        let got_sum = (
+            read_ef(proof.fractional_sum.0),
+            read_ef(proof.fractional_sum.1),
+        );
+        assert_eq!(
+            got_sum, eager_proof.fractional_sum,
+            "[{label}] fractional_sum mismatch"
+        );
         assert_eq!(
             proof.claims_per_layer.len(),
             eager_proof.claims_per_layer.len(),
@@ -3530,11 +3463,22 @@ mod tests {
         let got_polys: Vec<Vec<[EF; GKR_S_DEG]>> = proof
             .sumcheck_polys
             .iter()
-            .map(|rp| rp.iter().map(|s| std::array::from_fn(|k| read_ef(s[k]))).collect())
+            .map(|rp| {
+                rp.iter()
+                    .map(|s| std::array::from_fn(|k| read_ef(s[k])))
+                    .collect()
+            })
             .collect();
-        assert_eq!(got_polys, eager_proof.sumcheck_polys, "[{label}] sumcheck_polys mismatch");
+        assert_eq!(
+            got_polys, eager_proof.sumcheck_polys,
+            "[{label}] sumcheck_polys mismatch"
+        );
         let got_xi: Vec<EF> = proof.final_randomness.iter().map(|&b| read_ef(b)).collect();
-        assert_eq!(got_xi.as_slice(), eager_xi, "[{label}] final_randomness mismatch");
+        assert_eq!(
+            got_xi.as_slice(),
+            eager_xi,
+            "[{label}] final_randomness mismatch"
+        );
         println!(
             "[{label}] correctness OK ({} claim layers, {} sumcheck polys, {} final xi)",
             proof.claims_per_layer.len(),

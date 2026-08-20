@@ -695,7 +695,9 @@ mod tests {
             &atg,
             &BTreeMap::new(),
             DeviceType::Cuda(0),
-            &SchedulerMode::ListV1 { params: ListSchedulerV1::default() },
+            &SchedulerMode::ListV1 {
+                params: ListSchedulerV1::default(),
+            },
         )
         .expect("plan_v2");
         assert_eq!(plan.order(), vec![0, 1, 2]);

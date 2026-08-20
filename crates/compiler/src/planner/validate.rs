@@ -3,22 +3,18 @@
 //! Verifies that a plan is a legal schedule of an
 //! [`AbstractTimingGraph`]:
 //!
-//! * **Structural** — every node scheduled exactly once, stream and
-//!   event indices in range, exactly one recorded producer per event.
-//! * **Data-dependency ordering** — for every RAW edge `P → C` the
-//!   simulated finish time of `P` is `≤` the simulated start time of
-//!   `C` on `C`'s stream (missing / mis-placed `WaitOn`s show up
-//!   here because the simulator advances a stream's clock only when
-//!   it explicitly waits).
-//! * **Cross-stream sync existence** — for every cross-stream RAW
-//!   edge, some `WaitOn(C.stream, record_event[P])` instruction
-//!   appears in the flat instruction stream at a global position
+//! * **Structural** — every node scheduled exactly once, stream and event indices in range, exactly
+//!   one recorded producer per event.
+//! * **Data-dependency ordering** — for every RAW edge `P → C` the simulated finish time of `P` is
+//!   `≤` the simulated start time of `C` on `C`'s stream (missing / mis-placed `WaitOn`s show up
+//!   here because the simulator advances a stream's clock only when it explicitly waits).
+//! * **Cross-stream sync existence** — for every cross-stream RAW edge, some `WaitOn(C.stream,
+//!   record_event[P])` instruction appears in the flat instruction stream at a global position
 //!   strictly after `Node(P)` and strictly before `Node(C)`.
-//! * **Memory-pool safety** — no two buffers share pool bytes while
-//!   their simulated lifetimes overlap. Lifetime of a buf =
-//!   `[birth, death]` where `birth = producer's simulated start`
-//!   (or 0 for graph inputs) and `death = max simulated finish over
-//!   readers` (or `f64::INFINITY` for graph outputs).
+//! * **Memory-pool safety** — no two buffers share pool bytes while their simulated lifetimes
+//!   overlap. Lifetime of a buf = `[birth, death]` where `birth = producer's simulated start` (or 0
+//!   for graph inputs) and `death = max simulated finish over readers` (or `f64::INFINITY` for
+//!   graph outputs).
 //!
 //! The validator runs entirely on the plan + [`AbstractTimingGraph`]
 //! (no live GPU state / kernel launches), so it's safe to call from
@@ -178,10 +174,7 @@ impl std::fmt::Display for ValidationError {
 /// Validate `plan` against `atg`. Returns a (possibly empty) list of
 /// every distinct inconsistency found. Structural checks short-circuit
 /// the deeper simulation-based passes when the plan is malformed.
-pub fn validate_plan(
-    atg: &AbstractTimingGraph,
-    plan: &StreamMemoryPlan,
-) -> Vec<ValidationError> {
+pub fn validate_plan(atg: &AbstractTimingGraph, plan: &StreamMemoryPlan) -> Vec<ValidationError> {
     let mut errors = Vec::new();
     let n = atg.num_nodes;
     let m = plan.num_streams as usize;
@@ -471,8 +464,7 @@ pub fn validate_plan(
             // Life-time overlap = intervals [birth, death] intersect
             // with non-zero measure. Use a small epsilon to allow
             // exactly-touching intervals to count as disjoint.
-            let time_overlap =
-                birth[a].max(birth[b]) + 1e-9 < death[a].min(death[b]);
+            let time_overlap = birth[a].max(birth[b]) + 1e-9 < death[a].min(death[b]);
             if time_overlap {
                 errors.push(ValidationError::PoolLifetimeOverlap {
                     buf_a: BufId(a),

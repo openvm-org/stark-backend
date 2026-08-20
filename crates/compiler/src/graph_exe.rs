@@ -109,6 +109,7 @@ impl Drop for CapturedGraph {
 }
 
 use crate::{
+    graph_compiler_config::{ConfigError, FusionConfig, GraphCompilerConfig},
     graph_ir::{
         classify_buf_uses, for_each_unique_kernel, kernel_at, kernel_at_mut, BufId, BufInfo,
         ConstBuf, ConstNode, DeviceType, GraphBuilder, GraphNode, KernelNode,
@@ -313,6 +314,71 @@ impl GraphCompiler {
     pub fn without_fusion(mut self) -> Self {
         self.fusion = None;
         self
+    }
+
+    /// Builds a `GraphCompiler` from a serialized [`GraphCompilerConfig`].
+    /// Fields outside the TOML surface (symbol bindings, fusion-v2
+    /// estimator / artifact / graph_symbols) are left at their builder
+    /// defaults; callers that need them keep using the builder setters on
+    /// top of the returned compiler.
+    pub fn from_config(cfg: GraphCompilerConfig) -> Self {
+        let GraphCompilerConfig {
+            device,
+            module_compiler,
+            scheduler,
+            kernel_cache,
+            fusion,
+        } = cfg;
+
+        let mut compiler = Self::new()
+            .device(device.into())
+            .scheduler(scheduler.into());
+
+        // ModuleCompiler passthrough.
+        compiler = compiler
+            .arch(module_compiler.arch.clone())
+            .nvcc(module_compiler.nvcc.clone())
+            .verbosity(module_compiler.verbosity)
+            .check_accesses(module_compiler.check_accesses)
+            .nvcc_timeout(module_compiler.nvcc_timeout());
+        if let Some(dir) = module_compiler.dump_dir.clone() {
+            compiler = compiler.dump_dir(dir);
+        }
+        for flag in module_compiler.extra_nvcc_flags {
+            compiler = compiler.add_flag(flag);
+        }
+
+        // Kernel cache.
+        compiler = match kernel_cache.build() {
+            Some(cache) => compiler.kernel_cache(cache),
+            None => compiler.without_kernel_cache(),
+        };
+
+        // Fusion strategy.
+        compiler = match fusion {
+            FusionConfig::Off => compiler.without_fusion(),
+            FusionConfig::V1(v1) => compiler.fusion_options(v1.into()),
+            FusionConfig::V2(v2) => compiler.fusion_v2_options(v2.to_options()),
+        };
+
+        compiler
+    }
+
+    /// Reads a TOML config from `path` and builds a `GraphCompiler` via
+    /// [`Self::from_config`]. Missing fields fall back to
+    /// [`GraphCompilerConfig::default`].
+    pub fn from_toml(path: impl AsRef<std::path::Path>) -> Result<Self, ConfigError> {
+        let path = path.as_ref();
+        let text = std::fs::read_to_string(path).map_err(|source| ConfigError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        let cfg =
+            GraphCompilerConfig::from_toml_str(&text).map_err(|source| ConfigError::Parse {
+                path: path.to_path_buf(),
+                source,
+            })?;
+        Ok(Self::from_config(cfg))
     }
 
     // -----------------------------------------------------------------

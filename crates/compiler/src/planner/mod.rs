@@ -242,12 +242,11 @@ pub fn plan_raw(
 /// Build an [`AbstractTimingGraph`] view matching [`plan_raw`]'s
 /// `(bufs, nodes)` inputs, for [`SchedulerMode::ListV2`] dispatch.
 ///
-/// - **Inputs**: buffers with no writer in the current schedule
-///   (matches `GraphBuilder::input_bufs`).
-/// - **Outputs**: pinned buffers with at least one writer
-///   (`ctx.pinned` excluding inputs).
-/// - **Timings**: `node_times` verbatim when its length equals
-///   `nodes.len()`; else uniform `1.0` (first-compile bootstrapping).
+/// - **Inputs**: buffers with no writer in the current schedule (matches
+///   `GraphBuilder::input_bufs`).
+/// - **Outputs**: pinned buffers with at least one writer (`ctx.pinned` excluding inputs).
+/// - **Timings**: `node_times` verbatim when its length equals `nodes.len()`; else uniform `1.0`
+///   (first-compile bootstrapping).
 fn build_atg_for_plan_raw(
     bufs: &[BufInfo],
     nodes: &[NodeAccess],

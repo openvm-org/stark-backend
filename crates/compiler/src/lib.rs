@@ -29,6 +29,8 @@ pub use crypto_compiler_macros::kernel;
 pub mod dump;
 pub mod field_ext;
 #[cfg(feature = "planner")]
+pub mod graph_compiler_config;
+#[cfg(feature = "planner")]
 pub mod graph_exe;
 #[cfg(feature = "planner")]
 pub mod graph_info;
