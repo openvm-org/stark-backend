@@ -1524,6 +1524,191 @@ pub fn frac_claims_fold_ir_dsl(
 }
 
 // ---------------------------------------------------------------------------
+// M-build λ-split lerp: `m_total = m_zero + λ · (m_one − m_zero)`.
+//
+// The M-build kernel (`frac_precompute_m_build_dev_challenge_raw`) with
+// `inline_fold = true` is affine in `r_prev` (the round-0 challenge it
+// folds into the layer): `M(r) = M(0) + r · (M(1) − M(0))`. Emitting
+// the two challenge-free builds (`r_prev = 0`, `r_prev = 1`) lets the
+// scheduler overlap them with the transcript activity that produces the
+// actual `r_prev`; this lerp then combines them once `r_prev` is
+// sampled. See `fractional_sumcheck_gpu_ir_pipelined`.
+
+/// Build the DSL module for the M-build λ-split lerp at window size `w`.
+pub fn build_frac_m_lerp_module(w: usize) -> Module {
+    assert!(w >= 1, "m_lerp: w must be >= 1, got {w}");
+    let m_len = 1usize << (2 * w);
+    let mut b = IRBuilder::new();
+    let m_zero = b.input("m_zero", ScalarType::FpExt, vec![m_len]);
+    let m_one = b.input("m_one", ScalarType::FpExt, vec![m_len]);
+    let r = bind_challenge_as_fpext(&mut b, "r");
+    let body = b.compute(m_len, move |b, i| {
+        let z = b.index(m_zero, &[i]);
+        let o = b.index(m_one, &[i]);
+        let d = b.sub(o, z);
+        let ld = b.mul(r, d);
+        b.add(z, ld)
+    });
+    b.finish(format!("frac_m_lerp_dsl_w{w}"), body)
+}
+
+/// Insert the M-build λ-split lerp: `m_total = m_zero + r · (m_one − m_zero)`.
+/// All three EF-scaled inputs (`m_zero`, `m_one`, `m_total`) must be
+/// `1 << (2 * w)`-element `EF` buffers; `r` is a `[D_EF]`-shaped
+/// `BabyBear` challenge buffer.
+pub fn frac_m_lerp_ir_dsl(
+    g: &mut GraphBuilder,
+    m_zero: BufId,
+    m_one: BufId,
+    r: BufId,
+    m_total: BufId,
+    w: usize,
+) {
+    g.insert_kernel(
+        build_frac_m_lerp_module(w),
+        [m_zero, m_one, r],
+        [m_total],
+        &[],
+    );
+}
+
+// ---------------------------------------------------------------------------
+// M-build r-split quadratic combine.
+//
+// With `inline_fold = true` the M-build kernel folds `r_prev` into every
+// pq pair it reads: each folded value is affine in `r_prev`, and the
+// accumulated sums multiply two folded values, so `M(r_prev)` is a
+// degree-2 polynomial in `r_prev` (elementwise). Three challenge-free
+// builds at `r_prev ∈ {0, 1, 2}` therefore determine it exactly; these
+// modules interpolate at the sampled `r_prev` following
+// `openvm_stark_backend::poly_common::interpolate_quadratic_at_012`:
+//   s1 = M(1) − M(0), s2 = M(2) − M(1),
+//   p = (s2 − s1) / 2, q = s1 − p,
+//   M(r) = (p·r + q)·r + M(0).
+
+/// `1 / 2` in BabyBear canonical form (`(p + 1) / 2`).
+const INV2_CANONICAL: u32 = 1_006_632_961;
+
+/// Elementwise quadratic interpolation at nodes `{0, 1, 2}`; `inv2` must
+/// be a `const_fpext([INV2_CANONICAL, 0, 0, 0])` handle.
+fn interp_quad_012_at(
+    b: &mut IRBuilder,
+    x0: NodeId,
+    x1: NodeId,
+    x2: NodeId,
+    r: NodeId,
+    inv2: NodeId,
+) -> NodeId {
+    let s1 = b.sub(x1, x0);
+    let s2 = b.sub(x2, x1);
+    let d = b.sub(s2, s1);
+    let p = b.mul(d, inv2);
+    let q = b.sub(s1, p);
+    let pr = b.mul(p, r);
+    let prq = b.add(pr, q);
+    let prqr = b.mul(prq, r);
+    b.add(prqr, x0)
+}
+
+/// Build the DSL module for the M-build r-split combine at window size
+/// `w`: `m_total = interp_quad_012([m_r0, m_r1, m_r2], r)` elementwise.
+pub fn build_frac_m_lagrange3_module(w: usize) -> Module {
+    assert!(w >= 1, "m_lagrange3: w must be >= 1, got {w}");
+    let m_len = 1usize << (2 * w);
+    let mut b = IRBuilder::new();
+    let m_r0 = b.input("m_r0", ScalarType::FpExt, vec![m_len]);
+    let m_r1 = b.input("m_r1", ScalarType::FpExt, vec![m_len]);
+    let m_r2 = b.input("m_r2", ScalarType::FpExt, vec![m_len]);
+    let r = bind_challenge_as_fpext(&mut b, "r");
+    let inv2 = b.const_fpext([INV2_CANONICAL, 0, 0, 0]);
+    let body = b.compute(m_len, move |b, i| {
+        let x0 = b.index(m_r0, &[i]);
+        let x1 = b.index(m_r1, &[i]);
+        let x2 = b.index(m_r2, &[i]);
+        interp_quad_012_at(b, x0, x1, x2, r, inv2)
+    });
+    b.finish(format!("frac_m_lagrange3_dsl_w{w}"), body)
+}
+
+/// Insert the M-build r-split combine: `m_total[i]` is the quadratic
+/// through `(0, m_r0[i])`, `(1, m_r1[i])`, `(2, m_r2[i])` evaluated at
+/// `r`. All EF-valued buffers must be `1 << (2 * w)`-element `EF`
+/// buffers; `r` is a `[D_EF]`-shaped BabyBear challenge buffer.
+pub fn frac_m_lagrange3_ir_dsl(
+    g: &mut GraphBuilder,
+    m_r0: BufId,
+    m_r1: BufId,
+    m_r2: BufId,
+    r: BufId,
+    m_total: BufId,
+    w: usize,
+) {
+    g.insert_kernel(
+        build_frac_m_lagrange3_module(w),
+        [m_r0, m_r1, m_r2, r],
+        [m_total],
+        &[],
+    );
+}
+
+/// Build the DSL module for the fused λ×r combine at window size `w`.
+/// The inline-fold M-build output is affine in `lambda` and quadratic in
+/// `r_prev`, so six challenge-free builds at `(λ, r) ∈ {0,1} × {0,1,2}`
+/// determine it exactly:
+///   `M_λ(r)  = interp_quad_012([m_l{λ}_r0, m_l{λ}_r1, m_l{λ}_r2], r)`
+///   `m_total = M_0(r) + λ · (M_1(r) − M_0(r))`
+pub fn build_frac_m_lagrange3_lerp_module(w: usize) -> Module {
+    assert!(w >= 1, "m_lagrange3_lerp: w must be >= 1, got {w}");
+    let m_len = 1usize << (2 * w);
+    let mut b = IRBuilder::new();
+    let m_l0 = [
+        b.input("m_l0_r0", ScalarType::FpExt, vec![m_len]),
+        b.input("m_l0_r1", ScalarType::FpExt, vec![m_len]),
+        b.input("m_l0_r2", ScalarType::FpExt, vec![m_len]),
+    ];
+    let m_l1 = [
+        b.input("m_l1_r0", ScalarType::FpExt, vec![m_len]),
+        b.input("m_l1_r1", ScalarType::FpExt, vec![m_len]),
+        b.input("m_l1_r2", ScalarType::FpExt, vec![m_len]),
+    ];
+    let lambda = bind_challenge_as_fpext(&mut b, "lambda");
+    let r = bind_challenge_as_fpext(&mut b, "r");
+    let inv2 = b.const_fpext([INV2_CANONICAL, 0, 0, 0]);
+    let body = b.compute(m_len, move |b, i| {
+        let [x0, x1, x2] = m_l0.map(|m| b.index(m, &[i]));
+        let v0 = interp_quad_012_at(b, x0, x1, x2, r, inv2);
+        let [y0, y1, y2] = m_l1.map(|m| b.index(m, &[i]));
+        let v1 = interp_quad_012_at(b, y0, y1, y2, r, inv2);
+        let d = b.sub(v1, v0);
+        let ld = b.mul(lambda, d);
+        b.add(v0, ld)
+    });
+    b.finish(format!("frac_m_lagrange3_lerp_dsl_w{w}"), body)
+}
+
+/// Insert the fused λ×r combine of six challenge-free M builds.
+/// `m[li][ri]` holds the build at `lambda = li`, `r_prev = ri`; `lambda`
+/// and `r` are `[D_EF]`-shaped BabyBear challenge buffers; all M buffers
+/// are `1 << (2 * w)`-element `EF` buffers.
+pub fn frac_m_lagrange3_lerp_ir_dsl(
+    g: &mut GraphBuilder,
+    m: [[BufId; 3]; 2],
+    lambda: BufId,
+    r: BufId,
+    m_total: BufId,
+    w: usize,
+) {
+    g.insert_kernel(
+        build_frac_m_lagrange3_lerp_module(w),
+        [
+            m[0][0], m[0][1], m[0][2], m[1][0], m[1][1], m[1][2], lambda, r,
+        ],
+        [m_total],
+        &[],
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Tests.
 
 #[cfg(test)]
@@ -1608,9 +1793,12 @@ mod dsl_port_tests {
         for &b in bufs {
             g.register_output(b);
         }
-        let mut compiler = GraphCompiler::new()
-            .device(DeviceType::Cuda(0))
-            .scheduler(SchedulerMode::Heuristic);
+        let mut compiler =
+            GraphCompiler::new()
+                .device(DeviceType::Cuda(0))
+                .scheduler(SchedulerMode::ListV1 {
+                    params: crypto_compiler::planner::ListSchedulerV1::default(),
+                });
         // `FRAC_DSL_FUSION=v2` replays the whole suite through the
         // fusion-v2 pipeline (M12 bit-for-bit gate; enable
         // `crypto-compiler/planner-ortools` so extraction is CP-SAT-backed
@@ -2336,6 +2524,88 @@ mod dsl_port_tests {
                 &got[..],
                 frac_bytes(&want),
                 "frac_claims_fold_dsl mismatch at m={m}"
+            );
+        }
+    }
+
+    #[test]
+    fn frac_m_lagrange3_dsl_matches_host() {
+        let ctx = test_ctx();
+        let device = DeviceType::Cuda(0);
+        let mut rng = StdRng::seed_from_u64(0x1A63 ^ 0x2222);
+
+        // Host quadratic interpolation at nodes {0, 1, 2}, mirroring
+        // `interpolate_quadratic_at_012`.
+        use p3_field::Field;
+        let inv2 = (EF::ONE + EF::ONE).inverse();
+        let interp = |x0: EF, x1: EF, x2: EF, r: EF| {
+            let s1 = x1 - x0;
+            let s2 = x2 - x1;
+            let p = (s2 - s1) * inv2;
+            let q = s1 - p;
+            (p * r + q) * r + x0
+        };
+        let read_efs = |bytes: Vec<u8>| -> Vec<EF> {
+            bytes
+                .chunks_exact(size_of::<EF>())
+                .map(|c| unsafe { std::ptr::read_unaligned(c.as_ptr() as *const EF) })
+                .collect()
+        };
+
+        for w in [1usize, 2, 3] {
+            let m_len = 1usize << (2 * w);
+            let ms: Vec<Vec<EF>> = (0..6)
+                .map(|_| (0..m_len).map(|_| rng.random()).collect())
+                .collect();
+            let r: EF = rng.random();
+            let lambda: EF = rng.random();
+
+            // 3-input r-only combine.
+            let want_r: Vec<EF> = (0..m_len)
+                .map(|i| interp(ms[0][i], ms[1][i], ms[2][i], r))
+                .collect();
+            // 6-input fused λ×r combine.
+            let want_lr: Vec<EF> = (0..m_len)
+                .map(|i| {
+                    let v0 = interp(ms[0][i], ms[1][i], ms[2][i], r);
+                    let v1 = interp(ms[3][i], ms[4][i], ms[5][i], r);
+                    v0 + lambda * (v1 - v0)
+                })
+                .collect();
+
+            let mut g = GraphBuilder::new();
+            let m_bufs: Vec<BufId> = ms
+                .iter()
+                .enumerate()
+                .map(|(k, m)| ef_slice_const_buf(&mut g, &format!("m{k}"), m))
+                .collect();
+            let r_buf = ef_const_ext_scalar_buf(&mut g, device, "r", r);
+            let lambda_buf = ef_const_ext_scalar_buf(&mut g, device, "lambda", lambda);
+            let out_r = add_ef_buf(&mut g, device, "out_r", m_len);
+            frac_m_lagrange3_ir_dsl(&mut g, m_bufs[0], m_bufs[1], m_bufs[2], r_buf, out_r, w);
+            let out_lr = add_ef_buf(&mut g, device, "out_lr", m_len);
+            frac_m_lagrange3_lerp_ir_dsl(
+                &mut g,
+                [
+                    [m_bufs[0], m_bufs[1], m_bufs[2]],
+                    [m_bufs[3], m_bufs[4], m_bufs[5]],
+                ],
+                lambda_buf,
+                r_buf,
+                out_lr,
+                w,
+            );
+            let out_r_copy = add_ef_buf(&mut g, device, "out_r_copy", m_len);
+            g.insert_memcpy(out_r, out_r_copy);
+            let out_lr_copy = add_ef_buf(&mut g, device, "out_lr_copy", m_len);
+            g.insert_memcpy(out_lr, out_lr_copy);
+            let mut bufs = run_graph_read_bufs(g, &[out_r_copy, out_lr_copy], &ctx);
+            let got_lr = read_efs(bufs.remove(1));
+            let got_r = read_efs(bufs.remove(0));
+            assert_eq!(got_r, want_r, "frac_m_lagrange3_dsl mismatch at w={w}");
+            assert_eq!(
+                got_lr, want_lr,
+                "frac_m_lagrange3_lerp_dsl mismatch at w={w}"
             );
         }
     }

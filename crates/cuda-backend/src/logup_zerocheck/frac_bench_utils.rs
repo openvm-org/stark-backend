@@ -25,8 +25,14 @@
 //! - `CC_FUSION_OUTER_ITERS` — number of outer fusion iterations.
 //! - `CC_FUSION_HORIZONTAL=1` — re-enable horizontal fusion.
 //! - `CC_FUSION_SOLVER_WORKERS` — CP-SAT workers (default: all cores).
-//! - `CC_SCHEDULER` — `list_v1` (default) or `heuristic`.
-//! - `CC_STREAMS` — `ListSchedulerV1::max_concurrency` (default 4).
+//! - `CC_SCHEDULER` — `list_v1` (default) or `list_v2`. `list_v2` selects
+//!   `SchedulerMode::ListV2` with default beam params (num_beams=1,
+//!   beam_depth=1, frontier_cap=1 — pure-greedy) and `num_streams=CC_STREAMS`.
+//!   By default `plan_v2` routes through v1 for our carry-chain graphs
+//!   (v2's SSA assumption is violated by blackbox kernels with
+//!   `carried_outputs`); set `CC_LIST_V2_STRICT=1` to force the raw v2
+//!   beam solver instead.
+//! - `CC_STREAMS` — `ListSchedulerV1::max_concurrency` (default 8).
 //! - `CC_KERNEL_CACHE_MAX_ENTRIES` — max entries in the on-disk kernel cache (default 4096, larger
 //!   than the crate default so the v2 graph's ~hundreds of modules survive across bench runs).
 //! - `CC_KERNEL_CACHE_MAX_BYTES` — max total on-disk bytes (default 200 GiB, matching the v2
@@ -54,7 +60,7 @@ use crypto_compiler::{
     graph_serializer::SerializableGraphBuilder,
     kernel_cache::KernelCache,
     passes::fusion_v2::FusionOptionsV2,
-    planner::{ListSchedulerV1, SchedulerMode},
+    planner::{ListSchedulerV1, ListSchedulerV2, SchedulerMode},
 };
 use openvm_cuda_common::stream::GpuDeviceCtx;
 
@@ -177,21 +183,24 @@ fn cc_nvcc_timeout() -> Duration {
 }
 
 fn cc_scheduler_mode() -> SchedulerMode {
-    let mode = std::env::var("CC_SCHEDULER").unwrap_or_else(|_| "list_v1".into());
-    match mode.trim() {
-        "heuristic" => SchedulerMode::Heuristic,
-        _ => {
-            let max_conc: u32 = std::env::var("CC_STREAMS")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(4);
-            SchedulerMode::ListV1 {
-                params: ListSchedulerV1 {
-                    max_concurrency: max_conc,
-                    ..ListSchedulerV1::default()
-                },
-            }
-        }
+    let max_conc: u32 = std::env::var("CC_STREAMS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(8);
+    match std::env::var("CC_SCHEDULER").as_deref() {
+        Ok("list_v2") => SchedulerMode::ListV2 {
+            params: ListSchedulerV2 {
+                num_streams: max_conc as usize,
+                ..ListSchedulerV2::default()
+            },
+        },
+        // "list_v1" or unset — default profile-guided beam-search list scheduler.
+        _ => SchedulerMode::ListV1 {
+            params: ListSchedulerV1 {
+                max_concurrency: max_conc,
+                ..ListSchedulerV1::default()
+            },
+        },
     }
 }
 

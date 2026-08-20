@@ -663,7 +663,9 @@ mod tests {
 
         let mut exe = GraphCompiler::new()
             .device(device)
-            .scheduler(SchedulerMode::Heuristic)
+            .scheduler(SchedulerMode::ListV1 {
+                params: crypto_compiler::planner::ListSchedulerV1::default(),
+            })
             .compile(g)
             .expect("graph compile");
         // Copy the caller's leaves into the compiled graph's registered
@@ -962,7 +964,9 @@ mod tests {
         // fused-graph dump we just wrote (avoids running fusion twice).
         let exe = GraphCompiler::new()
             .device(device)
-            .scheduler(SchedulerMode::Heuristic)
+            .scheduler(SchedulerMode::ListV1 {
+                params: crypto_compiler::planner::ListSchedulerV1::default(),
+            })
             .without_fusion()
             .dump_dir(dir.clone())
             .compile(g_fused)
@@ -1495,8 +1499,12 @@ mod tests {
             .map(|s| s.trim().parse().expect("CC_STREAMS_SWEEP entry"))
             .collect();
 
-        let mut configs: Vec<(String, SchedulerMode)> =
-            vec![("heuristic".to_string(), SchedulerMode::Heuristic)];
+        let mut configs: Vec<(String, SchedulerMode)> = vec![(
+            "heuristic".to_string(),
+            SchedulerMode::ListV1 {
+                params: crypto_compiler::planner::ListSchedulerV1::default(),
+            },
+        )];
         for s in &stream_sweep {
             configs.push((
                 format!("listv1_s{s}"),

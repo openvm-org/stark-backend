@@ -174,11 +174,11 @@ fn blackbox_round_trip_with_existing() {
     exe.run(&ctx).unwrap();
 }
 
-/// `into_graph_builder` panics when the snapshot has blackboxes but the
-/// caller doesn't supply an `existing` builder.
+/// `into_graph_builder` without an `existing` builder reconstructs
+/// blackboxes with placeholder closures — usable for offline inspection
+/// (`print`, cytoscape export), panicking only if actually dispatched.
 #[test]
-#[should_panic(expected = "blackbox nodes")]
-fn into_graph_builder_panics_without_existing() {
+fn into_graph_builder_without_existing_installs_placeholders() {
     let ctx = GpuDeviceCtx::for_current_device().expect("GPU ctx");
     let bb_fn: KernelFn = Arc::new(|_ins: &[*mut ()], _outs: &[*mut ()], _s| {});
 
@@ -198,7 +198,18 @@ fn into_graph_builder_panics_without_existing() {
     let ser = SerializableGraphBuilder::from_graph_builder(&g, &ctx).unwrap();
     let bytes = bincode::serialize(&ser).unwrap();
     let ser2: SerializableGraphBuilder = bincode::deserialize(&bytes).unwrap();
-    let _ = ser2.into_graph_builder(None, &ctx);
+    assert!(ser2.has_blackboxes());
+    let restored = ser2.into_graph_builder(None, &ctx).unwrap();
+    let GraphNode::BlackboxKernel(k) = &restored.nodes[0] else {
+        panic!("expected blackbox at node 0");
+    };
+    assert_eq!(k.name, "bb");
+    let placeholder = k.func.clone();
+    let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        placeholder(&[], &[], std::ptr::null_mut());
+    }))
+    .is_err();
+    assert!(panicked, "placeholder closure must panic when dispatched");
 }
 
 /// `into_graph_builder` panics when the supplied `existing` builder has

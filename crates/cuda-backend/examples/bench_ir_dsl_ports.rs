@@ -183,7 +183,9 @@ fn bench_graph(
 ) -> Result<BenchStats, Box<dyn std::error::Error>> {
     let mut exe = GraphCompiler::new()
         .device(DeviceType::Cuda(0))
-        .scheduler(SchedulerMode::Heuristic)
+        .scheduler(SchedulerMode::ListV1 {
+            params: crypto_compiler::planner::ListSchedulerV1::default(),
+        })
         .compile(g)?;
 
     // Warmup.

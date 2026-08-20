@@ -82,6 +82,11 @@ pub mod fractional_ir;
 /// Structured `ir::Module` (DSL) ports of the fractional-GKR kernels.
 #[cfg(feature = "graph-ir")]
 pub mod fractional_ir_dsl;
+/// What-if timing-graph experiments for pipelining ideas in the
+/// fractional-sumcheck IR driver (dependency surgery over captured
+/// per-node timings — no real kernels are changed).
+#[cfg(all(test, feature = "graph-ir"))]
+pub mod fractional_ir_pipelined;
 /// Simplified DSL-first port of the fractional-GKR sumcheck prover
 /// (persistent per-layer tree, dense-only, fold-eval only, no reverts).
 #[cfg(feature = "graph-ir")]
