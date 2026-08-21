@@ -168,6 +168,32 @@ impl SpongeSnapshot {
             .to_vec()
         }
     }
+
+    /// The overlayed Poseidon2 state, borrowed in place.
+    ///
+    /// Prefer this over [`Self::state_bytes`] when the destination is a raw
+    /// H2D copy: `state().as_ptr()` is already the `WIDTH * 4` little-endian
+    /// Montgomery byte sequence a `[1, WIDTH]` BabyBear graph buffer expects,
+    /// so no intermediate `Vec` is needed.
+    pub fn state(&self) -> &[F; WIDTH] {
+        &self.state
+    }
+
+    /// Transcript position as `(absorb_idx, sample_idx)`, widened to `usize`.
+    ///
+    /// This is the pair a graph-IR transcript needs at *build* time — it
+    /// selects which kernel module each `observe` / `sample` emits — as
+    /// distinct from [`Self::state`], which is pure *run*-time data.
+    pub fn position(&self) -> (usize, usize) {
+        (self.absorb_idx as usize, self.sample_idx as usize)
+    }
+
+    /// Byte length of the state payload: `WIDTH * 4`.
+    ///
+    /// Handy for asserting against `GraphExe::input_size` at the bind site.
+    pub const fn state_size_bytes() -> usize {
+        std::mem::size_of::<[F; WIDTH]>()
+    }
 }
 
 /// GPU-accelerated duplex sponge that maintains state on both host and device.

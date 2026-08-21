@@ -52,11 +52,24 @@
 //! Seven of the seventeen entry points in this phase are *runtime
 //! interpreters* driven by arrays of `#[repr(C)]` context structs
 //! (`ZerocheckCtx`, `LogupCtx`, `MonomialAirCtx`, …) that embed raw device
-//! pointers assembled host-side (`batch_mle.rs:158-201`,
-//! `batch_mle_monomial.rs:176-192`). Here those arrays are ordinary graph
-//! buffers: the caller stages their bytes with `insert_const`, and the
-//! blackbox closure reconstructs a borrowed `DeviceBuffer` view over them.
-//! See the `TODO(cc-ir)` on [`ZerocheckEvalBufs`] for what that costs.
+//! pointers. The eager path assembles those structs on the host and uploads
+//! them (`batch_mle.rs:158-201`, `batch_mle_monomial.rs:176-192`), which
+//! hides every embedded pointer from the planner — a struct of host-baked
+//! addresses is an opaque leaf and alias analysis through it is impossible.
+//!
+//! `ZerocheckCtx` and `LogupCtx` (and the `MainMatrixPtrs<EF>` descriptor
+//! array they point at) are instead built **on the device**, one element per
+//! node, by [`materialize_zerocheck_ctx_ir`] / [`materialize_logup_ctx_ir`] /
+//! [`materialize_main_matrix_ptr_ir`]. Each pointer field is a
+//! [`DevicePtrArg::Graph`] whose `BufId` is bound as a node input and
+//! resolved at invocation time, so it stays a real graph edge; only
+//! host-known scalars are captured by value.
+//!
+//! Still host-assembled, and therefore still opaque: the three *monomial* ctx
+//! structs (`MonomialAirCtx`, `LogupMonomialCommonCtx`, `LogupMonomialCtx`),
+//! the round-0 `*const F` main-pointer table, and the stage-D
+//! `interpolate_columns` column-pointer table. Each is the same shape of hole
+//! and the same shape of fix.
 
 use std::mem::{forget, size_of};
 
@@ -72,13 +85,16 @@ use super::fractional_ir::{add_ef_buf, ef_const_ext_scalar_buf};
 use crate::{
     cuda::{
         logup_zerocheck::{
-            fold_ple_from_evals, fold_selectors_round0, interpolate_columns_gpu,
-            logup_bary_eval_interactions_round0, logup_batch_eval_mle, logup_monomial_batched,
+            _logup_batch_mle_intermediates_buffer_size,
+            _zerocheck_batch_mle_intermediates_buffer_size, fold_ple_from_evals,
+            fold_selectors_round0, interpolate_columns_gpu, logup_bary_eval_interactions_round0,
+            logup_batch_eval_mle, logup_monomial_batched, materialize_logup_ctx_raw,
+            materialize_main_matrix_ptr_raw, materialize_zerocheck_ctx_raw,
             precompute_lambda_combinations, precompute_logup_denom_combinations,
             precompute_logup_numer_combinations, zerocheck_batch_eval_mle,
             zerocheck_monomial_batched, zerocheck_monomial_par_y_batched,
             zerocheck_ntt_eval_constraints, BlockCtx, LogupCtx, LogupMonomialCommonCtx,
-            LogupMonomialCtx, MonomialAirCtx, ZerocheckCtx,
+            LogupMonomialCtx, MainMatrixPtrs, MonomialAirCtx, ZerocheckCtx,
         },
         poly::eq_hypercube_interleaved_stage_ext,
         sumcheck::batch_fold_mle,
@@ -367,16 +383,39 @@ pub struct Round0ZcBufs {
 }
 
 /// Insert the round-0 constraint evaluator (`round0.rs:127` ← `mod.rs:841`).
-// TODO(cc-ir): this entry point launches TWO CUDA kernels (the per-coset
-//   NTT evaluator and `sumcheck::final_reduce_block_sums`), so one node here
-//   violates Principle 1 ("one kernel per blackbox").
-// WHY: splitting it means `.cu` surgery to expose the reduce tail as its own
-//   `extern "C"` symbol. B3 §4 counts eight more entry points sharing that
-//   same tail, so it is one shared split, not nine — but it is not a
-//   today-sized change.
-// RISK: the planner cannot schedule across the internal kernel boundary or
-//   fuse the reduce with a neighbour. Correctness is unaffected: the two
-//   launches are already stream-ordered inside the launcher.
+///
+/// # Principle-1 exception: multi-launch compatibility node (T4)
+///
+/// `_zerocheck_ntt_eval_constraints` enqueues **two** kernels (the per-coset
+/// NTT evaluator and `sumcheck::final_reduce_block_sums`,
+/// `zerocheck_round0.cu:525-594, 600-669`), so one blackbox over it is not
+/// the guide's literal "one CUDA launch per blackbox".
+///
+/// This is the same precedent-backed exception documented on
+/// [`ZerocheckEvalBufs`]: the IR author ships exactly this shape in
+/// `frac_compute_round_dev_challenge` (`fractional_ir.rs:1927-1946`,
+/// `gkr.cu:1429-1445, 1466-1480`, commit `b566fed5`). It is safe **because
+/// the node below declares the complete access set across both launches** —
+/// every input the evaluator reads, `intermediates` as a written input, and
+/// `tmp_sums` (written by the main kernel, read by the reducer) plus `out`
+/// (written by the reducer) as outputs.
+///
+/// The split that removes the exception is scoped in
+/// `todo-solutions/T4-principle1-splits.md`
+/// (`_zerocheck_ntt_eval_constraints_main` +
+/// `_logup_zerocheck_final_reduce_block_sums`, with this symbol kept as a
+/// two-line compatibility composition).
+// TODO(cc-ir,T5): `main_ptrs` is a `*const F` pointer table assembled on the
+//   host (`mod.rs:826-832`), the round-0 analogue of the ctx hole T5 closed
+//   for stage D.
+// WHY: T5 scoped device materializers for `MainMatrixPtrs<EF>` /
+//   `ZerocheckCtx` / `LogupCtx`; the round-0 table is a bare `*const F[]`
+//   with a different ABI and was not in scope.
+// RISK: the planner cannot see through the table to the matrices it points
+//   at, so the individual `mats` buffers must be bound explicitly by the
+//   caller (as `interpolate_columns_ir` does) or the ordering is unstated.
+//   The fix is a `_materialize_main_ptr_f` twin of
+//   `_materialize_main_matrix_ptr`.
 pub fn zerocheck_ntt_eval_constraints_ir(
     g: &mut GraphBuilder,
     bufs: Round0ZcBufs,
@@ -508,15 +547,23 @@ pub struct Round0LogupBufs {
 }
 
 /// Insert the round-0 interaction evaluator (`round0.rs:282` ← `mod.rs:896`).
+///
+/// # Principle-1 exception: multi-launch compatibility node (T4)
+///
+/// `_logup_bary_eval_interactions_round0` enqueues two kernels (main +
+/// `final_reduce_block_sums`, `logup_round0.cu:519-586, 593-660`). Same named
+/// exception, same precedent, same condition as
+/// [`zerocheck_ntt_eval_constraints_ir`]: the node declares the complete
+/// read/write union across both launches.
 // TODO(cc-ir): `denom_sum_init: EF` is a challenge-derived scalar captured by
-//   value, and this entry point also launches two kernels (see
-//   `zerocheck_ntt_eval_constraints_ir`).
+//   value.
 // WHY: no `_dev_challenge` sibling exists for `_logup_bary_eval_interactions_round0`
 //   (`cuda/logup_zerocheck.rs:476`); adding one is the `template <bool DEV_CH>`
 //   pattern the author used six times in `gkr.cu` at `b566fed5`.
-// RISK: same as above — blocks a device-resident challenge chain, not
-//   correctness. `alpha_logup`/`beta_logup` are host values in the eager
-//   path too.
+// RISK: blocks a device-resident challenge chain, not correctness.
+//   `alpha_logup`/`beta_logup` are host values in the eager path too. The
+//   host-assembled `main_ptrs` table carries the same T5-shaped hole noted on
+//   [`zerocheck_ntt_eval_constraints_ir`].
 pub fn logup_bary_eval_interactions_round0_ir(
     g: &mut GraphBuilder,
     bufs: Round0LogupBufs,
@@ -704,7 +751,11 @@ pub fn fold_selectors_round0_ir(
 /// Insert an `interpolate_columns` node (`mod.rs:1207`).
 ///
 /// `columns` is a device table of `*const EF` column pointers assembled
-/// host-side (`mod.rs:1189-1199`); see the [`ZerocheckEvalBufs`] TODO.
+/// host-side (`mod.rs:1189-1199`) — the last unclosed instance of the ctx
+/// pointer hole T5 closed for `ZerocheckCtx` / `LogupCtx`. The node
+/// therefore binds `srcs` (the buffers the table points at) explicitly, so
+/// the ordering is declared even though the planner cannot see through the
+/// table itself.
 #[allow(clippy::too_many_arguments)]
 pub fn interpolate_columns_ir(
     g: &mut GraphBuilder,
@@ -738,6 +789,334 @@ pub fn interpolate_columns_ir(
     );
 }
 
+// ===========================================================================
+// Device-side ctx materialization (T5).
+// ===========================================================================
+//
+// The eager path assembles `MainMatrixPtrs<EF>` / `ZerocheckCtx` / `LogupCtx`
+// on the host and uploads them (`batch_mle.rs:158-201`,
+// `batch_mle_monomial.rs:176-192`). Every device pointer inside those structs
+// is then a *host-baked address*: the planner sees an opaque leaf and cannot
+// alias-analyse through it to the buffers the evaluator will dereference.
+//
+// The materializers below write one element of a ctx array on the device from
+// explicitly-typed launcher arguments. Each pointer argument is either a
+// [`DevicePtrArg::Graph`] — a `BufId` bound as a node input and resolved to
+// its pool address at invocation time — or a [`DevicePtrArg::Static`] address
+// the graph does not own (keygen-static proving-key tables, or null). Only
+// host-known scalars are captured by value. That is what puts every device
+// pointer back on a real graph edge.
+//
+// The CUDA side is `cuda/src/logup_zerocheck/batch_mle.cu`
+// ("CTX MATERIALIZERS"); it zeroes the destination element first, so ABI
+// padding is deterministic across replays, then assigns field by field.
+
+/// One device-pointer field of a batched ctx struct.
+#[derive(Clone, Copy, Debug)]
+pub enum DevicePtrArg {
+    /// A graph-owned buffer, plus a byte offset applied to the *resolved*
+    /// pointer inside the closure (never baked at build time).
+    Graph { buf: BufId, byte_offset: usize },
+    /// A raw address the graph does not own.
+    ///
+    /// Used for the null pointer (`Static(0)`) and for keygen-static
+    /// proving-key tables. Captured as `usize` because a blackbox closure
+    /// must be `Send + Sync + 'static`.
+    // TODO(cc-ir,T5): a `Static` proving-key address is only valid while that
+    //   exact `DeviceMultiStarkProvingKey` lives (its `DeviceBuffer`s free on
+    //   drop, `pkey.rs:268-334`).
+    // WHY: the rule tables are not graph inputs today, and copying them into
+    //   graph-owned buffers would duplicate multi-MB keygen data per graph.
+    // RISK: a `GraphExe` cached beyond the borrowed pk's lifetime (e.g. a
+    //   process-global graph cache) would replay dangling pointers. Keep the
+    //   compiled graph below the pk's lifetime until the tables become graph
+    //   inputs or the cache takes an owning pk handle.
+    Static(usize),
+}
+
+impl DevicePtrArg {
+    /// The null pointer — the eager path's "absent" encoding for
+    /// `d_preprocessed.data` and for `d_intermediates` when `buffer_size == 0`.
+    pub const NULL: Self = DevicePtrArg::Static(0);
+
+    /// A whole graph buffer.
+    pub fn buf(buf: BufId) -> Self {
+        DevicePtrArg::Graph {
+            buf,
+            byte_offset: 0,
+        }
+    }
+
+    /// A graph buffer offset by `byte_offset` bytes.
+    pub fn at(buf: BufId, byte_offset: usize) -> Self {
+        DevicePtrArg::Graph { buf, byte_offset }
+    }
+}
+
+/// How one declared [`DevicePtrArg`] is recovered inside a blackbox closure.
+#[derive(Clone, Copy, Debug)]
+enum PtrSlot {
+    /// `inputs[idx] + byte_offset`.
+    Input { idx: usize, byte_offset: usize },
+    /// A raw address captured by value.
+    Static(usize),
+}
+
+/// Build-time half: collects a materializer node's graph inputs and remembers
+/// where each declared pointer argument ended up.
+struct PtrBinder {
+    inputs: Vec<BufId>,
+    slots: Vec<PtrSlot>,
+}
+
+impl PtrBinder {
+    /// `out` is bound as input 0 with `modifies = true` (the node's only
+    /// write), so graph pointer arguments start at input index 1.
+    fn new(out: BufId) -> Self {
+        Self {
+            inputs: vec![out],
+            slots: Vec::new(),
+        }
+    }
+
+    fn push(&mut self, arg: DevicePtrArg) {
+        let slot = match arg {
+            DevicePtrArg::Static(addr) => PtrSlot::Static(addr),
+            DevicePtrArg::Graph { buf, byte_offset } => {
+                // Dedupe: one buffer may back several fields.
+                let idx = self
+                    .inputs
+                    .iter()
+                    .position(|&b| b == buf)
+                    .unwrap_or_else(|| {
+                        self.inputs.push(buf);
+                        self.inputs.len() - 1
+                    });
+                PtrSlot::Input { idx, byte_offset }
+            }
+        };
+        self.slots.push(slot);
+    }
+
+    fn push_all(&mut self, args: impl IntoIterator<Item = DevicePtrArg>) {
+        for a in args {
+            self.push(a);
+        }
+    }
+
+    fn finish(self) -> (Vec<BufId>, Vec<bool>, PtrResolver) {
+        let mut modifies = vec![false; self.inputs.len()];
+        modifies[0] = true;
+        (self.inputs, modifies, PtrResolver { slots: self.slots })
+    }
+}
+
+/// Invocation-time half of [`PtrBinder`].
+#[derive(Clone, Debug)]
+struct PtrResolver {
+    slots: Vec<PtrSlot>,
+}
+
+impl PtrResolver {
+    /// Resolve the `k`-th declared pointer argument against the pointers the
+    /// graph runner handed the closure.
+    ///
+    /// # Safety
+    /// `inputs` must be the slice the graph runner passed to the closure.
+    unsafe fn ptr(&self, k: usize, inputs: &[*mut ()]) -> *mut u8 {
+        match self.slots[k] {
+            PtrSlot::Static(addr) => addr as *mut u8,
+            PtrSlot::Input { idx, byte_offset } => (inputs[idx] as *mut u8).add(byte_offset),
+        }
+    }
+}
+
+/// The five logical components of `EvalCoreCtx` (`cuda/logup_zerocheck.rs:39`).
+#[derive(Clone, Copy, Debug)]
+pub struct EvalCoreCtxArgs {
+    pub d_selectors: DevicePtrArg,
+    /// `d_preprocessed.data`; [`DevicePtrArg::NULL`] when the AIR has none.
+    pub d_preprocessed_data: DevicePtrArg,
+    /// `d_preprocessed.air_width`; `0` when the AIR has no preprocessed data.
+    pub preprocessed_air_width: u32,
+    /// The materialized `MainMatrixPtrs<EF>` descriptor array.
+    pub d_main: DevicePtrArg,
+    pub d_public: DevicePtrArg,
+}
+
+/// Every field of `ZerocheckCtx` (`cuda/logup_zerocheck.rs:47`).
+#[derive(Clone, Copy, Debug)]
+pub struct ZerocheckCtxArgs {
+    pub eval_ctx: EvalCoreCtxArgs,
+    /// [`DevicePtrArg::NULL`] when `buffer_size == 0`, matching the eager
+    /// branch at `batch_mle.rs:164-176`.
+    pub d_intermediates: DevicePtrArg,
+    pub num_y: u32,
+    pub d_eq_xi: DevicePtrArg,
+    pub d_rules: DevicePtrArg,
+    pub rules_len: usize,
+    pub d_used_nodes: DevicePtrArg,
+    pub used_nodes_len: usize,
+    pub buffer_size: u32,
+}
+
+/// Every field of `LogupCtx` (`cuda/logup_zerocheck.rs:62`).
+#[derive(Clone, Copy, Debug)]
+pub struct LogupCtxArgs {
+    pub eval_ctx: EvalCoreCtxArgs,
+    /// [`DevicePtrArg::NULL`] when `buffer_size == 0`
+    /// (`batch_mle.rs:303-315`).
+    pub d_intermediates: DevicePtrArg,
+    pub num_y: u32,
+    pub d_eq_xi: DevicePtrArg,
+    pub d_challenges: DevicePtrArg,
+    pub d_eq_3bs: DevicePtrArg,
+    pub d_rules: DevicePtrArg,
+    pub rules_len: usize,
+    pub d_used_nodes: DevicePtrArg,
+    pub d_pair_idxs: DevicePtrArg,
+    pub used_nodes_len: usize,
+    pub buffer_size: u32,
+}
+
+/// Insert a `materialize_main_matrix_ptr` node: writes `out[idx]` of a
+/// `MainMatrixPtrs<EF>` descriptor array.
+///
+/// Mirrors the host-side `MainMatrixPtrs` construction the eager path does
+/// per trace (`mod.rs:1131-1149, 1224-1256`).
+pub fn materialize_main_matrix_ptr_ir(
+    g: &mut GraphBuilder,
+    out: BufId,
+    idx: u32,
+    data: DevicePtrArg,
+    air_width: u32,
+) {
+    let mut b = PtrBinder::new(out);
+    b.push(data);
+    let (inputs, modifies, ptrs) = b.finish();
+    g.insert_blackbox_kernel(
+        "materialize_main_matrix_ptr",
+        inputs.into_iter(),
+        std::iter::empty(),
+        modifies.into_iter(),
+        move |inputs, _outputs, stream| unsafe {
+            materialize_main_matrix_ptr_raw(
+                inputs[0] as *mut MainMatrixPtrs<EF>,
+                idx,
+                ptrs.ptr(0, inputs) as *const EF,
+                air_width,
+                stream,
+            )
+            .expect("materialize_main_matrix_ptr");
+        },
+    );
+}
+
+/// Insert a `materialize_zerocheck_ctx` node: writes `out[idx]` of a
+/// `ZerocheckCtx` array.
+///
+/// Mirrors `ZerocheckMleBatchBuilder::new`'s per-trace struct
+/// (`batch_mle.rs:158-201`) field for field.
+pub fn materialize_zerocheck_ctx_ir(
+    g: &mut GraphBuilder,
+    out: BufId,
+    idx: u32,
+    args: ZerocheckCtxArgs,
+) {
+    let mut b = PtrBinder::new(out);
+    b.push_all([
+        args.eval_ctx.d_selectors,
+        args.eval_ctx.d_preprocessed_data,
+        args.eval_ctx.d_main,
+        args.eval_ctx.d_public,
+        args.d_intermediates,
+        args.d_eq_xi,
+        args.d_rules,
+        args.d_used_nodes,
+    ]);
+    let (inputs, modifies, ptrs) = b.finish();
+    g.insert_blackbox_kernel(
+        "materialize_zerocheck_ctx",
+        inputs.into_iter(),
+        std::iter::empty(),
+        modifies.into_iter(),
+        move |inputs, _outputs, stream| unsafe {
+            materialize_zerocheck_ctx_raw(
+                inputs[0] as *mut ZerocheckCtx,
+                idx,
+                ptrs.ptr(0, inputs) as *const EF,
+                ptrs.ptr(1, inputs) as *const EF,
+                args.eval_ctx.preprocessed_air_width,
+                ptrs.ptr(2, inputs) as *const MainMatrixPtrs<EF>,
+                ptrs.ptr(3, inputs) as *const F,
+                ptrs.ptr(4, inputs) as *mut EF,
+                args.num_y,
+                ptrs.ptr(5, inputs) as *const EF,
+                ptrs.ptr(6, inputs) as *const std::ffi::c_void,
+                args.rules_len,
+                ptrs.ptr(7, inputs) as *const usize,
+                args.used_nodes_len,
+                args.buffer_size,
+                stream,
+            )
+            .expect("materialize_zerocheck_ctx");
+        },
+    );
+}
+
+/// Insert a `materialize_logup_ctx` node: writes `out[idx]` of a `LogupCtx`
+/// array.
+///
+/// Mirrors `LogupMleBatchBuilder::new`'s per-trace struct
+/// (`batch_mle.rs:297-353`) field for field.
+pub fn materialize_logup_ctx_ir(g: &mut GraphBuilder, out: BufId, idx: u32, args: LogupCtxArgs) {
+    let mut b = PtrBinder::new(out);
+    b.push_all([
+        args.eval_ctx.d_selectors,
+        args.eval_ctx.d_preprocessed_data,
+        args.eval_ctx.d_main,
+        args.eval_ctx.d_public,
+        args.d_intermediates,
+        args.d_eq_xi,
+        args.d_challenges,
+        args.d_eq_3bs,
+        args.d_rules,
+        args.d_used_nodes,
+        args.d_pair_idxs,
+    ]);
+    let (inputs, modifies, ptrs) = b.finish();
+    g.insert_blackbox_kernel(
+        "materialize_logup_ctx",
+        inputs.into_iter(),
+        std::iter::empty(),
+        modifies.into_iter(),
+        move |inputs, _outputs, stream| unsafe {
+            materialize_logup_ctx_raw(
+                inputs[0] as *mut LogupCtx,
+                idx,
+                ptrs.ptr(0, inputs) as *const EF,
+                ptrs.ptr(1, inputs) as *const EF,
+                args.eval_ctx.preprocessed_air_width,
+                ptrs.ptr(2, inputs) as *const MainMatrixPtrs<EF>,
+                ptrs.ptr(3, inputs) as *const F,
+                ptrs.ptr(4, inputs) as *mut EF,
+                args.num_y,
+                ptrs.ptr(5, inputs) as *const EF,
+                ptrs.ptr(6, inputs) as *const EF,
+                ptrs.ptr(7, inputs) as *const EF,
+                ptrs.ptr(8, inputs) as *const std::ffi::c_void,
+                args.rules_len,
+                ptrs.ptr(9, inputs) as *const usize,
+                ptrs.ptr(10, inputs) as *const u32,
+                args.used_nodes_len,
+                args.buffer_size,
+                stream,
+            )
+            .expect("materialize_logup_ctx");
+        },
+    );
+}
+
 /// Launch geometry shared by every batched MLE evaluator in stage D.
 #[derive(Clone, Copy, Debug)]
 pub struct BatchEvalShape {
@@ -753,53 +1132,128 @@ pub struct BatchEvalShape {
     pub chunk_size: u32,
 }
 
-/// The ctx-array buffers a batched evaluator reads.
-// TODO(cc-ir): these arrays are `#[repr(C)]` structs that *embed raw device
-//   pointers* into the trace / rule / eq buffers, assembled on the host
-//   (`batch_mle.rs:158-201`, `batch_mle_monomial.rs:176-192`).
-// WHY: reproducing them from `BufId`s would need the graph runtime's final
-//   addresses, which are not known until after planning; the eager builders
-//   are the only thing that can fill them today. The caller therefore stages
-//   the bytes with `insert_const`.
-// RISK: this is the port's real hole. The planner sees the ctx array as an
-//   opaque leaf and cannot alias-analyze through it to the buffers it points
-//   at, so (a) it may reorder a node that writes a pointed-to buffer against
-//   a node that reads it through the ctx, and (b) those pointed-to buffers
-//   must be pinned outside the graph for the whole run. Nothing here is
-//   safe to reorder until the ctx arrays are built by a device-side
-//   pointer-fixup kernel (or the launchers take positional buffers).
-#[derive(Clone, Copy, Debug)]
+/// The buffers one batched evaluator touches.
+///
+/// # Principle-1 exception: multi-launch compatibility node (T4)
+///
+/// Each of these evaluators is **one blackbox node over a `.cu` entry point
+/// that enqueues two kernels** (the main evaluator plus
+/// `batched_final_reduce_block_sums`), so it violates the porting guide's
+/// literal "one CUDA launch per blackbox" rule
+/// (`crates/compiler/gpu_ir_porting_guide.md:32-56`).
+///
+/// This is a *named, precedent-backed* exception, not an oversight: the IR
+/// author ships exactly this shape himself — `frac_compute_round_dev_challenge`
+/// is one blackbox over a launcher that enqueues its main kernel *and* its
+/// final reduction (`fractional_ir.rs:1927-1946`, `gkr.cu:1429-1445,
+/// 1466-1480`, both added in `b566fed5`).
+///
+/// What the exception costs is only planner visibility *at the hidden seam*:
+/// no node can be scheduled between main and reduce, and the temporary's
+/// logical lifetime cannot be shortened. Fusion is unaffected (both fusion
+/// passes only admit structured `Kernel` nodes), CUDA-graph capture is
+/// unaffected (capture wraps the whole `GraphExe::run`, so every launch the
+/// closure issues on the supplied stream is captured), and **scheduling
+/// correctness is unaffected provided the node declares the complete
+/// read/write union** — an under-declared access set is a real correctness
+/// bug, because the planner derives edges only from declared accesses
+/// (`crates/compiler/src/planner/ctx.rs:215-294`).
+///
+/// So the access set here is the union across *both* launches, including
+/// everything reached only by dereferencing the ctx array. The follow-up that
+/// removes the exception is the launcher split in
+/// `todo-solutions/T4-principle1-splits.md` (ten main-only entries plus two
+/// shared reducer entries, old symbols kept as compatibility compositions).
+#[derive(Clone, Debug)]
 pub struct ZerocheckEvalBufs {
+    /// Written by the main kernel, read by the reducer.
     pub tmp_sums: BufId,
+    /// Written by the reducer.
     pub out: BufId,
     pub block_ctxs: BufId,
+    /// The `ZerocheckCtx` / `LogupCtx` / `MonomialAirCtx` array, built on the
+    /// device by the T5 materializers.
     pub air_ctxs: BufId,
+    /// Read by the reducer only.
     pub air_block_offsets: BufId,
     /// `lambda_pows`; unused by the monomial evaluators.
     pub lambda_pows: Option<BufId>,
+    /// Principle-1 access set: every buffer the kernels **read** that is
+    /// reachable only by dereferencing `air_ctxs` — selectors, folded main /
+    /// preprocessed matrices, the `MainMatrixPtrs` descriptor array, public
+    /// values, `eq_xi`, the rule / used-node / pair-index streams, logup
+    /// challenges and `eq_3bs`.
+    pub ctx_reads: Vec<BufId>,
+    /// Principle-1 access set: per-AIR `d_intermediates` scratch, **written**
+    /// through the ctx by the DAG interpreter (`batch_mle.cu:186`). Bound
+    /// with `modifies = true`.
+    pub intermediates: Vec<BufId>,
+}
+
+/// Assemble a node's `(inputs, modifies)` from a fixed positional prefix (the
+/// buffers the closure indexes by hand), a written set, and a read set.
+///
+/// Later duplicates are folded into the first binding; a buffer that is both
+/// read and written ends up with `modifies = true`.
+fn eval_node_bindings(
+    fixed: &[BufId],
+    written: &[BufId],
+    read: &[BufId],
+) -> (Vec<BufId>, Vec<bool>) {
+    let mut inputs: Vec<BufId> = Vec::with_capacity(fixed.len() + written.len() + read.len());
+    let mut modifies: Vec<bool> = Vec::with_capacity(inputs.capacity());
+    for &b in fixed {
+        inputs.push(b);
+        modifies.push(false);
+    }
+    for &b in written {
+        match inputs.iter().position(|&x| x == b) {
+            Some(i) => modifies[i] = true,
+            None => {
+                inputs.push(b);
+                modifies.push(true);
+            }
+        }
+    }
+    for &b in read {
+        if !inputs.contains(&b) {
+            inputs.push(b);
+            modifies.push(false);
+        }
+    }
+    (inputs, modifies)
 }
 
 /// Insert a `zerocheck_batch_eval_mle` node (`batch_mle.rs:696`) — the
 /// multi-AIR DAG-interpreter constraint evaluator.
 pub fn zerocheck_batch_eval_mle_ir(
     g: &mut GraphBuilder,
-    bufs: ZerocheckEvalBufs,
+    bufs: &ZerocheckEvalBufs,
     shape: BatchEvalShape,
 ) {
     let lambda_pows = bufs
         .lambda_pows
         .expect("zerocheck DAG eval needs lambda_pows");
-    g.insert_blackbox_kernel(
-        "zerocheck_batch_eval_mle",
-        [
+    // Principle-1 exception (see [`ZerocheckEvalBufs`]): two launches behind
+    // one node, so the access set is the union across both.
+    //   main   reads  block_ctxs, air_ctxs + everything reachable through it,
+    //                 lambda_pows;  writes tmp_sums, d_intermediates
+    //   reduce reads  tmp_sums, air_block_offsets;  writes out
+    let (inputs, modifies) = eval_node_bindings(
+        &[
             bufs.block_ctxs,
             bufs.air_ctxs,
             bufs.air_block_offsets,
             lambda_pows,
-        ]
-        .into_iter(),
+        ],
+        &bufs.intermediates,
+        &bufs.ctx_reads,
+    );
+    g.insert_blackbox_kernel(
+        "zerocheck_batch_eval_mle",
+        inputs.into_iter(),
         [bufs.tmp_sums, bufs.out].into_iter(),
-        [false, false, false, false].into_iter(),
+        modifies.into_iter(),
         move |inputs, outputs, stream| unsafe {
             let mut tmp =
                 DeviceBuffer::<EF>::from_raw_parts(outputs[0] as *mut EF, shape.tmp_sums_len);
@@ -846,14 +1300,21 @@ pub fn zerocheck_batch_eval_mle_ir(
 /// Insert a `logup_batch_eval_mle` node (`batch_mle.rs:731`).
 pub fn logup_batch_eval_mle_ir(
     g: &mut GraphBuilder,
-    bufs: ZerocheckEvalBufs,
+    bufs: &ZerocheckEvalBufs,
     shape: BatchEvalShape,
 ) {
+    // Principle-1 exception (see [`ZerocheckEvalBufs`]): main + batched
+    // reducer behind one node; access set is the union across both.
+    let (inputs, modifies) = eval_node_bindings(
+        &[bufs.block_ctxs, bufs.air_ctxs, bufs.air_block_offsets],
+        &bufs.intermediates,
+        &bufs.ctx_reads,
+    );
     g.insert_blackbox_kernel(
         "logup_batch_eval_mle",
-        [bufs.block_ctxs, bufs.air_ctxs, bufs.air_block_offsets].into_iter(),
+        inputs.into_iter(),
         [bufs.tmp_sums, bufs.out].into_iter(),
-        [false, false, false].into_iter(),
+        modifies.into_iter(),
         move |inputs, outputs, stream| unsafe {
             let mut tmp = DeviceBuffer::<Frac<EF>>::from_raw_parts(
                 outputs[0] as *mut Frac<EF>,
@@ -904,19 +1365,26 @@ pub fn logup_batch_eval_mle_ir(
 /// `chunk_size` argument.
 pub fn zerocheck_monomial_batched_ir(
     g: &mut GraphBuilder,
-    bufs: ZerocheckEvalBufs,
+    bufs: &ZerocheckEvalBufs,
     shape: BatchEvalShape,
     par_y: bool,
 ) {
+    // Principle-1 exception (see [`ZerocheckEvalBufs`]): main + batched
+    // reducer behind one node; access set is the union across both.
+    let (inputs, modifies) = eval_node_bindings(
+        &[bufs.block_ctxs, bufs.air_ctxs, bufs.air_block_offsets],
+        &bufs.intermediates,
+        &bufs.ctx_reads,
+    );
     g.insert_blackbox_kernel(
         if par_y {
             "zerocheck_monomial_par_y_batched"
         } else {
             "zerocheck_monomial_batched"
         },
-        [bufs.block_ctxs, bufs.air_ctxs, bufs.air_block_offsets].into_iter(),
+        inputs.into_iter(),
         [bufs.tmp_sums, bufs.out].into_iter(),
-        [false, false, false].into_iter(),
+        modifies.into_iter(),
         move |inputs, outputs, stream| unsafe {
             let mut tmp =
                 DeviceBuffer::<EF>::from_raw_parts(outputs[0] as *mut EF, shape.tmp_sums_len);
@@ -974,42 +1442,70 @@ pub fn zerocheck_monomial_batched_ir(
 
 /// Buffers for a `logup_monomial_batched` launch — it takes three ctx
 /// arrays (common, numerator, denominator) instead of one.
-#[derive(Clone, Copy, Debug)]
+///
+/// The Principle-1 exception documented on [`ZerocheckEvalBufs`] applies here
+/// too, and harder: this entry point enqueues **three** kernels (numerator
+/// pass, denominator pass, batched reducer —
+/// `batch_mle_monomial.cu:446-498`). The numerator kernel writes `tmp_sums.p`
+/// and the denominator kernel writes `tmp_sums.q` *while preserving* `.p`, so
+/// in a split graph the denominator pass would take `tmp_sums` as an input
+/// with `modifies = true`; behind one node the union is simply "tmp_sums is
+/// written".
+#[derive(Clone, Debug)]
 pub struct LogupMonomialBufs {
+    /// Written by the numerator pass (`.p`) then the denominator pass (`.q`),
+    /// read by the reducer.
     pub tmp_sums: BufId,
+    /// Written by the reducer.
     pub out: BufId,
     pub block_ctxs: BufId,
     pub common_ctxs: BufId,
     pub numer_ctxs: BufId,
     pub denom_ctxs: BufId,
     pub air_block_offsets: BufId,
+    /// Principle-1 access set: buffers read only through the three ctx
+    /// arrays (monomial headers / variable streams / combination tables,
+    /// selectors, folded matrices, the `MainMatrixPtrs` array, public
+    /// values, `eq_xi`).
+    pub ctx_reads: Vec<BufId>,
 }
 
 /// Insert a `logup_monomial_batched` node (`batch_mle_monomial.rs:772`).
-// TODO(cc-ir): three CUDA kernels behind one node (numer pass, denom pass,
-//   reduce) — the worst Principle-1 offender in the phase (B3 §4).
-// WHY: same reason as the round-0 evaluators; splitting is `.cu` surgery.
-// RISK: scheduling only. Also note `LogupMonomialCommonCtx::bus_term_sum` is
-//   an `EF` challenge scalar riding *inside* the uploaded ctx
-//   (`batch_mle_monomial.rs:671`), so this node is challenge-by-value in
-//   disguise — a `_dev_challenge` port has to reach into the struct.
+///
+/// Principle-1 exception, see [`LogupMonomialBufs`]. The full access set is
+/// declared below, which is what makes the exception safe; the split that
+/// removes it is scoped in `todo-solutions/T4-principle1-splits.md`.
+// TODO(cc-ir,T5): `LogupMonomialCommonCtx::bus_term_sum` is an `EF` challenge
+//   scalar riding *inside* the uploaded ctx (`batch_mle_monomial.rs:671`), so
+//   this node is challenge-by-value in disguise.
+// WHY: T5 scoped device materializers for `MainMatrixPtrs` / `ZerocheckCtx` /
+//   `LogupCtx` only; the three monomial ctx structs are not covered and are
+//   still staged host-side (here: zeroed placeholders).
+// RISK: a `_dev_challenge` port of the monomial path has to reach into the
+//   struct, i.e. it needs a `materialize_logup_monomial_common_ctx` that
+//   takes `bus_term_sum` as a `BufId` rather than a value. Until then the
+//   monomial evaluators cannot be driven by device-sampled challenges.
 pub fn logup_monomial_batched_ir(
     g: &mut GraphBuilder,
-    bufs: LogupMonomialBufs,
+    bufs: &LogupMonomialBufs,
     shape: BatchEvalShape,
 ) {
-    g.insert_blackbox_kernel(
-        "logup_monomial_batched",
-        [
+    let (inputs, modifies) = eval_node_bindings(
+        &[
             bufs.block_ctxs,
             bufs.common_ctxs,
             bufs.numer_ctxs,
             bufs.denom_ctxs,
             bufs.air_block_offsets,
-        ]
-        .into_iter(),
+        ],
+        &[],
+        &bufs.ctx_reads,
+    );
+    g.insert_blackbox_kernel(
+        "logup_monomial_batched",
+        inputs.into_iter(),
         [bufs.tmp_sums, bufs.out].into_iter(),
-        [false, false, false, false, false].into_iter(),
+        modifies.into_iter(),
         move |inputs, outputs, stream| unsafe {
             let n_airs = shape.num_airs as usize;
             let mut tmp = DeviceBuffer::<Frac<EF>>::from_raw_parts(
@@ -1291,6 +1787,13 @@ pub struct TraceBufs {
     pub zc_rules: BufId,
     pub zc_used_nodes: BufId,
     pub logup_rules: BufId,
+    /// Interaction-interpreter used-node stream (`interaction_rules.inner`).
+    pub logup_used_nodes: BufId,
+    /// `pair_idx = 2 * interaction_idx + is_denom` (`interaction_rules`).
+    pub logup_pair_idxs: BufId,
+    /// `eq_3b_per_trace[t]`, read by the stage-D logup evaluator through
+    /// `LogupCtx::d_eq_3bs` (`mod.rs:677-707`).
+    pub eq_3bs: BufId,
     pub numer_weights: BufId,
     pub denom_weights: BufId,
     /// One `BufId` per matrix, same order as [`TracePlan::mats`].
@@ -1357,6 +1860,27 @@ impl TraceBufs {
             tp.logup_rules_len.max(1),
         );
         g.insert_memset(logup_rules, 0);
+        let logup_used_nodes = add_typed_buf::<usize>(
+            g,
+            device,
+            &format!("t{t}_logup_used_nodes"),
+            tp.logup_used_nodes_len.max(1),
+        );
+        g.insert_memset(logup_used_nodes, 0);
+        let logup_pair_idxs = add_typed_buf::<u32>(
+            g,
+            device,
+            &format!("t{t}_logup_pair_idxs"),
+            tp.logup_used_nodes_len.max(1),
+        );
+        g.insert_memset(logup_pair_idxs, 0);
+        let eq_3bs = add_ef_buf(
+            g,
+            device,
+            &format!("t{t}_eq_3bs"),
+            tp.num_interactions.max(1),
+        );
+        g.insert_memset(eq_3bs, 0);
 
         let numer_weights = add_ef_buf(
             g,
@@ -1413,6 +1937,9 @@ impl TraceBufs {
             zc_rules,
             zc_used_nodes,
             logup_rules,
+            logup_used_nodes,
+            logup_pair_idxs,
+            eq_3bs,
             numer_weights,
             denom_weights,
             mats,
@@ -1555,6 +2082,17 @@ where
     // enters the graph as a zeroed buffer for the same reason as above.
     let beta_pows = add_ef_buf(g, device, "beta_pows", plan.lambda_pows.len().max(1));
     g.insert_memset(beta_pows, 0);
+    // `LogupCtx::d_challenges` — the interaction challenge vector the DAG
+    // interpreter reads through `ENTRY_CHALLENGE` (`batch_mle.cu:224`).
+    // TODO(cc-ir): allocated zeroed like the other keygen/challenge inputs.
+    // WHY: the eager builder receives it as a raw `*const EF` from the
+    //   caller (`batch_mle.rs:271`); it is not part of `TraceBufs`.
+    // RISK: build/compile only, same as `TraceBufs::alloc_zeroed`. It is a
+    //   *shared* buffer across traces, so it must stay one `BufId` — every
+    //   `LogupCtx` points at the same allocation.
+    let logup_challenges = add_ef_buf(g, device, "logup_challenges", plan.lambda_pows.len().max(1));
+    g.insert_memset(logup_challenges, 0);
+    let mut logup_combinations: Vec<Option<(BufId, BufId)>> = vec![None; num_traces];
     for (t, tp) in plan.traces.iter().enumerate() {
         if !tp.has_interactions || tp.num_monomials == 0 {
             continue;
@@ -1569,13 +2107,9 @@ where
             tp.num_monomials,
         );
         g.insert_memset(terms, 0);
-        let eq_3bs = add_ef_buf(
-            g,
-            device,
-            &format!("t{t}_eq_3b"),
-            tp.num_interactions.max(1),
-        );
-        g.insert_memset(eq_3bs, 0);
+        // Same `eq_3bs` the stage-D `LogupCtx` points at — one buffer, one
+        // `BufId`, so the planner sees the shared read.
+        let eq_3bs = bufs[t].eq_3bs;
         let numer_out = add_ef_buf(g, device, &format!("t{t}_numer_comb"), tp.num_monomials);
         let denom_out = add_ef_buf(g, device, &format!("t{t}_denom_comb"), tp.num_monomials);
         precompute_logup_numer_combinations_ir(
@@ -1598,6 +2132,7 @@ where
             denom_out,
             tp.num_monomials as u32,
         );
+        logup_combinations[t] = Some((numer_out, denom_out));
     }
 
     // C.3 — one `eq(xi[..], ·)` hypercube tree per distinct `n_lift`
@@ -1906,14 +2441,20 @@ where
                     .sum::<usize>();
             let columns =
                 add_typed_buf::<*const EF>(g, device, &format!("t{t}_r{round}_cols"), num_columns);
-            // TODO(cc-ir): the column pointer table is assembled host-side
-            //   from the *current* folded buffers (`mod.rs:1189-1199`).
-            // WHY: same reason as the ctx arrays — the pointers are runtime
-            //   addresses of graph-owned buffers, unknown at build time.
-            // RISK: as recorded on `ZerocheckEvalBufs`, the planner cannot
-            //   see through this table to `cur_mats[t]` / `cur_sels[t]`, so
-            //   those are listed as explicit extra inputs of the node below
-            //   to keep the ordering honest.
+            // TODO(cc-ir,T5): the column pointer table is still assembled
+            //   host-side from the *current* folded buffers
+            //   (`mod.rs:1189-1199`) — the ctx-pointer hole T5 closed for
+            //   `ZerocheckCtx` / `LogupCtx`, in its last remaining form here.
+            // WHY: `interpolate_columns` takes a bare `*const EF[]` table,
+            //   not one of the three structs T5 scoped materializers for; the
+            //   fix is a `_materialize_column_ptr` twin of
+            //   `_materialize_main_matrix_ptr`, one node per column.
+            // RISK: the planner cannot see through this table to
+            //   `cur_mats[t]` / `cur_sels[t]`, so those are listed as
+            //   explicit extra inputs of the node below to keep the ordering
+            //   honest. Correct, but the table's contents are unwritten (the
+            //   memset below leaves it null), so this node cannot RUN until
+            //   the materializer twin lands.
             g.insert_memset(columns, 0);
             let interpolated = add_ef_buf(
                 g,
@@ -1952,10 +2493,59 @@ where
             .filter(|&t| plan.traces[t].has_interactions)
             .collect();
 
-        let zc_eval = (!zc_traces.is_empty())
-            .then(|| emit_zerocheck_round_eval(g, device, plan, round, &zc_traces, lambda_pows));
+        // Per-trace stage-D device inputs, as `BufId`s. This is what the T5
+        // ctx materializers consume: every pointer that used to be baked into
+        // a host-assembled ctx struct is a graph edge here.
+        let round_bufs: Vec<Option<RoundTraceBufs>> = (0..num_traces)
+            .map(|t| {
+                let tp = &plan.traces[t];
+                let tb = &bufs[t];
+                if !tp.has_constraints && !tp.has_interactions {
+                    return None;
+                }
+                let n_lift = tp.n_lift();
+                if round > n_lift + 1 {
+                    return None;
+                }
+                // `num_y` halves each round; at `round == n_lift + 1` the
+                // trace is on its last (single-`y`) round.
+                let log_num_y = n_lift.saturating_sub(round);
+                let has_prep = usize::from(tp.has_preprocessed);
+                Some(RoundTraceBufs {
+                    num_y: 1u32 << log_num_y,
+                    selectors: cur_sels[t],
+                    preprocessed: tp
+                        .has_preprocessed
+                        .then(|| (cur_mats[t][0], tp.mats[0].width as u32)),
+                    mains: (has_prep..tp.mats.len())
+                        .map(|i| (cur_mats[t][i], tp.mats[i].width as u32))
+                        .collect(),
+                    public_values: tb.public_values,
+                    eq_xi: eq_layers[&n_lift][log_num_y],
+                    zc_rules: tb.zc_rules,
+                    zc_rules_len: tp.zc_rules_len.max(1),
+                    zc_used_nodes: tb.zc_used_nodes,
+                    zc_used_nodes_len: tp.zc_used_nodes_len.max(1),
+                    zc_buffer_size: tp.zc_buffer_size,
+                    logup_rules: tb.logup_rules,
+                    logup_rules_len: tp.logup_rules_len.max(1),
+                    logup_used_nodes: tb.logup_used_nodes,
+                    logup_used_nodes_len: tp.logup_used_nodes_len.max(1),
+                    logup_pair_idxs: tb.logup_pair_idxs,
+                    logup_buffer_size: tp.logup_buffer_size,
+                    eq_3bs: tb.eq_3bs,
+                    challenges: logup_challenges,
+                    lambda_combinations: lambda_combinations[t],
+                    logup_combinations: logup_combinations[t],
+                })
+            })
+            .collect();
+
+        let zc_eval = (!zc_traces.is_empty()).then(|| {
+            emit_zerocheck_round_eval(g, device, plan, round, &zc_traces, lambda_pows, &round_bufs)
+        });
         let lg_eval = (!lg_traces.is_empty())
-            .then(|| emit_logup_round_eval(g, device, plan, round, &lg_traces));
+            .then(|| emit_logup_round_eval(g, device, plan, round, &lg_traces, &round_bufs));
         round_evals.push([zc_eval, lg_eval]);
 
         // D.3 — HOST SEAM (module docs, seam 2).
@@ -2120,6 +2710,263 @@ where
 
 /// Emit the round's zerocheck evaluator for `traces`, returning its output
 /// buffer.
+/// Which ctx struct a batched evaluator's per-AIR array holds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CtxKind {
+    /// `ZerocheckCtx` — built on the device by [`materialize_zerocheck_ctx_ir`].
+    Zerocheck,
+    /// `LogupCtx` — built on the device by [`materialize_logup_ctx_ir`].
+    Logup,
+    /// `MonomialAirCtx` — still a zeroed placeholder, see the TODO on
+    /// [`LogupMonomialBufs`].
+    Monomial,
+}
+
+/// One trace's stage-D device inputs at a given round, as `BufId`s.
+///
+/// This is what the T5 ctx materializers turn into one device-resident ctx
+/// element. Every field that becomes a pointer inside `ZerocheckCtx` /
+/// `LogupCtx` is a `BufId` here, which is exactly what keeps it a graph edge.
+#[derive(Clone, Debug)]
+pub struct RoundTraceBufs {
+    /// `2^(n_lift - round)` for this trace at this round.
+    pub num_y: u32,
+    /// Folded `EF` selectors, freshest SSA name.
+    pub selectors: BufId,
+    /// Folded preprocessed matrix and its `air_width`, when the AIR has one.
+    pub preprocessed: Option<(BufId, u32)>,
+    /// Folded main matrices (`cached…`, `common_main`) and their `air_width`s,
+    /// in the eager order.
+    pub mains: Vec<(BufId, u32)>,
+    pub public_values: BufId,
+    /// The `2^(n_lift - round)`-sized `eq(xi, ·)` layer.
+    pub eq_xi: BufId,
+    pub zc_rules: BufId,
+    pub zc_rules_len: usize,
+    pub zc_used_nodes: BufId,
+    pub zc_used_nodes_len: usize,
+    pub zc_buffer_size: u32,
+    pub logup_rules: BufId,
+    pub logup_rules_len: usize,
+    pub logup_used_nodes: BufId,
+    pub logup_used_nodes_len: usize,
+    pub logup_pair_idxs: BufId,
+    pub logup_buffer_size: u32,
+    pub eq_3bs: BufId,
+    /// `LogupCtx::d_challenges`.
+    pub challenges: BufId,
+    /// Precomputed per-monomial lambda combinations, when the trace uses a
+    /// monomial evaluator.
+    pub lambda_combinations: Option<BufId>,
+    /// Precomputed `(numerator, denominator)` monomial combinations.
+    pub logup_combinations: Option<(BufId, BufId)>,
+}
+
+/// Emit the per-trace `MainMatrixPtrs<EF>` descriptor array on the device.
+///
+/// The eager path builds this array on the host out of raw pointers
+/// (`mod.rs:1131-1149, 1224-1256`); here each element is written by a
+/// materializer node whose `data` pointer is a resolved `BufId`, so the
+/// planner keeps an edge from the folded matrix to every evaluator that
+/// dereferences it.
+fn emit_main_matrix_ptrs(
+    g: &mut GraphBuilder,
+    device: DeviceType,
+    tag: &str,
+    rb: &RoundTraceBufs,
+) -> BufId {
+    let arr = add_typed_buf::<MainMatrixPtrs<EF>>(
+        g,
+        device,
+        &format!("{tag}_main_desc"),
+        rb.mains.len().max(1),
+    );
+    g.insert_memset(arr, 0);
+    for (i, &(buf, air_width)) in rb.mains.iter().enumerate() {
+        materialize_main_matrix_ptr_ir(g, arr, i as u32, DevicePtrArg::buf(buf), air_width);
+    }
+    arr
+}
+
+/// `EvalCoreCtxArgs` + the reads it implies, shared by both DAG ctx kinds.
+fn eval_core_args(main_desc: BufId, rb: &RoundTraceBufs) -> EvalCoreCtxArgs {
+    EvalCoreCtxArgs {
+        d_selectors: DevicePtrArg::buf(rb.selectors),
+        d_preprocessed_data: match rb.preprocessed {
+            Some((b, _)) => DevicePtrArg::buf(b),
+            None => DevicePtrArg::NULL,
+        },
+        preprocessed_air_width: rb.preprocessed.map(|(_, w)| w).unwrap_or(0),
+        d_main: DevicePtrArg::buf(main_desc),
+        d_public: DevicePtrArg::buf(rb.public_values),
+    }
+}
+
+/// Record the buffers an `EvalCoreCtx` makes the evaluator read.
+fn push_eval_core_reads(reads: &mut Vec<BufId>, main_desc: BufId, rb: &RoundTraceBufs) {
+    reads.push(rb.selectors);
+    reads.push(main_desc);
+    reads.push(rb.public_values);
+    reads.extend(rb.mains.iter().map(|&(b, _)| b));
+    if let Some((b, _)) = rb.preprocessed {
+        reads.push(b);
+    }
+}
+
+/// Allocate the per-AIR `d_intermediates` scratch, or `None` when
+/// `buffer_size == 0` (the eager path passes null there,
+/// `batch_mle.rs:164-176`).
+fn alloc_intermediates(
+    g: &mut GraphBuilder,
+    device: DeviceType,
+    tag: &str,
+    buffer_size: u32,
+    num_x: u32,
+    num_y: u32,
+    logup: bool,
+) -> Option<BufId> {
+    if buffer_size == 0 {
+        return None;
+    }
+    let len = unsafe {
+        if logup {
+            _logup_batch_mle_intermediates_buffer_size(buffer_size, num_x, num_y)
+        } else {
+            _zerocheck_batch_mle_intermediates_buffer_size(buffer_size, num_x, num_y)
+        }
+    };
+    let b = add_ef_buf(g, device, &format!("{tag}_inter"), len.max(1));
+    // The materializer *reads* this buffer's address before the evaluator
+    // writes its contents, and the graph requires a writer to precede every
+    // reader in insertion order. There is no "address-of" edge, so the
+    // scratch gets an explicit zero producer.
+    // TODO(cc-ir,T5): one extra memset per AIR per round purely to satisfy
+    //   write-before-read on an address-only dependency.
+    // WHY: `insert_blackbox_kernel` declares whole-buffer reads/writes; the
+    //   materializer wants "I need your pointer, I touch no bytes".
+    // RISK: performance only (a tiny memset), never correctness — the DAG
+    //   interpreter writes every intermediate slot before reading it.
+    g.insert_memset(b, 0);
+    Some(b)
+}
+
+/// Materialize `air_ctxs[air]` as a `ZerocheckCtx` and record the accesses it
+/// adds to the evaluator node.
+fn emit_zerocheck_ctx_element(
+    g: &mut GraphBuilder,
+    device: DeviceType,
+    tag: &str,
+    bufs: &mut ZerocheckEvalBufs,
+    air: u32,
+    rb: &RoundTraceBufs,
+    num_x: u32,
+) {
+    let tag = format!("{tag}_a{air}");
+    let main_desc = emit_main_matrix_ptrs(g, device, &tag, rb);
+    let inter = alloc_intermediates(
+        g,
+        device,
+        &tag,
+        rb.zc_buffer_size,
+        num_x,
+        rb.num_y,
+        /* logup */ false,
+    );
+    materialize_zerocheck_ctx_ir(
+        g,
+        bufs.air_ctxs,
+        air,
+        ZerocheckCtxArgs {
+            eval_ctx: eval_core_args(main_desc, rb),
+            d_intermediates: inter.map(DevicePtrArg::buf).unwrap_or(DevicePtrArg::NULL),
+            num_y: rb.num_y,
+            d_eq_xi: DevicePtrArg::buf(rb.eq_xi),
+            d_rules: DevicePtrArg::buf(rb.zc_rules),
+            rules_len: rb.zc_rules_len,
+            d_used_nodes: DevicePtrArg::buf(rb.zc_used_nodes),
+            used_nodes_len: rb.zc_used_nodes_len,
+            buffer_size: rb.zc_buffer_size,
+        },
+    );
+    push_eval_core_reads(&mut bufs.ctx_reads, main_desc, rb);
+    bufs.ctx_reads
+        .extend([rb.eq_xi, rb.zc_rules, rb.zc_used_nodes]);
+    bufs.intermediates.extend(inter);
+}
+
+/// Materialize `air_ctxs[air]` as a `LogupCtx` and record the accesses it adds
+/// to the evaluator node.
+fn emit_logup_ctx_element(
+    g: &mut GraphBuilder,
+    device: DeviceType,
+    tag: &str,
+    bufs: &mut ZerocheckEvalBufs,
+    air: u32,
+    rb: &RoundTraceBufs,
+    num_x: u32,
+) {
+    let tag = format!("{tag}_a{air}");
+    let main_desc = emit_main_matrix_ptrs(g, device, &tag, rb);
+    let inter = alloc_intermediates(
+        g,
+        device,
+        &tag,
+        rb.logup_buffer_size,
+        num_x,
+        rb.num_y,
+        /* logup */ true,
+    );
+    materialize_logup_ctx_ir(
+        g,
+        bufs.air_ctxs,
+        air,
+        LogupCtxArgs {
+            eval_ctx: eval_core_args(main_desc, rb),
+            d_intermediates: inter.map(DevicePtrArg::buf).unwrap_or(DevicePtrArg::NULL),
+            num_y: rb.num_y,
+            d_eq_xi: DevicePtrArg::buf(rb.eq_xi),
+            d_challenges: DevicePtrArg::buf(rb.challenges),
+            d_eq_3bs: DevicePtrArg::buf(rb.eq_3bs),
+            d_rules: DevicePtrArg::buf(rb.logup_rules),
+            rules_len: rb.logup_rules_len,
+            d_used_nodes: DevicePtrArg::buf(rb.logup_used_nodes),
+            d_pair_idxs: DevicePtrArg::buf(rb.logup_pair_idxs),
+            used_nodes_len: rb.logup_used_nodes_len,
+            buffer_size: rb.logup_buffer_size,
+        },
+    );
+    push_eval_core_reads(&mut bufs.ctx_reads, main_desc, rb);
+    bufs.ctx_reads.extend([
+        rb.eq_xi,
+        rb.challenges,
+        rb.eq_3bs,
+        rb.logup_rules,
+        rb.logup_used_nodes,
+        rb.logup_pair_idxs,
+    ]);
+    bufs.intermediates.extend(inter);
+}
+
+/// Principle-1 access set for the monomial evaluators, whose ctx arrays are
+/// still zeroed placeholders (T5 covers only the three DAG ctx structs).
+///
+/// The reads are declared anyway: an under-declared access set is a real
+/// correctness bug the moment the ctx arrays are filled, and declaring them
+/// now costs nothing but a few planner edges.
+fn push_monomial_reads(reads: &mut Vec<BufId>, rb: &RoundTraceBufs) {
+    reads.push(rb.selectors);
+    reads.push(rb.public_values);
+    reads.push(rb.eq_xi);
+    reads.extend(rb.mains.iter().map(|&(b, _)| b));
+    if let Some((b, _)) = rb.preprocessed {
+        reads.push(b);
+    }
+    reads.extend(rb.lambda_combinations);
+    if let Some((numer, denom)) = rb.logup_combinations {
+        reads.extend([numer, denom]);
+    }
+}
+
 fn emit_zerocheck_round_eval(
     g: &mut GraphBuilder,
     device: DeviceType,
@@ -2127,6 +2974,7 @@ fn emit_zerocheck_round_eval(
     round: usize,
     traces: &[usize],
     lambda_pows: BufId,
+    round_bufs: &[Option<RoundTraceBufs>],
 ) -> BufId {
     let num_airs = traces.len() as u32;
     let num_x = plan.constraint_degree as u32;
@@ -2147,18 +2995,35 @@ fn emit_zerocheck_round_eval(
         //   floor.
         chunk_size: 1,
     };
-    let bufs = alloc_eval_bufs(
+    let kind = plan.traces[traces[0]].eval_kind;
+    let tag = format!("zc_r{round}");
+    let mut bufs = alloc_eval_bufs(
         g,
         device,
-        &format!("zc_r{round}"),
+        &tag,
         shape,
         Some(lambda_pows),
         /* frac_out */ false,
+        if kind == RoundEvalKind::Dag {
+            CtxKind::Zerocheck
+        } else {
+            CtxKind::Monomial
+        },
     );
-    match plan.traces[traces[0]].eval_kind {
-        RoundEvalKind::Dag => zerocheck_batch_eval_mle_ir(g, bufs, shape),
-        RoundEvalKind::Monomial => zerocheck_monomial_batched_ir(g, bufs, shape, false),
-        RoundEvalKind::MonomialParY => zerocheck_monomial_batched_ir(g, bufs, shape, true),
+    for (air, &t) in traces.iter().enumerate() {
+        let rb = round_bufs[t]
+            .as_ref()
+            .expect("stage-D trace bufs for an evaluated trace");
+        if kind == RoundEvalKind::Dag {
+            emit_zerocheck_ctx_element(g, device, &tag, &mut bufs, air as u32, rb, num_x);
+        } else {
+            push_monomial_reads(&mut bufs.ctx_reads, rb);
+        }
+    }
+    match kind {
+        RoundEvalKind::Dag => zerocheck_batch_eval_mle_ir(g, &bufs, shape),
+        RoundEvalKind::Monomial => zerocheck_monomial_batched_ir(g, &bufs, shape, false),
+        RoundEvalKind::MonomialParY => zerocheck_monomial_batched_ir(g, &bufs, shape, true),
     }
     g.register_output(bufs.out);
     bufs.out
@@ -2172,6 +3037,7 @@ fn emit_logup_round_eval(
     plan: &ZerocheckPhasePlan,
     round: usize,
     traces: &[usize],
+    round_bufs: &[Option<RoundTraceBufs>],
 ) -> BufId {
     let num_airs = traces.len() as u32;
     let num_x = plan.constraint_degree as u32;
@@ -2186,24 +3052,22 @@ fn emit_logup_round_eval(
         chunk_size: 1,
     };
     let use_monomial = plan.traces[traces[0]].eval_kind != RoundEvalKind::Dag;
+    let tag = format!("lg_r{round}");
     if use_monomial {
         let n = num_airs as usize;
-        let tmp_sums = add_frac_buf(g, device, &format!("lg_r{round}_tmp"), shape.tmp_sums_len);
-        let out = add_frac_buf(g, device, &format!("lg_r{round}_out"), shape.out_len);
+        let tmp_sums = add_frac_buf(g, device, &format!("{tag}_tmp"), shape.tmp_sums_len);
+        let out = add_frac_buf(g, device, &format!("{tag}_out"), shape.out_len);
         let block_ctxs = add_typed_buf::<BlockCtx>(
             g,
             device,
-            &format!("lg_r{round}_blocks"),
+            &format!("{tag}_blocks"),
             shape.num_blocks as usize,
         );
         let common_ctxs =
-            add_typed_buf::<LogupMonomialCommonCtx>(g, device, &format!("lg_r{round}_common"), n);
-        let numer_ctxs =
-            add_typed_buf::<LogupMonomialCtx>(g, device, &format!("lg_r{round}_numer"), n);
-        let denom_ctxs =
-            add_typed_buf::<LogupMonomialCtx>(g, device, &format!("lg_r{round}_denom"), n);
-        let air_block_offsets =
-            add_typed_buf::<u32>(g, device, &format!("lg_r{round}_offsets"), n + 1);
+            add_typed_buf::<LogupMonomialCommonCtx>(g, device, &format!("{tag}_common"), n);
+        let numer_ctxs = add_typed_buf::<LogupMonomialCtx>(g, device, &format!("{tag}_numer"), n);
+        let denom_ctxs = add_typed_buf::<LogupMonomialCtx>(g, device, &format!("{tag}_denom"), n);
+        let air_block_offsets = add_typed_buf::<u32>(g, device, &format!("{tag}_offsets"), n + 1);
         for b in [
             block_ctxs,
             common_ctxs,
@@ -2213,9 +3077,16 @@ fn emit_logup_round_eval(
         ] {
             g.insert_memset(b, 0);
         }
+        let mut ctx_reads = Vec::new();
+        for &t in traces {
+            let rb = round_bufs[t]
+                .as_ref()
+                .expect("stage-D trace bufs for an evaluated trace");
+            push_monomial_reads(&mut ctx_reads, rb);
+        }
         logup_monomial_batched_ir(
             g,
-            LogupMonomialBufs {
+            &LogupMonomialBufs {
                 tmp_sums,
                 out,
                 block_ctxs,
@@ -2223,27 +3094,38 @@ fn emit_logup_round_eval(
                 numer_ctxs,
                 denom_ctxs,
                 air_block_offsets,
+                ctx_reads,
             },
             shape,
         );
         g.register_output(out);
         out
     } else {
-        let bufs = alloc_eval_bufs(
+        let mut bufs = alloc_eval_bufs(
             g,
             device,
-            &format!("lg_r{round}"),
+            &tag,
             shape,
             None,
             /* frac_out */ true,
+            CtxKind::Logup,
         );
-        logup_batch_eval_mle_ir(g, bufs, shape);
+        for (air, &t) in traces.iter().enumerate() {
+            let rb = round_bufs[t]
+                .as_ref()
+                .expect("stage-D trace bufs for an evaluated trace");
+            emit_logup_ctx_element(g, device, &tag, &mut bufs, air as u32, rb, num_x);
+        }
+        logup_batch_eval_mle_ir(g, &bufs, shape);
         g.register_output(bufs.out);
         bufs.out
     }
 }
 
 /// Allocate (and zero) the ctx / scratch buffers one batched evaluator needs.
+///
+/// The ctx array is only *allocated* here; its elements are written by the T5
+/// materializer nodes (device-side), not staged from the host.
 fn alloc_eval_bufs(
     g: &mut GraphBuilder,
     device: DeviceType,
@@ -2251,6 +3133,7 @@ fn alloc_eval_bufs(
     shape: BatchEvalShape,
     lambda_pows: Option<BufId>,
     frac_out: bool,
+    ctx_kind: CtxKind,
 ) -> ZerocheckEvalBufs {
     let n = shape.num_airs as usize;
     let (tmp_sums, out) = if frac_out {
@@ -2270,16 +3153,14 @@ fn alloc_eval_bufs(
         &format!("{tag}_blocks"),
         shape.num_blocks as usize,
     );
-    // The ctx array is sized for the widest struct the evaluator families
-    // use so one allocation serves both the DAG and the monomial path.
-    let air_ctxs = if frac_out {
-        add_typed_buf::<LogupCtx>(g, device, &format!("{tag}_ctxs"), n)
-    } else if lambda_pows.is_some() {
-        add_typed_buf::<ZerocheckCtx>(g, device, &format!("{tag}_ctxs"), n)
-    } else {
-        add_typed_buf::<MonomialAirCtx>(g, device, &format!("{tag}_ctxs"), n)
+    let air_ctxs = match ctx_kind {
+        CtxKind::Zerocheck => add_typed_buf::<ZerocheckCtx>(g, device, &format!("{tag}_ctxs"), n),
+        CtxKind::Logup => add_typed_buf::<LogupCtx>(g, device, &format!("{tag}_ctxs"), n),
+        CtxKind::Monomial => add_typed_buf::<MonomialAirCtx>(g, device, &format!("{tag}_ctxs"), n),
     };
     let air_block_offsets = add_typed_buf::<u32>(g, device, &format!("{tag}_offsets"), n + 1);
+    // The ctx array is memset first so the materializers' per-element writes
+    // chain off a defined value and ABI padding is deterministic.
     for b in [block_ctxs, air_ctxs, air_block_offsets] {
         g.insert_memset(b, 0);
     }
@@ -2290,6 +3171,8 @@ fn alloc_eval_bufs(
         air_ctxs,
         air_block_offsets,
         lambda_pows,
+        ctx_reads: Vec::new(),
+        intermediates: Vec::new(),
     }
 }
 
@@ -2423,6 +3306,354 @@ mod zerocheck_ir_tests {
                 exe.get_output(idx).to_host_on(ctx).expect("D2H")
             })
             .collect()
+    }
+
+    /// T5: a graph-materialized ctx element must equal the eager builder's
+    /// struct field for field.
+    ///
+    /// The oracle is `ZerocheckMleBatchBuilder::new` / `LogupMleBatchBuilder::new`
+    /// (`batch_mle.rs:158-201, 297-353`): the same field map, but built from
+    /// the graph's own pool addresses instead of host-allocated
+    /// `DeviceBuffer`s. Comparing typed fields (pointers as `usize`) rather
+    /// than `memcmp` keeps ABI padding out of the assertion; a second replay
+    /// then checks the *complete* bytes are stable, which is what catches
+    /// unwritten padding.
+    ///
+    /// Two records are covered, exactly the branches the eager builders have:
+    /// preprocessed present / absent, and `buffer_size` nonzero / zero (the
+    /// null-`d_intermediates` branch, `batch_mle.rs:164-176`).
+    #[test]
+    fn ctx_materializers_match_eager_field_by_field() {
+        // The materializers write through the private C++ ctx definitions;
+        // fail loudly if the Rust mirrors have drifted in size.
+        crate::cuda::logup_zerocheck::assert_ctx_abi_matches_cuda();
+
+        let ctx = test_ctx();
+        let device = DeviceType::Cuda(0);
+
+        for (case, has_prep, buffer_size) in [(0usize, true, 4u32), (1, false, 0u32)] {
+            let num_x = 3usize;
+            let num_y = 4usize;
+            let height = num_x * num_y;
+            let main_widths = [2u32, 5u32];
+            let prep_width: u32 = if has_prep { 3 } else { 0 };
+            let rules_len = 7usize;
+            let used_nodes_len = 5usize;
+            let num_interactions = 6usize;
+
+            let mut g = GraphBuilder::new();
+
+            // --- source buffers (every one of them becomes a graph edge)
+            let selectors = add_ef_buf(&mut g, device, "sel", 3 * height);
+            g.insert_memset(selectors, 0);
+            let public = add_f_buf(&mut g, device, "public", 8);
+            g.insert_memset(public, 0);
+            let eq_xi = add_ef_buf(&mut g, device, "eq_xi", num_y);
+            g.insert_memset(eq_xi, 0);
+            let challenges = add_ef_buf(&mut g, device, "challenges", 4);
+            g.insert_memset(challenges, 0);
+            let eq_3bs = add_ef_buf(&mut g, device, "eq_3bs", num_interactions);
+            g.insert_memset(eq_3bs, 0);
+            let rules = add_typed_buf::<u128>(&mut g, device, "rules", rules_len);
+            g.insert_memset(rules, 0);
+            let used_nodes = add_typed_buf::<usize>(&mut g, device, "used_nodes", used_nodes_len);
+            g.insert_memset(used_nodes, 0);
+            let pair_idxs = add_typed_buf::<u32>(&mut g, device, "pair_idxs", used_nodes_len);
+            g.insert_memset(pair_idxs, 0);
+            let prep = has_prep.then(|| {
+                let b = add_ef_buf(&mut g, device, "prep", height * prep_width as usize);
+                g.insert_memset(b, 0);
+                b
+            });
+            let mains: Vec<BufId> = main_widths
+                .iter()
+                .enumerate()
+                .map(|(i, &w)| {
+                    let b = add_ef_buf(&mut g, device, &format!("main{i}"), height * w as usize);
+                    g.insert_memset(b, 0);
+                    b
+                })
+                .collect();
+            let intermediates = (buffer_size > 0).then(|| {
+                let b = add_ef_buf(&mut g, device, "inter", height * buffer_size as usize);
+                g.insert_memset(b, 0);
+                b
+            });
+
+            // --- the `MainMatrixPtrs<EF>` descriptor array, built on device
+            let main_desc =
+                add_typed_buf::<MainMatrixPtrs<EF>>(&mut g, device, "main_desc", mains.len());
+            g.insert_memset(main_desc, 0);
+            for (i, (&b, &w)) in mains.iter().zip(main_widths.iter()).enumerate() {
+                materialize_main_matrix_ptr_ir(
+                    &mut g,
+                    main_desc,
+                    i as u32,
+                    DevicePtrArg::buf(b),
+                    w,
+                );
+            }
+
+            let eval_ctx = EvalCoreCtxArgs {
+                d_selectors: DevicePtrArg::buf(selectors),
+                d_preprocessed_data: match prep {
+                    Some(b) => DevicePtrArg::buf(b),
+                    None => DevicePtrArg::NULL,
+                },
+                preprocessed_air_width: prep_width,
+                d_main: DevicePtrArg::buf(main_desc),
+                d_public: DevicePtrArg::buf(public),
+            };
+            let d_intermediates = match intermediates {
+                Some(b) => DevicePtrArg::buf(b),
+                None => DevicePtrArg::NULL,
+            };
+
+            // --- two-element ctx arrays: element 1 exercises `idx != 0`.
+            let zc_ctxs = add_typed_buf::<ZerocheckCtx>(&mut g, device, "zc_ctxs", 2);
+            g.insert_memset(zc_ctxs, 0);
+            let zc_args = ZerocheckCtxArgs {
+                eval_ctx,
+                d_intermediates,
+                num_y: num_y as u32,
+                d_eq_xi: DevicePtrArg::buf(eq_xi),
+                d_rules: DevicePtrArg::buf(rules),
+                rules_len,
+                d_used_nodes: DevicePtrArg::buf(used_nodes),
+                used_nodes_len,
+                buffer_size,
+            };
+            materialize_zerocheck_ctx_ir(&mut g, zc_ctxs, 1, zc_args);
+
+            let lg_ctxs = add_typed_buf::<LogupCtx>(&mut g, device, "lg_ctxs", 2);
+            g.insert_memset(lg_ctxs, 0);
+            let lg_args = LogupCtxArgs {
+                eval_ctx,
+                d_intermediates,
+                num_y: num_y as u32,
+                d_eq_xi: DevicePtrArg::buf(eq_xi),
+                d_challenges: DevicePtrArg::buf(challenges),
+                d_eq_3bs: DevicePtrArg::buf(eq_3bs),
+                d_rules: DevicePtrArg::buf(rules),
+                rules_len,
+                d_used_nodes: DevicePtrArg::buf(used_nodes),
+                d_pair_idxs: DevicePtrArg::buf(pair_idxs),
+                used_nodes_len,
+                buffer_size,
+            };
+            materialize_logup_ctx_ir(&mut g, lg_ctxs, 1, lg_args);
+
+            // --- compile + run
+            let mut tracked = vec![
+                selectors, public, eq_xi, challenges, eq_3bs, rules, used_nodes, pair_idxs,
+                main_desc, zc_ctxs, lg_ctxs,
+            ];
+            tracked.extend(mains.iter().copied());
+            tracked.extend(prep);
+            tracked.extend(intermediates);
+            for &b in &tracked {
+                g.register_output(b);
+            }
+            let mut exe = GraphCompiler::new()
+                .device(device)
+                .scheduler(SchedulerMode::Heuristic)
+                .compile(g)
+                .expect("graph compile");
+            exe.run(&ctx).expect("graph run");
+            ctx.stream.synchronize().unwrap();
+
+            let out_idx = |exe: &crypto_compiler::graph_exe::GraphExe, b: BufId| {
+                (0..exe.num_outputs())
+                    .find(|&i| exe.output_buf_id(i) == b)
+                    .unwrap_or_else(|| panic!("buf {b:?} not registered as an output"))
+            };
+            let addr = |exe: &crypto_compiler::graph_exe::GraphExe, b: BufId| {
+                exe.get_output(out_idx(exe, b)).as_raw_ptr() as usize
+            };
+            let bytes = |exe: &crypto_compiler::graph_exe::GraphExe, b: BufId| {
+                exe.get_output(out_idx(exe, b))
+                    .to_host_on(&ctx)
+                    .expect("D2H")
+            };
+
+            // --- MainMatrixPtrs array, element by element
+            let desc_bytes = bytes(&exe, main_desc);
+            for (i, (&b, &w)) in mains.iter().zip(main_widths.iter()).enumerate() {
+                let got: MainMatrixPtrs<EF> = unsafe {
+                    (desc_bytes.as_ptr() as *const MainMatrixPtrs<EF>)
+                        .add(i)
+                        .read_unaligned()
+                };
+                assert_eq!(
+                    got.data as usize,
+                    addr(&exe, b),
+                    "case {case}: main_desc[{i}].data"
+                );
+                assert_eq!(got.air_width, w, "case {case}: main_desc[{i}].air_width");
+            }
+
+            let prep_addr = prep.map(|b| addr(&exe, b)).unwrap_or(0);
+            let inter_addr = intermediates.map(|b| addr(&exe, b)).unwrap_or(0);
+
+            // --- ZerocheckCtx, field by field (the eager field map is the
+            //     oracle: `batch_mle.rs:178-196`).
+            let zc_bytes = bytes(&exe, zc_ctxs);
+            let got: ZerocheckCtx = unsafe {
+                (zc_bytes.as_ptr() as *const ZerocheckCtx)
+                    .add(1)
+                    .read_unaligned()
+            };
+            assert_eq!(
+                got.eval_ctx.d_selectors as usize,
+                addr(&exe, selectors),
+                "case {case}: zc.eval_ctx.d_selectors"
+            );
+            assert_eq!(
+                got.eval_ctx.d_preprocessed.data as usize, prep_addr,
+                "case {case}: zc.eval_ctx.d_preprocessed.data"
+            );
+            assert_eq!(
+                got.eval_ctx.d_preprocessed.air_width, prep_width,
+                "case {case}: zc.eval_ctx.d_preprocessed.air_width"
+            );
+            assert_eq!(
+                got.eval_ctx.d_main as usize,
+                addr(&exe, main_desc),
+                "case {case}: zc.eval_ctx.d_main"
+            );
+            assert_eq!(
+                got.eval_ctx.d_public as usize,
+                addr(&exe, public),
+                "case {case}: zc.eval_ctx.d_public"
+            );
+            assert_eq!(
+                got.d_intermediates as usize, inter_addr,
+                "case {case}: zc.d_intermediates"
+            );
+            assert_eq!(got.num_y, num_y as u32, "case {case}: zc.num_y");
+            assert_eq!(
+                got.d_eq_xi as usize,
+                addr(&exe, eq_xi),
+                "case {case}: zc.d_eq_xi"
+            );
+            assert_eq!(
+                got.d_rules as usize,
+                addr(&exe, rules),
+                "case {case}: zc.d_rules"
+            );
+            assert_eq!(got.rules_len, rules_len, "case {case}: zc.rules_len");
+            assert_eq!(
+                got.d_used_nodes as usize,
+                addr(&exe, used_nodes),
+                "case {case}: zc.d_used_nodes"
+            );
+            assert_eq!(
+                got.used_nodes_len, used_nodes_len,
+                "case {case}: zc.used_nodes_len"
+            );
+            assert_eq!(got.buffer_size, buffer_size, "case {case}: zc.buffer_size");
+
+            // Element 0 was only memset: proves `idx` is honoured.
+            let zc0: ZerocheckCtx =
+                unsafe { (zc_bytes.as_ptr() as *const ZerocheckCtx).read_unaligned() };
+            assert_eq!(
+                zc0.eval_ctx.d_selectors as usize, 0,
+                "case {case}: zc_ctxs[0] must be untouched"
+            );
+
+            // --- LogupCtx, field by field (`batch_mle.rs:317-347`).
+            let lg_bytes = bytes(&exe, lg_ctxs);
+            let got: LogupCtx = unsafe {
+                (lg_bytes.as_ptr() as *const LogupCtx)
+                    .add(1)
+                    .read_unaligned()
+            };
+            assert_eq!(
+                got.eval_ctx.d_selectors as usize,
+                addr(&exe, selectors),
+                "case {case}: lg.eval_ctx.d_selectors"
+            );
+            assert_eq!(
+                got.eval_ctx.d_preprocessed.data as usize, prep_addr,
+                "case {case}: lg.eval_ctx.d_preprocessed.data"
+            );
+            assert_eq!(
+                got.eval_ctx.d_preprocessed.air_width, prep_width,
+                "case {case}: lg.eval_ctx.d_preprocessed.air_width"
+            );
+            assert_eq!(
+                got.eval_ctx.d_main as usize,
+                addr(&exe, main_desc),
+                "case {case}: lg.eval_ctx.d_main"
+            );
+            assert_eq!(
+                got.eval_ctx.d_public as usize,
+                addr(&exe, public),
+                "case {case}: lg.eval_ctx.d_public"
+            );
+            assert_eq!(
+                got.d_intermediates as usize, inter_addr,
+                "case {case}: lg.d_intermediates"
+            );
+            assert_eq!(got.num_y, num_y as u32, "case {case}: lg.num_y");
+            assert_eq!(
+                got.d_eq_xi as usize,
+                addr(&exe, eq_xi),
+                "case {case}: lg.d_eq_xi"
+            );
+            assert_eq!(
+                got.d_challenges as usize,
+                addr(&exe, challenges),
+                "case {case}: lg.d_challenges"
+            );
+            assert_eq!(
+                got.d_eq_3bs as usize,
+                addr(&exe, eq_3bs),
+                "case {case}: lg.d_eq_3bs"
+            );
+            assert_eq!(
+                got.d_rules as usize,
+                addr(&exe, rules),
+                "case {case}: lg.d_rules"
+            );
+            assert_eq!(got.rules_len, rules_len, "case {case}: lg.rules_len");
+            assert_eq!(
+                got.d_used_nodes as usize,
+                addr(&exe, used_nodes),
+                "case {case}: lg.d_used_nodes"
+            );
+            assert_eq!(
+                got.d_pair_idxs as usize,
+                addr(&exe, pair_idxs),
+                "case {case}: lg.d_pair_idxs"
+            );
+            assert_eq!(
+                got.used_nodes_len, used_nodes_len,
+                "case {case}: lg.used_nodes_len"
+            );
+            assert_eq!(got.buffer_size, buffer_size, "case {case}: lg.buffer_size");
+
+            // --- replay: the same compiled graph, no rebinding. Pool
+            //     addresses are stable, so the *complete* bytes — padding
+            //     included — must be identical.
+            exe.run(&ctx).expect("graph replay");
+            ctx.stream.synchronize().unwrap();
+            assert_eq!(
+                bytes(&exe, zc_ctxs),
+                zc_bytes,
+                "case {case}: ZerocheckCtx bytes not stable across replay"
+            );
+            assert_eq!(
+                bytes(&exe, lg_ctxs),
+                lg_bytes,
+                "case {case}: LogupCtx bytes not stable across replay"
+            );
+            assert_eq!(
+                bytes(&exe, main_desc),
+                desc_bytes,
+                "case {case}: MainMatrixPtrs bytes not stable across replay"
+            );
+        }
     }
 
     /// `fold_ple_from_evals`: graph node vs eager launcher, raw device bytes.

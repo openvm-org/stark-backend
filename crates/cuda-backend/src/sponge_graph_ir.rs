@@ -40,16 +40,19 @@
 //! 100 non-permuting observes across 7 absorb positions ends up with 1
 //! compiled kernel instead of 7.
 
-use std::sync::Arc;
+use std::{ffi::c_void, sync::Arc};
 
 use crypto_compiler::{
+    graph_exe::GraphExe,
     graph_ir::{BufId, BufInfo, ConstBuf, DeviceType, GraphBuilder},
     ir::{IRBuilder, Module, NodeId, ScalarType},
     kernel,
     kernels::Poseidon2Constants,
     poseidon2_parallel::poseidon2_permute_par,
     quast::Quast,
+    CompileError,
 };
+use openvm_cuda_common::{copy::cuda_memcpy_on, stream::GpuDeviceCtx};
 
 use crate::{
     sponge::SpongeSnapshot,
@@ -200,23 +203,19 @@ impl DuplexSpongeGpuIR {
     /// (permuting vs not) picks up exactly where the live sponge left off.
     ///
     /// [`Self::new`] is unchanged: `new` still memsets to zero.
-    // TODO(cc-ir): the seed is baked in as a `Const`, so a graph built by
-    // `from_live` is valid for exactly one transcript and cannot be cached
-    // across proofs.
-    // WHY: `Const` was the shortest path to a working, tested seed (it is the
-    //   established pattern in `fractional_ir.rs`, e.g. `ef_const_ext_scalar_buf`
-    //   at fractional_ir.rs:150). The alternative — allocate the seed buffer and
-    //   `g.register_input(state_buf)` so the caller binds fresh bytes per run via
-    //   `GraphExe::set_input` — would allow graph reuse, because the *positions*
-    //   (`absorb_idx`/`sample_idx`), which are what actually select kernel shapes
-    //   at build time, are deterministic for a fixed AIR/config even though the
-    //   state bytes differ per proof. I did not build that variant because
-    //   nothing consumes it yet and an untested second constructor is worse than
-    //   this note.
-    // RISK: if the zerocheck phase ends up compiling its graph once and running
-    //   it for many proofs, this constructor forces a recompile per proof. Fix is
-    //   local (swap `insert_const` for `register_input` + expose the BufId); the
-    //   `SpongeSnapshot` export API on the eager side does not change.
+    ///
+    /// # Prefer [`Self::from_live_input`]
+    ///
+    /// The seed here is baked in as a `Const` node, so the resulting graph is
+    /// valid for **exactly one transcript** and cannot be reused for a second
+    /// proof — the state bytes are part of the graph definition, so a new
+    /// transcript means a new `GraphCompiler::compile` (30s-192s in this
+    /// crate). [`Self::from_live_input`] registers the state as a runtime
+    /// graph input instead, which keeps the compiled graph reusable across
+    /// proofs; use it for anything that is compiled once and run many times.
+    ///
+    /// This constructor is kept because it needs no post-compile bind step,
+    /// which makes it convenient for build-only tests.
     pub fn from_live(g: &mut GraphBuilder, device: DeviceType, snap: &SpongeSnapshot) -> Self {
         assert!(
             (snap.absorb_idx as usize) < CHUNK,
@@ -238,6 +237,80 @@ impl DuplexSpongeGpuIR {
             n_ops: 0,
             modules: SpongeModules::new(),
         }
+    }
+
+    /// Creates a transcript that **continues** a live [`crate::sponge::DuplexSpongeGpu`],
+    /// with the seed state supplied at *run* time rather than baked into the
+    /// graph — so the compiled graph is reusable across proofs.
+    ///
+    /// Returns `(transcript, seed_buf)`. `seed_buf` is registered as a graph
+    /// input (`GraphBuilder::register_input`) holding the `[1, WIDTH]`
+    /// BabyBear sponge state; the caller must fill it after compilation, most
+    /// conveniently via [`bind_sponge_seed`].
+    ///
+    /// # Why this exists (vs [`Self::from_live`])
+    ///
+    /// The two halves of a seed live at different times:
+    ///
+    /// - `absorb_idx` / `sample_idx` are **build**-time data. They decide which kernel module each
+    ///   `observe` / `sample` emits (permuting vs not), so they must be known while the graph is
+    ///   being constructed. They are copied out of `snap` here.
+    /// - the 16-word state is **run**-time data. No graph node inspects it at build time, so it can
+    ///   be an ordinary input.
+    ///
+    /// Splitting them this way is what makes graph caching possible: for a
+    /// fixed AIR/config the positions are deterministic across proofs, while
+    /// the state bytes differ every time. [`Self::from_live`] bakes the state
+    /// into a `Const`, which forces a fresh `GraphCompiler::compile` per proof
+    /// — prohibitive at 30s-192s per compile.
+    ///
+    /// # The snapshot is borrowed, not consumed
+    ///
+    /// Graph construction reads only `snap.position()`. The caller keeps
+    /// ownership because it still needs `snap.state()` *after* compilation, at
+    /// bind time. Nothing here retains a pointer into the live sponge — the
+    /// snapshot is an owned, pointer-free value, so the live sponge may be
+    /// advanced or dropped in between.
+    ///
+    /// # No initializer node
+    ///
+    /// Unlike [`Self::new`], this emits no `Memset`: registered graph inputs
+    /// must not be written by any graph node (validated at compile time).
+    ///
+    /// # Caching contract
+    ///
+    /// A cached graph is only valid for the `(absorb_idx, sample_idx)` it was
+    /// built at. Reusing one at a different position silently selects the
+    /// wrong permute/read path even when the state bytes are right, so any
+    /// graph cache **must include the position pair in its key**.
+    /// [`Self::position`] exposes it for that purpose, and
+    /// [`bind_sponge_seed`] is deliberately position-agnostic (it only moves
+    /// bytes) — checking the position is the cache's job, not the bind's.
+    pub fn from_live_input(
+        g: &mut GraphBuilder,
+        device: DeviceType,
+        snap: &SpongeSnapshot,
+    ) -> (Self, BufId) {
+        let (absorb_idx, sample_idx) = snap.position();
+        assert!(
+            absorb_idx < CHUNK,
+            "seed absorb_idx {absorb_idx} out of range (must be < CHUNK = {CHUNK})",
+        );
+        assert!(
+            sample_idx <= CHUNK,
+            "seed sample_idx {sample_idx} out of range (must be <= CHUNK = {CHUNK})",
+        );
+        let state_buf = alloc_state_buf(g, device, "sponge_state_seed_input");
+        g.register_input(state_buf);
+        let me = Self {
+            state_buf,
+            absorb_idx,
+            sample_idx,
+            device,
+            n_ops: 0,
+            modules: SpongeModules::new(),
+        };
+        (me, state_buf)
     }
 
     /// Current state buffer id (mostly for tests / inspection).
@@ -417,6 +490,67 @@ impl FiatShamirTranscriptGraphIR for DuplexSpongeGpuIR {
         self.n_ops += 1;
         ext_buf
     }
+}
+
+// ---------------------------------------------------------------------------
+// Runtime seed binding.
+
+/// Copies a [`SpongeSnapshot`]'s sponge state into the seed input slot of a
+/// compiled graph, for a transcript built with
+/// [`DuplexSpongeGpuIR::from_live_input`].
+///
+/// Call this after `GraphCompiler::compile` and before `run` / `launch_graph`.
+/// It resolves `seed_buf` to its input index, checks the slot size, and does a
+/// single `WIDTH * 4`-byte H2D straight into the executor's unified pool slot
+/// (`GraphExe::get_input_ptr`) — no staging `DeviceBuffer`. This is the same
+/// direct-to-pool path
+/// `logup_zerocheck::fractional_sumcheck_gpu_irv2` uses for its leaf input.
+///
+/// # Reuse across proofs
+///
+/// `get_input_ptr` returns a pool address that is stable for the exe's
+/// lifetime, so a cached graph is re-seeded by simply calling this again with
+/// the next proof's snapshot — no recompile, no rebind of anything else.
+/// Under `launch_graph`, re-copy on the same stream before each replay: capture
+/// records addresses, not contents, so a replay reads whatever the slot holds.
+///
+/// # Asynchrony
+///
+/// The copy is enqueued on `ctx.stream` and is **not** complete when this
+/// returns. `snap` must stay alive until the stream has drained past it —
+/// satisfied automatically if the caller holds it until the graph's terminal
+/// D2H (which synchronizes), otherwise synchronize the stream explicitly.
+pub fn bind_sponge_seed(
+    exe: &mut GraphExe,
+    ctx: &GpuDeviceCtx,
+    seed_buf: BufId,
+    snap: &SpongeSnapshot,
+) -> Result<(), CompileError> {
+    let idx = (0..exe.num_inputs())
+        .find(|&i| exe.input_buf_id(i) == seed_buf)
+        .ok_or_else(|| {
+            CompileError::Runtime(format!(
+                "bind_sponge_seed: {seed_buf:?} is not a registered input of this graph                  (was the transcript built with `from_live_input`?)"
+            ))
+        })?;
+    let want = SpongeSnapshot::state_size_bytes();
+    let got = exe.input_size(idx);
+    if got != want {
+        return Err(CompileError::Runtime(format!(
+            "bind_sponge_seed: seed input {idx} is {got} bytes, expected {want} \
+             (WIDTH = {WIDTH} BabyBear elements)"
+        )));
+    }
+    let dst = exe.get_input_ptr(ctx, idx)?;
+    // SAFETY: `dst` is the graph pool slot for `seed_buf`, sized `want` bytes
+    // (checked above). `snap.state()` is `[F; WIDTH]` — exactly `want` bytes of
+    // initialized, contiguous, Montgomery-encoded memory. The copy is enqueued
+    // on `ctx.stream`; see the asynchrony note above for the lifetime of `snap`.
+    unsafe {
+        cuda_memcpy_on::<false, true>(dst, snap.state().as_ptr() as *const c_void, want, ctx)
+            .map_err(|e| CompileError::Runtime(format!("bind_sponge_seed: H2D failed: {e}")))?;
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -826,21 +960,53 @@ mod tests {
         SampleExt,
     }
 
+    /// How the graph transcript under test gets its starting state.
+    #[derive(Clone, Copy)]
+    enum Seed<'a> {
+        /// `DuplexSpongeGpuIR::new` — all-zero state.
+        Zero,
+        /// `DuplexSpongeGpuIR::from_live` — state baked in as a `Const` node.
+        Const(&'a SpongeSnapshot),
+        /// `DuplexSpongeGpuIR::from_live_input` — state registered as a graph
+        /// input and H2D'd into the pool slot after compile, via
+        /// [`bind_sponge_seed`]. This is the cacheable path.
+        Input(&'a SpongeSnapshot),
+    }
+
+    impl Seed<'_> {
+        fn label(&self) -> &'static str {
+            match self {
+                Seed::Zero => "zero",
+                Seed::Const(_) => "const",
+                Seed::Input(_) => "input",
+            }
+        }
+    }
+
     /// Runs `ops` on a fresh `DuplexSpongeGpuIR` (compiling and executing the
     /// resulting graph on the GPU) and returns the ordered list of sampled F
     /// values. Sample_ext contributes four values in coefficient order.
     fn run_ir(ctx: &GpuDeviceCtx, ops: &[Op]) -> Vec<F> {
-        run_ir_with(ctx, None, ops)
+        run_ir_with(ctx, Seed::Zero, ops)
     }
 
-    /// Same as [`run_ir`], but seeds the graph transcript from `seed` (via
-    /// [`DuplexSpongeGpuIR::from_live`]) when one is supplied, so the emitted
-    /// graph *continues* a live transcript instead of starting from zero.
-    fn run_ir_with(ctx: &GpuDeviceCtx, seed: Option<&SpongeSnapshot>, ops: &[Op]) -> Vec<F> {
+    /// Same as [`run_ir`], but starts the graph transcript from `seed`, so the
+    /// emitted graph can *continue* a live transcript instead of starting from
+    /// zero. All three seeding paths must produce identical challenges.
+    fn run_ir_with(ctx: &GpuDeviceCtx, seed: Seed<'_>, ops: &[Op]) -> Vec<F> {
         let mut g = GraphBuilder::new();
+        // `seed_buf` is `Some` only on the `Input` path; it must be excluded
+        // from the observe-input binding loop below and filled separately.
+        let mut seed_buf: Option<BufId> = None;
         let mut sponge = match seed {
-            Some(snap) => DuplexSpongeGpuIR::from_live(&mut g, DeviceType::Cuda(0), snap),
-            None => DuplexSpongeGpuIR::new(&mut g, DeviceType::Cuda(0)),
+            Seed::Zero => DuplexSpongeGpuIR::new(&mut g, DeviceType::Cuda(0)),
+            Seed::Const(snap) => DuplexSpongeGpuIR::from_live(&mut g, DeviceType::Cuda(0), snap),
+            Seed::Input(snap) => {
+                let (sp, buf) =
+                    DuplexSpongeGpuIR::from_live_input(&mut g, DeviceType::Cuda(0), snap);
+                seed_buf = Some(buf);
+                sp
+            }
         };
 
         // Register input buffers for every observe operation.
@@ -886,14 +1052,20 @@ mod tests {
             g.register_output(*buf);
         }
 
+        let g_input_ids: Vec<BufId> = g.input_bufs().to_vec();
         let mut exe = GraphCompiler::new()
             .device(DeviceType::Cuda(0))
             .compile(g)
             .expect("graph compile");
 
-        // Bind each registered input to its slot in the compiled exe.
+        // Bind each registered observe input to its slot in the compiled exe.
+        // On the `Input` seeding path the seed is also a registered input, so
+        // skip it here and fill it through `bind_sponge_seed` instead.
         for i in 0..exe.num_inputs() {
             let bid = exe.input_buf_id(i);
+            if Some(bid) == seed_buf {
+                continue;
+            }
             let (_, bytes) = observe_bufs
                 .iter()
                 .find(|(b, _)| *b == bid)
@@ -901,6 +1073,16 @@ mod tests {
             let dbuf = bytes.as_slice().to_device_on(ctx).expect("H2D");
             exe.set_input(ctx, i, &dbuf).expect("set_input");
         }
+
+        // Fill the seed slot directly in the pool, immediately before run.
+        if let (Some(buf), Seed::Input(snap)) = (seed_buf, seed) {
+            assert!(
+                g_input_ids.contains(&buf),
+                "seed buf should have been registered as a graph input"
+            );
+            bind_sponge_seed(&mut exe, ctx, buf, snap).expect("bind_sponge_seed");
+        }
+
         exe.run(ctx).expect("run");
 
         // Now collect the sampled bytes in the order the caller requested.
@@ -1028,29 +1210,200 @@ mod tests {
             // 3. Continue on the live sponge — this is the oracle.
             let want = run_host_on(&mut live, &cont);
 
-            // 4. Seed a graph transcript from the snapshot and run the same continuation on the
-            //    GPU.
-            let got = run_ir_with(&ctx, Some(&snap), &cont);
+            // 4. Drop the live sponge before running any graph. The snapshot is owned and
+            //    pointer-free, so this must not affect anything; if it ever did, the assertions
+            //    below would catch it.
+            drop(live);
 
-            assert_eq!(
-                got.len(),
-                want.len(),
-                "prefix_len={prefix_len}: sample count mismatch"
-            );
-            for (i, (g, w)) in got.iter().zip(&want).enumerate() {
+            // 5. Both seeding paths must reproduce the oracle. `Input` is the cacheable one: its
+            //    state arrives as a post-compile H2D into the graph's pool slot, not as part of the
+            //    graph definition.
+            for seed in [Seed::Const(&snap), Seed::Input(&snap)] {
+                let got = run_ir_with(&ctx, seed, &cont);
+                let path = seed.label();
+
                 assert_eq!(
-                    f_to_bytes(*g),
-                    f_to_bytes(*w),
-                    "prefix_len={prefix_len} (seed absorb_idx={}, sample_idx={}): \
-                     challenge {i} mismatch: got {g:?}, want {w:?}",
-                    snap.absorb_idx,
-                    snap.sample_idx,
+                    got.len(),
+                    want.len(),
+                    "prefix_len={prefix_len} path={path}: sample count mismatch"
+                );
+                for (i, (g, w)) in got.iter().zip(&want).enumerate() {
+                    assert_eq!(
+                        f_to_bytes(*g),
+                        f_to_bytes(*w),
+                        "prefix_len={prefix_len} path={path} (seed absorb_idx={}, \
+                         sample_idx={}): challenge {i} mismatch: got {g:?}, want {w:?}",
+                        snap.absorb_idx,
+                        snap.sample_idx,
+                    );
+                }
+                assert_ne!(
+                    got, unseeded,
+                    "prefix_len={prefix_len} path={path}: seeded continuation matched \
+                     the zero-seeded one — the snapshot is not reaching the graph"
                 );
             }
-            assert_ne!(
-                got, unseeded,
-                "prefix_len={prefix_len}: seeded continuation matched the \
-                 zero-seeded one — the snapshot is not reaching the graph"
+        }
+    }
+
+    /// A graph built by `from_live_input` must be **reusable**: compile once,
+    /// then re-seed it with a *different* snapshot and re-run to get that
+    /// snapshot's challenges. This is the property the whole variant exists
+    /// for — with the `Const` path it is impossible, because the state is part
+    /// of the graph definition.
+    ///
+    /// Both re-seeds share the same `(absorb_idx, sample_idx)`, which is the
+    /// documented reuse contract: positions select kernel shapes at build
+    /// time, so only the state bytes may vary across runs of one graph.
+    #[test]
+    fn seeded_input_graph_is_reusable_across_snapshots() {
+        let ctx = test_ctx();
+        let cont = [
+            Op::Sample,
+            Op::Observe(f_from_u32(77)),
+            Op::SampleExt,
+            Op::Sample,
+        ];
+
+        // Two live transcripts at the SAME position but with different state:
+        // same op *kinds*, different observed values.
+        let mut live_a = DuplexSpongeGpu::default();
+        let mut live_b = DuplexSpongeGpu::default();
+        for i in 0..5u32 {
+            FiatShamirTranscript::<SC>::observe(&mut live_a, f_from_u32(100 + i));
+            FiatShamirTranscript::<SC>::observe(&mut live_b, f_from_u32(900 + i));
+        }
+        let snap_a = live_a.snapshot();
+        let snap_b = live_b.snapshot();
+        assert_eq!(
+            snap_a.position(),
+            snap_b.position(),
+            "setup: both snapshots must share a position to reuse one graph"
+        );
+        assert_ne!(
+            snap_a.state_bytes(),
+            snap_b.state_bytes(),
+            "setup: the snapshots must differ in state, else reuse proves nothing"
+        );
+
+        let want_a = run_host_on(&mut live_a, &cont);
+        let want_b = run_host_on(&mut live_b, &cont);
+        assert_ne!(want_a, want_b, "setup: the two oracles must differ");
+
+        // Build ONE graph, compile ONCE.
+        let mut g = GraphBuilder::new();
+        let (mut sponge, seed_buf) =
+            DuplexSpongeGpuIR::from_live_input(&mut g, DeviceType::Cuda(0), &snap_a);
+        let mut observe_bufs: Vec<(BufId, Vec<u8>)> = Vec::new();
+        let mut sample_bufs: Vec<(BufId, usize)> = Vec::new();
+        for (i, op) in cont.iter().enumerate() {
+            match op {
+                Op::Observe(f) => {
+                    let buf = add_input_f_buf(&mut g, &format!("in_{i}"));
+                    observe_bufs.push((buf, f_to_bytes(*f).to_vec()));
+                    sponge.observe(&mut g, buf);
+                }
+                Op::Sample => sample_bufs.push((sponge.sample(&mut g), 1)),
+                Op::SampleExt => sample_bufs.push((sponge.sample_ext(&mut g), D_EF)),
+                Op::ObserveExt(_) => unreachable!("not used in this continuation"),
+            }
+        }
+        for (buf, _) in &observe_bufs {
+            g.register_input(*buf);
+        }
+        for (buf, _) in &sample_bufs {
+            g.register_output(*buf);
+        }
+        let mut exe = GraphCompiler::new()
+            .device(DeviceType::Cuda(0))
+            .compile(g)
+            .expect("graph compile");
+
+        // Bind the observe inputs once — identical for both runs.
+        for i in 0..exe.num_inputs() {
+            let bid = exe.input_buf_id(i);
+            if bid == seed_buf {
+                continue;
+            }
+            let (_, bytes) = observe_bufs
+                .iter()
+                .find(|(b, _)| *b == bid)
+                .expect("input buf not found");
+            let dbuf = bytes.as_slice().to_device_on(&ctx).expect("H2D");
+            exe.set_input(&ctx, i, &dbuf).expect("set_input");
+        }
+
+        fn collect(exe: &GraphExe, ctx: &GpuDeviceCtx, sample_bufs: &[(BufId, usize)]) -> Vec<F> {
+            let mut out = Vec::new();
+            for (bid, len) in sample_bufs {
+                let idx = (0..exe.num_outputs())
+                    .find(|&i| exe.output_buf_id(i) == *bid)
+                    .expect("sample buf not found");
+                let bytes = exe.get_output(idx).to_host_on(ctx).expect("D2H");
+                for k in 0..*len {
+                    out.push(bytes_to_f(&bytes[4 * k..4 * (k + 1)]));
+                }
+            }
+            out
+        }
+
+        // Run 1: seed A.
+        bind_sponge_seed(&mut exe, &ctx, seed_buf, &snap_a).expect("bind A");
+        exe.run(&ctx).expect("run A");
+        let got_a = collect(&exe, &ctx, &sample_bufs);
+        assert_eq!(got_a, want_a, "run A: seeded graph did not match oracle A");
+
+        // Run 2: SAME compiled exe, re-seeded with B. No recompile.
+        bind_sponge_seed(&mut exe, &ctx, seed_buf, &snap_b).expect("bind B");
+        exe.run(&ctx).expect("run B");
+        let got_b = collect(&exe, &ctx, &sample_bufs);
+        assert_eq!(
+            got_b, want_b,
+            "run B: re-seeding the cached graph did not pick up snapshot B"
+        );
+        assert_ne!(
+            got_a, got_b,
+            "re-seed had no effect — the graph is not reading the seed input"
+        );
+    }
+
+    /// `from_live_input` must register the state as a graph input of exactly
+    /// `WIDTH * 4` bytes, adopt the live position, and emit no initializer
+    /// (registered inputs may not be written by any graph node).
+    #[test]
+    fn from_live_input_registers_state_input() {
+        for prefix_len in [0usize, 1, 2, 3, 5, 7, 9, 12, 16] {
+            let mut live = DuplexSpongeGpu::default();
+            let _ = run_host_on(&mut live, &prefix_ops(prefix_len));
+            let snap = live.snapshot();
+
+            let mut g = GraphBuilder::new();
+            let (sponge, seed_buf) =
+                DuplexSpongeGpuIR::from_live_input(&mut g, DeviceType::Cuda(0), &snap);
+
+            assert_eq!(
+                sponge.position(),
+                snap.position(),
+                "prefix_len={prefix_len}: seeded position mismatch"
+            );
+            assert_eq!(
+                sponge.state_buf(),
+                seed_buf,
+                "prefix_len={prefix_len}: the returned seed buf must be the \
+                 transcript's initial state buf"
+            );
+            assert!(
+                g.input_bufs().contains(&seed_buf),
+                "prefix_len={prefix_len}: seed buf was not registered as a graph input"
+            );
+            assert!(
+                g.buf_is_interface(seed_buf),
+                "prefix_len={prefix_len}: seed buf must be interface (DCE-protected)"
+            );
+            assert_eq!(
+                g.buf_info(seed_buf).size.eval(&Default::default()),
+                SpongeSnapshot::state_size_bytes() as i64,
+                "prefix_len={prefix_len}: seed buf size mismatch"
             );
         }
     }

@@ -633,6 +633,69 @@ extern "C" {
         stream: cudaStream_t,
     ) -> i32;
 
+    // ---- ctx materializers (graph-IR) --------------------------------------
+    // See `cuda/src/logup_zerocheck/batch_mle.cu` "CTX MATERIALIZERS": these
+    // build one element of a batched ctx array *on the device* from typed
+    // pointer arguments, so no host-assembled struct-of-pointers has to be
+    // uploaded and every pointer stays a real graph edge.
+
+    fn _materialize_main_matrix_ptr(
+        out: *mut MainMatrixPtrs<EF>,
+        idx: u32,
+        data: *const EF,
+        air_width: u32,
+        stream: cudaStream_t,
+    ) -> i32;
+
+    fn _materialize_zerocheck_ctx(
+        out: *mut ZerocheckCtx,
+        idx: u32,
+        d_selectors: *const EF,
+        d_preprocessed_data: *const EF,
+        preprocessed_air_width: u32,
+        d_main: *const MainMatrixPtrs<EF>,
+        d_public: *const F,
+        d_intermediates: *mut EF,
+        num_y: u32,
+        d_eq_xi: *const EF,
+        d_rules: *const std::ffi::c_void,
+        rules_len: usize,
+        d_used_nodes: *const usize,
+        used_nodes_len: usize,
+        buffer_size: u32,
+        stream: cudaStream_t,
+    ) -> i32;
+
+    #[allow(clippy::too_many_arguments)]
+    fn _materialize_logup_ctx(
+        out: *mut LogupCtx,
+        idx: u32,
+        d_selectors: *const EF,
+        d_preprocessed_data: *const EF,
+        preprocessed_air_width: u32,
+        d_main: *const MainMatrixPtrs<EF>,
+        d_public: *const F,
+        d_intermediates: *mut EF,
+        num_y: u32,
+        d_eq_xi: *const EF,
+        d_challenges: *const EF,
+        d_eq_3bs: *const EF,
+        d_rules: *const std::ffi::c_void,
+        rules_len: usize,
+        d_used_nodes: *const usize,
+        d_pair_idxs: *const u32,
+        used_nodes_len: usize,
+        buffer_size: u32,
+        stream: cudaStream_t,
+    ) -> i32;
+
+    /// `sizeof` of the C++ ctx ABI, for the layout static-asserts in
+    /// [`assert_ctx_abi_matches_cuda`].
+    pub fn _main_matrix_ptrs_ext_size() -> usize;
+    pub fn _eval_core_ctx_size() -> usize;
+    pub fn _zerocheck_ctx_size() -> usize;
+    pub fn _logup_ctx_size() -> usize;
+
     fn _zerocheck_monomial_batched(
         tmp_sums: *mut EF,
         output: *mut EF,
@@ -1957,4 +2020,153 @@ pub unsafe fn fold_selectors_round0(
         num_x as u32,
         stream,
     ))
+}
+
+// ===========================================================================
+// Ctx materializers (graph-IR)
+// ===========================================================================
+//
+// One `<<<1,1>>>` launch writes one complete element of a batched ctx array.
+// Callers pass raw device pointers that were resolved at *invocation* time
+// (in the graph-IR case, `BufId`s resolved by the graph runner), so the
+// planner keeps a real edge for every buffer the evaluator will dereference
+// through the ctx.
+//
+// These are `unsafe fn`s over raw pointers on purpose: the graph-facing
+// wrappers must not construct owning `DeviceBuffer`s (that would free pool
+// memory on drop), matching `fractional_ir.rs`'s device-challenge wrappers.
+
+/// Write `out[idx] = MainMatrixPtrs { data, air_width }` on the device.
+pub unsafe fn materialize_main_matrix_ptr_raw(
+    out: *mut MainMatrixPtrs<EF>,
+    idx: u32,
+    data: *const EF,
+    air_width: u32,
+    stream: cudaStream_t,
+) -> Result<(), CudaError> {
+    CudaError::from_result(_materialize_main_matrix_ptr(
+        out, idx, data, air_width, stream,
+    ))
+}
+
+/// Write `out[idx]` of a `ZerocheckCtx` array on the device.
+///
+/// Field order mirrors the eager builder in `logup_zerocheck/batch_mle.rs`.
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn materialize_zerocheck_ctx_raw(
+    out: *mut ZerocheckCtx,
+    idx: u32,
+    d_selectors: *const EF,
+    d_preprocessed_data: *const EF,
+    preprocessed_air_width: u32,
+    d_main: *const MainMatrixPtrs<EF>,
+    d_public: *const F,
+    d_intermediates: *mut EF,
+    num_y: u32,
+    d_eq_xi: *const EF,
+    d_rules: *const std::ffi::c_void,
+    rules_len: usize,
+    d_used_nodes: *const usize,
+    used_nodes_len: usize,
+    buffer_size: u32,
+    stream: cudaStream_t,
+) -> Result<(), CudaError> {
+    CudaError::from_result(_materialize_zerocheck_ctx(
+        out,
+        idx,
+        d_selectors,
+        d_preprocessed_data,
+        preprocessed_air_width,
+        d_main,
+        d_public,
+        d_intermediates,
+        num_y,
+        d_eq_xi,
+        d_rules,
+        rules_len,
+        d_used_nodes,
+        used_nodes_len,
+        buffer_size,
+        stream,
+    ))
+}
+
+/// Write `out[idx]` of a `LogupCtx` array on the device.
+///
+/// Field order mirrors the eager builder in `logup_zerocheck/batch_mle.rs`.
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn materialize_logup_ctx_raw(
+    out: *mut LogupCtx,
+    idx: u32,
+    d_selectors: *const EF,
+    d_preprocessed_data: *const EF,
+    preprocessed_air_width: u32,
+    d_main: *const MainMatrixPtrs<EF>,
+    d_public: *const F,
+    d_intermediates: *mut EF,
+    num_y: u32,
+    d_eq_xi: *const EF,
+    d_challenges: *const EF,
+    d_eq_3bs: *const EF,
+    d_rules: *const std::ffi::c_void,
+    rules_len: usize,
+    d_used_nodes: *const usize,
+    d_pair_idxs: *const u32,
+    used_nodes_len: usize,
+    buffer_size: u32,
+    stream: cudaStream_t,
+) -> Result<(), CudaError> {
+    CudaError::from_result(_materialize_logup_ctx(
+        out,
+        idx,
+        d_selectors,
+        d_preprocessed_data,
+        preprocessed_air_width,
+        d_main,
+        d_public,
+        d_intermediates,
+        num_y,
+        d_eq_xi,
+        d_challenges,
+        d_eq_3bs,
+        d_rules,
+        rules_len,
+        d_used_nodes,
+        d_pair_idxs,
+        used_nodes_len,
+        buffer_size,
+        stream,
+    ))
+}
+
+/// Panics unless the Rust ctx mirrors agree byte-for-byte in size with the
+/// private C++ definitions in `batch_mle.cu`.
+///
+/// The two layouts are hand-duplicated and already relied upon by the eager
+/// H2D upload; the materializers make a device writer depend on them too, so
+/// drift must fail loudly. Field *order* is covered by the graph-vs-eager
+/// field-by-field test in `zerocheck_ir.rs`.
+pub fn assert_ctx_abi_matches_cuda() {
+    unsafe {
+        assert_eq!(
+            std::mem::size_of::<MainMatrixPtrs<EF>>(),
+            _main_matrix_ptrs_ext_size(),
+            "MainMatrixPtrs<EF> layout drift vs CUDA"
+        );
+        assert_eq!(
+            std::mem::size_of::<EvalCoreCtx>(),
+            _eval_core_ctx_size(),
+            "EvalCoreCtx layout drift vs CUDA"
+        );
+        assert_eq!(
+            std::mem::size_of::<ZerocheckCtx>(),
+            _zerocheck_ctx_size(),
+            "ZerocheckCtx layout drift vs CUDA"
+        );
+        assert_eq!(
+            std::mem::size_of::<LogupCtx>(),
+            _logup_ctx_size(),
+            "LogupCtx layout drift vs CUDA"
+        );
+    }
 }

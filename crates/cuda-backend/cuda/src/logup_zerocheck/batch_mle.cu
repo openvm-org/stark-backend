@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cassert>
 #include <cstdint>
+#include <cstring>
 #include <stdio.h>
 #include <vector_types.h>
 
@@ -455,5 +456,227 @@ extern "C" int _logup_batch_eval_mle(
 
     return CHECK_KERNEL();
 }
+
+// ============================================================================
+// CTX MATERIALIZERS (graph-IR)
+// ============================================================================
+//
+// The eager path assembles `MainMatrixPtrs<FpExt>` / `ZerocheckCtx` / `LogupCtx`
+// on the *host* and uploads them (`batch_mle.rs:158-201`). That hides every
+// embedded device pointer from the graph-IR planner: a struct full of raw
+// addresses is an opaque leaf, so alias analysis through it is impossible.
+//
+// These launchers write one element of each array *on the device* from
+// explicitly-typed pointer arguments, so each pointer stays a real graph edge
+// (a `BufId` resolved at invocation time) instead of a stale host-baked
+// address. Every field of every struct is covered; the eager builders are the
+// field-by-field oracle.
+//
+// Each kernel zeroes the destination element first so ABI padding is
+// deterministic across replays, then assigns field by field.
+//
+// `EvalCoreCtx::d_preprocessed` is a `const` data member, so the containing
+// object's constness is stripped with `const_cast` before writing it. The
+// destination is a plain (non-const) device object, so this is well-defined.
+
+__global__ void materialize_main_matrix_ptr_kernel(
+    MainMatrixPtrs<FpExt> *__restrict__ out,
+    uint32_t idx,
+    const FpExt *data,
+    uint32_t air_width
+) {
+    MainMatrixPtrs<FpExt> &o = out[idx];
+    memset(&o, 0, sizeof(MainMatrixPtrs<FpExt>));
+    o.data = data;
+    o.air_width = air_width;
+}
+
+extern "C" int _materialize_main_matrix_ptr(
+    MainMatrixPtrs<FpExt> *out,
+    uint32_t idx,
+    const FpExt *data,
+    uint32_t air_width,
+    cudaStream_t stream
+) {
+    materialize_main_matrix_ptr_kernel<<<1, 1, 0, stream>>>(out, idx, data, air_width);
+    return CHECK_KERNEL();
+}
+
+__device__ __forceinline__ void write_eval_core_ctx(
+    EvalCoreCtx &o,
+    const FpExt *d_selectors,
+    const FpExt *d_preprocessed_data,
+    uint32_t preprocessed_air_width,
+    const MainMatrixPtrs<FpExt> *d_main,
+    const Fp *d_public
+) {
+    o.d_selectors = d_selectors;
+    // `d_preprocessed` is a const member of `EvalCoreCtx`; the object itself
+    // is mutable device memory, so stripping the member's constness is legal.
+    MainMatrixPtrs<FpExt> &prep = const_cast<MainMatrixPtrs<FpExt> &>(o.d_preprocessed);
+    prep.data = d_preprocessed_data;
+    prep.air_width = preprocessed_air_width;
+    o.d_main = d_main;
+    o.d_public = d_public;
+}
+
+__global__ void materialize_zerocheck_ctx_kernel(
+    ZerocheckCtx *__restrict__ out,
+    uint32_t idx,
+    const FpExt *d_selectors,
+    const FpExt *d_preprocessed_data,
+    uint32_t preprocessed_air_width,
+    const MainMatrixPtrs<FpExt> *d_main,
+    const Fp *d_public,
+    FpExt *d_intermediates,
+    uint32_t num_y,
+    const FpExt *d_eq_xi,
+    const Rule *d_rules,
+    size_t rules_len,
+    const size_t *d_used_nodes,
+    size_t used_nodes_len,
+    uint32_t buffer_size
+) {
+    ZerocheckCtx &o = out[idx];
+    memset(&o, 0, sizeof(ZerocheckCtx));
+    write_eval_core_ctx(
+        o.eval_ctx, d_selectors, d_preprocessed_data, preprocessed_air_width, d_main, d_public
+    );
+    o.d_intermediates = d_intermediates;
+    o.num_y = num_y;
+    o.d_eq_xi = d_eq_xi;
+    o.d_rules = d_rules;
+    o.rules_len = rules_len;
+    o.d_used_nodes = d_used_nodes;
+    o.used_nodes_len = used_nodes_len;
+    o.buffer_size = buffer_size;
+}
+
+extern "C" int _materialize_zerocheck_ctx(
+    ZerocheckCtx *out,
+    uint32_t idx,
+    const FpExt *d_selectors,
+    const FpExt *d_preprocessed_data,
+    uint32_t preprocessed_air_width,
+    const MainMatrixPtrs<FpExt> *d_main,
+    const Fp *d_public,
+    FpExt *d_intermediates,
+    uint32_t num_y,
+    const FpExt *d_eq_xi,
+    const Rule *d_rules,
+    size_t rules_len,
+    const size_t *d_used_nodes,
+    size_t used_nodes_len,
+    uint32_t buffer_size,
+    cudaStream_t stream
+) {
+    materialize_zerocheck_ctx_kernel<<<1, 1, 0, stream>>>(
+        out,
+        idx,
+        d_selectors,
+        d_preprocessed_data,
+        preprocessed_air_width,
+        d_main,
+        d_public,
+        d_intermediates,
+        num_y,
+        d_eq_xi,
+        d_rules,
+        rules_len,
+        d_used_nodes,
+        used_nodes_len,
+        buffer_size
+    );
+    return CHECK_KERNEL();
+}
+
+__global__ void materialize_logup_ctx_kernel(
+    LogupCtx *__restrict__ out,
+    uint32_t idx,
+    const FpExt *d_selectors,
+    const FpExt *d_preprocessed_data,
+    uint32_t preprocessed_air_width,
+    const MainMatrixPtrs<FpExt> *d_main,
+    const Fp *d_public,
+    FpExt *d_intermediates,
+    uint32_t num_y,
+    const FpExt *d_eq_xi,
+    const FpExt *d_challenges,
+    const FpExt *d_eq_3bs,
+    const Rule *d_rules,
+    size_t rules_len,
+    const size_t *d_used_nodes,
+    const uint32_t *d_pair_idxs,
+    size_t used_nodes_len,
+    uint32_t buffer_size
+) {
+    LogupCtx &o = out[idx];
+    memset(&o, 0, sizeof(LogupCtx));
+    write_eval_core_ctx(
+        o.eval_ctx, d_selectors, d_preprocessed_data, preprocessed_air_width, d_main, d_public
+    );
+    o.d_intermediates = d_intermediates;
+    o.num_y = num_y;
+    o.d_eq_xi = d_eq_xi;
+    o.d_challenges = d_challenges;
+    o.d_eq_3bs = d_eq_3bs;
+    o.d_rules = d_rules;
+    o.rules_len = rules_len;
+    o.d_used_nodes = d_used_nodes;
+    o.d_pair_idxs = d_pair_idxs;
+    o.used_nodes_len = used_nodes_len;
+    o.buffer_size = buffer_size;
+}
+
+extern "C" int _materialize_logup_ctx(
+    LogupCtx *out,
+    uint32_t idx,
+    const FpExt *d_selectors,
+    const FpExt *d_preprocessed_data,
+    uint32_t preprocessed_air_width,
+    const MainMatrixPtrs<FpExt> *d_main,
+    const Fp *d_public,
+    FpExt *d_intermediates,
+    uint32_t num_y,
+    const FpExt *d_eq_xi,
+    const FpExt *d_challenges,
+    const FpExt *d_eq_3bs,
+    const Rule *d_rules,
+    size_t rules_len,
+    const size_t *d_used_nodes,
+    const uint32_t *d_pair_idxs,
+    size_t used_nodes_len,
+    uint32_t buffer_size,
+    cudaStream_t stream
+) {
+    materialize_logup_ctx_kernel<<<1, 1, 0, stream>>>(
+        out,
+        idx,
+        d_selectors,
+        d_preprocessed_data,
+        preprocessed_air_width,
+        d_main,
+        d_public,
+        d_intermediates,
+        num_y,
+        d_eq_xi,
+        d_challenges,
+        d_eq_3bs,
+        d_rules,
+        rules_len,
+        d_used_nodes,
+        d_pair_idxs,
+        used_nodes_len,
+        buffer_size
+    );
+    return CHECK_KERNEL();
+}
+
+// Byte sizes of the batched ctx ABI, so the Rust mirrors in
+// `src/cuda/logup_zerocheck.rs` can be static-asserted against the C++ truth.
+extern "C" size_t _main_matrix_ptrs_ext_size() { return sizeof(MainMatrixPtrs<FpExt>); }
+extern "C" size_t _eval_core_ctx_size() { return sizeof(EvalCoreCtx); }
+extern "C" size_t _zerocheck_ctx_size() { return sizeof(ZerocheckCtx); }
+extern "C" size_t _logup_ctx_size() { return sizeof(LogupCtx); }
 
 } // namespace logup_zerocheck_mle
