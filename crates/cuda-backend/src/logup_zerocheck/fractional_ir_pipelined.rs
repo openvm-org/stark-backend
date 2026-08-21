@@ -1696,6 +1696,7 @@ mod tests {
     extern "C" {
         fn cudaProfilerStart() -> i32;
         fn cudaProfilerStop() -> i32;
+        fn cudaDeviceSynchronize() -> i32;
     }
 
     fn test_ctx() -> GpuDeviceCtx {
@@ -2254,9 +2255,30 @@ mod tests {
                 nvtx::range_pop!();
             }
             eager_ms.push(t0.elapsed().as_secs_f64() * 1e3);
+            let _ = unsafe { cudaDeviceSynchronize() };
         }
+        // Rebind every registered input before each iteration so the
+        // graph sees a fresh copy — the pool intentionally does not
+        // preserve input storage across `launch_graph` replays. The
+        // `set_input` D2Ds sit OUTSIDE the NVTX range so nsys measures
+        // only kernel work.
+        let rebind_inputs = |exe: &mut GraphExe, ctx: &GpuDeviceCtx| {
+            exe.set_input(ctx, 0, &d_leaves).expect("set_input leaves");
+            for (j, d) in d_xis.iter().enumerate() {
+                exe.set_input(ctx, 1 + j, d).expect("set_input xi");
+            }
+            exe.set_input(ctx, 1 + round, &d_lambda)
+                .expect("set_input lambda");
+            exe.set_input(ctx, 2 + round, &d_prev)
+                .expect("set_input prev_s_eval");
+            exe.set_input(ctx, 3 + round, &d_eqacc)
+                .expect("set_input eq_r_acc");
+            exe.set_input(ctx, 4 + round, &d_seed)
+                .expect("set_input seed");
+            ctx.stream.synchronize().expect("sync post-set_input");
+        };
         for i in 0..ITERS {
-            ctx.stream.synchronize().expect("sync pre-pipelined");
+            rebind_inputs(&mut exe, &ctx);
             let t0 = Instant::now();
             if nsys_enabled {
                 nvtx::range_push!("pipelined j={round} iter={i}");
@@ -2267,6 +2289,7 @@ mod tests {
                 nvtx::range_pop!();
             }
             pipelined_ms.push(t0.elapsed().as_secs_f64() * 1e3);
+            let _ = unsafe { cudaDeviceSynchronize() };
         }
         if nsys_enabled {
             unsafe { cudaProfilerStop() };
@@ -2574,6 +2597,7 @@ mod tests {
             unsafe { cudaProfilerStart() };
         }
         for i in 0..ITERS {
+            // H2D + sponge init outside the NVTX range.
             let mut sp = DuplexSpongeGpu::default();
             let d_l: openvm_cuda_common::d_buffer::DeviceBuffer<Frac<EF>> =
                 leaves.as_slice().to_device_on(&ctx).expect("H2D iter");
@@ -2591,9 +2615,18 @@ mod tests {
                 nvtx::range_pop!();
             }
             eager_ms.push(t0.elapsed().as_secs_f64() * 1e3);
+            let _ = unsafe { cudaDeviceSynchronize() };
         }
+        // Rebind every registered input before each pipelined iteration
+        // — the graph pool doesn't preserve input slots across
+        // `launch_graph` replays, so re-copy leaves and seed each time.
+        // The `set_input` D2Ds happen OUTSIDE the NVTX range so nsys
+        // measures only kernel work.
         for i in 0..ITERS {
-            ctx.stream.synchronize().expect("sync pre-pipelined");
+            exe.set_input(&ctx, 0, &d_leaves)
+                .expect("set_input leaves");
+            exe.set_input(&ctx, 1, &d_seed).expect("set_input seed");
+            ctx.stream.synchronize().expect("sync post-set_input");
             let t0 = Instant::now();
             if nsys_enabled {
                 nvtx::range_push!("pipelined log_n={log_n} iter={i}");
@@ -2604,6 +2637,7 @@ mod tests {
                 nvtx::range_pop!();
             }
             pipelined_ms.push(t0.elapsed().as_secs_f64() * 1e3);
+            let _ = unsafe { cudaDeviceSynchronize() };
         }
         if nsys_enabled {
             unsafe { cudaProfilerStop() };

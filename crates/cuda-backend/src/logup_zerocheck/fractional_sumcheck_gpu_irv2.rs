@@ -508,6 +508,7 @@ mod tests {
     extern "C" {
         fn cudaProfilerStart() -> i32;
         fn cudaProfilerStop() -> i32;
+        fn cudaDeviceSynchronize() -> i32;
     }
 
     fn make_host_leaves(len: usize, seed: u64) -> Vec<Frac<EF>> {
@@ -1225,7 +1226,7 @@ mod tests {
                 let d_leaves = leaves_to_device(&st.leaves, &ctx);
                 let mut sponge = DuplexSpongeGpu::default();
                 let mut mem = MemTracker::start("bench.fractional_v2_eager");
-                ctx.stream.synchronize().expect("sync");
+                ctx.stream.synchronize().expect("sync post-H2D");
                 if nsys_enabled {
                     nvtx::range_push!("eager n=2^{} iter={i}", st.log_n);
                 }
@@ -1240,13 +1241,14 @@ mod tests {
                     &ctx,
                 )
                 .expect("eager");
-                ctx.stream.synchronize().expect("sync");
+                ctx.stream.synchronize().expect("sync post-eager");
                 let elapsed_ms = t0.elapsed().as_secs_f64() * 1e3;
                 if nsys_enabled {
                     nvtx::range_pop!();
                 }
                 st.eager_ms.push(elapsed_ms);
                 st.eager_sum = proof.fractional_sum;
+                let _ = unsafe { cudaDeviceSynchronize() };
             }
 
             // Bind the graph input by H2D-ing leaves directly into the
@@ -1298,33 +1300,56 @@ mod tests {
                 ctx.stream.synchronize().expect("sync");
             }
 
+            // Timed graph iterations. Re-H2D the leaves into the pool
+            // slot before every iteration — the graph mutates its
+            // input's storage in-place (the pool doesn't preserve
+            // inputs across `launch_graph` / `run` calls), so each
+            // iteration needs a fresh copy. The H2D sits OUTSIDE the
+            // NVTX range so nsys measures only the kernel work.
+            let refresh_input = |st: &mut PerSize, ctx: &GpuDeviceCtx| {
+                let dst = st.exe.get_input_ptr(ctx, 0).expect("get_input_ptr");
+                let src = frac_bytes(&st.leaves);
+                unsafe {
+                    cuda_memcpy_on::<false, true>(
+                        dst,
+                        src.as_ptr() as *const std::ffi::c_void,
+                        src.len(),
+                        ctx,
+                    )
+                    .expect("H2D leaves into pool slot");
+                }
+                ctx.stream.synchronize().expect("sync post-H2D");
+            };
+
             for i in 0..ITERS {
-                ctx.stream.synchronize().expect("sync");
+                refresh_input(st, &ctx);
                 if nsys_enabled {
                     nvtx::range_push!("graph n=2^{} iter={i}", st.log_n);
                 }
                 let t0 = Instant::now();
                 st.exe.run(&ctx).expect("graph run");
-                ctx.stream.synchronize().expect("sync");
+                ctx.stream.synchronize().expect("sync post-run");
                 let elapsed_ms = t0.elapsed().as_secs_f64() * 1e3;
                 if nsys_enabled {
                     nvtx::range_pop!();
                 }
                 st.graph_ms.push(elapsed_ms);
+                let _ = unsafe { cudaDeviceSynchronize() };
             }
             for i in 0..ITERS {
-                ctx.stream.synchronize().expect("sync");
+                refresh_input(st, &ctx);
                 if nsys_enabled {
                     nvtx::range_push!("graph_capture n=2^{} iter={i}", st.log_n);
                 }
                 let t0 = Instant::now();
                 st.exe.launch_graph(&ctx).expect("graph launch");
-                ctx.stream.synchronize().expect("sync");
+                ctx.stream.synchronize().expect("sync post-launch");
                 let elapsed_ms = t0.elapsed().as_secs_f64() * 1e3;
                 if nsys_enabled {
                     nvtx::range_pop!();
                 }
                 st.graph_capture_ms.push(elapsed_ms);
+                let _ = unsafe { cudaDeviceSynchronize() };
             }
         }
         if nsys_enabled {
@@ -1521,6 +1546,11 @@ mod tests {
             name: String,
             exe: GraphExe,
             peak_bytes: usize,
+            /// Device-resident leaves, rebound via `set_input` before
+            /// every timed iteration so the graph sees fresh input on
+            /// each launch (the pool doesn't preserve input slots
+            /// across replays).
+            d_input: DeviceBuffer<u8>,
         }
 
         // Compile every scheduler variant, upload the input, warm each up
@@ -1570,6 +1600,7 @@ mod tests {
                 name,
                 exe,
                 peak_bytes,
+                d_input,
             });
         }
 
@@ -1586,12 +1617,14 @@ mod tests {
             unsafe { cudaProfilerStart() };
         }
 
-        // Eager reference workload.
+        // Eager reference workload. The per-iter H2D happens above
+        // when pre-allocating `eager_leaves`, so nothing here touches
+        // host memory — the NVTX range wraps kernel work only.
         for i in 0..ITERS {
             let d_leaves = eager_leaves.pop().expect("pre-alloc'd eager leaves");
             let mut sponge = DuplexSpongeGpu::default();
             let mut mem = MemTracker::start("bench.fractional_v2_eager");
-            ctx.stream.synchronize().expect("sync");
+            ctx.stream.synchronize().expect("sync pre-eager");
             if nsys_enabled {
                 nvtx::range_push!("eager iter={i}");
             }
@@ -1605,37 +1638,50 @@ mod tests {
                 &ctx,
             )
             .expect("eager");
-            ctx.stream.synchronize().expect("sync");
+            ctx.stream.synchronize().expect("sync post-eager");
             if nsys_enabled {
                 nvtx::range_pop!();
             }
+            let _ = unsafe { cudaDeviceSynchronize() };
         }
 
         // Per-scheduler: exec workload, then CUDA-graph replay workload.
+        // Rebind the input via `set_input` before every iteration —
+        // the pool doesn't preserve input slots across replays, so
+        // each launch needs a fresh copy. The `set_input` D2D sits
+        // OUTSIDE the NVTX range so nsys measures only kernel work.
         for c in compiled.iter_mut() {
             for i in 0..ITERS {
-                ctx.stream.synchronize().expect("sync");
+                c.exe
+                    .set_input(&ctx, 0, &c.d_input)
+                    .expect("set_input pre-run");
+                ctx.stream.synchronize().expect("sync post-set_input");
                 if nsys_enabled {
                     let label = format!("{}_exec iter={i}", c.name);
                     nvtx::range_push!("{}", label);
                 }
                 c.exe.run(&ctx).expect("graph run");
-                ctx.stream.synchronize().expect("sync");
+                ctx.stream.synchronize().expect("sync post-run");
                 if nsys_enabled {
                     nvtx::range_pop!();
                 }
+                let _ = unsafe { cudaDeviceSynchronize() };
             }
             for i in 0..ITERS {
-                ctx.stream.synchronize().expect("sync");
+                c.exe
+                    .set_input(&ctx, 0, &c.d_input)
+                    .expect("set_input pre-launch");
+                ctx.stream.synchronize().expect("sync post-set_input");
                 if nsys_enabled {
                     let label = format!("{}_graph iter={i}", c.name);
                     nvtx::range_push!("{}", label);
                 }
                 c.exe.launch_graph(&ctx).expect("graph launch");
-                ctx.stream.synchronize().expect("sync");
+                ctx.stream.synchronize().expect("sync post-launch");
                 if nsys_enabled {
                     nvtx::range_pop!();
                 }
+                let _ = unsafe { cudaDeviceSynchronize() };
             }
         }
 

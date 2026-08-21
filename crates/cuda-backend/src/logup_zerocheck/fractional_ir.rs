@@ -3879,6 +3879,7 @@ mod tests {
     extern "C" {
         fn cudaProfilerStart() -> i32;
         fn cudaProfilerStop() -> i32;
+        fn cudaDeviceSynchronize() -> i32;
     }
 
     fn make_host_leaves(len: usize, seed: u64) -> Vec<Frac<EF>> {
@@ -6162,6 +6163,11 @@ mod tests {
             alpha: EF,
             eager_sum: (EF, EF),
             exe: GraphExe,
+            /// Device-resident copy of `leaves`, kept alive across the
+            /// timed pass so each iteration can rebind it via
+            /// `set_input` — the graph's pool intentionally does not
+            /// preserve inputs across `launch_graph` calls.
+            d_input: DeviceBuffer<u8>,
             exports: Vec<BufId>,
             build_ms: f64,
             compile_ms: f64,
@@ -6368,6 +6374,7 @@ mod tests {
                 alpha,
                 eager_sum,
                 exe,
+                d_input,
                 exports,
                 build_ms,
                 compile_ms,
@@ -6410,10 +6417,12 @@ mod tests {
         }
         for st in states.iter_mut() {
             for i in 0..ITERS {
+                // H2D outside the NVTX range: nsys measures only the
+                // sumcheck kernel work, not the input copy.
                 let d_leaves = leaves_to_device(&st.leaves, &ctx);
                 let mut sponge = DuplexSpongeGpu::default();
                 let mut mem = MemTracker::start("bench.fractional_eager");
-                ctx.stream.synchronize().expect("sync");
+                ctx.stream.synchronize().expect("sync post-H2D");
                 let t0 = Instant::now();
                 if nsys_enabled {
                     nvtx::range_push!("eager n=2^{} iter={}", st.log_n, i);
@@ -6428,25 +6437,41 @@ mod tests {
                     &ctx,
                 )
                 .expect("eager fractional_sumcheck_gpu");
-                ctx.stream.synchronize().expect("sync");
+                ctx.stream.synchronize().expect("sync post-eager");
                 if nsys_enabled {
                     nvtx::range_pop!();
                 }
                 st.eager_ms.push(t0.elapsed().as_secs_f64() * 1e3);
                 st.eager_sum = proof.fractional_sum;
+                let _ = unsafe { cudaDeviceSynchronize() };
             }
             for i in 0..ITERS {
-                ctx.stream.synchronize().expect("sync");
+                // Bind the input fresh for every iteration: the graph
+                // pool intentionally does not preserve input slots
+                // across `launch_graph` replays (they may be reused
+                // for scratch/output storage), so the caller must
+                // re-copy leaves into the pool before each launch.
+                // The `set_input` D2D memcpy sits OUTSIDE the NVTX
+                // range so nsys measures only the kernel work — same
+                // pattern as `bench_pipelined_ir_vs_eager`.
+                st.exe
+                    .set_input(&ctx, 0, &st.d_input)
+                    .expect("set_input");
+                ctx.stream.synchronize().expect("sync post-set_input");
                 let t0 = Instant::now();
                 if nsys_enabled {
                     nvtx::range_push!("graph n=2^{} iter={}", st.log_n, i);
                 }
                 st.exe.launch_graph(&ctx).expect("graph launch");
-                ctx.stream.synchronize().expect("sync");
+                ctx.stream.synchronize().expect("sync post-launch");
                 if nsys_enabled {
                     nvtx::range_pop!();
                 }
                 st.graph_ms.push(t0.elapsed().as_secs_f64() * 1e3);
+                // Full-device barrier between iterations so the next
+                // iteration starts from a quiesced GPU (matches the
+                // eager loop's fresh state).
+                let _ = unsafe { cudaDeviceSynchronize() };
             }
         }
         if nsys_enabled {
@@ -6952,21 +6977,23 @@ mod tests {
                     cc_compiler(DeviceType::Cuda(0))
                 };
                 let compiler_pg = if use_v2 {
-                    base_pg.scheduler(SchedulerMode::ListV2 {
-                        params: ListSchedulerV2 {
-                            num_streams,
-                            node_times,
-                            ..ListSchedulerV2::default()
-                        },
-                    })
+                    base_pg
+                        .scheduler(SchedulerMode::ListV2 {
+                            params: ListSchedulerV2 {
+                                num_streams,
+                                ..ListSchedulerV2::default()
+                            },
+                        })
+                        .node_times(Some(node_times))
                 } else {
-                    base_pg.scheduler(SchedulerMode::ListV1 {
-                        params: ListSchedulerV1 {
-                            max_concurrency: num_streams as u32,
-                            node_times,
-                            ..ListSchedulerV1::default()
-                        },
-                    })
+                    base_pg
+                        .scheduler(SchedulerMode::ListV1 {
+                            params: ListSchedulerV1 {
+                                max_concurrency: num_streams as u32,
+                                ..ListSchedulerV1::default()
+                            },
+                        })
+                        .node_times(Some(node_times))
                 };
                 let t0 = Instant::now();
                 let mut exe_pg = compiler_pg.compile(g2_for_compile).expect("pg compile");
@@ -7095,10 +7122,12 @@ mod tests {
         }
         for st in states.iter_mut() {
             for i in 0..ITERS {
+                // H2D outside the NVTX range: nsys measures only the
+                // sumcheck kernel work, not the input copy.
                 let d_leaves = leaves_to_device(&st.leaves, &ctx);
                 let mut sponge = DuplexSpongeGpu::default();
                 let mut mem = MemTracker::start("bench.fractional_eager");
-                ctx.stream.synchronize().expect("sync");
+                ctx.stream.synchronize().expect("sync post-H2D");
                 let t0 = Instant::now();
                 if nsys_enabled {
                     nvtx::range_push!("eager n=2^{} iter={}", st.log_n, i);
@@ -7113,12 +7142,13 @@ mod tests {
                     &ctx,
                 )
                 .expect("eager fractional_sumcheck_gpu");
-                ctx.stream.synchronize().expect("sync");
+                ctx.stream.synchronize().expect("sync post-eager");
                 if nsys_enabled {
                     nvtx::range_pop!();
                 }
                 st.eager_ms.push(t0.elapsed().as_secs_f64() * 1e3);
                 st.eager_sum = proof.fractional_sum;
+                let _ = unsafe { cudaDeviceSynchronize() };
             }
             for d in st.drivers.iter_mut() {
                 for i in 0..ITERS {
@@ -7128,7 +7158,7 @@ mod tests {
                     d.exe
                         .set_input(&ctx, 0, &d.d_input)
                         .expect("set_input pre-launch");
-                    ctx.stream.synchronize().expect("sync");
+                    ctx.stream.synchronize().expect("sync post-set_input");
                     let t0 = Instant::now();
                     if nsys_enabled {
                         nvtx::range_push!(
@@ -7140,11 +7170,12 @@ mod tests {
                         );
                     }
                     d.exe.launch_graph(&ctx).expect("graph launch");
-                    ctx.stream.synchronize().expect("sync");
+                    ctx.stream.synchronize().expect("sync post-launch");
                     if nsys_enabled {
                         nvtx::range_pop!();
                     }
                     d.times_ms.push(t0.elapsed().as_secs_f64() * 1e3);
+                    let _ = unsafe { cudaDeviceSynchronize() };
                 }
             }
         }
