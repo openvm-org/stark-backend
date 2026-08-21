@@ -1,7 +1,7 @@
 //! Graph compilation pipeline.
 //!
 //! [`GraphCompiler`] consumes a [`GraphBuilder`], validates its registered
-//! input/output interface, plans memory via [`crate::planner::plan_raw`],
+//! input/output interface, plans memory via [`crate::planner::plan`],
 //! compiles every [`GraphNode::Kernel`]'s module through
 //! [`crate::module_compiler::ModuleCompiler`], and packages the whole thing into a
 //! [`GraphExe`]. Every buffer — inputs, outputs, and graph-level
@@ -9,7 +9,7 @@
 //! consecutive [`GraphExe::run`]s replay identical device addresses (the
 //! CUDA-graph-capture contract).
 //!
-//! Feature-gated behind `planner` (needs the CP-SAT planner + OR-Tools).
+//! Feature-gated behind `planner`.
 
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -156,11 +156,6 @@ impl GraphCompiler {
         self
     }
 
-    /// Picks the memory scheduler backend. Default depends on features:
-    /// with `planner-ortools`, [`SchedulerMode::CpSat`] with `max_secs =
-    /// 30.0` (requires the OR-Tools install described in the compiler
-    /// crate's `Cargo.toml`); without it, [`SchedulerMode::Heuristic`] —
-    /// the OR-Tools-free fallback described in [`planner::plan_heuristic`].
     /// Attach per-node runtime timings (ms), typically populated from a
     /// prior [`GraphExe::collect_graph_info`]. The vec length must match
     /// the post-fuse+dce node count at compile time — [`Self::plan_memory`]
@@ -171,6 +166,10 @@ impl GraphCompiler {
         self
     }
 
+    /// Picks the memory scheduler backend. Defaults to
+    /// [`SchedulerMode::default`] — currently a single-stream
+    /// [`SchedulerMode::ListV1`]. Use [`Self::stream_planning`] for the
+    /// multi-stream `ListV1` convenience wrapper.
     pub fn scheduler(mut self, scheduler: SchedulerMode) -> Self {
         self.scheduler = scheduler;
         self

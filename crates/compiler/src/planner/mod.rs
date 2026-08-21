@@ -6,7 +6,6 @@
 //!
 //! Backends are selected via [`SchedulerMode`]:
 //!
-//! - [`SchedulerMode::CpSat`] — joint CP-SAT solve, feature-gated behind `planner-ortools`.
 //! - [`SchedulerMode::ListV1`] — profile-guided beam-search list scheduler with depth-`k`
 //!   look-ahead. Assigns each node to one of `params.max_concurrency` streams and inserts `WaitOn`
 //!   sync instructions.
@@ -36,7 +35,7 @@ pub use list_v1::ListSchedulerV1;
 pub use plan::{StreamInstr, StreamMemoryPlan};
 pub use validate::{validate_plan, ValidationError};
 
-/// Memory-planner backend selector. See [`plan_raw`].
+/// Memory-planner backend selector. See [`plan`].
 #[derive(Debug, Clone)]
 pub enum SchedulerMode {
     /// Profile-guided list scheduler with depth-`k` beam look-ahead.

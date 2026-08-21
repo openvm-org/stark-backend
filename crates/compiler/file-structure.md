@@ -241,12 +241,12 @@ The crate exposes two entry points:
   emits a dlopen'd `runtime::KernelProgram`. Strictly pure lowering: no
   rewrites, no fusion, no monomorphization.
 
-- **`graph_exe::GraphCompiler`** — graph-level driver. Consumes a
+- **`graph_compiler::GraphCompiler`** — graph-level driver. Consumes a
   `graph_ir::GraphBuilder`, runs the graph pass pipeline
-  (`restore_ssa` → `lower_reduce` → `monomorphize` → `canonicalize` →
-  optional fusion → dce → `plan_memory`), JITs every unique residual
-  module in parallel through `ModuleCompiler`, and packages the whole
-  thing into a `GraphExe` backed by one fixed-offset device pool
+  (`lower_reduce` → `monomorphize` → `canonicalize` → optional fusion →
+  dce → `plan_memory`), JITs every unique residual module in parallel
+  through `ModuleCompiler`, and packages the whole thing into a
+  `graph_exe::GraphExe` backed by one fixed-offset device pool
   (compatible with CUDA-graph capture). Feature-gated on `planner`.
 
 ## `src/` — core IR and infrastructure
@@ -296,9 +296,24 @@ The crate exposes two entry points:
 - **`kernel_cache.rs`** — on-disk LRU cache of JIT artifacts (`.so` +
   CUDA source + metadata), keyed by module hash. Bounded by count and
   bytes. Feature-gated on `planner`.
-- **`graph_exe.rs`** — `GraphCompiler` + `GraphExe`. Runs the graph
-  pipeline, compiles residual modules in parallel, allocates the fixed
-  device pool, and captures a CUDA graph for cheap replay.
+- **`graph_compiler.rs`** — `GraphCompiler`. Builder-pattern driver
+  that runs the graph pipeline, compiles unique residual modules in
+  parallel through `ModuleCompiler`, plans memory, and hands off a
+  `GraphExe`. Feature-gated on `planner`.
+- **`graph_compiler_config.rs`** — `GraphCompilerConfig` — the TOML
+  schema behind `GraphCompiler::from_toml`. Feature-gated on `planner`.
+- **`graph_exe.rs`** — `GraphExe`. Owns every JIT'd `KernelProgram`, the
+  static memory plan, and the unified device pool that backs every
+  buffer at a fixed offset. Supports CUDA-graph capture / replay via
+  `launch_graph`. Feature-gated on `planner`.
+- **`graph_info.rs`** — `GraphInfo` — per-node timings and graph hash,
+  serializable, consumed by later replans (via `GraphCompiler::node_times`)
+  and by the cytoscape / `sim_scheduler` overlays. Feature-gated on
+  `planner`.
+- **`graph_serializer.rs`** — `SerializableGraphBuilder`: bincode wire
+  format for a `GraphBuilder` (pre-pass or post-fuse+dce), used by the
+  sumcheck bench harness (`load_or_compile_and_dump`) and by
+  `sim_scheduler`. Feature-gated on `planner`.
 
 ## `src/passes/` — compiler passes
 
@@ -312,9 +327,9 @@ Pipeline order (mirrors `passes/mod.rs` and the module docs there).
   bounds, loop sizes, and reduce lengths must be concrete before
   lowering.
 - **`canonicalize.rs`** — flattens arbitrary nesting into the canonical
-  form from `design.md`: an ordered sequence of let-bound computes,
-  each with at most one inner compute (or a reduce), reduces have
-  scalar bodies. Merges deep nests by rewriting innermost pairs.
+  form from `old_plans/design.md`: an ordered sequence of let-bound
+  computes, each with at most one inner compute (or a reduce), reduces
+  have scalar bodies. Merges deep nests by rewriting innermost pairs.
 - **`parallel_reduce_rewrite.rs`** — block-reduce lowering for
   under-parallel reduces: rewrites to a two-stage tree (per-thread
   sequential accumulation + halving butterfly) when the outer bound is
@@ -323,18 +338,39 @@ Pipeline order (mirrors `passes/mod.rs` and the module docs there).
   become global buffers, each canonical compute becomes one kernel,
   inner let-bound computes become shared-memory buffers, par operands
   list every captured value from the enclosing scope.
-- **`layout_infer.rs`** — fills in `par_attr` / `alloc_attr` left empty
-  by lowering. Promotes shared tiles to registers when the write
-  access is invertible and non-grid-spanning. Classifies each read
-  layout as identity, slot permutation, shuffle, or shared bounce.
+- **`par_attr_infer.rs`** — assigns each par a `(spatial, lane, warp)
+  → logical` par-attr by propagating read layouts forward. Sub-pass of
+  `layout_infer`.
+- **`layout_infer.rs`** — driver for the layout inference pipeline:
+  fills in `par_attr` / `alloc_attr` left empty by lowering, promotes
+  shared tiles to registers when the write access is invertible and
+  non-grid-spanning, and inserts `ConvertLayout` ops where the reader's
+  expected layout doesn't match the producer's. See
+  `compiler-docs/Layout Inference Algorithm.md` for the algorithm.
+- **`layout_cost.rs`** — hardware-specific cost constants
+  (`ConversionCostModel`) shared by `par_attr_infer`, `shared_swizzle`,
+  and `convert_decompose`. Currently tuned for RTX 5090 / GB202.
+- **`shared_swizzle.rs`** — `choose_shared_layout` picks a
+  bank-conflict-minimizing shared-memory swizzle for a given set of
+  accesses (paper §5.4 + Appendix 9.2). Called by
+  `allocate_convert_scratch` and by `layout_infer` for multi-access
+  shared tiles.
+- **`convert_decompose.rs`** — `best_decomposition` scores each
+  `ConvertLayout` op across the Copy / Slot / Shuffle / Bounce
+  strategies (paper §5.4) and returns the winner for codegen.
+- **`allocate_convert_scratch.rs`** — sizes each `ConvertLayout`'s
+  shared scratch buffer as a pure function of the `(src, dst)` layout
+  pair (full tile iff `Strategy::Bounce` wins, 0 otherwise). Runs after
+  `layout_infer`.
 - **`insert_sync.rs`** — inserts `__syncthreads()` barriers before
   reads-after-shared-writes and around writes to aliased shared
   buffers.
 - **`plan_shared_mem.rs`** — liveness-based packing of shared buffers
   onto shared memory offsets to minimize peak footprint.
 - **`codegen.rs`** — `KirProgram` → CUDA C++. Emits the C ABI expected
-  by `design.md`, handles Montgomery arithmetic for BabyBear, uses
-  inline PTX for mul reduction.
+  by `old_plans/design.md`, handles Montgomery arithmetic for BabyBear,
+  uses inline PTX for mul reduction. `ConvertLayout` is realized via
+  `best_decomposition`'s winning strategy.
 - **`verify.rs`** — structural KIR checks: SSA, par primitiveness (no
   nesting, no statement loops, no syncs inside pars).
 - **`check_accesses.rs`** — optional exhaustive access validation for a
@@ -346,22 +382,21 @@ Pipeline order (mirrors `passes/mod.rs` and the module docs there).
 - **`split_module.rs`** — splits a multi-kernel HIR module into
   single-kernel modules wired by edges, so each residual can go through
   `ModuleCompiler`.
-- **`restore_ssa.rs`** — restores SSA at the `BufId` level for
-  in-place blackbox mutations: mutating kernels get a fresh `BufId` for
-  the output, downstream reads are rerouted, the original is recorded
-  as an *alias* so the alias-aware planner packs both onto the same
-  pool offset.
+- **`fusion_utils.rs`** — shared helpers for graph rewrites: `dce`
+  (graph-level dead-code elimination), `FusionReport`, HIR traversal
+  helpers used across `fusion/`.
 - **`utils.rs`** — shared helpers used across passes.
 - **`inplace.rs`** — empty placeholder.
 
 ### Fusion (`src/passes/fusion/`)
 
-CP-SAT-extracted rewrite pipeline (spec: `old_plans/detailed-fusion-plan-v2.md`).
-Selectable from `GraphCompiler`.
+Enumerate–score–extract rewrite pipeline (design:
+`compiler-docs/High-level Fusion Design.md`, long-form spec:
+`old_plans/detailed-fusion-plan-v2.md`). Selectable from
+`GraphCompiler::fusion_options` / `without_fusion`.
 
-- **`fusion_utils.rs`** — shared HIR traversal helpers (occurrence-based
-  visitors, index-scope uniqueness, HIR cloning with substitution).
-- **`mod.rs`** — module glue and public re-exports.
+- **`mod.rs`** — module glue and public re-exports (`fuse_graph`,
+  `FusionOptions`, `FusionReport`, `ArtifactKey`, ...).
 - **`driver.rs`** — `fuse_graph` — top-level bounded-saturation loop:
   freeze seed → enumerate candidates per round → dedup by `CandidateKey`
   → validate acyclicity → insert accepted candidates → extract → apply.
@@ -400,25 +435,36 @@ draft `AltGraphNode`s to the driver:
 
 - `mod.rs` (`ExtractionData`, `ExtractionSolution`,
   `FallbackReason`), `cpsat.rs` (CP-SAT solve, gated on
-  `planner-ortools`), `brute.rs` (exhaustive enumerator; correctness
-  oracle for the CP-SAT extractor).
+  `planner-ortools`; falls back to `brute` when unavailable),
+  `brute.rs` (exhaustive enumerator; correctness oracle for small
+  inputs).
 
 ## `src/planner/` — memory & stream planner
 
-Feature-gated on `planner`. Picks execution order and per-buffer byte
-offsets to minimize peak bytes (single-stream) or execution time
-(multi-stream list scheduler). Emits a unified `StreamMemoryPlan`.
+Feature-gated on `planner`. Picks execution order, stream assignment,
+and per-buffer byte offsets to minimize wall time under a memory bound.
+Emits a unified `StreamMemoryPlan`. See
+`compiler-docs/Stream & Memory co-scheduler.md` for the algorithm.
 
-- **`mod.rs`** — public entry, `SchedulerMode` selector.
-- **`plan.rs`** — `StreamMemoryPlan` output type.
-- **`ctx.rs`** — planner evaluation context (topology, sizes, live
-  ranges).
-- **`cpsat.rs`** — joint CP-SAT solve (feature-gated on
-  `planner-ortools`).
-- **`heuristic.rs`** — solver-free three-phase heuristic
-  (memory-aware greedy topo + BFD packing + adjacent-swap hill climb).
-- **`list_v1.rs`** — depth-`k` beam-search list scheduler with
-  multi-stream support and `WaitOn` sync insertion.
+- **`mod.rs`** — public entry, `SchedulerMode` selector (`ListV1` /
+  `ListV2`) and the `plan(atg, mode) -> StreamMemoryPlan` dispatcher.
+- **`plan.rs`** — `StreamMemoryPlan` / `StreamInstr` output types.
+- **`abstract_timing.rs`** — `AbstractTimingGraph` (the scheduler input
+  layer: buffers, per-node timings, producers/consumers, alias
+  classes) plus `access_from_node`, `eval_size`, `perf_est`, and
+  `load_abstract_timing_graph` (the offline loader used by
+  `sim_scheduler` and the abstract-planner examples).
+- **`list_v1.rs`** — profile-guided list scheduler with depth-`k` beam
+  look-ahead, multi-stream `WaitOn` insertion, and offline best-fit
+  memory packing.
+- **`list_v2.rs`** — persistent-beam list scheduler with parallel
+  fan-out over ready-set × streams (uses the `im` persistent
+  collections for O(1) beam clones). Post-pass replays the assignment
+  into a `StreamMemoryPlan` with per-stream ordering, cross-stream
+  event assignment, and best-fit-decreasing memory packing.
+- **`validate.rs`** — `validate_plan`: checks the emitted schedule for
+  missing cross-stream syncs, data-dep races, and pool-lifetime
+  overlaps. Used by `sim_scheduler`.
 
 ## `macros/` — `kernel!` proc macro
 
@@ -435,50 +481,96 @@ producing `NodeId`s.
 - **`tests/gpu_graph.rs`** — multi-kernel graph compile + run tests.
 - **`tests/gpu_macro.rs`** — the large macro-driven end-to-end DSL
   test suite (write these first when adding compiler features).
+- **`tests/convert_layout.rs`** — layout-conversion codegen tests.
 - **`tests/custom_kernels.rs`** — placeholder.
+- **`tests/graph_serializer.rs`** — round-trip tests for the
+  `SerializableGraphBuilder` bincode format.
 - **`examples/dump_ntt_cuda.rs`** — dump generated CUDA for the NTT
   kernel.
 - **`examples/ntt_scale_graph.rs`** — NTT graph construction and
-  scaling.
-- **`examples/planner_bench.rs`** — memory planner benchmark
-  (requires `planner-ortools`).
+  scaling (requires `planner`).
+- **`examples/bench_abstract_planners.rs`** — offline planner
+  benchmark: runs the heuristic + `list_v1` at several
+  `max_concurrency` levels against a captured `graph.bin` +
+  `timings.json` (requires `planner`).
+- **`examples/bench_list_v2_ops.rs`** — micro-benchmarks `list_v2`'s
+  per-step primitives (`cost`, `put_on`, `state.clone()`) (requires
+  `planner`).
 - **`examples/profile_ntt_supra.rs`** — profiling harness for
   Supra-compiled NTT.
+- **`examples/tmp_ntt_kdist.rs`** — scratch driver for NTT
+  distribution experiments.
 - **`benches/ntt.rs`**, **`ntt_supra_sweep.rs`**, **`poseidon2.rs`** —
   Criterion benchmarks.
+- **`src/bin/sim_scheduler.rs`** — offline replay of the memory +
+  stream planner against a captured graph and timings JSON. See
+  `tools.md` for usage.
 
-## Design docs in this directory
+## Design docs and porting guides
 
 These docs describe intent and history; the code is the source of
 truth when they disagree.
 
+### `compiler-docs/` — current design references
+
+- **`Backend IR and compiler.md`** — overall compile pipeline, HIR
+  syntax and type-inference rules, KIR SSA layout.
+- **`High-level Fusion Design.md`** — build/score/pick fusion
+  architecture (matches the current `passes/fusion/` implementation).
+- **`Layout Inference Algorithm.md`** — layout inference algorithm and
+  `ConvertLayout` decomposition, including the shared-swizzle
+  bank-conflict optimization.
+- **`Stream & Memory co-scheduler.md`** — `AbstractTimingGraph` /
+  `StreamMemoryPlan` interface and the `list_v2` beam search.
+
+### Root-level guides
+
+- **`gpu_ir_porting_guide.md`** — porting eager CUDA code to the graph
+  IR (blackbox kernels, `insert_memcpy`/`insert_memset`, avoiding
+  data-dependent host values).
+- **`tools.md`** — user guide for `GraphCompilerConfig`, graph dumps
+  (text + cytoscape), the graph visualizer, `SerializableGraphBuilder`
+  format, and `sim_scheduler`.
+- **`notes.md`** — miscellaneous notes: graph mutation semantics,
+  benchmark harness (env vars, nsys flags, per-bench command
+  templates).
+
+### `old_plans/` — historical and reference specs
+
 - **`design.md`** — original architecture: DSL, canonical form, KIR,
   layout system, compile flow.
-- **`graph-ir.md`** — graph IR spec (slightly out of date on field
-  names).
-- **`old_plans/detailed-fusion-plan-v2.md`** — long-form spec, the
-  operative reference for `passes/fusion/`.
-- **`old_plans/fusion-plan.md`, `fusion-plan-v2.md`, `fusion-plan-v2-agent-gen.md`,
+- **`detailed-fusion-plan-v2.md`** — long-form spec, the operative
+  reference for `passes/fusion/`.
+- **`fusion-plan.md`, `fusion-plan-v2.md`, `fusion-plan-v2-agent-gen.md`,
   `fusion-v2-progress.md`, `fusion-v2-architecture.html`, `fusion_extension.md`**
   — historical fusion notes.
 - **`refactor-plan.md`** — running refactor plan (planner feature
   gating, graph-exe split, etc.).
-- **`mutation_semantics.md`** — semantics behind `restore_ssa` and
-  in-place kernels.
+- **`mutation_semantics.md`** — semantics behind SSA restoration on
+  in-place kernels. (The `restore_ssa` pass this doc describes has
+  since been folded into other passes / builder-time bookkeeping.)
 - **`stream-scheduling.md` / `.html`** — multi-stream list scheduler
   design.
-- **`gpu_ir_porting_guide.md`**, **`kernel_ir_porting_guide.md`** —
-  porting notes when moving hand-written CUDA into the DSL / KIR.
+- **`kernel_ir_porting_guide.md`** — porting notes for KIR.
+- **`kernel_ir_gaps.md`**, **`kernel_ir_layout_progress.md`** —
+  layout-inference work-in-progress notes.
+- **`graph-ir.md`** — early graph IR spec (slightly out of date on
+  field names).
 - **`layout_optimization_problem.md`** — layout inference problem
   statement.
+- **`gkr-small-round-overlap-plan.md`** — GKR pipelining plan.
 
 ## Feature flags
 
-- `planner` (default) — enables `planner/`, `graph_exe`, `kernel_cache`.
+- `planner` (default) — enables `planner/`, `graph_compiler`,
+  `graph_exe`, `graph_info`, `graph_serializer`, `kernel_cache`.
   Without it only the per-kernel `ModuleCompiler` surface is available.
-- `planner-ortools` — enables the CP-SAT planner backend and the
-  CP-SAT fusion extractor. Links against OR-Tools; see
-  `Cargo.toml` for install locations / `ORTOOLS_PREFIX`.
+- `planner-ortools` — enables the CP-SAT fusion extractor in
+  `passes/fusion/extract/cpsat.rs`. Links against OR-Tools; see
+  `Cargo.toml` for install locations / `ORTOOLS_PREFIX`. Without it,
+  the fusion pass falls back to the brute-force extractor for small
+  graphs and to the original graph otherwise
+  (`FallbackReason::SolverUnavailable`).
   
 `---end AI generated description---`
 

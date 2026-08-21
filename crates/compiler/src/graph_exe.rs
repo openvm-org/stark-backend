@@ -11,7 +11,7 @@
 //! node always resolves the same device addresses, a run is CUDA-graph
 //! capturable and replayable.
 //!
-//! Feature-gated behind `planner` (needs the CP-SAT planner + OR-Tools).
+//! Feature-gated behind `planner`.
 
 use std::{
     ffi::c_void,
