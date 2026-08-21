@@ -19,17 +19,17 @@ Top-level sections:
 | `[module_compiler]`| `nvcc`, `arch`, `extra_nvcc_flags`, `dump_dir`, `verbosity`, `check_accesses`, `nvcc_timeout_secs` — passthrough to the module-level nvcc invocation |
 | `[scheduler]`      | `mode = "list_v1" \| "list_v2"` plus per-mode knobs (see below) |
 | `[kernel_cache]`   | `kind = "enabled" \| "disabled"`; when enabled, `directory` / `max_kernels` / `max_bytes` |
-| `[fusion]`         | `kind = "v2" \| "off" \| "v1"` (v1 is deprecated); v2 knobs mirror [`FusionOptionsV2`](src/passes/fusion_v2/mod.rs) |
+| `[fusion]`         | `kind = "on" \| "off"`; when on, mirrors [`FusionOptions`](src/passes/fusion/mod.rs) |
 
 Scheduler knobs (see [`planner`](src/planner/mod.rs)):
 
+- **`list_v2`** — persistent-beam scheduler with parallel fan-out (shipped
+  default in `cc_default_config.toml`). `num_streams`, `max_memory_bound`,
+  `num_beams`, `beam_depth`, `frontier_cap`, `w_m`, `w_t`, `w_c`.
 - **`list_v1`** — profile-guided list scheduler with beam look-ahead.
   `max_concurrency`, `max_memory_bytes`, `lookahead_k`, `beam`, `w_cp`,
-  `w_mem`, `mem_target_frac`.
-- **`list_v2`** — persistent-beam scheduler with parallel fan-out.
-  `num_streams`, `max_memory_bound`, `num_beams`, `beam_depth`,
-  `frontier_cap`, `w_m`, `w_t`, `w_c`. A working example lives in
-  [`cc_list_v2_config.toml`](cc_list_v2_config.toml).
+  `w_mem`, `mem_target_frac`. See the commented example block in
+  [`cc_default_config.toml`](cc_default_config.toml).
 
 Loading a config:
 
@@ -40,7 +40,7 @@ let compiler = GraphCompiler::from_config(cfg)?;
 ```
 
 **Fields not in the TOML surface** (set programmatically on the builder):
-symbol bindings (`GraphCompiler::symbol`), fusion-v2 `estimator` /
+symbol bindings (`GraphCompiler::symbol`), fusion `estimator` /
 `artifact` / `graph_symbols` (hardware- and graph-specific), and per-node
 timings for the list schedulers (populated from profiling, not tuning).
 

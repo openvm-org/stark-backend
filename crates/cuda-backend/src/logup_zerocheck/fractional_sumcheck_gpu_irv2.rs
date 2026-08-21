@@ -465,7 +465,7 @@ mod tests {
     use std::mem::size_of;
 
     use crypto_compiler::{
-        graph_exe::GraphCompiler,
+        graph_compiler::GraphCompiler,
         graph_ir::{DeviceType, GraphBuilder},
         planner::SchedulerMode,
     };

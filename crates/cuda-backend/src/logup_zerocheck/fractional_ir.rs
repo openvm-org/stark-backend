@@ -47,7 +47,6 @@ use crypto_compiler::{
     field_ext::ef_inverse_coeffs,
     graph_ir::{BufId, DeviceType, GraphBuilder},
     ir::{IRBuilder, Module, NodeId, ScalarType, SizeExpr},
-    quast::Quast,
 };
 use openvm_cuda_common::d_buffer::DeviceBuffer;
 use openvm_stark_backend::prover::fractional_sumcheck_gkr::{Frac, FractionalGkrMemoryModel};
@@ -64,10 +63,7 @@ use super::{
     },
     fractional_ir_utils::{
         add_ef_buf, add_ext_scalar_buf, add_frac_ef_buf, ef_const_ext_scalar_buf,
-        fpext_from_coeffs, frac_claims_fold_ir_dsl, frac_m_lagrange3_ir_dsl,
-        frac_m_lagrange3_lerp_ir_dsl, frac_m_lerp_ir_dsl, frac_m_outer_product_ir_dsl,
-        frac_precompute_m_eval_lambda_ir_dsl, frac_precompute_m_eval_round_ir_dsl,
-        frac_tree_revert_two_input_ir_dsl, load_ext_coeffs, FRAC_EF_BYTES, GKR_S_DEG,
+        fpext_from_coeffs, frac_precompute_m_eval_round_ir_dsl, load_ext_coeffs, GKR_S_DEG,
     },
 };
 use crate::{
@@ -1043,7 +1039,8 @@ impl SqrtEqLayersIR {
         let low_n = n / 2;
         let high_n = n - low_n;
         let low = EqEvalLayersIR::new_with_one(g, xi[high_n..].iter().rev().copied(), seed, device);
-        let high = EqEvalLayersIR::new_with_one(g, xi[..high_n].iter().rev().copied(), seed, device);
+        let high =
+            EqEvalLayersIR::new_with_one(g, xi[..high_n].iter().rev().copied(), seed, device);
         debug_assert_eq!(low.n(), low_n);
         debug_assert_eq!(high.n(), high_n);
         Self { low, high }
@@ -2384,79 +2381,7 @@ pub fn fractional_sumcheck_gpu_ir<TS>(
 where
     TS: FiatShamirTranscriptGraphIR,
 {
-    fractional_sumcheck_gpu_ir_with(
-        g,
-        transcript,
-        leaves,
-        sizes,
-        alpha,
-        assert_zero,
-        device,
-        FracSumcheckIrOptions::default(),
-    )
-}
-
-/// Emission knobs for [`fractional_sumcheck_gpu_ir_with`]. `Default`
-/// (all `false`) is the plain [`fractional_sumcheck_gpu_ir`] driver;
-/// [`fractional_sumcheck_gpu_ir_pipelined`] enables all four.
-#[derive(Clone, Copy, Default, Debug)]
-pub struct FracSumcheckIrOptions {
-    /// Disables the `pm_min_n` / `pm_min_blocks` gates in
-    /// [`choose_round_strategy`] so every outer round large enough to fit
-    /// at least one PrecomputeM window (`rounds_left >= GKR_WINDOW_SIZE`)
-    /// uses PrecomputeM. Smaller outer rounds still fall back to FoldEval
-    /// — a PrecomputeM window needs at least `GKR_WINDOW_SIZE` inner
-    /// rounds.
-    pub force_precompute_m: bool,
-    /// Replaces the first-window inline-fold M build with two builds at
-    /// `lambda ∈ {0, 1}` plus a
-    /// [`frac_m_lerp_ir_dsl`][crate::logup_zerocheck::fractional_ir_utils::frac_m_lerp_ir_dsl]
-    /// combine (the M-build output is affine in `lambda`). The builds
-    /// then have no RAW dep on the outer-round `lambda` sample. Costs 2×
-    /// M-build compute per outer round.
-    pub use_lambda_split: bool,
-    /// Replaces the first-window inline-fold M build with three builds at
-    /// `r_prev ∈ {0, 1, 2}` plus a
-    /// [`frac_m_lagrange3_ir_dsl`][crate::logup_zerocheck::fractional_ir_utils::frac_m_lagrange3_ir_dsl]
-    /// quadratic-interpolation combine (the inline-folded M-build output
-    /// is quadratic in `r_prev`, round 0's challenge). Costs 3× M-build
-    /// compute per outer round; crossed with `use_lambda_split` the six
-    /// builds carry no challenge dependency at all.
-    pub use_r_split: bool,
-    /// Emits each outer round's round 0 as a standalone in-place tree
-    /// revert plus a read-only round compute instead of the fused
-    /// `frac_compute_round_and_revert` kernel, so the `layer` write does
-    /// not wait on the `lambda` sample and challenge-free M builds can
-    /// start as soon as the revert lands. Dense inputs only; ignored for
-    /// virtual inputs (the plain compute kernel has no compact
-    /// addressing).
-    pub split_round0_revert: bool,
-}
-
-/// [`fractional_sumcheck_gpu_ir`] with the [`FracSumcheckIrOptions`]
-/// emission knobs exposed.
-#[allow(clippy::too_many_arguments)]
-pub fn fractional_sumcheck_gpu_ir_with<TS>(
-    g: &mut GraphBuilder,
-    transcript: &mut TS,
-    leaves: BufId,
-    sizes: FractionalInputSize,
-    alpha: EF,
-    assert_zero: bool,
-    device: DeviceType,
-    options: FracSumcheckIrOptions,
-) -> Result<FracSumcheckProofIR, FractionalSumcheckError>
-where
-    TS: FiatShamirTranscriptGraphIR,
-{
     use p3_field::PrimeCharacteristicRing;
-
-    let FracSumcheckIrOptions {
-        force_precompute_m,
-        use_lambda_split,
-        use_r_split,
-        split_round0_revert,
-    } = options;
 
     let real_len = sizes.real_len;
     let total_leaves = sizes.logical_len;
@@ -2523,46 +2448,13 @@ where
     // PrecomputeM env knobs, read once (as the eager prover does). These
     // only steer strategy/window selection — size- and env-dependent, never
     // data-dependent, so they are Principle-4-safe host values.
-    let pm_env = precompute_m_enabled() || force_precompute_m;
-    // `force_precompute_m` = "use PrecomputeM wherever the algorithm
-    // permits it". Drops the two host-side heuristics that gate
-    // strategy selection in the default `ir` driver:
-    //   - `pm_min_n` — the minimum `rem_n` before PrecomputeM is worth preferring over FoldEval.
-    //   - `pm_min_blocks` — the minimum `num_tail_blocks` to justify the M-build kernel's tile
-    //     parallelism.
-    // The remaining hard constraint is `rounds_left >= GKR_WINDOW_SIZE`,
-    // enforced by [`choose_precompute_m_window_w`]. Outer rounds too
-    // small to fit a single window still fall back to FoldEval — a
-    // PrecomputeM window needs `GKR_WINDOW_SIZE` inner rounds.
-    let pm_min_blocks = if force_precompute_m {
-        1
-    } else {
-        precompute_m_min_blocks_threshold()
-    };
+    let pm_env = precompute_m_enabled();
+    let pm_min_blocks = precompute_m_min_blocks_threshold();
     let pm_target_blocks = precompute_m_target_blocks();
     let pm_tile_override = precompute_m_tail_tile_override();
-    let pm_min_n = if force_precompute_m {
-        0
-    } else {
-        precompute_m_min_n()
-    };
+    let pm_min_n = precompute_m_min_n();
 
     // ---- Outer GKR loop ----------------------------------------------------
-    // Shared EF-scalar const bufs for the challenge-split branches:
-    // `{0, 1}` serve as the λ points (λ-split) and the first two
-    // `r_prev` points (r-split); `2` is the third `r_prev` point.
-    // Emitted once, referenced by every outer round's first window.
-    // `ef_const_ext_scalar_buf` inserts a `Const` node whose buffer
-    // holds a fixed EF scalar.
-    let (const_zero, const_one) = if use_lambda_split || use_r_split {
-        (
-            Some(ef_const_ext_scalar_buf(g, device, "ef_zero", EF::ZERO)),
-            Some(ef_const_ext_scalar_buf(g, device, "ef_one", EF::ONE)),
-        )
-    } else {
-        (None, None)
-    };
-    let const_two = use_r_split.then(|| ef_const_ext_scalar_buf(g, device, "ef_two", EF::TWO));
     let rctx = GkrOuterRoundCtx {
         layer,
         layer_len,
@@ -2578,12 +2470,6 @@ where
         pm_target_blocks,
         pm_tile_override,
         pm_min_n,
-        use_lambda_split,
-        use_r_split,
-        split_round0_revert,
-        const_zero,
-        const_one,
-        const_two,
         device,
     };
     for round in 1..total_rounds {
@@ -2623,35 +2509,6 @@ struct GkrOuterRoundCtx {
     pm_target_blocks: usize,
     pm_tile_override: Option<usize>,
     pm_min_n: usize,
-    /// `true` = replace the first-window inline-fold M build with two
-    /// builds at `lambda ∈ {0, 1}` followed by a `frac_m_lerp_ir_dsl`
-    /// combine `M_total = M_zero + λ · (M_one − M_zero)`. The kernel's
-    /// output is affine in `lambda`, so this is an exact rewrite; the
-    /// two builds have no RAW dep on the outer-round `lambda` sample.
-    /// Costs 2× M-build compute per outer round; pays off when
-    /// transcript ≳ M-build (small `LOG_N`). See
-    /// [`fractional_sumcheck_gpu_ir_pipelined`].
-    use_lambda_split: bool,
-    /// `true` = additionally split the first-window M build on `r_prev`
-    /// (round 0's challenge): the inline-folded output is quadratic in
-    /// `r_prev`, so builds at `r_prev ∈ {0, 1, 2}` plus a
-    /// `frac_m_lagrange3_ir_dsl` quadratic interpolation reproduce it
-    /// exactly. Crossed with `use_lambda_split` this yields 6
-    /// challenge-free builds combined by
-    /// `frac_m_lagrange3_lerp_ir_dsl`.
-    use_r_split: bool,
-    /// `true` = emit round 0 as a standalone in-place tree revert plus a
-    /// read-only round compute instead of the fused
-    /// `frac_compute_round_and_revert` kernel, so the `layer` write does
-    /// not wait on `lambda`. Ignored when `virtual_input` (the plain
-    /// compute kernel is dense-only).
-    split_round0_revert: bool,
-    /// Shared EF-scalar const bufs `0` / `1` / `2` for the split
-    /// branches. `const_zero` / `const_one` are populated iff
-    /// `use_lambda_split || use_r_split`; `const_two` iff `use_r_split`.
-    const_zero: Option<BufId>,
-    const_one: Option<BufId>,
-    const_two: Option<BufId>,
     device: DeviceType,
 }
 
@@ -2691,12 +2548,6 @@ where
         pm_target_blocks,
         pm_tile_override,
         pm_min_n,
-        use_lambda_split,
-        use_r_split,
-        split_round0_revert,
-        const_zero,
-        const_one,
-        const_two,
         device,
     } = *ctx;
 
@@ -2729,60 +2580,26 @@ where
         let mut eq_r_acc = eq_r_acc_one;
 
         // Round 0: compute + revert; the fold of `r0` is fused into the
-        // next round's compute. The fused kernel writes `layer` from a
-        // node that also reads `lambda`, so every downstream `layer`
-        // reader transitively waits on the λ sample. Under
-        // `split_round0_revert` the revert is emitted standalone (a
-        // challenge-free in-place write, identical math to the fused
-        // kernel's revert phase) and the round compute becomes a
-        // read-only node on the post-revert values (the plain compute
-        // kernel pairs `(idx, idx|half)` exactly like the fused kernel's
-        // accumulate phase), so challenge-free first-window M builds can
-        // start as soon as the revert lands. The plain compute kernel is
-        // dense-only, hence the `!virtual_input` gate.
+        // next round's compute.
         let d_sum = add_ef_buf(g, device, "d_sum_evals", GKR_S_DEG - 1);
         let tmp = add_ef_buf(g, device, "tmp_block_sums", tmp_len(pq_size / 2));
-        let out0 = if split_round0_revert && !virtual_input {
-            frac_build_tree_layer_ir(
-                g,
-                layer,
-                layer_len,
-                pq_size,
-                total_leaves,
-                /* revert */ true,
-                alpha,
-                /* apply_alpha */ false,
-            );
-            frac_compute_round_ir_bufid(g, &eq_buffer, layer, pq_size / 2, lambda, d_sum, tmp);
-            eq_buffer.drop_layer();
-            observe_and_update_ir(
-                g,
-                transcript,
-                d_sum,
-                prev_s_eval,
-                xi_prev[0],
-                eq_r_acc,
-                device,
-            )
-        } else {
-            do_sumcheck_round_and_revert_ir(
-                g,
-                transcript,
-                &mut eq_buffer,
-                layer,
-                layer_len,
-                pq_size,
-                total_leaves,
-                lambda,
-                alpha,
-                d_sum,
-                tmp,
-                prev_s_eval,
-                xi_prev[0],
-                eq_r_acc,
-                device,
-            )
-        };
+        let out0 = do_sumcheck_round_and_revert_ir(
+            g,
+            transcript,
+            &mut eq_buffer,
+            layer,
+            layer_len,
+            pq_size,
+            total_leaves,
+            lambda,
+            alpha,
+            d_sum,
+            tmp,
+            prev_s_eval,
+            xi_prev[0],
+            eq_r_acc,
+            device,
+        );
         round_polys.push(out0.s_evals);
         r_vec.push(out0.r);
         prev_s_eval = out0.prev_s_eval;
@@ -3051,114 +2868,26 @@ where
                     } else {
                         (active_pq, active_real_len, active_logical_len)
                     };
-                    if pending_fold && (use_lambda_split || use_r_split) {
-                        // First-window challenge splits. With
-                        // `inline_fold = true` the M-build output is
-                        //   M(λ, r_prev): affine in `lambda` (the
-                        //   outer-round sample multiplies one eq term
-                        //   linearly) and quadratic in `r_prev` (round
-                        //   0's sample: the inline fold makes every pq
-                        //   value affine in `r_prev`, and the
-                        //   accumulated sums multiply two folded
-                        //   values).
-                        // Emitting builds at const λ ∈ {0, 1} (λ-split)
-                        // and/or const r_prev ∈ {0, 1, 2} (r-split)
-                        // removes the corresponding sample from the
-                        // builds' RAW deps; the lerp / quadratic-interp
-                        // combine below restores the exact value once
-                        // the real challenges land. With both splits the
-                        // 6 builds carry no challenge dependency at all
-                        // — under `split_round0_revert` they launch as
-                        // soon as round 0's revert lands, overlapping
-                        // the whole round-0 compute + transcript chain.
-                        let czero = const_zero.expect("split enabled but const_zero unset");
-                        let cone = const_one.expect("split enabled but const_one unset");
-                        let lam_points: Vec<BufId> = if use_lambda_split {
-                            vec![czero, cone]
-                        } else {
-                            vec![lambda]
-                        };
-                        let r_points: Vec<BufId> = if use_r_split {
-                            let ctwo = const_two.expect("r-split enabled but const_two unset");
-                            vec![czero, cone, ctwo]
-                        } else {
-                            vec![r_fold]
-                        };
-                        let mut m_bufs: Vec<BufId> =
-                            Vec::with_capacity(lam_points.len() * r_points.len());
-                        for (li, &lam_buf) in lam_points.iter().enumerate() {
-                            for (ri, &r_buf) in r_points.iter().enumerate() {
-                                let m_partial_b = add_ef_buf(
-                                    g,
-                                    device,
-                                    &format!("m_partial_l{li}r{ri}"),
-                                    partial_len,
-                                );
-                                let m_b = add_ef_buf(g, device, &format!("m_l{li}r{ri}"), m_len);
-                                frac_precompute_m_build_ir_bufid(
-                                    g,
-                                    build_src,
-                                    eq_tail_low,
-                                    eq_tail_high,
-                                    m_partial_b,
-                                    m_b,
-                                    build_real_len,
-                                    build_logical_len,
-                                    rem_n,
-                                    w,
-                                    lam_buf,
-                                    r_buf,
-                                    alpha,
-                                    /* inline_fold */ true,
-                                    eq_low_cap,
-                                    tail_tile,
-                                    partial_len,
-                                );
-                                m_bufs.push(m_b);
-                            }
-                        }
-                        match (use_lambda_split, use_r_split) {
-                            (true, true) => frac_m_lagrange3_lerp_ir_dsl(
-                                g,
-                                [
-                                    [m_bufs[0], m_bufs[1], m_bufs[2]],
-                                    [m_bufs[3], m_bufs[4], m_bufs[5]],
-                                ],
-                                lambda,
-                                r_fold,
-                                m_total,
-                                w,
-                            ),
-                            (true, false) => {
-                                frac_m_lerp_ir_dsl(g, m_bufs[0], m_bufs[1], lambda, m_total, w)
-                            }
-                            (false, true) => frac_m_lagrange3_ir_dsl(
-                                g, m_bufs[0], m_bufs[1], m_bufs[2], r_fold, m_total, w,
-                            ),
-                            (false, false) => unreachable!(),
-                        }
-                    } else {
-                        let m_partial = add_ef_buf(g, device, "m_partial", partial_len);
-                        frac_precompute_m_build_ir_bufid(
-                            g,
-                            build_src,
-                            eq_tail_low,
-                            eq_tail_high,
-                            m_partial,
-                            m_total,
-                            build_real_len,
-                            build_logical_len,
-                            rem_n,
-                            w,
-                            lambda,
-                            r_fold,
-                            alpha,
-                            pending_fold, // inline fold only on the first window
-                            eq_low_cap,
-                            tail_tile,
-                            partial_len,
-                        );
-                    }
+                    let m_partial = add_ef_buf(g, device, "m_partial", partial_len);
+                    frac_precompute_m_build_ir_bufid(
+                        g,
+                        build_src,
+                        eq_tail_low,
+                        eq_tail_high,
+                        m_partial,
+                        m_total,
+                        build_real_len,
+                        build_logical_len,
+                        rem_n,
+                        w,
+                        lambda,
+                        r_fold,
+                        alpha,
+                        pending_fold, // inline fold only on the first window
+                        eq_low_cap,
+                        tail_tile,
+                        partial_len,
+                    );
 
                     let mut window_rs: Vec<BufId> = Vec::with_capacity(w);
                     for t in 0..w {
@@ -3343,385 +3072,38 @@ where
 }
 
 // ---------------------------------------------------------------------------
-// Small-round overlap driver.
-
-/// `SWIRL_CUDA_GKR_SMALL_M_MAX_PQ`: largest pq buffer (in `Frac<EF>`
-/// elements) that [`fractional_sumcheck_gpu_ir_overlap`] treats as a
-/// "small" round. Default 4096, i.e. rounds `R` with `2^(R+1) <= 4096`
-/// (`R <= 11`). `0` disables the small regime entirely.
-fn small_m_max_pq() -> usize {
-    std::env::var("SWIRL_CUDA_GKR_SMALL_M_MAX_PQ")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(4096)
-}
-
-/// Variant of [`fractional_sumcheck_gpu_ir`] that restructures small outer
-/// rounds (pq buffer `<=` [`small_m_max_pq`] `Frac<EF>`s) around a
-/// challenge-free precompute-M stage, so the *next* round's
-/// invert-pq/revert + M build carries **zero transcript dependencies** and
-/// the graph scheduler can overlap it (on another stream) with the
-/// *current* round's transcript sampling and s-poly evals.
-///
-/// Design, derivation, and correctness argument:
-/// `crates/compiler/gkr-small-round-overlap-plan.md`. Per small round `R`
-/// the graph contains two chains:
-///
-/// - **A(R), challenge-free:** out-of-place tree revert into a fresh side buffer `pq(R)` (parents =
-///   `pq(R-1)`, stored right children read from `layer[2^R..2^(R+1))`), then the λ-split
-///   outer-product build `M = M_a + λ·M_b` (window `w = R`, `base = 0`, empty eq tail). A(R)
-///   depends only on A(R-1) and the segment tree — never on the transcript — so the whole A-chain
-///   can run ahead of every B round.
-/// - **B(R), transcript-serial:** λ sample, `prev_s_eval` seed, `R` eval rounds on the precomputed
-///   `M_ab` (λ combined in-kernel from the device scalar), then a one-shot `eq_r` contraction of
-///   `pq(R)` for the layer claims. The contraction is an exact finite-field reordering of the eager
-///   fold chain, so the transcript is bit-identical to [`fractional_sumcheck_gpu_ir`] / the eager
-///   prover.
-///
-/// `layer` is read-only throughout the small regime. At regime exit (large
-/// rounds remain) a D2D range copy restores the eager invariant
-/// `layer[0..2^(R_max+1)) = pq(R_max)`; large rounds then run through the
-/// shared [`gkr_outer_round_ir`]. Virtual inputs (`real_len <
-/// total_leaves`) fall back entirely to the large-round path: compact tree
-/// levels are not dense-addressable and the DSL revert/M kernels are
-/// dense-only.
-pub fn fractional_sumcheck_gpu_ir_overlap<TS>(
-    g: &mut GraphBuilder,
-    transcript: &mut TS,
-    leaves: BufId,
-    sizes: FractionalInputSize,
-    alpha: EF,
-    assert_zero: bool,
-    device: DeviceType,
-) -> Result<FracSumcheckProofIR, FractionalSumcheckError>
-where
-    TS: FiatShamirTranscriptGraphIR,
-{
-    use p3_field::PrimeCharacteristicRing;
-
-    let real_len = sizes.real_len;
-    let total_leaves = sizes.logical_len;
-    assert!(
-        real_len > 0,
-        "fractional_sumcheck_gpu_ir_overlap requires nonempty input"
-    );
-
-    let layer = leaves;
-    let layer_len = real_len;
-
-    // ---- Segment-tree build + root extraction / observes (shared) ---------
-    let tree = build_segment_tree_ir(g, transcript, layer, sizes, alpha, assert_zero, device)?;
-
-    let total_rounds = log2_strict_usize(total_leaves);
-    let virtual_input = real_len < total_leaves;
-
-    // ---- First claims — identical to `fractional_sumcheck_gpu_ir` ---------
-    let first_claim = if virtual_input && real_len == total_leaves / 2 {
-        let p_xi_0 = add_ext_scalar_buf(g, device, "claim0_p_xi_0");
-        let q_xi_0 = add_ext_scalar_buf(g, device, "claim0_q_xi_0");
-        extract_root_pq_ir(g, layer, layer_len, p_xi_0, q_xi_0);
-        GkrLayerClaimIR {
-            p_xi_0,
-            q_xi_0,
-            p_xi_1: ef_const_ext_scalar_buf(g, device, "claim0_p_xi_1", EF::ZERO),
-            q_xi_1: ef_const_ext_scalar_buf(
-                g,
-                device,
-                "claim0_q_xi_1",
-                virtual_padding_q(alpha, total_leaves / 2),
-            ),
-        }
-    } else {
-        extract_claim_pair_ir(g, layer, layer_len, 1, "claim0", device)
-    };
-
-    let mut claims_per_layer = Vec::with_capacity(total_rounds);
-    claims_per_layer.push(first_claim);
-    for buf in first_claim.as_array() {
-        transcript.observe_ext(g, buf);
-    }
-    let mu_1 = transcript.sample_ext(g);
-    let mut xi_prev: Vec<BufId> = vec![mu_1];
-    let mut sumcheck_polys: Vec<Vec<[BufId; GKR_S_DEG]>> = Vec::with_capacity(total_rounds);
-
-    // Shared read-only `EF::ONE` seed for each round's `eq_r_acc`.
-    let eq_r_acc_one = ef_const_ext_scalar_buf(g, device, "eq_r_acc_one", EF::ONE);
-
-    // FoldEval work-buffer capacity, mirroring the eager prover.
-    let max_work_size = if total_rounds > 2 {
-        FractionalGkrMemoryModel::fold_eval_work_buffer_elements(total_leaves)
-    } else {
-        0
-    };
-
-    let rctx = GkrOuterRoundCtx {
-        layer,
-        layer_len,
-        real_len,
-        total_leaves,
-        virtual_input,
-        total_rounds,
-        alpha,
-        eq_r_acc_one,
-        max_work_size,
-        pm_env: precompute_m_enabled(),
-        pm_min_blocks: precompute_m_min_blocks_threshold(),
-        pm_target_blocks: precompute_m_target_blocks(),
-        pm_tile_override: precompute_m_tail_tile_override(),
-        pm_min_n: precompute_m_min_n(),
-        use_lambda_split: false,
-        use_r_split: false,
-        split_round0_revert: false,
-        const_zero: None,
-        const_one: None,
-        const_two: None,
-        device,
-    };
-
-    // ---- Small-regime extent -----------------------------------------------
-    let max_pq = small_m_max_pq();
-    let small_rounds = if virtual_input {
-        0
-    } else {
-        (1..total_rounds)
-            .take_while(|&r| (2usize << r) <= max_pq)
-            .count()
-    };
-
-    // ---- A-chain: reverts + M builds, all emitted up front -----------------
-    //
-    // Graph order != execution order; only the dependencies matter. Every
-    // node here reads `layer` (never writes it) plus the previous side
-    // buffer, so the whole chain hangs off the segment tree.
-    let mut pq_side: Vec<BufId> = Vec::with_capacity(small_rounds + 1);
-    let mut m_ab: Vec<BufId> = Vec::with_capacity(small_rounds);
-    if small_rounds > 0 {
-        // pq(0) = layer[0..2) post root-revert, copied into a 2-Frac side
-        // buffer so every small round uses the uniform two-input revert.
-        let pq0 = add_frac_ef_buf(g, device, "pq_side_0", 2);
-        g.insert_memcpy_range(
-            layer,
-            Quast::cst(0),
-            pq0,
-            Quast::cst(0),
-            Quast::cst((2 * FRAC_EF_BYTES) as i64),
-        );
-        pq_side.push(pq0);
-        for round in 1..=small_rounds {
-            let half = 1usize << round;
-            let pq_r = add_frac_ef_buf(g, device, &format!("pq_side_{round}"), 2 * half);
-            frac_tree_revert_two_input_ir_dsl(g, pq_side[round - 1], layer, pq_r, half, layer_len);
-            let mab = add_frac_ef_buf(g, device, &format!("m_ab_{round}"), half * half);
-            frac_m_outer_product_ir_dsl(g, pq_r, mab, half);
-            pq_side.push(pq_r);
-            m_ab.push(mab);
-        }
-        if small_rounds + 1 < total_rounds {
-            // Regime exit: the first large round's fused compute+revert
-            // expects `layer[0..2^(R+1)) = pq(small_rounds)`. WAR hazards
-            // on `layer` order this copy after every small-regime reader.
-            g.insert_memcpy_range(
-                pq_side[small_rounds],
-                Quast::cst(0),
-                layer,
-                Quast::cst(0),
-                Quast::cst(((2usize << small_rounds) * FRAC_EF_BYTES) as i64),
-            );
-        }
-    }
-
-    // ---- B-chain: transcript-serial small rounds ---------------------------
-    for round in 1..=small_rounds {
-        debug_assert_eq!(xi_prev.len(), round);
-        let lambda = transcript.sample_ext(g);
-
-        // Seed `prev_s_eval = numer + lambda * denom` from the previous
-        // layer's claims, exactly as in the shared outer-round helper.
-        let (numer, denom) = reduce_to_single_evaluation_ir(
-            g,
-            *claims_per_layer.last().unwrap(),
-            /* mu */ xi_prev[0],
-            device,
-        );
-        let mut prev_s_eval = claim_combine_ir(g, numer, denom, lambda, device);
-        let mut eq_r_acc = eq_r_acc_one;
-
-        // Full-round window w = round, base = 0: every inner sumcheck
-        // round evaluates on the precomputed M_ab (no eq tail, no fused
-        // fold). `xi_prev[t]` plays the role of the eager arm's
-        // `xi_prev[base + t]` (t = 0 consumes `mu`).
-        let mut round_polys: Vec<[BufId; GKR_S_DEG]> = Vec::with_capacity(round);
-        let mut window_rs: Vec<BufId> = Vec::with_capacity(round);
-        for t in 0..round {
-            let eq_r_prefix = eq_mle_table_ir(g, &window_rs, device);
-            let eq_suffix = eq_mle_table_ir(g, &xi_prev[t + 1..], device);
-            let d_sum = add_ef_buf(g, device, "d_sum_evals", GKR_S_DEG - 1);
-            frac_precompute_m_eval_lambda_ir_dsl(
-                g,
-                m_ab[round - 1],
-                lambda,
-                eq_r_prefix,
-                eq_suffix,
-                d_sum,
-                round,
-                t,
-            );
-            let out = observe_and_update_ir(
-                g,
-                transcript,
-                d_sum,
-                prev_s_eval,
-                xi_prev[t],
-                eq_r_acc,
-                device,
-            );
-            round_polys.push(out.s_evals);
-            prev_s_eval = out.prev_s_eval;
-            eq_r_acc = out.eq_r_acc;
-            window_rs.push(out.r);
-        }
-
-        // One-shot claims contraction of pq(round): exact reordering of
-        // the eager fold-then-read-at-{0, pq_size/2} chain (big-endian
-        // `eq_r`: r_0 owns the top within-poly bit). Output is
-        // byte-identical to a 2-element Frac buffer.
-        let eq_r = eq_mle_table_ir(g, &window_rs, device);
-        let claims_fold = add_frac_ef_buf(g, device, &format!("claims_fold_{round}"), 2);
-        frac_claims_fold_ir_dsl(g, pq_side[round], eq_r, claims_fold, 1usize << round);
-        let claim = extract_claim_pair_ir(g, claims_fold, 2, 1, &format!("claim{round}"), device);
-        claims_per_layer.push(claim);
-        for buf in claim.as_array() {
-            transcript.observe_ext(g, buf);
-        }
-
-        let mu = transcript.sample_ext(g);
-        xi_prev = std::iter::once(mu).chain(window_rs).collect();
-        sumcheck_polys.push(round_polys);
-    }
-
-    // ---- Large rounds: shared eager-mirroring path -------------------------
-    for round in (small_rounds + 1)..total_rounds {
-        let prev_claim = *claims_per_layer.last().unwrap();
-        let out = gkr_outer_round_ir(g, transcript, &rctx, round, &xi_prev, prev_claim);
-        claims_per_layer.push(out.claim);
-        sumcheck_polys.push(out.round_polys);
-        xi_prev = std::iter::once(out.mu).chain(out.r_vec).collect();
-    }
-
-    Ok(FracSumcheckProofIR {
-        fractional_sum: (tree.root_p, tree.root_q),
-        claims_per_layer,
-        sumcheck_polys,
-        final_randomness: xi_prev,
-    })
-}
-
-// ---------------------------------------------------------------------------
-// Pipelined windowed driver (blackbox CUDA kernels only).
-// removed pipelining helpers 3411..3798
-
-/// Thin wrapper around [`fractional_sumcheck_gpu_ir`].
-///
-/// Historically this held a hand-scheduled variant that inserted revert +
-/// λ-split M-build nodes across round boundaries so `precompute_m` for
-/// round `j+1` could overlap with round `j`'s transcript tail. That
-/// bespoke pipelining is now removed: the natural graph structure that
-/// [`fractional_sumcheck_gpu_ir`] emits exposes the same dependencies
-/// (per-window `frac_precompute_m_build_dev_challenge`, per-`t` eval +
-/// observe + sample, per-window multifold), and the scheduler is
-/// expected to overlap whatever the DAG permits. See the module-level
-/// notes on where overlap is and is not possible under this structure.
-pub fn fractional_sumcheck_gpu_ir_pipelined<TS>(
-    g: &mut GraphBuilder,
-    transcript: &mut TS,
-    leaves: BufId,
-    sizes: FractionalInputSize,
-    alpha: EF,
-    assert_zero: bool,
-    device: DeviceType,
-) -> Result<FracSumcheckProofIR, FractionalSumcheckError>
-where
-    TS: FiatShamirTranscriptGraphIR,
-{
-    // `ir_pipelined` = `fractional_sumcheck_gpu_ir` with PrecomputeM
-    // forced and every challenge-decoupling knob enabled:
-    //   - `force_precompute_m`: every large-enough outer round uses PrecomputeM;
-    //   - `use_lambda_split` × `use_r_split`: each first-window M build becomes 6 challenge-free
-    //     builds at `(λ, r_prev) ∈ {0,1} × {0,1,2}` plus one fused lerp × quadratic-interp combine;
-    //   - `split_round0_revert`: round 0's tree revert is standalone (challenge-free `layer`
-    //     write), so those 6 builds launch as soon as the revert lands and overlap the entire
-    //     round-0 compute + observe + sample transcript chain.
-    // The splits cost 6× M-build compute per outer round: a win when
-    // the transcript dominates (small LOG_N), a loss when the M-build
-    // dominates (large LOG_N). `ir` (no forcing, no splits) is the
-    // natural strategy-selection path.
-    //
-    // `SWIRL_CUDA_GKR_PIPELINE_SPLITS` overrides the enabled knobs for
-    // A/B benchmarking: a comma-separated subset of
-    // `lambda`, `r`, `revert` (e.g. `lambda` = the pre-r-split
-    // pipelined driver), or `none` to force PrecomputeM alone. Unset =
-    // all three.
-    let splits = std::env::var("SWIRL_CUDA_GKR_PIPELINE_SPLITS").ok();
-    let has = |name: &str| -> bool {
-        match &splits {
-            Some(s) => s.split(',').any(|t| t.trim() == name),
-            None => true,
-        }
-    };
-    fractional_sumcheck_gpu_ir_with(
-        g,
-        transcript,
-        leaves,
-        sizes,
-        alpha,
-        assert_zero,
-        device,
-        FracSumcheckIrOptions {
-            force_precompute_m: true,
-            use_lambda_split: has("lambda"),
-            use_r_split: has("r"),
-            split_round0_revert: has("revert"),
-        },
-    )
-}
-
-// ---------------------------------------------------------------------------
 // Tests.
 
-/// Memcpy every proof artifact into a fresh scalar buffer, returned in
-/// canonical order: root_p, root_q, claims (4 per layer), sumcheck
-/// polynomials, final randomness. Every artifact has in-graph readers
-/// (transcript observes / later kernels), hence the export copies.
-/// The caller registers the returned buffers as graph outputs.
+/// Every proof artifact's source `BufId`, in canonical order: root_p,
+/// root_q, claims (4 per layer), sumcheck polynomials, final randomness.
+/// The caller registers the returned buffers as graph outputs; the memory
+/// planner pins each output's pool slot to end-of-graph, so their bytes
+/// survive past any in-graph readers (transcript observes / later kernels)
+/// without needing defensive D2D copies.
 #[cfg(test)]
 pub(crate) fn export_proof_artifacts(
-    g: &mut GraphBuilder,
+    _g: &mut GraphBuilder,
     proof: &FracSumcheckProofIR,
-    device: DeviceType,
+    _device: DeviceType,
 ) -> Vec<BufId> {
     let mut exports: Vec<BufId> = Vec::new();
-    let export = |g: &mut GraphBuilder, src: BufId, name: String| {
-        let out = add_ext_scalar_buf(g, device, &name);
-        g.insert_memcpy(src, out);
-        out
-    };
     let (root_p, root_q) = proof.fractional_sum;
-    exports.push(export(g, root_p, "out_root_p".to_string()));
-    exports.push(export(g, root_q, "out_root_q".to_string()));
-    for (i, claim) in proof.claims_per_layer.iter().enumerate() {
-        for (k, buf) in claim.as_array().into_iter().enumerate() {
-            exports.push(export(g, buf, format!("out_claim_{i}_{k}")));
+    exports.push(root_p);
+    exports.push(root_q);
+    for claim in &proof.claims_per_layer {
+        for buf in claim.as_array() {
+            exports.push(buf);
         }
     }
-    for (i, layer_polys) in proof.sumcheck_polys.iter().enumerate() {
-        for (j, s) in layer_polys.iter().enumerate() {
-            for (k, &buf) in s.iter().enumerate() {
-                exports.push(export(g, buf, format!("out_s_{i}_{j}_{k}")));
+    for layer_polys in &proof.sumcheck_polys {
+        for s in layer_polys {
+            for &buf in s {
+                exports.push(buf);
             }
         }
     }
-    for (i, &buf) in proof.final_randomness.iter().enumerate() {
-        exports.push(export(g, buf, format!("out_xi_{i}")));
+    for &buf in &proof.final_randomness {
+        exports.push(buf);
     }
     exports
 }
@@ -3731,11 +3113,12 @@ mod tests {
     use std::mem::transmute;
 
     use crypto_compiler::{
-        graph_exe::GraphCompiler,
+        graph_compiler::GraphCompiler,
         graph_ir::{DeviceType, GraphBuilder},
-        graph_serializer::SerializableGraphBuilder,
-        planner::{perf_est, AbstractTimingGraph, PerfEst, SchedulerMode},
+        planner::SchedulerMode,
     };
+
+    use super::super::fractional_ir_utils::FRAC_EF_BYTES;
     use openvm_cuda_common::{
         common::get_device,
         copy::{MemCopyD2H, MemCopyH2D},
@@ -4213,86 +3596,6 @@ mod tests {
         buf
     }
 
-    /// Resolves `GRAPH_PATH` into a per-driver, size-suffixed file path.
-    ///
-    /// The env value is treated as a *base path*: driver label + size
-    /// marker `.<label>.n{n}` are injected before the extension so
-    /// multiple `(driver, log_n)` pairs coexist. E.g. `GRAPH_PATH=/tmp/g.bin`
-    /// with `label="ir"` and `log_n=10` yields `/tmp/g.ir.n1024.bin`.
-    ///
-    /// Returns `None` when the env var is unset.
-    fn graph_path_from_env(label: &str, log_n: usize) -> Option<std::path::PathBuf> {
-        use std::path::PathBuf;
-        let base = PathBuf::from(std::env::var_os("GRAPH_PATH")?);
-        let n = 1usize << log_n;
-        let stem = base.file_stem().and_then(|s| s.to_str()).unwrap_or("graph");
-        let file_name = match base.extension().and_then(|s| s.to_str()) {
-            Some(ext) => format!("{stem}.{label}.n{n}.{ext}"),
-            None => format!("{stem}.{label}.n{n}"),
-        };
-        let dir = base.parent();
-        Some(match dir {
-            Some(d) if !d.as_os_str().is_empty() => d.join(file_name),
-            _ => PathBuf::from(file_name),
-        })
-    }
-
-    /// Longest weighted path (in ms) through `atg` — the theoretical
-    /// makespan lower bound under unlimited streams and no scheduling
-    /// overhead. Edges are the chain of adjacent-in-insertion-order
-    /// users of each buffer (`atg.buf_users` is sorted by node index),
-    /// which captures WAW/WAR/RAW deps for multi-writer buffers (i.e.
-    /// blackbox kernels with `carried_outputs` reading+writing the
-    /// same BufId).
-    fn critical_path_ms(atg: &AbstractTimingGraph) -> f64 {
-        let n = atg.num_nodes;
-        let mut succ: Vec<Vec<usize>> = vec![Vec::new(); n];
-        for users in atg.buf_users.values() {
-            for w in users.windows(2) {
-                succ[w[0]].push(w[1]);
-            }
-        }
-        for sv in succ.iter_mut() {
-            sv.sort_unstable();
-            sv.dedup();
-        }
-        let mut indeg = vec![0usize; n];
-        for sv in &succ {
-            for &u in sv {
-                indeg[u] += 1;
-            }
-        }
-        let mut ready: Vec<usize> = (0..n).filter(|&v| indeg[v] == 0).collect();
-        let mut fwd = Vec::with_capacity(n);
-        let mut cur = 0;
-        while cur < ready.len() {
-            let v = ready[cur];
-            cur += 1;
-            fwd.push(v);
-            for &u in &succ[v] {
-                indeg[u] -= 1;
-                if indeg[u] == 0 {
-                    ready.push(u);
-                }
-            }
-        }
-        let mut bl = vec![0.0f64; n];
-        for &v in fwd.iter().rev() {
-            let m = succ[v].iter().map(|&u| bl[u]).fold(0.0_f64, f64::max);
-            bl[v] = atg.node_times[v] + m;
-        }
-        bl.iter().copied().fold(0.0_f64, f64::max)
-    }
-
-    /// [`cc_compiler`] with fusion disabled — the compiler for the
-    /// pipelined driver. Its heavy compute is all blackbox kernels, so
-    /// fusion only touches the tiny per-inner-round scalar chains, and
-    /// each fused cluster bakes in round-specific structure that blows
-    /// up the JIT module cache without a runtime win.
-    fn pipelined_cc_compiler() -> GraphCompiler {
-        cc_compiler(DeviceType::Cuda(0)).without_fusion()
-    }
-
     /// Compile a graph with no runtime inputs, run it, and read back the
     /// given buffers as raw bytes. Each buffer is registered as a graph
     /// output here, so it must have a writer (e.g. be an `insert_memcpy`
@@ -4342,19 +3645,6 @@ mod tests {
     /// given EF-scalar buffers.
     fn run_graph_read_efs(g: GraphBuilder, bufs: &[BufId], ctx: &GpuDeviceCtx) -> Vec<EF> {
         run_graph_read_bufs(g, bufs, ctx)
-            .iter()
-            .map(|bytes| ef_from_bytes(bytes))
-            .collect()
-    }
-
-    /// [`run_graph_read_efs`] with an explicit compiler.
-    fn run_graph_read_efs_with(
-        compiler: GraphCompiler,
-        g: GraphBuilder,
-        bufs: &[BufId],
-        ctx: &GpuDeviceCtx,
-    ) -> Vec<EF> {
-        run_graph_read_bufs_with(compiler, g, bufs, ctx)
             .iter()
             .map(|bytes| ef_from_bytes(bytes))
             .collect()
@@ -5408,345 +4698,6 @@ mod tests {
         assert_e2e_matches_eager_precompute_m(1 << 14, 1 << 14, 0x5EED_000C, 8);
     }
 
-    // ---- Small-round overlap driver (challenge-free precompute-M) ---------
-    //
-    // Plan & design: crates/compiler/gkr-small-round-overlap-plan.md.
-
-    /// Like [`run_ir_sumcheck`] but through the overlap driver.
-    #[allow(clippy::type_complexity)]
-    fn run_ir_overlap_sumcheck(
-        leaves: &[Frac<EF>],
-        sizes: FractionalInputSize,
-        alpha: EF,
-        ctx: &GpuDeviceCtx,
-    ) -> ((EF, EF), Vec<[EF; 4]>, Vec<Vec<[EF; GKR_S_DEG]>>, Vec<EF>) {
-        let device = DeviceType::Cuda(0);
-        let mut g = GraphBuilder::new();
-        let mut transcript = DuplexSpongeGpuIR::new(&mut g, device);
-        let layer = frac_const_buf(&mut g, "leaves", leaves);
-        let proof = fractional_sumcheck_gpu_ir_overlap(
-            &mut g,
-            &mut transcript,
-            layer,
-            sizes,
-            alpha,
-            false,
-            device,
-        )
-        .expect("fractional_sumcheck_gpu_ir_overlap");
-        let exports = export_proof_artifacts(&mut g, &proof, device);
-        let efs = run_graph_read_efs(g, &exports, ctx);
-        reshape_proof_efs(efs, &proof)
-    }
-
-    /// Host-side graph build only: count the overlap path's M-build
-    /// kernels, so tests cannot silently pass on the fallback
-    /// (non-overlap) path.
-    fn count_overlap_m_builds(real_len: usize, logical_len: usize, seed: u64) -> usize {
-        use crypto_compiler::graph_ir::GraphNode;
-        let device = DeviceType::Cuda(0);
-        let mut g = GraphBuilder::new();
-        let mut transcript = DuplexSpongeGpuIR::new(&mut g, device);
-        let leaves = make_host_leaves(real_len, seed ^ 0xA5A5);
-        let layer = frac_const_buf(&mut g, "leaves", &leaves);
-        fractional_sumcheck_gpu_ir_overlap(
-            &mut g,
-            &mut transcript,
-            layer,
-            FractionalInputSize::new(real_len, logical_len),
-            EF::ZERO,
-            false,
-            device,
-        )
-        .expect("fractional_sumcheck_gpu_ir_overlap");
-        g.nodes
-            .iter()
-            .filter(|n| {
-                matches!(n, GraphNode::Kernel(k)
-                    if k.module.name.starts_with("frac_m_outer_product_dsl"))
-            })
-            .count()
-    }
-
-    /// Overlap-driver e2e: assert the graph contains exactly
-    /// `want_m_builds` small-regime M-build kernels, then compare the full
-    /// proof (fractional sum, claims, round polys, final randomness)
-    /// against the eager prover. The overlap path's fold-vs-contract
-    /// reordering is exact in finite fields, so the transcripts must be
-    /// bit-identical.
-    fn assert_e2e_overlap_matches_eager(
-        real_len: usize,
-        logical_len: usize,
-        seed: u64,
-        want_m_builds: usize,
-    ) {
-        use openvm_cuda_common::memory_manager::MemTracker;
-
-        use super::super::fractional::fractional_sumcheck_gpu;
-
-        assert_eq!(
-            count_overlap_m_builds(real_len, logical_len, seed),
-            want_m_builds,
-            "overlap M-build node count mismatch"
-        );
-
-        let ctx = test_ctx();
-        let sizes = FractionalInputSize::new(real_len, logical_len);
-        let mut rng = StdRng::seed_from_u64(seed);
-        let alpha: EF = rng.random();
-        let leaves = make_host_leaves(real_len, seed ^ 0xA5A5);
-
-        let mut sponge = DuplexSpongeGpu::default();
-        let mut mem = MemTracker::start("test.fractional_ir_overlap_e2e");
-        let (want_proof, want_xi) = fractional_sumcheck_gpu::<SC, _>(
-            &mut sponge,
-            leaves_to_device(&leaves, &ctx),
-            sizes,
-            alpha,
-            false,
-            &mut mem,
-            &ctx,
-        )
-        .expect("eager fractional_sumcheck_gpu");
-        ctx.stream.synchronize().expect("sync");
-
-        let got = run_ir_overlap_sumcheck(&leaves, sizes, alpha, &ctx);
-        assert_ir_proof_matches_eager(&got, &want_proof, &want_xi);
-    }
-
-    #[test]
-    fn fractional_sumcheck_gpu_ir_overlap_matches_eager_all_small() {
-        // total_rounds = 10: every outer round 1..=9 has pq_size = 2^(R+1)
-        // <= 1024 <= 4096, so the whole proof runs on the overlap path (9
-        // M builds) and the transition copy is never emitted.
-        assert_e2e_overlap_matches_eager(1 << 10, 1 << 10, 0x5EED_0020, 9);
-    }
-
-    #[test]
-    fn fractional_sumcheck_gpu_ir_overlap_matches_eager_mixed() {
-        // total_rounds = 14: rounds 1..=11 are small (pq_size <= 4096, 11
-        // M builds); rounds 12..13 take the existing large-round path
-        // after the transition copy of pq(11) back into the layer.
-        assert_e2e_overlap_matches_eager(1 << 14, 1 << 14, 0x5EED_0021, 11);
-    }
-
-    #[test]
-    fn fractional_sumcheck_gpu_ir_overlap_virtual_falls_back() {
-        // Virtual input: the small regime is disabled entirely (compact
-        // tree levels are not dense-addressable), so the driver must fall
-        // back to the existing path and still match the eager prover.
-        assert_e2e_overlap_matches_eager(192, 256, 0x5EED_0022, 0);
-    }
-
-    #[test]
-    fn fractional_sumcheck_gpu_ir_overlap_knob_disable_matches_eager() {
-        // SAFETY: nextest runs each test in its own process, so setting
-        // the process env only affects this test.
-        unsafe { std::env::set_var("SWIRL_CUDA_GKR_SMALL_M_MAX_PQ", "0") };
-        assert_e2e_overlap_matches_eager(1 << 10, 1 << 10, 0x5EED_0023, 0);
-        unsafe { std::env::remove_var("SWIRL_CUDA_GKR_SMALL_M_MAX_PQ") };
-    }
-
-    // ---- Pipelined windowed driver (blackbox CUDA kernels only) ------------
-
-    /// Like [`run_ir_sumcheck`] but through the pipelined driver.
-    #[allow(clippy::type_complexity)]
-    fn run_ir_pipelined_sumcheck(
-        leaves: &[Frac<EF>],
-        sizes: FractionalInputSize,
-        alpha: EF,
-        ctx: &GpuDeviceCtx,
-    ) -> ((EF, EF), Vec<[EF; 4]>, Vec<Vec<[EF; GKR_S_DEG]>>, Vec<EF>) {
-        let device = DeviceType::Cuda(0);
-        let mut g = GraphBuilder::new();
-        let mut transcript = DuplexSpongeGpuIR::new(&mut g, device);
-        let layer = frac_const_buf(&mut g, "leaves", leaves);
-        let proof = fractional_sumcheck_gpu_ir_pipelined(
-            &mut g,
-            &mut transcript,
-            layer,
-            sizes,
-            alpha,
-            false,
-            device,
-        )
-        .expect("fractional_sumcheck_gpu_ir_pipelined");
-        let exports = export_proof_artifacts(&mut g, &proof, device);
-        let efs = run_graph_read_efs_with(pipelined_cc_compiler(), g, &exports, ctx);
-        reshape_proof_efs(efs, &proof)
-    }
-
-    /// Host-side graph build only: count the pipelined path's M-build
-    /// nodes — `(λ-split host-λ builds, dev-challenge window builds)` — so
-    /// tests cannot silently pass on the fallback path. For a dense input
-    /// with `R = total_rounds` and window `W`, expect `2·(R − 1)` λ-split
-    /// nodes (one pair per outer round) and `Σ_{j=1}^{R−1} (⌈j/W⌉ − 1)`
-    /// dev-challenge nodes (one per window boundary).
-    fn count_pipelined_m_builds(real_len: usize, logical_len: usize, seed: u64) -> (usize, usize) {
-        use crypto_compiler::graph_ir::GraphNode;
-        let device = DeviceType::Cuda(0);
-        let mut g = GraphBuilder::new();
-        let mut transcript = DuplexSpongeGpuIR::new(&mut g, device);
-        let leaves = make_host_leaves(real_len, seed ^ 0xA5A5);
-        let layer = frac_const_buf(&mut g, "leaves", &leaves);
-        fractional_sumcheck_gpu_ir_pipelined(
-            &mut g,
-            &mut transcript,
-            layer,
-            FractionalInputSize::new(real_len, logical_len),
-            EF::ZERO,
-            false,
-            device,
-        )
-        .expect("fractional_sumcheck_gpu_ir_pipelined");
-        let count = |name: &str| {
-            g.nodes
-                .iter()
-                .filter(|n| matches!(n, GraphNode::BlackboxKernel(k) if k.name == name))
-                .count()
-        };
-        (
-            count("frac_precompute_m_build"),
-            count("frac_precompute_m_build_dev_challenge"),
-        )
-    }
-
-    /// Pipelined-driver e2e: assert the graph contains exactly the
-    /// expected M-build nodes, then compare the full proof (fractional
-    /// sum, claims, round polys, final randomness) against the eager
-    /// prover. Every pipelined restructuring (multifold ≡ sequential
-    /// folds, evals on precomputed M, λ-lerp of the λ-split builds) is an
-    /// exact finite-field reordering, so the transcripts must be
-    /// bit-identical.
-    fn assert_e2e_pipelined_matches_eager(
-        real_len: usize,
-        logical_len: usize,
-        seed: u64,
-        _want_split_builds: usize,
-        _want_devch_builds: usize,
-    ) {
-        use openvm_cuda_common::memory_manager::MemTracker;
-
-        use super::super::fractional::fractional_sumcheck_gpu;
-
-        // NOTE: `fractional_sumcheck_gpu_ir_pipelined` is now a thin
-        // wrapper around `fractional_sumcheck_gpu_ir`; every M build is
-        // a `frac_precompute_m_build_dev_challenge` node (first-window
-        // λ×r splits included — the split points are const bufs fed to
-        // the same kernel). The old (split, devch) node counts no
-        // longer apply; the proof-equality assertion below is the only
-        // correctness check that matters here.
-        let _ = count_pipelined_m_builds(real_len, logical_len, seed);
-
-        let ctx = test_ctx();
-        let sizes = FractionalInputSize::new(real_len, logical_len);
-        let mut rng = StdRng::seed_from_u64(seed);
-        let alpha: EF = rng.random();
-        let leaves = make_host_leaves(real_len, seed ^ 0xA5A5);
-
-        let mut sponge = DuplexSpongeGpu::default();
-        let mut mem = MemTracker::start("test.fractional_ir_pipelined_e2e");
-        let (want_proof, want_xi) = fractional_sumcheck_gpu::<SC, _>(
-            &mut sponge,
-            leaves_to_device(&leaves, &ctx),
-            sizes,
-            alpha,
-            false,
-            &mut mem,
-            &ctx,
-        )
-        .expect("eager fractional_sumcheck_gpu");
-        ctx.stream.synchronize().expect("sync");
-
-        let got = run_ir_pipelined_sumcheck(&leaves, sizes, alpha, &ctx);
-        assert_ir_proof_matches_eager(&got, &want_proof, &want_xi);
-    }
-
-    #[test]
-    fn fractional_sumcheck_gpu_ir_pipelined_matches_eager_small() {
-        // total_rounds = 10, default W = 5: λ-split pairs for rounds 1..=9
-        // (18 nodes); rounds 6..=9 each run a second window (4
-        // dev-challenge builds).
-        assert_e2e_pipelined_matches_eager(1 << 10, 1 << 10, 0x5EED_0030, 18, 4);
-    }
-
-    #[test]
-    fn fractional_sumcheck_gpu_ir_pipelined_matches_eager_multi_window() {
-        // total_rounds = 14, default W = 5: λ-split pairs for rounds 1..=13
-        // (26 nodes); rounds 6..=10 run two windows (1 dev-challenge build
-        // each) and rounds 11..=13 run three (2 each): 5 + 6 = 11.
-        assert_e2e_pipelined_matches_eager(1 << 14, 1 << 14, 0x5EED_0031, 26, 11);
-    }
-
-    #[test]
-    fn fractional_sumcheck_gpu_ir_pipelined_virtual_falls_back() {
-        // Virtual input: the dense revert / M-build addressing does not
-        // apply, so the driver must fall back to
-        // `fractional_sumcheck_gpu_ir` (no M builds of either kind with
-        // PrecomputeM env off) and still match the eager prover.
-        assert_e2e_pipelined_matches_eager(192, 256, 0x5EED_0032, 0, 0);
-    }
-
-    #[test]
-    fn fractional_sumcheck_gpu_ir_pipelined_window1_matches_eager() {
-        // W = 1: every inner round is its own window, so round j has j − 1
-        // window boundaries: Σ_{j=1}^{9} (j − 1) = 36 dev-challenge builds.
-        // SAFETY: nextest runs each test in its own process, so setting
-        // the process env only affects this test.
-        unsafe { std::env::set_var("SWIRL_CUDA_GKR_PIPELINE_WINDOW", "1") };
-        assert_e2e_pipelined_matches_eager(1 << 10, 1 << 10, 0x5EED_0033, 18, 36);
-        unsafe { std::env::remove_var("SWIRL_CUDA_GKR_PIPELINE_WINDOW") };
-    }
-
-    #[test]
-    fn fractional_sumcheck_gpu_ir_pipelined_window3_matches_eager() {
-        // W = 3: rounds 4..=6 run two windows, rounds 7..=9 run three:
-        // 3·1 + 3·2 = 9 dev-challenge builds.
-        // SAFETY: nextest runs each test in its own process, so setting
-        // the process env only affects this test.
-        unsafe { std::env::set_var("SWIRL_CUDA_GKR_PIPELINE_WINDOW", "3") };
-        assert_e2e_pipelined_matches_eager(1 << 10, 1 << 10, 0x5EED_0034, 18, 9);
-        unsafe { std::env::remove_var("SWIRL_CUDA_GKR_PIPELINE_WINDOW") };
-    }
-
-    #[test]
-    fn fractional_sumcheck_gpu_ir_pipelined_module_count() {
-        // The pipelined driver's whole point: heavy compute stays in
-        // precompiled CUDA kernels, so the JIT'd unique-module count is a
-        // few dozen fixed-name helpers, independent of input size.
-        let ctx = test_ctx();
-        let _ = &ctx;
-        let real_len = 1usize << 12;
-        let device = DeviceType::Cuda(0);
-        let mut rng = StdRng::seed_from_u64(0x5EED_0035);
-        let alpha: EF = rng.random();
-        let leaves = make_host_leaves(real_len, 0x5EED_0035 ^ 0xA5A5);
-
-        let mut g = GraphBuilder::new();
-        let mut transcript = DuplexSpongeGpuIR::new(&mut g, device);
-        let layer = frac_const_buf(&mut g, "leaves", &leaves);
-        let proof = fractional_sumcheck_gpu_ir_pipelined(
-            &mut g,
-            &mut transcript,
-            layer,
-            FractionalInputSize::new(real_len, real_len),
-            alpha,
-            false,
-            device,
-        )
-        .expect("fractional_sumcheck_gpu_ir_pipelined");
-        let exports = export_proof_artifacts(&mut g, &proof, device);
-        for &b in &exports {
-            g.register_output(b);
-        }
-        let exe = pipelined_cc_compiler().compile(g).expect("graph compile");
-        assert!(
-            exe.num_unique_modules() <= 50,
-            "pipelined driver JIT'd {} unique modules, expected <= 50",
-            exe.num_unique_modules()
-        );
-    }
-
     /// Artifact generator, not a correctness test: builds the composed
     /// fractional-sumcheck graph (PrecomputeM forced on via env, so both
     /// round strategies appear), writes the `GraphBuilder` SSA dump,
@@ -6121,13 +5072,11 @@ mod tests {
                 let mut g = GraphBuilder::new();
                 let mut transcript = DuplexSpongeGpuIR::new(&mut g, device);
                 let input = add_frac_ef_buf(&mut g, device, "leaves_in", n);
-                let layer = add_frac_ef_buf(&mut g, device, "leaves_work", n);
-                g.insert_memcpy(input, layer);
                 g.register_input(input);
                 let proof_ir = fractional_sumcheck_gpu_ir(
                     &mut g,
                     &mut transcript,
-                    layer,
+                    input,
                     sizes,
                     alpha,
                     false,
@@ -6339,9 +5288,7 @@ mod tests {
                 // The `set_input` D2D memcpy sits OUTSIDE the NVTX
                 // range so nsys measures only the kernel work — same
                 // pattern as `bench_pipelined_ir_vs_eager`.
-                st.exe
-                    .set_input(&ctx, 0, &st.d_input)
-                    .expect("set_input");
+                st.exe.set_input(&ctx, 0, &st.d_input).expect("set_input");
                 ctx.stream.synchronize().expect("sync post-set_input");
                 let t0 = Instant::now();
                 if nsys_enabled {
@@ -6456,659 +5403,6 @@ mod tests {
                     cy_path.display(),
                     timings_path.display(),
                     graph_path.display(),
-                );
-            }
-        }
-    }
-
-    /// Benchmark, not a correctness test: eager `fractional_sumcheck_gpu`
-    /// vs the base graph-IR driver vs the small-round overlap driver
-    /// ([`fractional_sumcheck_gpu_ir_overlap`]). Both graph exes are
-    /// compiled with the same scheduler (default: 2-stream `ListV1`;
-    /// override via `FRAC_BENCH_STREAMS`), so the ir-vs-ir_overlap delta
-    /// isolates the overlap restructuring while ir-vs-eager captures the
-    /// graph-pipeline gain. Timed graph iterations are captured-CUDA-graph
-    /// replays; eager iterations start from device-resident leaves.
-    ///
-    /// Each driver's warmup run is checked artifact-by-artifact against
-    /// the eager proof, and the overlap graph must contain the expected
-    /// number of small-regime M-build kernels (so the bench cannot
-    /// silently measure the fallback path).
-    ///
-    /// Sizes via `FRAC_BENCH_LOG_N` (comma-separated log2 leaf counts,
-    /// default `16,24`).
-    ///
-    /// Run explicitly:
-    ///     FRAC_BENCH_LOG_N=24 cargo nextest run -p openvm-cuda-backend \
-    ///         --run-ignored all --no-capture \
-    ///         -E 'test(bench_fractional_sumcheck_eager_vs_ir_overlap)'
-    ///
-    /// nsys profile (env `NSYS_ENABLED=1`): a single cudaProfilerStart/Stop
-    /// window wraps only the timed iterations across every size; warmup,
-    /// JIT, and CUDA-graph capture happen before the window opens. NVTX
-    /// ranges `eager…`, `ir…`, `ir_overlap…`, `ir_pipelined…` label each
-    /// iteration:
-    ///     NSYS_ENABLED=1 nsys profile --capture-range=cudaProfilerApi \
-    ///         --cuda-graph-trace=node --gpu-metrics-devices=visible \
-    ///         --trace=cuda,nvtx -o frac_overlap_bench \
-    ///         cargo nextest run -p openvm-cuda-backend \
-    ///             --run-ignored all --no-capture \
-    ///             -E 'test(bench_fractional_sumcheck_eager_vs_ir_overlap)'
-    ///
-    /// The pipelined driver's window size is `SWIRL_CUDA_GKR_PIPELINE_WINDOW`
-    /// (default 5); rerun the bench with different values to tune it.
-    #[test]
-    #[ignore = "benchmark; run explicitly with --run-ignored"]
-    fn bench_fractional_sumcheck_eager_vs_ir_overlap() {
-        use std::time::Instant;
-
-        use crypto_compiler::{graph_exe::GraphExe, graph_ir::GraphNode};
-        use openvm_cuda_common::memory_manager::MemTracker;
-
-        use super::super::fractional::fractional_sumcheck_gpu;
-
-        const ITERS: usize = 3;
-
-        type Driver = fn(
-            &mut GraphBuilder,
-            &mut DuplexSpongeGpuIR,
-            BufId,
-            FractionalInputSize,
-            EF,
-            bool,
-            DeviceType,
-        ) -> Result<FracSumcheckProofIR, FractionalSumcheckError>;
-        let all_drivers: [(&'static str, Driver); 3] = [
-            ("ir", fractional_sumcheck_gpu_ir::<DuplexSpongeGpuIR>),
-            (
-                "ir_overlap",
-                fractional_sumcheck_gpu_ir_overlap::<DuplexSpongeGpuIR>,
-            ),
-            (
-                "ir_pipelined",
-                fractional_sumcheck_gpu_ir_pipelined::<DuplexSpongeGpuIR>,
-            ),
-        ];
-        // `FRAC_BENCH_DRIVERS=<label,...>` restricts which graph drivers
-        // run (eager always runs). The three drivers together exceed the
-        // kernel cache's eviction cap, so sweeping a knob that only
-        // affects one driver (e.g. `SWIRL_CUDA_GKR_PIPELINE_WINDOW`) is
-        // much faster with the others filtered out.
-        let driver_filter = std::env::var("FRAC_BENCH_DRIVERS").ok();
-        let drivers: Vec<(&'static str, Driver)> = all_drivers
-            .into_iter()
-            .filter(|(label, _)| match &driver_filter {
-                Some(f) => f.split(',').any(|s| s.trim() == *label),
-                None => true,
-            })
-            .collect();
-        assert!(!drivers.is_empty(), "FRAC_BENCH_DRIVERS matched no driver");
-
-        struct PerDriver {
-            label: &'static str,
-            exe: GraphExe,
-            exports: Vec<BufId>,
-            build_ms: f64,
-            compile_ms: f64,
-            n_nodes: usize,
-            m_builds: usize,
-            times_ms: Vec<f64>,
-            /// Device-side copy of the input `leaves`. Kept alive so
-            /// every graph launch can re-populate the in-place-mutated
-            /// input pool slot outside the captured CUDA graph (H2D
-            /// happens outside the profile window / NVTX range).
-            d_input: openvm_cuda_common::d_buffer::DeviceBuffer<u8>,
-        }
-        struct PerSize {
-            log_n: usize,
-            n: usize,
-            sizes: FractionalInputSize,
-            leaves: Vec<Frac<EF>>,
-            alpha: EF,
-            eager_sum: (EF, EF),
-            eager_ms: Vec<f64>,
-            drivers: Vec<PerDriver>,
-        }
-
-        let ctx = test_ctx();
-        let device = DeviceType::Cuda(0);
-        let log_ns: Vec<usize> = std::env::var("FRAC_BENCH_LOG_N")
-            .unwrap_or_else(|_| "16,24".into())
-            .split(',')
-            .map(|s| s.trim().parse().expect("FRAC_BENCH_LOG_N entry"))
-            .collect();
-        let nsys_enabled = std::env::var_os("NSYS_ENABLED").is_some();
-
-        // `FRAC_BENCH_SCHEDULER=v2` re-plans every driver with the
-        // profile-guided v2 list scheduler after collecting per-node
-        // timings from a first v1 compile. `v1` (default) skips the
-        // re-plan and benches the v1 plan directly. Both plans reuse
-        // the same `GRAPH_PATH` pre-pass snapshot and on-disk kernel
-        // cache — only the plan/instructions differ, so the second
-        // compile is cache-cheap.
-        let bench_scheduler = std::env::var("FRAC_BENCH_SCHEDULER").unwrap_or_else(|_| "v1".into());
-        let use_v2 = bench_scheduler == "v2";
-        let sched_label: &'static str = if use_v2 { "v2" } else { "v1" };
-        println!(
-            "[bench] scheduler: {sched_label} ({} streams via CC_STREAMS)",
-            std::env::var("CC_STREAMS").unwrap_or_else(|_| "8".into()),
-        );
-
-        // ---- Setup pass: eager warmup (records the reference proof), then
-        // per driver: graph build + compile + warmup run + full e2e check.
-        // Nothing here runs inside the profiler window.
-        let mut states: Vec<PerSize> = Vec::with_capacity(log_ns.len());
-        for log_n in log_ns {
-            let n = 1usize << log_n;
-            let sizes = FractionalInputSize::new(n, n);
-            let leaves = make_host_leaves(n, 0x0E71_A9B0 ^ log_n as u64);
-            let mut rng = StdRng::seed_from_u64(0xBEA7 ^ log_n as u64);
-            let alpha: EF = rng.random();
-
-            println!("\n=== fractional sumcheck (overlap bench): n = 2^{log_n} = {n} leaves ===");
-
-            let (eager_proof, eager_xi) = {
-                let d_leaves = leaves_to_device(&leaves, &ctx);
-                let mut sponge = DuplexSpongeGpu::default();
-                let mut mem = MemTracker::start("bench.fractional_eager");
-                ctx.stream.synchronize().expect("sync");
-                let t0 = Instant::now();
-                let out = fractional_sumcheck_gpu::<SC, _>(
-                    &mut sponge,
-                    d_leaves,
-                    sizes,
-                    alpha,
-                    false,
-                    &mut mem,
-                    &ctx,
-                )
-                .expect("eager warmup");
-                ctx.stream.synchronize().expect("sync");
-                println!(
-                    "[bench] eager warmup: {:>8.2} ms",
-                    t0.elapsed().as_secs_f64() * 1e3
-                );
-                out
-            };
-
-            // Small rounds are R with 2^(R+1) <= small_m_max_pq(), R in
-            // 1..total_rounds — mirror of the driver's regime selection.
-            let want_m_builds = (1..log_n)
-                .filter(|&r| (1usize << (r + 1)) <= small_m_max_pq())
-                .count();
-
-            let mut per_driver: Vec<PerDriver> = Vec::with_capacity(drivers.len());
-            for &(label, driver) in &drivers {
-                let t0 = Instant::now();
-                let mut g = GraphBuilder::new();
-                let mut transcript = DuplexSpongeGpuIR::new(&mut g, device);
-                // Register the driver's working `layer` directly as
-                // the graph input. The caller populates it via H2D into
-                // its pool slot before each launch — no in-graph memcpy,
-                // so the captured CUDA graph doesn't include a leaves-
-                // upload node in the profile window.
-                let layer = add_frac_ef_buf(&mut g, device, "leaves_work", n);
-                g.register_input(layer);
-                let proof_ir = driver(&mut g, &mut transcript, layer, sizes, alpha, false, device)
-                    .expect(label);
-                let exports = export_proof_artifacts(&mut g, &proof_ir, device);
-                for &b in &exports {
-                    g.register_output(b);
-                }
-                let m_builds = g
-                    .nodes
-                    .iter()
-                    .filter(|nd| {
-                        matches!(nd, GraphNode::Kernel(k)
-                            if k.module.name.starts_with("frac_m_outer_product_dsl"))
-                    })
-                    .count();
-                let pm_builds = g
-                    .nodes
-                    .iter()
-                    .filter(|nd| {
-                        matches!(nd, GraphNode::BlackboxKernel(k)
-                            if k.name == "frac_precompute_m_build_dev_challenge")
-                    })
-                    .count();
-                let build_ms = t0.elapsed().as_secs_f64() * 1e3;
-                let n_nodes = g.nodes.len();
-
-                // `GRAPH_PATH`: on file-hit, load a pre-pass
-                // `SerializableGraphBuilder` and reattach blackbox
-                // closures from the freshly-built `g`; on file-miss, dump
-                // the fresh `g` before compile consumes it so subsequent
-                // runs skip the reconstruction. Independent of the
-                // separate `CC_GRAPH_DUMP_PATH` machinery used by the
-                // v2 fractional bench.
-                let graph_path = graph_path_from_env(label, log_n);
-                let g_for_compile = match graph_path.as_ref() {
-                    Some(path) if path.exists() => {
-                        eprintln!(
-                            "[bench] {label}: loading graph builder snapshot from {}",
-                            path.display()
-                        );
-                        let bytes = std::fs::read(path).expect("read graph snapshot");
-                        let ser: SerializableGraphBuilder = bincode::deserialize(&bytes)
-                            .expect("bincode: SerializableGraphBuilder");
-                        ser.into_graph_builder(Some(&mut g), &ctx)
-                            .expect("into_graph_builder")
-                    }
-                    Some(path) => {
-                        let _ = g.original_hash();
-                        let ser = SerializableGraphBuilder::from_graph_builder(&g, &ctx)
-                            .expect("from_graph_builder");
-                        if let Some(parent) = path.parent() {
-                            if !parent.as_os_str().is_empty() {
-                                std::fs::create_dir_all(parent).ok();
-                            }
-                        }
-                        let bytes = bincode::serialize(&ser).expect("bincode serialize snapshot");
-                        std::fs::write(path, bytes).expect("write graph snapshot");
-                        eprintln!(
-                            "[bench] {label}: dumped graph builder snapshot to {}",
-                            path.display()
-                        );
-                        g
-                    }
-                    None => g,
-                };
-
-                let t0 = Instant::now();
-                let compiler = if label == "ir_pipelined" {
-                    pipelined_cc_compiler()
-                } else {
-                    cc_compiler(DeviceType::Cuda(0))
-                };
-                // Capture the post-fuse `GraphBuilder` in-memory (through
-                // the serializer's H2H offline round-trip) so we can
-                // build an `AbstractTimingGraph` against `exe.plan()`
-                // below without going through disk.
-                let fused_cell: std::cell::RefCell<Option<SerializableGraphBuilder>> =
-                    std::cell::RefCell::new(None);
-                let mut exe = compiler
-                    .compile_with_post_fuse_hook(g_for_compile, |g_fused| {
-                        *fused_cell.borrow_mut() = Some(
-                            SerializableGraphBuilder::from_graph_builder(g_fused, &ctx)
-                                .expect("from_graph_builder(post-fuse)"),
-                        );
-                        Ok(())
-                    })
-                    .expect("graph compile");
-                let fused_g = fused_cell
-                    .into_inner()
-                    .expect("post-fuse hook ran")
-                    .into_graph_builder_offline();
-                let compile_ms = t0.elapsed().as_secs_f64() * 1e3;
-                println!(
-                    "[bench] {label}: build {build_ms:>8.2} ms ({n_nodes} nodes, {m_builds} M \
-                     builds, {pm_builds} PM builds); compile {compile_ms:>8.2} ms ({} \
-                     unique modules, {} cached, scratch pool {} MiB)",
-                    exe.num_unique_modules(),
-                    exe.num_cached_modules(),
-                    exe.scratch_bytes() >> 20,
-                );
-
-                let d_input = frac_bytes(&leaves).to_device_on(&ctx).expect("H2D");
-                exe.set_input(&ctx, 0, &d_input).expect("set_input");
-                exe.run(&ctx).expect("graph warmup");
-                ctx.stream.synchronize().expect("sync");
-
-                // Full e2e check against the eager proof, read back from
-                // the warmup run of the exact exe the timed pass replays.
-                let read_output = |bid: BufId| -> EF {
-                    let idx = (0..exe.num_outputs())
-                        .find(|&i| exe.output_buf_id(i) == bid)
-                        .expect("export output index");
-                    ef_from_bytes(&exe.get_output(idx).to_host_on(&ctx).expect("D2H"))
-                };
-                let efs: Vec<EF> = exports.iter().map(|&bid| read_output(bid)).collect();
-                let got = reshape_proof_efs(efs, &proof_ir);
-                assert_ir_proof_matches_eager(&got, &eager_proof, &eager_xi);
-                println!("[bench] {label}: e2e proof matches eager");
-
-                // Profile-guided perf estimate: measure per-node cost with
-                // `collect_graph_info`, then feed the (fused-builder + info)
-                // pair to `perf_est` to score the actual `exe.plan()` under
-                // the perfect-parallel stream model. This is a single
-                // number the bench iterations below can be compared
-                // against; it also flags planner regressions before the
-                // full timed pass runs.
-                // Re-populate `layer` (registered as the graph input)
-                // before every warmup + timed iteration — kernels mutate
-                // it in place, so a stale value would corrupt the next
-                // iter's timings.
-                let d_input_ref = &d_input;
-                let info = exe
-                    .collect_graph_info(&ctx, |exe, ctx| exe.set_input(ctx, 0, d_input_ref), 2, 4)
-                    .expect("collect_graph_info");
-                let atg = AbstractTimingGraph::from_graph_and_info(&fused_g, &info);
-                let PerfEst { time, peak_bytes } = perf_est(&atg, exe.plan());
-                let per_node_sum: f64 = info.nodes.iter().map(|n| n.mean_ms).sum();
-                let cp_ms = critical_path_ms(&atg);
-                let n_streams_used = exe.plan().num_streams.max(1) as f64;
-                let work_bound = per_node_sum / n_streams_used;
-                let lower_bound = cp_ms.max(work_bound);
-                let idle_ms = time * n_streams_used - per_node_sum;
-                let util = per_node_sum / (time * n_streams_used);
-                println!(
-                    "[bench] {label}(v1): profile per-node sum {per_node_sum:>8.2} ms, \
-                     perf_est {time:>8.2} ms (peak {} MiB, {} stream(s), {} event(s))",
-                    peak_bytes >> 20,
-                    exe.plan().num_streams,
-                    exe.plan().num_events,
-                );
-                println!(
-                    "[bench] {label}(v1): critical path {cp_ms:>8.2} ms, \
-                     work/{}={work_bound:>7.2} ms, lower bound {lower_bound:>8.2} ms; \
-                     stream-idle {idle_ms:>8.2} ms ({:.1}% util); \
-                     waste-vs-CP {:>+7.2} ms ({:.1}x)",
-                    exe.plan().num_streams,
-                    100.0 * util,
-                    time - cp_ms,
-                    time / cp_ms,
-                );
-
-                // Profile-guided second compile: feed the v1 timings into
-                // the chosen scheduler (`SchedulerMode::ListV1` with
-                // `node_times`, or `SchedulerMode::ListV2`), rebuild
-                // the same pre-pass graph, and re-compile. Kernel JIT
-                // hits the cache (identical modules), so the second
-                // compile is fast. Both `v1` and `v2` bench modes go
-                // through this path — the only difference is the
-                // scheduler variant.
-                use crypto_compiler::planner::{ListSchedulerV1, ListSchedulerV2};
-                let num_streams: usize = std::env::var("CC_STREAMS")
-                    .ok()
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(8);
-                let node_times: Vec<f64> = info.nodes.iter().map(|n| n.mean_ms).collect();
-
-                // Rebuild the same graph shape from scratch (compile
-                // above consumed the original), then reload the
-                // pre-pass snapshot to keep the pre-fusion node
-                // order stable.
-                let mut g2 = GraphBuilder::new();
-                let mut transcript2 = DuplexSpongeGpuIR::new(&mut g2, device);
-                let layer2 = add_frac_ef_buf(&mut g2, device, "leaves_work", n);
-                g2.register_input(layer2);
-                let proof_ir2 = driver(
-                    &mut g2,
-                    &mut transcript2,
-                    layer2,
-                    sizes,
-                    alpha,
-                    false,
-                    device,
-                )
-                .expect(label);
-                let exports2 = export_proof_artifacts(&mut g2, &proof_ir2, device);
-                for &b in &exports2 {
-                    g2.register_output(b);
-                }
-                let g2_for_compile = match graph_path.as_ref() {
-                    Some(path) if path.exists() => {
-                        let bytes = std::fs::read(path).expect("read graph snapshot");
-                        let ser: SerializableGraphBuilder = bincode::deserialize(&bytes)
-                            .expect("bincode: SerializableGraphBuilder");
-                        ser.into_graph_builder(Some(&mut g2), &ctx)
-                            .expect("into_graph_builder")
-                    }
-                    _ => g2,
-                };
-                let base_pg = if label == "ir_pipelined" {
-                    pipelined_cc_compiler()
-                } else {
-                    cc_compiler(DeviceType::Cuda(0))
-                };
-                let compiler_pg = if use_v2 {
-                    base_pg
-                        .scheduler(SchedulerMode::ListV2 {
-                            params: ListSchedulerV2 {
-                                num_streams,
-                                ..ListSchedulerV2::default()
-                            },
-                        })
-                        .node_times(Some(node_times))
-                } else {
-                    base_pg
-                        .scheduler(SchedulerMode::ListV1 {
-                            params: ListSchedulerV1 {
-                                max_concurrency: num_streams as u32,
-                                ..ListSchedulerV1::default()
-                            },
-                        })
-                        .node_times(Some(node_times))
-                };
-                let t0 = Instant::now();
-                let mut exe_pg = compiler_pg.compile(g2_for_compile).expect("pg compile");
-                let compile_pg_ms = t0.elapsed().as_secs_f64() * 1e3;
-                println!(
-                    "[bench] {label}({sched_label}): compile {compile_pg_ms:>8.2} ms ({} unique \
-                     modules, {} cached, scratch pool {} MiB)",
-                    exe_pg.num_unique_modules(),
-                    exe_pg.num_cached_modules(),
-                    exe_pg.scratch_bytes() >> 20,
-                );
-
-                let d_input2 = frac_bytes(&leaves).to_device_on(&ctx).expect("H2D");
-                exe_pg.set_input(&ctx, 0, &d_input2).expect("set_input pg");
-                exe_pg.run(&ctx).expect("pg warmup");
-                ctx.stream.synchronize().expect("sync");
-                let read_output2 = |bid: BufId| -> EF {
-                    let idx = (0..exe_pg.num_outputs())
-                        .find(|&i| exe_pg.output_buf_id(i) == bid)
-                        .expect("pg export output index");
-                    ef_from_bytes(&exe_pg.get_output(idx).to_host_on(&ctx).expect("D2H"))
-                };
-                let efs2: Vec<EF> = exports2.iter().map(|&bid| read_output2(bid)).collect();
-                let got2 = reshape_proof_efs(efs2, &proof_ir2);
-                assert_ir_proof_matches_eager(&got2, &eager_proof, &eager_xi);
-                println!("[bench] {label}({sched_label}): e2e proof matches eager");
-                let perf_pg = perf_est(&atg, exe_pg.plan());
-                let n_streams_pg = exe_pg.plan().num_streams.max(1) as f64;
-                let work_bound_pg = per_node_sum / n_streams_pg;
-                let idle_pg = perf_pg.time * n_streams_pg - per_node_sum;
-                let util_pg = per_node_sum / (perf_pg.time * n_streams_pg);
-                println!(
-                    "[bench] {label}({sched_label}): perf_est {:>8.2} ms (peak {} MiB, {} \
-                     stream(s), {} event(s))",
-                    perf_pg.time,
-                    perf_pg.peak_bytes >> 20,
-                    exe_pg.plan().num_streams,
-                    exe_pg.plan().num_events,
-                );
-                println!(
-                    "[bench] {label}({sched_label}): critical path {cp_ms:>8.2} ms, \
-                     work/{}={work_bound_pg:>7.2} ms, lower bound {:>8.2} ms; \
-                     stream-idle {idle_pg:>8.2} ms ({:.1}% util); \
-                     waste-vs-CP {:>+7.2} ms ({:.1}x)",
-                    exe_pg.plan().num_streams,
-                    cp_ms.max(work_bound_pg),
-                    100.0 * util_pg,
-                    perf_pg.time - cp_ms,
-                    perf_pg.time / cp_ms,
-                );
-                let final_exe = exe_pg;
-                let final_exports = exports2;
-                let final_compile_ms = compile_pg_ms;
-                let final_d_input = d_input2;
-
-                per_driver.push(PerDriver {
-                    label,
-                    exe: final_exe,
-                    exports: final_exports,
-                    build_ms,
-                    compile_ms: final_compile_ms,
-                    n_nodes,
-                    m_builds,
-                    times_ms: Vec::with_capacity(ITERS),
-                    d_input: final_d_input,
-                });
-            }
-            for d in &per_driver {
-                match d.label {
-                    "ir" => assert_eq!(d.m_builds, 0, "base driver must not emit overlap M builds"),
-                    "ir_overlap" => assert_eq!(
-                        d.m_builds, want_m_builds,
-                        "overlap driver M-build count at 2^{log_n}"
-                    ),
-                    // Post-simplification `ir_pipelined` delegates to
-                    // `fractional_sumcheck_gpu_ir`; no dedicated M-build
-                    // node-count invariant to check here anymore.
-                    "ir_pipelined" => {}
-                    other => unreachable!("unknown driver label {other}"),
-                }
-            }
-
-            states.push(PerSize {
-                log_n,
-                n,
-                sizes,
-                leaves,
-                alpha,
-                eager_sum: eager_proof.fractional_sum,
-                eager_ms: Vec::with_capacity(ITERS),
-                drivers: per_driver,
-            });
-        }
-
-        // Capture CUDA graphs before the profiler window so timed graph
-        // iterations are pure `cudaGraphLaunch` replays. `capture_graph`
-        // internally runs the exe once to record the DAG — `layer` has
-        // been mutated by an earlier warmup, so refresh it first. Do
-        // the same before the post-capture launch warmup.
-        for st in states.iter_mut() {
-            for d in st.drivers.iter_mut() {
-                d.exe
-                    .set_input(&ctx, 0, &d.d_input)
-                    .expect("set_input pre-capture");
-                ctx.stream.synchronize().expect("sync");
-                let t0 = Instant::now();
-                d.exe.capture_graph(&ctx).expect("graph capture");
-                d.exe
-                    .set_input(&ctx, 0, &d.d_input)
-                    .expect("set_input pre-launch-warmup");
-                d.exe.launch_graph(&ctx).expect("graph warmup");
-                ctx.stream.synchronize().expect("sync");
-                println!(
-                    "[bench] n=2^{} {}: capture + launch warmup {:>8.2} ms",
-                    st.log_n,
-                    d.label,
-                    t0.elapsed().as_secs_f64() * 1e3,
-                );
-            }
-        }
-
-        // ---- Timed pass: one profiler window, one NVTX range per
-        // workload iteration.
-        if nsys_enabled {
-            unsafe { cudaProfilerStart() };
-        }
-        for st in states.iter_mut() {
-            for i in 0..ITERS {
-                // H2D outside the NVTX range: nsys measures only the
-                // sumcheck kernel work, not the input copy.
-                let d_leaves = leaves_to_device(&st.leaves, &ctx);
-                let mut sponge = DuplexSpongeGpu::default();
-                let mut mem = MemTracker::start("bench.fractional_eager");
-                ctx.stream.synchronize().expect("sync post-H2D");
-                let t0 = Instant::now();
-                if nsys_enabled {
-                    nvtx::range_push!("eager n=2^{} iter={}", st.log_n, i);
-                }
-                let (proof, _xi) = fractional_sumcheck_gpu::<SC, _>(
-                    &mut sponge,
-                    d_leaves,
-                    st.sizes,
-                    st.alpha,
-                    false,
-                    &mut mem,
-                    &ctx,
-                )
-                .expect("eager fractional_sumcheck_gpu");
-                ctx.stream.synchronize().expect("sync post-eager");
-                if nsys_enabled {
-                    nvtx::range_pop!();
-                }
-                st.eager_ms.push(t0.elapsed().as_secs_f64() * 1e3);
-                st.eager_sum = proof.fractional_sum;
-                let _ = unsafe { cudaDeviceSynchronize() };
-            }
-            for d in st.drivers.iter_mut() {
-                for i in 0..ITERS {
-                    // Refresh the input outside the NVTX/profile range —
-                    // graph mutates `layer` in place, so every launch
-                    // needs a fresh copy of the initial leaves.
-                    d.exe
-                        .set_input(&ctx, 0, &d.d_input)
-                        .expect("set_input pre-launch");
-                    ctx.stream.synchronize().expect("sync post-set_input");
-                    let t0 = Instant::now();
-                    if nsys_enabled {
-                        nvtx::range_push!(
-                            "{}({}) n=2^{} iter={}",
-                            d.label,
-                            sched_label,
-                            st.log_n,
-                            i
-                        );
-                    }
-                    d.exe.launch_graph(&ctx).expect("graph launch");
-                    ctx.stream.synchronize().expect("sync post-launch");
-                    if nsys_enabled {
-                        nvtx::range_pop!();
-                    }
-                    d.times_ms.push(t0.elapsed().as_secs_f64() * 1e3);
-                    let _ = unsafe { cudaDeviceSynchronize() };
-                }
-            }
-        }
-        if nsys_enabled {
-            unsafe { cudaProfilerStop() };
-        }
-
-        // ---- Report + post-replay sanity check.
-        for st in &states {
-            let eager_mean = st.eager_ms.iter().sum::<f64>() / ITERS as f64;
-            // "x ir" baseline: the base driver's mean if it ran, else eager.
-            let ir_mean = st
-                .drivers
-                .iter()
-                .find(|d| d.label == "ir")
-                .map(|d| d.times_ms.iter().sum::<f64>() / ITERS as f64)
-                .unwrap_or(eager_mean);
-            println!(
-                "\n--- fractional sumcheck (overlap bench): n = 2^{} = {} leaves ---\n\
-                 eager       : {:>8.2?} ms (mean {:.2} ms)",
-                st.log_n, st.n, st.eager_ms, eager_mean,
-            );
-            for d in &st.drivers {
-                let mean = d.times_ms.iter().sum::<f64>() / ITERS as f64;
-                println!(
-                    "{:<12}: {:>8.2?} ms (mean {:.2} ms, {:.3}x eager, {:.3}x ir) [build \
-                     {:.2} ms / {} nodes / {} M builds; compile {:.2} ms]",
-                    d.label,
-                    d.times_ms,
-                    mean,
-                    mean / eager_mean,
-                    mean / ir_mean,
-                    d.build_ms,
-                    d.n_nodes,
-                    d.m_builds,
-                    d.compile_ms,
-                );
-                let read_export = |bid: BufId| -> EF {
-                    let idx = (0..d.exe.num_outputs())
-                        .find(|&i| d.exe.output_buf_id(i) == bid)
-                        .expect("export output index");
-                    ef_from_bytes(&d.exe.get_output(idx).to_host_on(&ctx).expect("D2H"))
-                };
-                let got_sum = (read_export(d.exports[0]), read_export(d.exports[1]));
-                assert_eq!(
-                    got_sum, st.eager_sum,
-                    "fractional_sum mismatch at 2^{} ({})",
-                    st.log_n, d.label
                 );
             }
         }

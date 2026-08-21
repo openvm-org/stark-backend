@@ -62,8 +62,7 @@ to minutes. Run them explicitly with `--run-ignored all --no-capture` (`nextest`
 | env var                        | purpose                                                              |
 | ------------------------------ | -------------------------------------------------------------------- |
 | `CUDA_VISIBLE_DEVICES`         | GPU selection (project convention: GPU 5).                           |
-| `CC_CONFIG`                    | Path to compiler-config TOML (`cc_default_config.toml` = list_v1,   |
-|                                | `cc_list_v2_config.toml` = list_v2).                                 |
+| `CC_CONFIG`                    | Path to compiler-config TOML (`cc_default_config.toml` ships list_v2). |
 | `NSYS_ENABLED=1`               | Enable `cudaProfilerStart/Stop` + NVTX ranges in every bench.        |
 | `CC_GRAPH_DUMP_PATH=<file>`    | Cache the compiled `GraphExe` between runs (skips fusion/schedule).  |
 | `CC_CY_DUMP_PATH=<dir>`        | Dump post-fuse+dce graph + cytoscape JSON + timings JSON.            |
@@ -71,7 +70,6 @@ to minutes. Run them explicitly with `--run-ignored all --no-capture` (`nextest`
 | `FRAC_LOG_N=<csv>`             | Leaf-count log2 list (default varies by bench).                      |
 | `FRAC_ROUND=<n>` / `FRAC_ROUNDS=<csv>` | Which outer round(s) the pipelined benches build for.        |
 | `CC_STREAMS_SWEEP=<csv>`       | Override list_v2 stream sweep in `all_schedulers_nsys`.              |
-| `SWIRL_CUDA_GKR_PIPELINE_SPLITS=<n>` | Pipeline splits knob for the pipelined driver graphs.          |
 
 Recommended nsys flags (per `AGENTS.md`):
 
@@ -93,8 +91,7 @@ and where it lives.
 | Bench                                          | File                                | Purpose                                                                                             |
 | ---------------------------------------------- | ----------------------------------- | --------------------------------------------------------------------------------------------------- |
 | `bench_fractional_sumcheck_eager_vs_ir`        | `fractional_ir.rs`                  | Full fractional sumcheck — eager vs `GraphExe.launch_graph()` at every `FRAC_LOG_N` (default `16,20`). |
-| `bench_fractional_sumcheck_eager_vs_ir_overlap`| `fractional_ir.rs`                  | Same graph as above but sweeps overlap-based execution drivers side-by-side.                        |
-| `bench_fractional_sumcheck_eager_vs_irv2`      | `fractional_sumcheck_gpu_irv2.rs`   | irv2 (fusion-v2 optimised) full sumcheck vs eager, with `exe.run()` and `launch_graph()` variants.  |
+| `bench_fractional_sumcheck_eager_vs_irv2`      | `fractional_sumcheck_gpu_irv2.rs`   | irv2 (fusion-optimised) full sumcheck vs eager, with `exe.run()` and `launch_graph()` variants.     |
 | `bench_pipelined_ir_vs_eager`                  | `fractional_ir_pipelined.rs`        | Single outer round `FRAC_ROUND` of the α-tiled pipelined driver vs eager.                           |
 | `bench_pipelined_full_sumcheck_vs_eager`       | `fractional_ir_pipelined.rs`        | Full pipelined sumcheck vs eager at every `FRAC_LOG_N`.                                             |
 | `bench_pipelined_ir_sweep`                     | `fractional_ir_pipelined.rs`        | Per-`j` single-round pipelined graphs across `FRAC_ROUNDS` (default `4,10,16,20,24`).               |
@@ -106,8 +103,9 @@ All bench functions live in the `tests` submodule of their file — the nextest 
 
 ### Command templates
 
-Substitute `$CFG=cc_default_config.toml` (list_v1) or `$CFG=cc_list_v2_config.toml` (list_v2)
-in every command below. Default profiling target is GPU 5.
+`$CFG=cc_default_config.toml` in every command below ships list_v2; swap
+to a list_v1 profile per the example block in the file to compare.
+Default profiling target is GPU 5.
 
 **`bench_fractional_sumcheck_eager_vs_ir`** — default full-proof bench, `FRAC_LOG_N=16,20`:
 
@@ -120,6 +118,23 @@ CUDA_VISIBLE_DEVICES=5 NSYS_ENABLED=1 \
   cargo nextest run -p openvm-cuda-backend --features graph-ir --release \
     --run-ignored all --no-capture \
     -E 'test(=logup_zerocheck::fractional_ir::tests::bench_fractional_sumcheck_eager_vs_ir)'
+```
+
+Dump the fused graph + timings and serve them in the Cytoscape viewer
+(no nsys; writes `frac_ir.n{N}.{graph.bin,cy.json,timings.json}` to
+`$CC_CY_DUMP_PATH`):
+
+```bash
+CUDA_VISIBLE_DEVICES=5 FRAC_LOG_N=12 \
+  CC_CONFIG=$(pwd)/crates/compiler/$CFG \
+  CC_CY_DUMP_PATH=$(pwd)/target/frac_cy_dump \
+  cargo nextest run -p openvm-cuda-backend --features graph-ir --release \
+    --run-ignored all --no-capture --test-threads=1 \
+    -E 'test(=logup_zerocheck::fractional_ir::tests::bench_fractional_sumcheck_eager_vs_ir)'
+
+python3 scripts/serve_graph.py --port 8086 \
+  target/frac_cy_dump/frac_ir.n4096.cy.json
+# then open http://localhost:8086
 ```
 
 Non-nsys run (fast turnaround, no profiler overhead):
@@ -137,20 +152,7 @@ Optional: dump the compiled exe or fused cytoscape graph:
 FRAC_BENCH_DUMP_EXE=/tmp/frac_ir.exe CC_CY_DUMP_PATH=/tmp/frac_ir_dump ...
 ```
 
-**`bench_fractional_sumcheck_eager_vs_ir_overlap`** — same file, driver-overlap sweep:
-
-```bash
-CUDA_VISIBLE_DEVICES=5 NSYS_ENABLED=1 \
-  CC_CONFIG=$(pwd)/crates/compiler/$CFG FRAC_LOG_N=24 \
-  nsys profile --capture-range=cudaProfilerApi --capture-range-end=stop \
-    --cuda-graph-trace=node --gpu-metrics-devices=cuda-visible \
-    --trace=cuda,nvtx --wait=all --force-overwrite=true -o frac_ir_overlap_n24 \
-  cargo nextest run -p openvm-cuda-backend --features graph-ir --release \
-    --run-ignored all --no-capture \
-    -E 'test(=logup_zerocheck::fractional_ir::tests::bench_fractional_sumcheck_eager_vs_ir_overlap)'
-```
-
-**`bench_fractional_sumcheck_eager_vs_irv2`** — fusion-v2 optimised full sumcheck:
+**`bench_fractional_sumcheck_eager_vs_irv2`** — fusion-optimised full sumcheck:
 
 ```bash
 CUDA_VISIBLE_DEVICES=5 NSYS_ENABLED=1 \
@@ -255,4 +257,139 @@ CUDA_VISIBLE_DEVICES=5 NSYS_ENABLED=1 FRAC_LOG_N=24 \
       graph_ir_dumps/ir.n1048576.timings.json
   ```
 
+## Environment variables reference
 
+Every env var read by the compiler crate or the fractional-sumcheck benches.
+Compiler-side vars are read once at builder / runtime setup; bench-side vars
+are read inside the timed tests.
+
+### Compiler (`crates/compiler`)
+
+**`runtime::CompileOptions::default()`** — nvcc + verbosity knobs, populated
+from the environment at first use:
+
+| var                                | purpose                                                                                       |
+| ---------------------------------- | --------------------------------------------------------------------------------------------- |
+| `NVCC`                             | nvcc binary path (default `"nvcc"`).                                                          |
+| `CRYPTO_COMPILER_CUDA_ARCH`        | `-arch=` value (default `"native"`).                                                          |
+| `CRYPTO_COMPILER_DUMP_IR`          | Directory for IR dumps; unset = no dumps.                                                     |
+| `CRYPTO_COMPILER_VERBOSITY`        | `none` / `basic` / `verbose` (default `basic`).                                               |
+| `CRYPTO_COMPILER_CHECK_ACCESSES`   | Run per-module access checker (`0` / `false` = off, else on).                                 |
+| `NVCC_TIMEOUT_SECS`                | Per-kernel nvcc wall-time limit.                                                              |
+| `CUDA_LINEINFO=1`                  | Pass `-lineinfo` to nvcc for source-line PTX debug info.                                      |
+
+**`kernel_cache`** — on-disk cache location:
+
+| var                | purpose                                                                                       |
+| ------------------ | --------------------------------------------------------------------------------------------- |
+| `HOME`             | Default cache dir: `$HOME/.openvm/kernel_cache`.                                              |
+| `XDG_CACHE_HOME`   | Fallback cache dir: `$XDG_CACHE_HOME/openvm/kernel_cache` when `HOME` is unset.               |
+
+**`graph_exe` — compile / run debug knobs:**
+
+| var                                | purpose                                                                                       |
+| ---------------------------------- | --------------------------------------------------------------------------------------------- |
+| `GRAPH_EXE_DUMP_SCHEDULE=1`        | Dump per-stream schedule after memory plan.                                                   |
+| `GRAPH_EXE_DUMP_MODULES=1`         | List unique module names during compile.                                                      |
+| `GRAPH_EXE_TRACE=<stride>`         | Print an instruction trace every `stride` dispatches.                                         |
+| `GRAPH_EXE_SLOW_INSTR_MS=<ms>`     | Arm a per-instruction wall-time watchdog; dumps the offending module.                         |
+| `GRAPH_EXE_STOP_AT_INSTR=<idx>`    | Dump instruction `idx`'s module and return before dispatch.                                   |
+| `GRAPH_EXE_SYNC_EACH_INSTR=1`      | Sync after each dispatch (serializes launches).                                               |
+| `GRAPH_EXE_DISPATCH_WATCHDOG_MS=<ms>` | Kill the process if a single dispatch blocks longer than the given wall time.              |
+
+**`passes/fusion` — fusion pass debug:**
+
+| var                                | purpose                                                                                       |
+| ---------------------------------- | --------------------------------------------------------------------------------------------- |
+| `FUSION_DEBUG=1`                   | Print per-pass reject aggregates.                                                             |
+| `FUSION_DEBUG=2`                   | As above, plus dump the cost interpreter's HIR on cost-failure.                               |
+| `FUSION_CHECK_SELECTED=1`          | Post-solve, re-verify each selected module compiles.                                          |
+
+**`planner/list_v2`:**
+
+| var                | purpose                                                                                       |
+| ------------------ | --------------------------------------------------------------------------------------------- |
+| `LIST_V2_TRACE`    | Any value → chatty per-step trace of the persistent-beam scheduler.                           |
+
+**`test_utils::maybe_bench()`** — micro-bench helper for unit tests:
+
+| var                                | purpose                                                                                       |
+| ---------------------------------- | --------------------------------------------------------------------------------------------- |
+| `BENCH_KERNEL`                     | Enable timing of a `TestModuleRunner` (unset = no-op).                                        |
+| `BENCH_KERNEL_WARMUP`              | Warmup iterations (default 5).                                                                |
+| `BENCH_KERNEL_ITERS`               | Timed iterations (default 50).                                                                |
+
+**Compiler examples:**
+
+| var                                | example                              | purpose                                                                     |
+| ---------------------------------- | ------------------------------------ | --------------------------------------------------------------------------- |
+| `V2_OPS_STREAMS`                   | `bench_list_v2_ops`                  | `num_streams` for the walk (default 8).                                     |
+| `V2_OPS_MAX_MEM_GIB`               | `bench_list_v2_ops`                  | Memory bound in GiB (default 256).                                          |
+| `NCU_ENABLED`                      | `profile_ntt_supra`                  | Wrap a single launch each in an NVTX `NCU_PROFILE` range.                   |
+
+### CUDA-backend fractional-sumcheck benches (`crates/cuda-backend/src/logup_zerocheck`)
+
+**`frac_bench_utils.rs`** — shared setup:
+
+| var                                | purpose                                                                                       |
+| ---------------------------------- | --------------------------------------------------------------------------------------------- |
+| `CC_CONFIG`                        | Path to a `GraphCompilerConfig` TOML; unset ⇒ programmatic defaults.                          |
+| `FRAC_LOG_N`                       | Comma-separated `log2(leaves)` list (bench input sizes).                                      |
+| `CC_GRAPH_DUMP_PATH`               | Base path for the pre-pass `GraphBuilder` snapshot (suffixed with `.n{n}`).                   |
+
+**`fractional_ir.rs`** — plain IR driver + full-proof bench:
+
+| var                                | purpose                                                                                       |
+| ---------------------------------- | --------------------------------------------------------------------------------------------- |
+| `GRAPH_PATH`                       | Per-driver + per-size pre-pass graph snapshot (label + `.n{n}` suffix).                       |
+| `CC_GRAPH_INPUT_PATH`              | Load a preloaded fused graph and skip build + fusion.                                         |
+| `CC_TIMING_JSON_PATH`              | Inject a `GraphInfo` timings JSON into the cytoscape dump.                                    |
+| `CC_CY_DUMP_PATH`                  | Where cytoscape dumps land.                                                                   |
+| `FRAC_BENCH_DUMP_EXE`              | Write `exe.print()` next to each `log_n`.                                                     |
+| `FRAC_BENCH_DRIVERS`               | Comma filter over driver labels (skips eviction pressure).                                    |
+| `FRAC_BENCH_LOG_N`                 | Comma list of `log_n`s (default `"16,24"`).                                                   |
+| `FRAC_BENCH_SCHEDULER`             | `v1` (default) or `v2` (profile-guided replan).                                               |
+| `CC_STREAMS`                       | Max concurrency for the replanning scheduler (default 8).                                     |
+| `NSYS_ENABLED`                     | Wrap the timed window in `cudaProfilerStart/Stop`.                                            |
+
+**`fractional_sumcheck_gpu_irv2.rs`** — irv2 driver bench:
+
+| var                                | purpose                                                                                       |
+| ---------------------------------- | --------------------------------------------------------------------------------------------- |
+| `FRAC_V2_DUMP_GRAPH_ONLY=1`        | Skip the expensive compile at large `n`.                                                      |
+| `CC_STREAMS_SWEEP`                 | Comma stream counts for the list-v1 sweep (default `"1,2,3"`).                                |
+| Also honours `CRYPTO_COMPILER_DUMP_IR`, `CC_TIMING_JSON_PATH`, `NSYS_ENABLED`.                                                       |
+
+**`fractional_ir_pipelined.rs`** — pipelined driver benches:
+
+| var                                | purpose                                                                                       |
+| ---------------------------------- | --------------------------------------------------------------------------------------------- |
+| `FRAC_ROUND`                       | Single-round GKR bench: which sumcheck round to test (default 12).                            |
+| `FRAC_ROUNDS`                      | Multi-round bench: comma list (default `"4,10,16,20,24"`).                                    |
+| `NSYS_ENABLED`                     | As above.                                                                                     |
+
+**`fractional_ir_utils.rs`** — DSL-port replay harness:
+
+| var                                | purpose                                                                                       |
+| ---------------------------------- | --------------------------------------------------------------------------------------------- |
+| `FRAC_DSL_FUSION`                  | `off` disables fusion, `verbose` enables verbose logging, unset = default.                    |
+
+**PrecomputeM tunables (`fractional.rs`, read by `fractional_ir.rs`, `fractional_ir_pipelined.rs`):**
+
+| var                                        | purpose                                                                                       |
+| ------------------------------------------ | --------------------------------------------------------------------------------------------- |
+| `SWIRL_CUDA_GKR_PRECOMPUTE_M`              | Master switch for PrecomputeM strategy selection.                                             |
+| `SWIRL_CUDA_GKR_PRECOMPUTE_M_MIN_BLOCKS`   | Minimum tail-block count before PrecomputeM is preferred.                                     |
+| `SWIRL_CUDA_GKR_PRECOMPUTE_M_MIN_N`        | Minimum `rem_n` gate for PrecomputeM.                                                         |
+| `SWIRL_CUDA_GKR_PRECOMPUTE_M_TARGET_BLOCKS`| Target tail-block count for the M-build kernel.                                               |
+| `SWIRL_CUDA_GKR_PRECOMPUTE_M_TAIL_TILE`    | Override auto-selected tail tile size.                                                        |
+
+### CUDA-backend examples
+
+| var                                | example                                       | purpose                                             |
+| ---------------------------------- | --------------------------------------------- | --------------------------------------------------- |
+| `BENCH_WARMUP` / `BENCH_ITERS` / `BENCH_SEED` | `bench_ir_dsl_ports`                    | Warmup (5) / iters (50) / RNG seed.                 |
+| `W` / `T` / `DUMP_DIR`             | `dump_ir_eval_round`                         | Window / point-count / output dir.                  |
+| `NUM_X` / `DUMP_DIR`               | `dump_ir_frac_compute_round`                 | Row count / output dir.                             |
+| `DUMP_DIR`                         | `dump_fold_frac_fusion_chain`                | Output dir.                                         |
+| `NUM_THREADS` / `NUM_TASKS`        | `keccakf`                                    | Threads (streams) / proofs to run.                  |

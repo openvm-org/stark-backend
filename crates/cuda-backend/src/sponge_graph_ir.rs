@@ -35,7 +35,7 @@
 //! from the buffer shapes, which are all `[1, WIDTH]`). The spliced
 //! parameter survives monomorphization as a runtime kernel argument, so
 //! every position of one op kind lowers to the *same* residual and
-//! [`crypto_compiler::graph_exe::GraphCompiler`]'s content-hash dedup
+//! [`crypto_compiler::graph_compiler::GraphCompiler`]'s content-hash dedup
 //! collapses them into a single JIT compilation — e.g. a transcript with
 //! 100 non-permuting observes across 7 absorb positions ends up with 1
 //! compiled kernel instead of 7.
@@ -686,7 +686,7 @@ fn load_state(b: &mut IRBuilder, state: NodeId) -> [NodeId; 16] {
 
 #[cfg(test)]
 mod tests {
-    use crypto_compiler::graph_exe::{GraphCompiler, GraphExe};
+    use crypto_compiler::{graph_compiler::GraphCompiler, graph_exe::GraphExe};
     use openvm_cuda_common::{
         common::get_device,
         copy::MemCopyH2D,

@@ -27,7 +27,7 @@
 use std::path::{Path, PathBuf};
 
 use crypto_compiler::{
-    graph_exe::{GraphCompiler, GraphExe},
+    graph_compiler::GraphCompiler, graph_exe::GraphExe,
     graph_ir::{DeviceType, GraphBuilder},
     graph_serializer::SerializableGraphBuilder,
 };

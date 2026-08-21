@@ -135,7 +135,7 @@ pub enum SchedulerConfig {
 
 impl Default for SchedulerConfig {
     fn default() -> Self {
-        SchedulerConfig::ListV1(ListSchedulerV1Config::default())
+        SchedulerConfig::ListV2(ListSchedulerV2Config::default())
     }
 }
 
@@ -425,7 +425,7 @@ mod tests {
         let back = GraphCompilerConfig::from_toml_str(&s).unwrap();
         // Spot-check every top-level section survives the round trip.
         assert!(matches!(back.device, DeviceConfig::Cuda { ordinal: 0 }));
-        assert!(matches!(back.scheduler, SchedulerConfig::ListV1(_)));
+        assert!(matches!(back.scheduler, SchedulerConfig::ListV2(_)));
         assert!(matches!(back.fusion, FusionConfig::On(_)));
         assert!(matches!(back.kernel_cache, KernelCacheConfig::Enabled(_)));
     }

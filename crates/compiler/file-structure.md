@@ -354,30 +354,17 @@ Pipeline order (mirrors `passes/mod.rs` and the module docs there).
 - **`utils.rs`** — shared helpers used across passes.
 - **`inplace.rs`** — empty placeholder.
 
-### Fusion v1 (legacy)
+### Fusion (`src/passes/fusion/`)
 
-- **`fusion.rs`** — the original six-stage fusion pass over the buffer
-  graph: access-relation extraction, candidate enumeration on
-  single-writer buffers, case dispatch, greedy dst-disjoint selection,
-  application, DCE, fixpoint driver, post-fusion module dedup. Still
-  wired up and selectable from `GraphCompiler`; being replaced by v2.
-- **`fusion_utils.rs`** — shared HIR traversal helpers used by both
-  the v1 and v2 fusion pipelines (occurrence-based visitors,
-  index-scope uniqueness, HIR cloning with substitution).
+CP-SAT-extracted rewrite pipeline (spec: `old_plans/detailed-fusion-plan-v2.md`).
+Selectable from `GraphCompiler`.
 
-### Fusion v2 (`src/passes/fusion_v2/`)
-
-CP-SAT-extracted rewrite pipeline from `fusion-plan-v2.md` and the more
-detailed `detailed-fusion-plan-v2.md`. Selectable from
-`GraphCompiler`; will become the default once §21 completion criteria
-are met. Does not import from `fusion.rs`. Milestone status tracked in
-`fusion-v2-progress.md`.
-
+- **`fusion_utils.rs`** — shared HIR traversal helpers (occurrence-based
+  visitors, index-scope uniqueness, HIR cloning with substitution).
 - **`mod.rs`** — module glue and public re-exports.
-- **`driver.rs`** — `fuse_graph_v2` — top-level bounded-saturation
-  loop: freeze seed → enumerate candidates per round → dedup by
-  `CandidateKey` → validate acyclicity → insert accepted candidates →
-  extract → apply.
+- **`driver.rs`** — `fuse_graph` — top-level bounded-saturation loop:
+  freeze seed → enumerate candidates per round → dedup by `CandidateKey`
+  → validate acyclicity → insert accepted candidates → extract → apply.
 - **`model.rs`** — `GraphFuser`, `AltGraphNode`, `ValueClassId`,
   `NodeId`. Versioned bipartite alternative graph over dense arenas.
   Seed and synthesized candidates share one namespace; sidecar state
@@ -385,15 +372,14 @@ are met. Does not import from `fusion.rs`. Milestone status tracked in
 - **`saturate.rs`** — saturation bookkeeping: seed-origin tracking (for
   disjointness) and cross-round dedup by `CandidateKey`.
 - **`version.rs`** — versioned graph guard: wraps/unwraps a
-  `GraphBuilder` into/out of the v2 alternative graph.
+  `GraphBuilder` into/out of the alternative graph.
 - **`access.rs`** — `AccessRelation` binding reads/writes to value
-  classes (the simplified form from `fusion-plan-v2.md`, not the
-  passes/fusion.rs form).
+  classes.
 - **`validate.rs`** — acyclicity and storage-hazard checking, decoupled
   from `model` so revisions don't mutate the alternative graph.
 - **`apply.rs`** — turns an `ExtractionSolution` back into a
   `GraphBuilder`; adds RAW/WAW/WAR storage-hazard edges; re-validates.
-- **`tests.rs`** — module-local unit tests for v2.
+- **`tests.rs`** — module-local unit tests.
 
 `fusions/` — candidate producers. Each pass discovers matches over the
 frozen seed prefix, synthesizes candidate HIR, normalizes, and returns
@@ -470,13 +456,11 @@ truth when they disagree.
   layout system, compile flow.
 - **`graph-ir.md`** — graph IR spec (slightly out of date on field
   names).
-- **`fusion-plan.md`** — v1 fusion plan (matches `passes/fusion.rs`).
-- **`fusion-plan-v2.md`** — short v2 sketch.
-- **`detailed-fusion-plan-v2.md`** — long-form v2 spec, the operative
-  reference for `passes/fusion_v2/`.
-- **`fusion-v2-progress.md`** — milestone tracker for v2.
-- **`fusion-v2-architecture.html`**, **`fusion-plan-v2-agent-gen.md`**,
-  **`fusion_extension.md`** — supporting fusion notes.
+- **`old_plans/detailed-fusion-plan-v2.md`** — long-form spec, the
+  operative reference for `passes/fusion/`.
+- **`old_plans/fusion-plan.md`, `fusion-plan-v2.md`, `fusion-plan-v2-agent-gen.md`,
+  `fusion-v2-progress.md`, `fusion-v2-architecture.html`, `fusion_extension.md`**
+  — historical fusion notes.
 - **`refactor-plan.md`** — running refactor plan (planner feature
   gating, graph-exe split, etc.).
 - **`mutation_semantics.md`** — semantics behind `restore_ssa` and
@@ -493,7 +477,7 @@ truth when they disagree.
 - `planner` (default) — enables `planner/`, `graph_exe`, `kernel_cache`.
   Without it only the per-kernel `ModuleCompiler` surface is available.
 - `planner-ortools` — enables the CP-SAT planner backend and the
-  CP-SAT fusion-v2 extractor. Links against OR-Tools; see
+  CP-SAT fusion extractor. Links against OR-Tools; see
   `Cargo.toml` for install locations / `ORTOOLS_PREFIX`.
   
 `---end AI generated description---`

@@ -10,7 +10,7 @@
 #
 # Fields NOT in this file (they stay on the builder API):
 #   - Symbol bindings (graph-specific; use `GraphCompiler::symbol(...)`)
-#   - Fusion v2 estimator / artifact / graph_symbols (hardware- and
+#   - Fusion estimator / artifact / graph_symbols (hardware- and
 #     graph-specific; overridden by the caller when needed)
 #   - Per-node timings for the list schedulers (populated from profiling
 #     via `GraphExe::collect_graph_info`)
@@ -44,42 +44,42 @@ check_accesses = false
 
 # ---------- Scheduler ----------
 #
-# `mode` = "list_v1" (default), "list_v2", or "cp_sat" (requires the
-# `planner-ortools` feature). Per-mode tunables live in the same table.
+# `mode` = "list_v2" (default) or "list_v1". Per-mode tunables live in
+# the same table.
+#
+# ListV2 (persistent-beam, parallel fan-out):
+#   num_streams        — number of concurrent CUDA streams.
+#   max_memory_bound   — cap on the pool in bytes; `i64::MAX` = "no cap".
+#   num_beams          — beam width.
+#   beam_depth         — beam-search rollout depth.
+#   frontier_cap       — cap on the ready frontier expanded per step.
+#   w_m, w_t, w_c      — memory / time / commit-cost weights.
 #
 # ListV1 (profile-guided list scheduler with beam look-ahead):
-#   max_concurrency        — number of concurrent CUDA streams.
-#   max_memory_bytes       — cap on the pool; omit / set to null for "no cap".
-#   lookahead_k, beam      — beam-search depth × width (0/1 is greedy).
-#   w_cp, w_mem            — critical-path vs memory-pressure weights.
-#   mem_target_frac        — fraction of pool above which mem penalty kicks in.
-#
-# ListV2 (persistent-beam, parallel fan-out): num_streams,
-# max_memory_bound, num_beams, beam_depth, frontier_cap, w_m, w_t, w_c.
-#
-# CpSat: max_secs (wall-time cap for the CP-SAT joint solve).
+#   max_concurrency, max_memory_bytes, lookahead_k, beam,
+#   w_cp, w_mem, mem_target_frac.
 [scheduler]
-mode = "list_v1"
-max_concurrency = 8
-lookahead_k = 3
-beam = 2
-w_cp = 1.0
-w_mem = 0.001
-mem_target_frac = 0.9
-# max_memory_bytes = ...
+mode = "list_v2"
+num_streams = 8
+max_memory_bound = 9223372036854775807
+num_beams = 4
+beam_depth = 1
+frontier_cap = 1
+w_m = 1.0
+w_t = 1.0
+w_c = -2.0
 
-# Example: switch to list_v2 by replacing the block above with:
+# Example: switch to list_v1 by replacing the block above with:
 #
 # [scheduler]
-# mode = "list_v2"
-# num_streams = 8
-# max_memory_bound = 9223372036854775807
-# num_beams = 1
-# beam_depth = 1
-# frontier_cap = 1
-# w_m = 1.0
-# w_t = 1.0
-# w_c = -2.0
+# mode = "list_v1"
+# max_concurrency = 8
+# lookahead_k = 3
+# beam = 2
+# w_cp = 1.0
+# w_mem = 0.001
+# mem_target_frac = 0.9
+# # max_memory_bytes = ...
 
 # ---------- Kernel cache ----------
 #
@@ -95,13 +95,10 @@ max_bytes = 10737418240   # 10 GiB
 
 # ---------- Fusion ----------
 #
-# `kind` = "v2" (default), "off", or "v1" (deprecated — retained for
-# compatibility with old snapshots). New profiles should use v2; see
-# `passes/fusion` for the DAG-hypergraph rewrite.
-#
-# The v2 knobs below mirror `FusionOptionsV2`; fields outside the TOML
-# surface (`estimator`, `artifact`, `graph_symbols`) keep the crate
-# defaults.
+# `kind` = "on" (default) or "off". See `passes/fusion` for the
+# DAG-hypergraph rewrite. The knobs below mirror `FusionOptions`; fields
+# outside the TOML surface (`estimator`, `artifact`, `graph_symbols`)
+# keep the crate defaults.
 [fusion]
 kind = "on"
 max_total_alternatives = 5000
@@ -130,16 +127,3 @@ verbose = false
 #
 # [fusion]
 # kind = "off"
-#
-# Example (deprecated): fall back to v1 with
-#
-# [fusion]
-# kind = "v1"
-# max_iterations = 10
-# max_body_ops = 1024
-# launch_cost = 0.000005
-# bw_eff = 2000000000000.0
-# flop_eff = 10000000000000.0
-# gamma = 0.5
-# per_thread_bw = 1000000000.0
-# verbose = false
