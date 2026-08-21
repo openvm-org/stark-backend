@@ -21,7 +21,7 @@
 //! [`crate::graph_exe::GraphExe::collect_graph_info`]) so the timings
 //! feed straight into the scheduler as `node_times`.
 
-use std::{collections::BTreeMap, path::PathBuf, process::ExitCode, time::Instant};
+use std::{path::PathBuf, process::ExitCode, time::Instant};
 
 use crypto_compiler::{
     graph_compiler_config::GraphCompilerConfig,
@@ -29,7 +29,7 @@ use crypto_compiler::{
     graph_ir::{BufId, DeviceType, GraphBuilder},
     graph_serializer::SerializableGraphBuilder,
     planner::{
-        access_from_node, perf_est, plan_raw, validate_plan, AbstractTimingGraph, PerfEst,
+        access_from_node, perf_est, validate_plan, AbstractTimingGraph, PerfEst,
         SchedulerMode, StreamInstr, StreamMemoryPlan, ValidationError,
     },
 };
@@ -227,48 +227,39 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     let node_times: Vec<f64> = timings.nodes.iter().map(|n| n.mean_ms).collect();
 
-    // ---- Build scheduler with the timings injected as node_times ----
-    let mut scheduler: SchedulerMode = config.scheduler.clone().into();
-    match &mut scheduler {
-        SchedulerMode::ListV1 { params } => params.node_times = node_times.clone(),
-        SchedulerMode::ListV2 { params } => params.node_times = node_times.clone(),
-        #[cfg(feature = "planner-ortools")]
-        SchedulerMode::CpSat { .. } => {
-            // CP-SAT joint-schedule doesn't consume per-node runtime timings;
-            // the plan_raw contract is happy with an empty vec.
-        }
-    }
+    let scheduler: SchedulerMode = config.scheduler.clone().into();
 
-    // ---- Plan ----
+    // ---- Build the ATG (fake ordering-edge bufs + timings) ----
     let device: DeviceType = config.device.clone().into();
-    let env: BTreeMap<_, _> = BTreeMap::new();
-    let pin: Vec<BufId> = g
-        .input_bufs()
-        .iter()
-        .chain(g.output_bufs().iter())
-        .copied()
-        .collect();
     let t_access = Instant::now();
-    let node_accesses: Vec<_> = g.nodes.iter().map(access_from_node).collect();
+    let reads: Vec<Vec<BufId>> = g
+        .nodes
+        .iter()
+        .map(|n| access_from_node(n).reads)
+        .collect();
+    let writes: Vec<Vec<BufId>> = g
+        .nodes
+        .iter()
+        .map(|n| access_from_node(n).writes)
+        .collect();
     let access_secs = t_access.elapsed().as_secs_f64();
 
-    let t_plan = Instant::now();
-    let plan = plan_raw(
-        &g.bufs,
-        &node_accesses,
-        &env,
-        device,
-        &pin,
-        &g.aliases,
-        &scheduler,
-    )
-    .map_err(|e| format!("plan_raw: {e}"))?;
-    let plan_secs = t_plan.elapsed().as_secs_f64();
-
-    // ---- Validation + library-side perf estimate ----
     let t_atg = Instant::now();
-    let atg = AbstractTimingGraph::from_graph_and_info(&g, &timings);
+    let atg = AbstractTimingGraph::from_accesses(
+        g.bufs.clone(),
+        &reads,
+        &writes,
+        node_times.clone(),
+        device,
+        g.input_bufs().to_vec(),
+        g.output_bufs().to_vec(),
+    );
     let atg_secs = t_atg.elapsed().as_secs_f64();
+
+    let t_plan = Instant::now();
+    let plan = crypto_compiler::planner::plan(&atg, &scheduler)
+        .map_err(|e| format!("plan: {e}"))?;
+    let plan_secs = t_plan.elapsed().as_secs_f64();
 
     let t_validate = Instant::now();
     let validation_errors = validate_plan(&atg, &plan);
@@ -347,8 +338,6 @@ fn print_shapes(g: &GraphBuilder) {
 
 fn scheduler_label(s: &SchedulerMode) -> &'static str {
     match s {
-        #[cfg(feature = "planner-ortools")]
-        SchedulerMode::CpSat { .. } => "cp_sat",
         SchedulerMode::ListV1 { .. } => "list_v1",
         SchedulerMode::ListV2 { .. } => "list_v2",
     }
@@ -450,7 +439,7 @@ fn print_planner_timing(
 ) {
     println!("\n--- planner cost ---");
     println!("  access_from_node:    {:>10.3} ms", access_secs * 1e3);
-    println!("  plan_raw:            {:>10.3} ms", plan_secs * 1e3);
+    println!("  plan:                {:>10.3} ms", plan_secs * 1e3);
     println!("  ATG build:           {:>10.3} ms", atg_secs * 1e3);
     println!("  validate_plan:       {:>10.3} ms", validate_secs * 1e3);
     println!("  perf_est:            {:>10.3} ms", perf_secs * 1e3);
