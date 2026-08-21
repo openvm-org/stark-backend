@@ -43,7 +43,7 @@
 use std::sync::Arc;
 
 use crypto_compiler::{
-    graph_ir::{BufId, BufInfo, DeviceType, GraphBuilder},
+    graph_ir::{BufId, BufInfo, ConstBuf, DeviceType, GraphBuilder},
     ir::{IRBuilder, Module, NodeId, ScalarType},
     kernel,
     kernels::Poseidon2Constants,
@@ -51,7 +51,10 @@ use crypto_compiler::{
     quast::Quast,
 };
 
-use crate::types::{CHUNK, D_EF, WIDTH};
+use crate::{
+    sponge::SpongeSnapshot,
+    types::{CHUNK, D_EF, WIDTH},
+};
 
 /// Fiat-Shamir transcript expressed as nodes on a [`GraphBuilder`].
 ///
@@ -176,9 +179,78 @@ impl DuplexSpongeGpuIR {
         }
     }
 
+    /// Creates a transcript that **continues** a live [`crate::sponge::DuplexSpongeGpu`]
+    /// instead of starting from the all-zero state.
+    ///
+    /// A phase that runs mid-transcript (the logup-zerocheck phase starts
+    /// after grinding and the fractional GKR phase have already absorbed and
+    /// squeezed) cannot use [`Self::new`]: it would restart the Fiat-Shamir
+    /// stream. `from_live` takes the snapshot produced by
+    /// [`crate::sponge::DuplexSpongeGpu::snapshot`] and seeds the graph with it,
+    /// so the emitted `observe` / `sample` nodes chain onto the live stream.
+    ///
+    /// The seeded state is emitted as a `Const` node carrying the snapshot's
+    /// `WIDTH * 4` bytes (the graph runtime stages them once, before the run).
+    /// The buffer is therefore **read-only**, which is exactly how the sponge
+    /// uses it: every `observe` / `sample` writes a *fresh* state buffer and
+    /// never mutates its input state.
+    ///
+    /// The `absorb_idx` / `sample_idx` positions are carried over verbatim, so
+    /// the build-time simulation that decides which kernel shape each op emits
+    /// (permuting vs not) picks up exactly where the live sponge left off.
+    ///
+    /// [`Self::new`] is unchanged: `new` still memsets to zero.
+    // TODO(cc-ir): the seed is baked in as a `Const`, so a graph built by
+    // `from_live` is valid for exactly one transcript and cannot be cached
+    // across proofs.
+    // WHY: `Const` was the shortest path to a working, tested seed (it is the
+    //   established pattern in `fractional_ir.rs`, e.g. `ef_const_ext_scalar_buf`
+    //   at fractional_ir.rs:150). The alternative — allocate the seed buffer and
+    //   `g.register_input(state_buf)` so the caller binds fresh bytes per run via
+    //   `GraphExe::set_input` — would allow graph reuse, because the *positions*
+    //   (`absorb_idx`/`sample_idx`), which are what actually select kernel shapes
+    //   at build time, are deterministic for a fixed AIR/config even though the
+    //   state bytes differ per proof. I did not build that variant because
+    //   nothing consumes it yet and an untested second constructor is worse than
+    //   this note.
+    // RISK: if the zerocheck phase ends up compiling its graph once and running
+    //   it for many proofs, this constructor forces a recompile per proof. Fix is
+    //   local (swap `insert_const` for `register_input` + expose the BufId); the
+    //   `SpongeSnapshot` export API on the eager side does not change.
+    pub fn from_live(g: &mut GraphBuilder, device: DeviceType, snap: &SpongeSnapshot) -> Self {
+        assert!(
+            (snap.absorb_idx as usize) < CHUNK,
+            "seed absorb_idx {} out of range (must be < CHUNK = {CHUNK})",
+            snap.absorb_idx,
+        );
+        assert!(
+            (snap.sample_idx as usize) <= CHUNK,
+            "seed sample_idx {} out of range (must be <= CHUNK = {CHUNK})",
+            snap.sample_idx,
+        );
+        let state_buf = alloc_state_buf(g, device, "sponge_state_seed");
+        g.insert_const(state_buf, ConstBuf::HostBuf(snap.state_bytes()));
+        Self {
+            state_buf,
+            absorb_idx: snap.absorb_idx as usize,
+            sample_idx: snap.sample_idx as usize,
+            device,
+            n_ops: 0,
+            modules: SpongeModules::new(),
+        }
+    }
+
     /// Current state buffer id (mostly for tests / inspection).
     pub fn state_buf(&self) -> BufId {
         self.state_buf
+    }
+
+    /// Current transcript position `(absorb_idx, sample_idx)`.
+    ///
+    /// Mostly for tests / inspection: lets a caller assert that a seeded
+    /// transcript picked up where the live one left off.
+    pub fn position(&self) -> (usize, usize) {
+        (self.absorb_idx, self.sample_idx)
     }
 
     fn observe_triggers_perm(&self) -> bool {
@@ -758,8 +830,18 @@ mod tests {
     /// resulting graph on the GPU) and returns the ordered list of sampled F
     /// values. Sample_ext contributes four values in coefficient order.
     fn run_ir(ctx: &GpuDeviceCtx, ops: &[Op]) -> Vec<F> {
+        run_ir_with(ctx, None, ops)
+    }
+
+    /// Same as [`run_ir`], but seeds the graph transcript from `seed` (via
+    /// [`DuplexSpongeGpuIR::from_live`]) when one is supplied, so the emitted
+    /// graph *continues* a live transcript instead of starting from zero.
+    fn run_ir_with(ctx: &GpuDeviceCtx, seed: Option<&SpongeSnapshot>, ops: &[Op]) -> Vec<F> {
         let mut g = GraphBuilder::new();
-        let mut sponge = DuplexSpongeGpuIR::new(&mut g, DeviceType::Cuda(0));
+        let mut sponge = match seed {
+            Some(snap) => DuplexSpongeGpuIR::from_live(&mut g, DeviceType::Cuda(0), snap),
+            None => DuplexSpongeGpuIR::new(&mut g, DeviceType::Cuda(0)),
+        };
 
         // Register input buffers for every observe operation.
         let mut observe_bufs: Vec<(BufId, Vec<u8>)> = Vec::new();
@@ -839,19 +921,26 @@ mod tests {
     /// list of sampled F values, in the same order as `run_ir`.
     fn run_host(ops: &[Op]) -> Vec<F> {
         let mut sponge = DuplexSpongeGpu::default();
+        run_host_on(&mut sponge, ops)
+    }
+
+    /// Same as [`run_host`], but drives an existing (possibly already
+    /// advanced) sponge, so a caller can run a prefix, snapshot, and then
+    /// continue the *same* live transcript.
+    fn run_host_on(sponge: &mut DuplexSpongeGpu, ops: &[Op]) -> Vec<F> {
         let mut out = Vec::new();
         for op in ops {
             match op {
-                Op::Observe(f) => FiatShamirTranscript::<SC>::observe(&mut sponge, *f),
+                Op::Observe(f) => FiatShamirTranscript::<SC>::observe(sponge, *f),
                 Op::ObserveExt(vals) => {
                     for v in vals {
-                        FiatShamirTranscript::<SC>::observe(&mut sponge, *v);
+                        FiatShamirTranscript::<SC>::observe(sponge, *v);
                     }
                 }
-                Op::Sample => out.push(FiatShamirTranscript::<SC>::sample(&mut sponge)),
+                Op::Sample => out.push(FiatShamirTranscript::<SC>::sample(sponge)),
                 Op::SampleExt => {
                     for _ in 0..D_EF {
-                        out.push(FiatShamirTranscript::<SC>::sample(&mut sponge));
+                        out.push(FiatShamirTranscript::<SC>::sample(sponge));
                     }
                 }
             }
@@ -866,6 +955,147 @@ mod tests {
         assert_eq!(got.len(), want.len(), "sample count mismatch");
         for (i, (g, w)) in got.iter().zip(&want).enumerate() {
             assert_eq!(g, w, "sample {i} mismatch: got {g:?}, want {w:?}");
+        }
+    }
+
+    /// Deterministic op sequence used to drive a transcript into an arbitrary
+    /// mid-flight position. `n` ops are produced, mixing observes, ext
+    /// observes and samples so the prefix lands on a variety of
+    /// `(absorb_idx, sample_idx)` pairs.
+    fn prefix_ops(n: usize) -> Vec<Op> {
+        (0..n)
+            .map(|i| match i % 4 {
+                0 => Op::Observe(f_from_u32(1_000 + i as u32 * 37)),
+                1 => Op::Observe(f_from_u32(2_000 + i as u32 * 91)),
+                2 => Op::Sample,
+                _ => Op::ObserveExt([
+                    f_from_u32(3_000 + i as u32),
+                    f_from_u32(4_000 + i as u32),
+                    f_from_u32(5_000 + i as u32),
+                    f_from_u32(6_000 + i as u32),
+                ]),
+            })
+            .collect()
+    }
+
+    /// The zerocheck phase starts mid-transcript. Drive a real
+    /// `DuplexSpongeGpu` through a prefix, snapshot it, seed a
+    /// `DuplexSpongeGpuIR` from that snapshot, then run the *same*
+    /// continuation on both and require every sampled challenge to match
+    /// byte-for-byte.
+    ///
+    /// The prefix lengths are chosen to land the seed on many distinct
+    /// `(absorb_idx, sample_idx)` pairs, including `absorb_idx != 0`
+    /// (continuation's first sample must permute), `sample_idx` mid-block
+    /// (reads walk down the seeded state without permuting) and
+    /// `sample_idx < D_EF` (a `sample_ext` that straddles the permutation
+    /// boundary).
+    #[test]
+    fn seeded_ir_continues_live_transcript() {
+        let ctx = test_ctx();
+        // Continuation exercises every op kind, including the ext paths that
+        // depend on the seeded indices.
+        let cont = [
+            Op::Sample,
+            Op::Observe(f_from_u32(11)),
+            Op::SampleExt,
+            Op::ObserveExt([
+                f_from_u32(21),
+                f_from_u32(22),
+                f_from_u32(23),
+                f_from_u32(24),
+            ]),
+            Op::Sample,
+            Op::Sample,
+            Op::SampleExt,
+        ];
+
+        // Teeth: the same continuation run from a *fresh* (zero-seeded)
+        // transcript must NOT match, otherwise the test would pass even if
+        // `from_live` silently ignored the snapshot.
+        let unseeded = run_ir(&ctx, &cont);
+
+        for prefix_len in [1usize, 2, 3, 5, 7, 9, 12] {
+            let prefix = prefix_ops(prefix_len);
+
+            // 1. Drive the live (eager) sponge through the prefix.
+            let mut live = DuplexSpongeGpu::default();
+            let _ = run_host_on(&mut live, &prefix);
+
+            // 2. Export.
+            let snap = live.snapshot();
+
+            // 3. Continue on the live sponge — this is the oracle.
+            let want = run_host_on(&mut live, &cont);
+
+            // 4. Seed a graph transcript from the snapshot and run the same continuation on the
+            //    GPU.
+            let got = run_ir_with(&ctx, Some(&snap), &cont);
+
+            assert_eq!(
+                got.len(),
+                want.len(),
+                "prefix_len={prefix_len}: sample count mismatch"
+            );
+            for (i, (g, w)) in got.iter().zip(&want).enumerate() {
+                assert_eq!(
+                    f_to_bytes(*g),
+                    f_to_bytes(*w),
+                    "prefix_len={prefix_len} (seed absorb_idx={}, sample_idx={}): \
+                     challenge {i} mismatch: got {g:?}, want {w:?}",
+                    snap.absorb_idx,
+                    snap.sample_idx,
+                );
+            }
+            assert_ne!(
+                got, unseeded,
+                "prefix_len={prefix_len}: seeded continuation matched the \
+                 zero-seeded one — the snapshot is not reaching the graph"
+            );
+        }
+    }
+
+    /// Cheap structural half of [`seeded_ir_continues_live_transcript`]: the
+    /// seeded builder must adopt the live sponge's transcript position, and
+    /// the const bytes it bakes in must be the live overlayed state.
+    ///
+    /// Runs no graph, so it stays fast and pins the seeding contract even if
+    /// graph compilation regresses.
+    #[test]
+    fn seeded_ir_adopts_live_position_and_state() {
+        for prefix_len in [0usize, 1, 2, 3, 5, 7, 9, 12, 16] {
+            let mut live = DuplexSpongeGpu::default();
+            let _ = run_host_on(&mut live, &prefix_ops(prefix_len));
+            let snap = live.snapshot();
+
+            let mut g = GraphBuilder::new();
+            let sponge = DuplexSpongeGpuIR::from_live(&mut g, DeviceType::Cuda(0), &snap);
+
+            assert_eq!(
+                sponge.position(),
+                (snap.absorb_idx as usize, snap.sample_idx as usize),
+                "prefix_len={prefix_len}: seeded position mismatch"
+            );
+
+            // The bytes handed to `insert_const` are the raw device encoding
+            // of the overlayed state that `sync_h2d` would have uploaded.
+            let bytes = snap.state_bytes();
+            assert_eq!(bytes.len(), WIDTH * 4);
+            let dev = live.device_state();
+            for j in 0..WIDTH {
+                assert_eq!(
+                    bytes[4 * j..4 * (j + 1)],
+                    f_to_bytes(dev.state[j]),
+                    "prefix_len={prefix_len}: state slot {j} byte mismatch"
+                );
+            }
+            assert_eq!(dev.absorb_idx, snap.absorb_idx);
+            assert_eq!(dev.sample_idx, snap.sample_idx);
+
+            // A fresh `new()` must still start from zero — seeding is additive.
+            let mut g2 = GraphBuilder::new();
+            let fresh = DuplexSpongeGpuIR::new(&mut g2, DeviceType::Cuda(0));
+            assert_eq!(fresh.position(), (0, 0));
         }
     }
 

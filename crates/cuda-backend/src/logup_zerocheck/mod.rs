@@ -98,6 +98,9 @@ mod gkr_input;
 mod mle_round;
 mod round0;
 pub(crate) mod rules;
+/// Graph-IR mirror of [`prove_zerocheck_and_logup_gpu`] (stages C, D and E).
+#[cfg(feature = "graph-ir")]
+pub mod zerocheck_ir;
 
 use batch_mle::{evaluate_logup_batched, TraceCtx};
 use batch_mle_monomial::{

@@ -106,6 +106,70 @@ impl FiatShamirTranscript<SC> for DeviceSpongeState {
     }
 }
 
+/// A pure-value snapshot of a live transcript, sufficient to seed another
+/// transcript implementation so that it *continues* the same Fiat-Shamir
+/// stream.
+///
+/// Produced by [`DuplexSpongeGpu::snapshot`]. Carries the **overlayed** state
+/// (pending `input_buffer` values already written into `state[0..absorb_idx]`,
+/// exactly as [`DuplexSpongeGpu::sync_h2d`] uploads it) plus the two transcript
+/// positions.
+///
+/// Deliberately holds **no device pointers and no borrows** — it is a plain
+/// `Copy`-able value, so it can outlive the sponge it came from and be moved
+/// into a graph builder without any lifetime coupling to a device buffer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SpongeSnapshot {
+    /// Full Poseidon2 state (WIDTH = 16 elements), with pending absorbs
+    /// already overlayed onto `state[0..absorb_idx]`.
+    pub state: [F; WIDTH],
+    /// Current absorb position (`0 <= absorb_idx < CHUNK`).
+    pub absorb_idx: u32,
+    /// Current sample position (`0 <= sample_idx <= CHUNK`).
+    pub sample_idx: u32,
+}
+
+impl SpongeSnapshot {
+    /// Snapshot an already-overlayed [`DeviceSpongeState`].
+    pub fn from_device_state(s: &DeviceSpongeState) -> Self {
+        debug_assert!((s.absorb_idx as usize) < CHUNK, "absorb_idx out of range");
+        debug_assert!((s.sample_idx as usize) <= CHUNK, "sample_idx out of range");
+        Self {
+            state: s.state,
+            absorb_idx: s.absorb_idx,
+            sample_idx: s.sample_idx,
+        }
+    }
+
+    /// Rebuild the [`DeviceSpongeState`] this snapshot was taken from.
+    pub fn to_device_state(&self) -> DeviceSpongeState {
+        DeviceSpongeState {
+            state: self.state,
+            absorb_idx: self.absorb_idx,
+            sample_idx: self.sample_idx,
+        }
+    }
+
+    /// Raw bytes of [`Self::state`] — `WIDTH * 4` bytes, one little-endian
+    /// Montgomery-encoded `u32` per `F`.
+    ///
+    /// This is the exact on-device encoding a `[1, WIDTH]` `ScalarType::BabyBear`
+    /// graph buffer expects, so the result can be handed straight to
+    /// `GraphBuilder::insert_const(.., ConstBuf::HostBuf(..))`.
+    pub fn state_bytes(&self) -> Vec<u8> {
+        // SAFETY: `F` (p3 `BabyBear`) is a `#[repr(transparent)]` newtype over
+        // a Montgomery-form `u32`, so `[F; WIDTH]` is exactly `WIDTH * 4`
+        // initialized bytes with no padding. Read as bytes only.
+        unsafe {
+            std::slice::from_raw_parts(
+                self.state.as_ptr() as *const u8,
+                std::mem::size_of::<[F; WIDTH]>(),
+            )
+            .to_vec()
+        }
+    }
+}
+
 /// GPU-accelerated duplex sponge that maintains state on both host and device.
 ///
 /// The host-side state uses [`DeviceSpongeState`] which matches the behavior of
@@ -184,20 +248,19 @@ impl DuplexSpongeGpu {
         }
     }
 
-    /// Synchronize state from host to device (H2D memcpy).
-    ///
-    /// Call this before running GPU kernels that read/modify the sponge state.
+    /// Build the device-format view of the current host transcript state.
     ///
     /// This converts from `DuplexChallenger`'s representation (with buffered input/output)
-    /// to `DeviceSpongeState`'s representation (with indices pointing into state).
-    pub fn sync_h2d(&mut self, device_ctx: &GpuDeviceCtx) -> Result<(), MemCopyError> {
-        self.ensure_device_allocated(device_ctx);
-
-        // Convert DuplexChallenger state to DeviceSpongeState format:
-        // - DuplexChallenger buffers input values before writing to sponge_state
-        // - DeviceSpongeState writes directly to state[absorb_idx]
-        // We need to overlay the input_buffer onto state[0..len]
-
+    /// to `DeviceSpongeState`'s representation (with indices pointing into state):
+    /// - `DuplexChallenger` buffers input values before writing to `sponge_state`
+    /// - `DeviceSpongeState` writes directly to `state[absorb_idx]`
+    ///
+    /// so the pending `input_buffer` values must be overlayed onto `state[0..len]`.
+    ///
+    /// This is the single source of truth for that conversion — both
+    /// [`sync_h2d`](Self::sync_h2d) (which uploads it) and
+    /// [`snapshot`](Self::snapshot) (which exports it) go through here.
+    pub fn device_state(&self) -> DeviceSpongeState {
         let mut device_state = DeviceSpongeState {
             state: self.host.sponge_state,
             absorb_idx: self.host.input_buffer.len() as u32,
@@ -210,6 +273,34 @@ impl DuplexSpongeGpu {
         for (i, &val) in self.host.input_buffer.iter().enumerate() {
             device_state.state[i] = val;
         }
+
+        device_state
+    }
+
+    /// Export the live transcript position so another transcript
+    /// implementation can *continue* it rather than start from zero.
+    ///
+    /// The returned [`SpongeSnapshot`] is a plain value — it owns no device
+    /// memory and borrows nothing from `self`, so it stays valid after this
+    /// sponge is mutated or dropped.
+    ///
+    /// The primary consumer is the graph-IR mirror
+    /// (`crate::sponge_graph_ir::DuplexSpongeGpuIR::from_live`), which needs
+    /// to pick a transcript up mid-flight (e.g. the logup-zerocheck phase
+    /// starts after grinding and the fractional GKR phase already ran).
+    pub fn snapshot(&self) -> SpongeSnapshot {
+        SpongeSnapshot::from_device_state(&self.device_state())
+    }
+
+    /// Synchronize state from host to device (H2D memcpy).
+    ///
+    /// Call this before running GPU kernels that read/modify the sponge state.
+    ///
+    /// The uploaded bytes are exactly [`device_state`](Self::device_state).
+    pub fn sync_h2d(&mut self, device_ctx: &GpuDeviceCtx) -> Result<(), MemCopyError> {
+        self.ensure_device_allocated(device_ctx);
+
+        let device_state = self.device_state();
 
         // SAFETY: Copying a single DeviceSpongeState from host to device
         // - Both pointers are valid and properly aligned
