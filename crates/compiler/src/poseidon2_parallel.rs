@@ -448,7 +448,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        graph_exe::GraphCompiler,
+        graph_compiler::GraphCompiler,
         graph_ir::GraphModule,
         kernels::poseidon2_permutation,
         test_utils::{from_monty, to_monty},

@@ -8,7 +8,7 @@
 //! - [`module_compiler::ModuleCompiler`] is the per-kernel backend. It expects an
 //!   already-canonical, monomorphized single-kernel [`ir::Module`] and exposes `lower(ir::Module)
 //!   -> KirProgram` + `codegen(KirProgram) -> KernelProgram` (or `compile` for both).
-//! - [`graph_exe::GraphCompiler`] wraps a `ModuleCompiler` and drives a full
+//! - [`graph_compiler::GraphCompiler`] wraps a `ModuleCompiler` and drives a full
 //!   [`graph_ir::GraphBuilder`] through the pass pipeline (`lower_reduce` → `monomorphize` →
 //!   `canonicalize` → optional `fuse` → `dce` → `plan_memory`), then JITs every unique residual in
 //!   parallel and packages everything into a [`graph_exe::GraphExe`].
@@ -28,6 +28,8 @@ pub use crypto_compiler_macros::kernel;
 
 pub mod dump;
 pub mod field_ext;
+#[cfg(feature = "planner")]
+pub mod graph_compiler;
 #[cfg(feature = "planner")]
 pub mod graph_compiler_config;
 #[cfg(feature = "planner")]

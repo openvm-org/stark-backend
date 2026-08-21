@@ -13,7 +13,7 @@
 use std::sync::Arc;
 
 use crypto_compiler::{
-    graph_exe::{GraphCompiler, GraphExe},
+    graph_compiler::GraphCompiler, graph_exe::GraphExe,
     graph_ir::{
         BufId, BufInfo, ConstBuf, DeviceType, GraphBuilder, GraphNode, KernelFn, KernelNode,
     },

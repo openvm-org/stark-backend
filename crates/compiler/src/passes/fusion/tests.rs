@@ -4258,7 +4258,7 @@ mod estimator_tests {
 #[cfg(feature = "planner")]
 mod graph_compiler_tests {
     use super::*;
-    use crate::{graph_exe::GraphCompiler, ir::VarId, passes::fusion::FusionOptions};
+    use crate::{graph_compiler::GraphCompiler, ir::VarId, passes::fusion::FusionOptions};
 
     fn scale_by(n: usize, c: u32) -> Arc<crate::ir::Module> {
         let mut b = IRBuilder::new();

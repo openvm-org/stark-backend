@@ -14,7 +14,7 @@
 //!         --example ntt_scale_graph -- 10
 
 use crypto_compiler::{
-    graph_exe::GraphCompiler,
+    graph_compiler::GraphCompiler,
     graph_ir::{BufId, BufInfo, ConstBuf, DeviceType, GraphBuilder},
     ir::{IRBuilder, ScalarType},
     kernel, kernels,

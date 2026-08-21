@@ -1,13 +1,13 @@
-//! TOML-serializable configuration for [`crate::graph_exe::GraphCompiler`].
+//! TOML-serializable configuration for [`crate::graph_compiler::GraphCompiler`].
 //!
 //! [`GraphCompilerConfig`] mirrors the builder-style setters on
-//! [`GraphCompiler`](crate::graph_exe::GraphCompiler) so a caller can persist
+//! [`GraphCompiler`](crate::graph_compiler::GraphCompiler) so a caller can persist
 //! a full tuning profile to a file and rebuild the compiler with
-//! [`GraphCompiler::from_toml`](crate::graph_exe::GraphCompiler::from_toml)
-//! or [`GraphCompiler::from_config`](crate::graph_exe::GraphCompiler::from_config).
+//! [`GraphCompiler::from_toml`](crate::graph_compiler::GraphCompiler::from_toml)
+//! or [`GraphCompiler::from_config`](crate::graph_compiler::GraphCompiler::from_config).
 //!
 //! Fields excluded from the TOML surface (still available on the builder):
-//! - Symbol bindings ([`GraphCompiler::symbol`](crate::graph_exe::GraphCompiler::symbol)):
+//! - Symbol bindings ([`GraphCompiler::symbol`](crate::graph_compiler::GraphCompiler::symbol)):
 //!   graph-specific and set by the caller that owns the graph.
 //! - Fusion [`estimator`](crate::passes::fusion::FusionOptions::estimator),
 //!   [`artifact`](crate::passes::fusion::FusionOptions::artifact), and
@@ -29,7 +29,7 @@ use crate::{
     runtime::Verbosity,
 };
 
-/// Root TOML config for a [`GraphCompiler`](crate::graph_exe::GraphCompiler).
+/// Root TOML config for a [`GraphCompiler`](crate::graph_compiler::GraphCompiler).
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct GraphCompilerConfig {
@@ -397,7 +397,7 @@ impl FusionSettings {
     }
 }
 
-/// Errors returned by [`GraphCompiler::from_toml`](crate::graph_exe::GraphCompiler::from_toml).
+/// Errors returned by [`GraphCompiler::from_toml`](crate::graph_compiler::GraphCompiler::from_toml).
 #[derive(thiserror::Error, Debug)]
 pub enum ConfigError {
     #[error("read config {path}: {source}")]
@@ -495,7 +495,7 @@ mod tests {
         // shipped file must succeed. Guards against the config type
         // drifting away from what the builder actually accepts.
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("cc_default_config.toml");
-        crate::graph_exe::GraphCompiler::from_toml(&path)
+        crate::graph_compiler::GraphCompiler::from_toml(&path)
             .unwrap_or_else(|e| panic!("from_toml({}): {e}", path.display()));
     }
 

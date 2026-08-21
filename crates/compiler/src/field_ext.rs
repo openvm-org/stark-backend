@@ -182,7 +182,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        graph_exe::GraphCompiler,
+        graph_compiler::GraphCompiler,
         graph_ir::GraphModule,
         ir::{IRBuilder, ScalarType},
         kernel,

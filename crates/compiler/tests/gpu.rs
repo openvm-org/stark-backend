@@ -46,7 +46,7 @@ fn run_module(module: crypto_compiler::ir::Module, inputs: &[Vec<u32>]) -> Vec<V
     ));
     let name = module.name.clone();
     let gm = GraphModule::from_ir(module, &[]).unwrap();
-    let compiler = crypto_compiler::graph_exe::GraphCompiler::new().dump_dir(dump_dir);
+    let compiler = crypto_compiler::graph_compiler::GraphCompiler::new().dump_dir(dump_dir);
     let mut runner = TestModuleRunner::with_compiler(compiler, gm).unwrap();
     assert_eq!(runner.num_inputs(), inputs.len());
     runner.set_inputs(inputs);

@@ -1130,7 +1130,7 @@ impl GraphBuilder {
     /// device (each `GraphNode::Kernel` then upholds the single-kernel
     /// invariant documented on [`KernelModuleNode`]). Split kernels are
     /// content-deduped onto canonical `Arc`s so
-    /// [`crate::graph_exe::GraphCompiler`] JITs each unique kernel once.
+    /// [`crate::graph_compiler::GraphCompiler`] JITs each unique kernel once.
     ///
     /// The module is passed as an `Arc<ir::Module>` (or anything convertible
     /// into one, so a bare `ir::Module` also works).
@@ -1987,7 +1987,7 @@ impl GraphBuilder {
     /// On the first call this snapshots [`Self::content_hash`] into
     /// [`Self::original_hash`] and returns it; subsequent calls return
     /// the cached value regardless of any mutation the graph has since
-    /// undergone. Called by [`crate::graph_exe::GraphCompiler::compile`]
+    /// undergone. Called by [`crate::graph_compiler::GraphCompiler::compile`]
     /// before any pass mutates the builder, so a `GraphBuilder` handed
     /// to `compile` always ends the compile with its pre-fusion hash
     /// available for later comparison (e.g. by
@@ -2837,7 +2837,7 @@ mod tests {
         // `insert_kernel` pushes a single (multi-kernel) node;
         // canonicalize splits into per-kernel graph nodes with fresh
         // intermediate buffers.
-        crate::graph_exe::GraphCompiler::new()
+        crate::graph_compiler::GraphCompiler::new()
             .canonicalize(&mut b)
             .unwrap();
 

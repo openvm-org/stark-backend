@@ -97,7 +97,7 @@ pub struct CompileOptions {
     /// timeout (unbounded wait, the previous behaviour). On timeout the
     /// nvcc process group is SIGKILL'd and [`CompileError::NvccTimeout`]
     /// is returned with the module name embedded, so an aggregating
-    /// caller (e.g. [`crate::graph_exe::GraphCompiler::compile`]) can
+    /// caller (e.g. [`crate::graph_compiler::GraphCompiler::compile`]) can
     /// surface which kernels were the slow ones.
     pub nvcc_timeout: Option<Duration>,
 }

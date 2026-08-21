@@ -23,7 +23,7 @@
 use std::time::Instant;
 
 use crypto_compiler::{
-    graph_exe::{GraphCompiler, GraphExe},
+    graph_compiler::GraphCompiler, graph_exe::GraphExe,
     graph_ir::GraphModule,
     ir::{IRBuilder, Module, ScalarType},
     kernel,

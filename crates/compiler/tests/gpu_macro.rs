@@ -2,7 +2,7 @@
 //! Requires a CUDA GPU.
 
 use crypto_compiler::{
-    graph_exe::GraphCompiler,
+    graph_compiler::GraphCompiler,
     graph_ir::GraphModule,
     ir::{IRBuilder, NodeId, ScalarType},
     kernel,

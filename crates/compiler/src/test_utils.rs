@@ -31,7 +31,8 @@ use openvm_cuda_common::{
 };
 
 use crate::{
-    graph_exe::{GraphCompiler, GraphExe},
+    graph_compiler::GraphCompiler,
+    graph_exe::GraphExe,
     graph_ir::GraphModule,
     ir::ScalarType,
     CompileError,

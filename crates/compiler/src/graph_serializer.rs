@@ -50,7 +50,7 @@ use crate::{
 /// Serialized form of a [`GraphBuilder`]. Round-trips through `bincode`
 /// (or any `serde` format); a subsequent [`Self::into_graph_builder`]
 /// yields a builder ready to hand to
-/// [`crate::graph_exe::GraphCompiler::compile`].
+/// [`crate::graph_compiler::GraphCompiler::compile`].
 #[derive(Serialize, Deserialize)]
 pub struct SerializableGraphBuilder {
     /// Pre-pass content hash captured from the source builder. Compared
