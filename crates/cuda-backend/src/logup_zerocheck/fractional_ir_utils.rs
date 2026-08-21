@@ -1,11 +1,18 @@
-//! Structured `ir::Module` ports of the fractional-GKR CUDA kernels.
+//! Shared helpers for the fractional-GKR graph-IR drivers.
 //!
-//! Each `*_ir_dsl` function inserts a [`GraphNode::Kernel`] whose body is a
-//! DSL `ir::Module` (via [`GraphBuilder::insert_kernel`]) instead of a
-//! blackbox launch of the underlying `_frac_*` / `fold_ef_*` CUDA kernel.
-//! The functional/pure DSL forces in-place mutation to be replaced by
-//! producing a fresh output buffer; the graph memory planner is free to
-//! alias later.
+//! Two related groups of helpers live here:
+//!
+//! * **Structured `ir::Module` ports of the CUDA kernels** — each
+//!   `*_ir_dsl` function inserts a [`GraphNode::Kernel`] whose body is a
+//!   DSL `ir::Module` (via [`GraphBuilder::insert_kernel`]) instead of a
+//!   blackbox launch of the underlying `_frac_*` / `fold_ef_*` CUDA
+//!   kernel. The functional/pure DSL forces in-place mutation to be
+//!   replaced by producing a fresh output buffer; the graph memory
+//!   planner is free to alias later.
+//! * **Low-level buffer and IR-scalar helpers** — [`add_frac_ef_buf`],
+//!   [`add_ef_buf`], [`add_ext_scalar_buf`], [`ef_const_ext_scalar_buf`],
+//!   [`frac_ef_buf_exact`], [`load_ext_coeffs`], [`fpext_from_coeffs`] —
+//!   used by every `fractional_ir*` driver.
 //!
 //! # Dense-only
 //!
@@ -28,27 +35,165 @@
 //!
 //! Challenges like `lambda` and `r` come from `sample_ext` as
 //! `[D_EF]`-shaped `BabyBear` buffers. Inside a module they are lifted to
-//! an `FpExt` scalar via [`super::fractional_ir::load_ext_coeffs`] +
-//! [`super::fractional_ir::fpext_from_coeffs`] and re-used via
-//! [`IRBuilder::let_bound`].
+//! an `FpExt` scalar via [`load_ext_coeffs`] + [`fpext_from_coeffs`] and
+//! re-used via [`IRBuilder::let_bound`].
 //!
 //! # Frac<EF> binding: [n, 2] FpExt
 //!
 //! A `Frac<EF>` element is `(p: EF, q: EF)` = 2 * 16 = 32 bytes. The
-//! [`crate::logup_zerocheck::fractional_ir::add_frac_ef_buf`] allocates 32
-//! bytes per element (`elem_size = 32`). Inside a module we bind it as
-//! `[n, 2] FpExt`: rows are Fracs, column 0 is `p`, column 1 is `q`. The
-//! byte size matches (`n * 2 * 16 == 32 * n`).
+//! [`add_frac_ef_buf`] helper allocates 32 bytes per element
+//! (`elem_size = 32`). Inside a module we bind it as `[n, 2] FpExt`:
+//! rows are Fracs, column 0 is `p`, column 1 is `q`. The byte size
+//! matches (`n * 2 * 16 == 32 * n`).
+
+use std::mem::size_of;
 
 use crypto_compiler::{
     field_ext::ef_inverse_coeffs,
-    graph_ir::{BufId, GraphBuilder},
+    graph_ir::{BufId, BufInfo, ConstBuf, DeviceType, GraphBuilder},
     ir::{IRBuilder, Module, NodeId, ScalarType, SizeExpr},
     passes::parallel_reduce_rewrite::reduce_lowers_multi_stage,
+    quast::Quast,
 };
+use openvm_stark_backend::prover::fractional_sumcheck_gkr::Frac;
 
-use super::fractional_ir::{add_ef_buf, fpext_from_coeffs, load_ext_coeffs, FRAC_EF_BYTES};
-use crate::{logup_zerocheck::fractional_ir::GKR_S_DEG, types::D_EF};
+use crate::{prelude::EF, types::D_EF};
+
+// ---------------------------------------------------------------------------
+// Constants shared across every fractional-GKR graph-IR driver.
+
+/// Byte size of a `Frac<EF>` element (two `EF`s = 8 base-field elements).
+pub(crate) const FRAC_EF_BYTES: usize = size_of::<Frac<EF>>();
+
+/// Byte size of an `EF` scalar.
+pub(crate) const EF_BYTES: usize = size_of::<EF>();
+
+/// Degree of the sumcheck round polynomial (`s(0), s(1), s(2)` → 3
+/// evaluations, needed downstream by the transcript reconstruction).
+pub(crate) const GKR_S_DEG: usize = 3;
+
+// ---------------------------------------------------------------------------
+// Buffer allocation helpers.
+
+/// Allocate a device buffer of `n` `Frac<EF>` elements on `device`.
+#[allow(dead_code)]
+pub(crate) fn add_frac_ef_buf(
+    g: &mut GraphBuilder,
+    device: DeviceType,
+    name: &str,
+    n: usize,
+) -> BufId {
+    g.add_buf(BufInfo {
+        name: Some(name.to_string()),
+        device_type: device,
+        size: Quast::cst((n * FRAC_EF_BYTES) as i64),
+        concrete_size: n * FRAC_EF_BYTES,
+        elem_size: FRAC_EF_BYTES,
+    })
+}
+
+/// Same as [`add_frac_ef_buf`] but discards the returned `BufId`. Used by
+/// the pipelined driver to declare intermediate work / claim buffers that
+/// the caller-facing API doesn't re-use.
+#[allow(dead_code)]
+pub(crate) fn frac_ef_buf_exact(
+    g: &mut GraphBuilder,
+    device: DeviceType,
+    name: &str,
+    n: usize,
+) {
+    let _ = add_frac_ef_buf(g, device, name, n);
+}
+
+/// Allocate a device buffer of `n` `EF` elements on `device`.
+#[allow(dead_code)]
+pub(crate) fn add_ef_buf(g: &mut GraphBuilder, device: DeviceType, name: &str, n: usize) -> BufId {
+    g.add_buf(BufInfo {
+        name: Some(name.to_string()),
+        device_type: device,
+        size: Quast::cst((n * EF_BYTES) as i64),
+        concrete_size: n * EF_BYTES,
+        elem_size: EF_BYTES,
+    })
+}
+
+/// Allocate a `[D_EF]`-shaped `BabyBear` buffer (`D_EF * 4` bytes,
+/// `elem_size = D_EF * 4`) — the exact shape
+/// [`FiatShamirTranscriptGraphIR`](crate::sponge_graph_ir::FiatShamirTranscriptGraphIR)'s
+/// `observe_ext` / `sample_ext` expect.
+///
+/// The bytes stored are those of an `EF` value (four `F`s in coefficient
+/// order, Montgomery-encoded — the raw p3 / CUDA memory layout, which the
+/// DSL's Montgomery codegen reads directly); the transcript reads them raw.
+///
+/// `elem_size` is `D_EF * 4` (not 4): structured kernels also bind these
+/// buffers as `[1]`-shaped `ScalarType::FpExt` tensors, whose loads/stores
+/// are 128-bit vector instructions — the memory planner aligns buffer
+/// offsets to `elem_size`, and 16-byte alignment satisfies the BabyBear
+/// view too.
+pub(crate) fn add_ext_scalar_buf(g: &mut GraphBuilder, device: DeviceType, name: &str) -> BufId {
+    g.add_buf(BufInfo {
+        name: Some(name.to_string()),
+        device_type: device,
+        size: Quast::cst((D_EF as i64) * 4),
+        concrete_size: D_EF * 4,
+        elem_size: D_EF * 4,
+    })
+}
+
+/// Allocate an EF-scalar buffer (see [`add_ext_scalar_buf`]) holding the
+/// bytes of a host `EF` constant.
+///
+/// The buffer must stay read-only: const buffers are staged once by the
+/// graph runtime, so no kernel may mutate them.
+pub(crate) fn ef_const_ext_scalar_buf(
+    g: &mut GraphBuilder,
+    device: DeviceType,
+    name: &str,
+    value: EF,
+) -> BufId {
+    let buf = add_ext_scalar_buf(g, device, name);
+    let bytes: Vec<u8> = unsafe {
+        std::slice::from_raw_parts(&value as *const EF as *const u8, size_of::<EF>()).to_vec()
+    };
+    g.insert_const(buf, ConstBuf::HostBuf(bytes));
+    buf
+}
+
+// ---------------------------------------------------------------------------
+// Low-level IR-scalar helpers.
+//
+// Data-dependent challenges (lambda, r) come from `sample_ext` as
+// `[D_EF]`-shaped BabyBear buffers; every module below lifts them to a
+// single `FpExt` scalar with the two helpers here.
+
+/// Load the four base-field coefficients of a `[D_EF]`-shaped BabyBear
+/// input.
+pub(crate) fn load_ext_coeffs(b: &mut IRBuilder, x: NodeId) -> [NodeId; D_EF] {
+    std::array::from_fn(|k| {
+        let idx = b.const_u32(k as u32);
+        b.index(x, &[idx])
+    })
+}
+
+/// Recombine four BabyBear coefficient scalars into one `FpExt` scalar
+/// against the extension basis `{1, t, t², t³}`.
+pub(crate) fn fpext_from_coeffs(b: &mut IRBuilder, coeffs: [NodeId; D_EF]) -> NodeId {
+    let [a0, a1, a2, a3] = coeffs;
+    let e0 = b.lift_fpext(a0);
+    let e1 = b.lift_fpext(a1);
+    let e2 = b.lift_fpext(a2);
+    let e3 = b.lift_fpext(a3);
+    let t = b.const_fpext([0, 1, 0, 0]);
+    let t2 = b.const_fpext([0, 0, 1, 0]);
+    let t3 = b.const_fpext([0, 0, 0, 1]);
+    let e1t = b.mul(e1, t);
+    let e2t2 = b.mul(e2, t2);
+    let e3t3 = b.mul(e3, t3);
+    let sum01 = b.add(e0, e1t);
+    let sum23 = b.add(e2t2, e3t3);
+    b.add(sum01, sum23)
+}
 
 // ---------------------------------------------------------------------------
 // Small helpers.
@@ -1716,7 +1861,7 @@ mod dsl_port_tests {
     use crypto_compiler::{
         graph_exe::GraphCompiler,
         graph_ir::{ConstBuf, DeviceType, GraphBuilder},
-        passes::fusion_v2::FusionOptionsV2,
+        passes::fusion::FusionOptions,
         planner::SchedulerMode,
     };
     use openvm_cuda_common::{
@@ -1735,7 +1880,7 @@ mod dsl_port_tests {
             _frac_compute_round_temp_buffer_size, fold_ef_frac_columns, frac_build_tree_two_layers,
             frac_compute_round, frac_multifold_raw, frac_precompute_m_eval_round_raw,
         },
-        logup_zerocheck::fractional_ir::{
+        logup_zerocheck::fractional_ir_utils::{
             add_ef_buf, add_frac_ef_buf, ef_const_ext_scalar_buf, FRAC_EF_BYTES,
         },
         poly::SqrtEqLayers,
@@ -1799,30 +1944,28 @@ mod dsl_port_tests {
                 .scheduler(SchedulerMode::ListV1 {
                     params: crypto_compiler::planner::ListSchedulerV1::default(),
                 });
-        // `FRAC_DSL_FUSION=v2` replays the whole suite through the
-        // fusion-v2 pipeline (M12 bit-for-bit gate; enable
-        // `crypto-compiler/planner-ortools` so extraction is CP-SAT-backed
-        // beyond the brute-force cap); `off` compiles the graph unfused.
-        // Default remains the existing fusion pass.
+        // `FRAC_DSL_FUSION=off` compiles the graph unfused;
+        // `FRAC_DSL_FUSION=verbose` runs the pass with verbose logging.
+        // Default runs the pass with default options.
         match std::env::var("FRAC_DSL_FUSION").as_deref() {
-            Ok("v2") => {
-                compiler = compiler.fusion_v2_options(FusionOptionsV2 {
+            Ok("verbose") => {
+                compiler = compiler.fusion_options(FusionOptions {
                     verbose: true,
-                    ..FusionOptionsV2::default()
+                    ..FusionOptions::default()
                 })
             }
             Ok("off") => compiler = compiler.without_fusion(),
             _ => {}
         }
         let mut exe = compiler.compile(g).expect("graph compile");
-        if let Some(v2) = exe.fusion_report().and_then(|r| r.v2.as_ref()) {
+        if let Some(r) = exe.fusion_report() {
             eprintln!(
-                "[dsl-fusion-v2] nodes {} -> {}, inserted={}, selected={}, fallback={:?}",
-                v2.nodes_before,
-                v2.nodes_after,
-                v2.candidates_inserted,
-                v2.selected_from_solver,
-                v2.fallback_reason,
+                "[dsl-fusion] nodes {} -> {}, inserted={}, selected={}, fallback={:?}",
+                r.nodes_before,
+                r.nodes_after,
+                r.candidates_inserted,
+                r.selected_from_solver,
+                r.fallback_reason,
             );
         }
         exe.run(ctx).expect("graph run");

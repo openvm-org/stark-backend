@@ -79,9 +79,11 @@ mod fractional;
 /// Graph-IR mirror of [`fractional::fractional_sumcheck_gpu`].
 #[cfg(feature = "graph-ir")]
 pub mod fractional_ir;
-/// Structured `ir::Module` (DSL) ports of the fractional-GKR kernels.
+/// Shared helpers for the fractional-GKR graph-IR drivers: structured
+/// `ir::Module` (DSL) ports of the CUDA kernels plus low-level buffer
+/// and IR-scalar helpers used across every `fractional_ir*` module.
 #[cfg(feature = "graph-ir")]
-pub mod fractional_ir_dsl;
+pub mod fractional_ir_utils;
 /// What-if timing-graph experiments for pipelining ideas in the
 /// fractional-sumcheck IR driver (dependency surgery over captured
 /// per-node timings — no real kernels are changed).

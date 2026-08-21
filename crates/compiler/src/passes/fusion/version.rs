@@ -12,7 +12,7 @@ use thiserror::Error;
 
 use crate::{
     graph_ir::{BufId, GraphBuilder},
-    passes::fusion_v2::model::{AltGraphNode, GraphFuser, NodeId, UseInfo, ValueClassId},
+    passes::fusion::model::{AltGraphNode, GraphFuser, NodeId, UseInfo, ValueClassId},
 };
 
 /// Failure modes of [`take_graph`]. Every variant is a hard structural
@@ -45,7 +45,7 @@ pub enum TakeGraphError {
 /// Moves every [`GraphNode`] out of `g` and builds the versioned seed
 /// alternative graph. `g.nodes` is emptied but `g.bufs`, `g.symbols`, and
 /// the registered interface remain intact so the caller can restore the
-/// original graph via [`crate::passes::fusion_v2::apply::apply_solution`]
+/// original graph via [`crate::passes::fusion::apply::apply_solution`]
 /// (or its take-graph guard on error).
 pub fn take_graph(g: &mut GraphBuilder) -> Result<GraphFuser, TakeGraphError> {
     let n_bufs = g.bufs.len();
@@ -150,7 +150,7 @@ pub fn take_graph(g: &mut GraphBuilder) -> Result<GraphFuser, TakeGraphError> {
         // input-passthrough output, that value class exists too (the
         // graph input was seeded with `ValueClassId(b.0)`).
         let v = current[b.0].expect(
-            "registered graph output has no producer — validated by graph_exe before v2 runs",
+            "registered graph output has no producer — validated by graph_exe before fusion runs",
         );
         gf.outputs.push(v);
     }

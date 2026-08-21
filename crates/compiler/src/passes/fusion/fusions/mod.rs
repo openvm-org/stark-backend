@@ -21,11 +21,11 @@ pub mod horizontal;
 pub mod producer_consumer;
 pub mod small_kernel;
 
-/// `FUSION_V2_DEBUG` level: `0` unset, `1` set (aggregate per-pass
+/// `FUSION_DEBUG` level: `0` unset, `1` set (aggregate per-pass
 /// reject counters), `2` (value `"2"`: additionally print each
 /// rejected seam).
 pub(crate) fn debug_reject_level() -> u8 {
-    match std::env::var("FUSION_V2_DEBUG") {
+    match std::env::var("FUSION_DEBUG") {
         Ok(v) if v == "2" => 2,
         Ok(_) => 1,
         Err(_) => 0,
@@ -42,7 +42,7 @@ pub(crate) fn variant_name(dbg: &impl std::fmt::Debug) -> String {
 /// Prints an aggregate reject-counter map for one pass invocation.
 pub(crate) fn dump_rejects(pass: &str, rejects: &std::collections::BTreeMap<String, u64>) {
     if !rejects.is_empty() {
-        eprintln!("[fusion-v2-debug] {pass} rejects: {rejects:?}");
+        eprintln!("[fusion-debug] {pass} rejects: {rejects:?}");
     }
 }
 

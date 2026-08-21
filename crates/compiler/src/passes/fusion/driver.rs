@@ -1,10 +1,10 @@
-//! Top-level fusion-v2 entry point: [`fuse_graph_v2`].
+//! Top-level fusion entry point: [`fuse_graph`].
 //!
 //! `detailed-fusion-plan-v2.md` §3 pipeline. Runs bounded saturation
 //! (§11) on the input graph:
 //!
 //! 1. Convert to a versioned seed alternative graph
-//!    ([`crate::passes::fusion_v2::version::take_graph`]);
+//!    ([`crate::passes::fusion::version::take_graph`]);
 //! 2. Loop up to `max_rounds`:
 //!    - freeze the current node count as the round's read-only view;
 //!    - enumerate each enabled fusion pass over that frozen prefix;
@@ -23,11 +23,11 @@ use std::collections::BTreeSet;
 use thiserror::Error;
 
 #[cfg(not(feature = "planner-ortools"))]
-use crate::passes::fusion_v2::extract::brute;
+use crate::passes::fusion::extract::brute;
 use crate::{
     graph_ir::{GraphBuilder, GraphNode},
     module_hash::module_hash,
-    passes::fusion_v2::{
+    passes::fusion::{
         apply::apply_solution,
         cost::{
             estimate_non_kernel, ArtifactContext, EstimatorConfig, GraphNodeCost, KernelCostManager,
@@ -41,13 +41,13 @@ use crate::{
     },
 };
 
-/// Configuration for one invocation of [`fuse_graph_v2`].
+/// Configuration for one invocation of [`fuse_graph`].
 ///
-/// Only the M3/M4-relevant subset of the plan's `FusionOptionsV2` (§15) is
+/// Only the M3/M4-relevant subset of the plan's `FusionOptions` (§15) is
 /// wired for now. Additional fields will be added as later milestones
 /// consume them.
 #[derive(Debug, Clone)]
-pub struct FusionOptionsV2 {
+pub struct FusionOptions {
     /// Hard cap on the number of candidates inserted into the
     /// alternative graph, summed across every saturation round of one
     /// outer iteration. Enforced level-by-level after
@@ -156,7 +156,7 @@ pub struct FusionOptionsV2 {
     /// per round (§11 `max_alternatives_per_pass_per_round`). When
     /// the enumerator returns more drafts than this the driver
     /// truncates and counts the excess in
-    /// [`FusionReportV2::candidates_rejected_pass_cap`]. Set to zero
+    /// [`FusionReport::candidates_rejected_pass_cap`]. Set to zero
     /// to disable per-pass truncation.
     pub max_alternatives_per_pass_per_round: usize,
     /// Whether the extractor's artifact-count objective (§13.5 stage 2)
@@ -169,7 +169,7 @@ pub struct FusionOptionsV2 {
     pub verbose: bool,
 }
 
-impl Default for FusionOptionsV2 {
+impl Default for FusionOptions {
     fn default() -> Self {
         Self {
             max_total_alternatives: 5000,
@@ -203,9 +203,9 @@ impl Default for FusionOptionsV2 {
     }
 }
 
-/// Report produced by one call to [`fuse_graph_v2`].
+/// Report produced by one call to [`fuse_graph`].
 #[derive(Debug, Clone, Default)]
-pub struct FusionReportV2 {
+pub struct FusionReport {
     pub nodes_before: usize,
     pub nodes_after: usize,
     pub candidates_generated: usize,
@@ -215,7 +215,7 @@ pub struct FusionReportV2 {
     /// the candidate reads a version of a multi-version storage class
     /// while transitively depending on a later version, so
     /// reconstruction could not schedule it (see
-    /// [`crate::passes::fusion_v2::validate::StorageHazardIndex`]).
+    /// [`crate::passes::fusion::validate::StorageHazardIndex`]).
     pub candidates_rejected_storage_hazard: usize,
     pub candidates_rejected_cap: usize,
     /// M6: candidates discarded because their `CandidateKey` was
@@ -259,43 +259,43 @@ pub struct FusionReportV2 {
     pub outer_inserted: Vec<usize>,
 }
 
-/// Failure modes of [`fuse_graph_v2`]. Structural errors from
+/// Failure modes of [`fuse_graph`]. Structural errors from
 /// [`take_graph`] surface here; [`apply_solution`] failures do not — the
 /// driver falls back to the restored original graph and records the
-/// reason in [`FusionReportV2::fallback_reason`].
+/// reason in [`FusionReport::fallback_reason`].
 #[derive(Debug, Error)]
-pub enum FuseV2Error {
+pub enum FuseError {
     #[error(transparent)]
     TakeGraph(#[from] TakeGraphError),
 }
 
-/// Runs bounded-saturation fusion v2 on `g`, in place. Preserves the
+/// Runs bounded-saturation fusion on `g`, in place. Preserves the
 /// registered interface, invalidates `g.plan`, and returns a diagnostic
-/// [`FusionReportV2`].
+/// [`FusionReport`].
 ///
 /// The outer loop runs up to `options.max_outer_iterations` full
 /// enumeration + saturation + extraction cycles, feeding the extracted
 /// graph back in as the seed for the next cycle. It stops early if an
 /// iteration produces no fusion (`candidates_inserted == 0`).
-pub fn fuse_graph_v2(
+pub fn fuse_graph(
     g: &mut GraphBuilder,
-    options: &FusionOptionsV2,
-) -> Result<FusionReportV2, FuseV2Error> {
+    options: &FusionOptions,
+) -> Result<FusionReport, FuseError> {
     let nodes_before = g.nodes.len();
     let max_outer = options.max_outer_iterations.max(1);
 
-    let mut aggregate = FusionReportV2::default();
+    let mut aggregate = FusionReport::default();
     let mut outer_inserted: Vec<usize> = Vec::new();
 
     for outer_iter in 0..max_outer {
         if options.verbose && max_outer > 1 {
             eprintln!(
-                "[fusion-v2] outer iteration {}/{max_outer} starting on {} node(s)",
+                "[fusion] outer iteration {}/{max_outer} starting on {} node(s)",
                 outer_iter + 1,
                 g.nodes.len(),
             );
         }
-        let inner = fuse_graph_v2_inner(g, options)?;
+        let inner = fuse_graph_inner(g, options)?;
         outer_inserted.push(inner.candidates_inserted);
         merge_inner_report(&mut aggregate, &inner);
         if inner.candidates_inserted == 0 {
@@ -312,7 +312,7 @@ pub fn fuse_graph_v2(
 }
 
 /// Accumulates one outer iteration's report into the aggregate.
-fn merge_inner_report(agg: &mut FusionReportV2, inner: &FusionReportV2) {
+fn merge_inner_report(agg: &mut FusionReport, inner: &FusionReport) {
     agg.candidates_generated += inner.candidates_generated;
     agg.candidates_inserted += inner.candidates_inserted;
     agg.candidates_rejected_cycle += inner.candidates_rejected_cycle;
@@ -336,10 +336,10 @@ fn merge_inner_report(agg: &mut FusionReportV2, inner: &FusionReportV2) {
 
 /// One outer iteration: enumeration + saturation + extraction + apply.
 /// Returns a per-iteration report; the outer loop accumulates.
-fn fuse_graph_v2_inner(
+fn fuse_graph_inner(
     g: &mut GraphBuilder,
-    options: &FusionOptionsV2,
-) -> Result<FusionReportV2, FuseV2Error> {
+    options: &FusionOptions,
+) -> Result<FusionReport, FuseError> {
     let nodes_before = g.nodes.len();
 
     // Step 1: convert to versioned seed alternative graph.
@@ -439,13 +439,13 @@ fn fuse_graph_v2_inner(
         if options.verbose {
             for (pass, generated, dt) in &pass_stats {
                 eprintln!(
-                    "[fusion-v2] round {round} pass {pass}: generated={generated} in {:.1} ms",
+                    "[fusion] round {round} pass {pass}: generated={generated} in {:.1} ms",
                     dt.as_secs_f64() * 1e3,
                 );
             }
             if past_deadline() {
                 eprintln!(
-                    "[fusion-v2] round {round} enumeration deadline hit ({:.1} ms budget)",
+                    "[fusion] round {round} enumeration deadline hit ({:.1} ms budget)",
                     options.max_enumeration_time_per_round.as_secs_f64() * 1e3,
                 );
             }
@@ -523,7 +523,7 @@ fn fuse_graph_v2_inner(
         rounds_inserted.push(inserted_this_round);
         if options.verbose {
             eprintln!(
-                "[fusion-v2] round {round}: generated={generated_this_round}, \
+                "[fusion] round {round}: generated={generated_this_round}, \
                  inserted={inserted_this_round}, alt_nodes={}, rejected \
                  dedup={} cycle={} storage_hazard={} cap={} pass_cap={over_cap}, \
                  insert took {:.1} ms",
@@ -547,7 +547,7 @@ fn fuse_graph_v2_inner(
     let rounds_run = rounds_inserted.len();
     if options.verbose {
         eprintln!(
-            "[fusion-v2] saturation: {rounds_run} round(s), generated={candidates_generated}, \
+            "[fusion] saturation: {rounds_run} round(s), generated={candidates_generated}, \
              inserted={candidates_inserted}, alt_nodes={}, total {:.1} ms",
             gf.nodes.len(),
             sat_t0.elapsed().as_secs_f64() * 1e3,
@@ -568,7 +568,7 @@ fn fuse_graph_v2_inner(
         let est_ms = stats.estimate_time.as_secs_f64() * 1e3;
         let runs = stats.misses + stats.failures;
         eprintln!(
-            "[fusion-v2] costing: {} nodes in {:.1} ms; kernel cost cache hits={} misses={} \
+            "[fusion] costing: {} nodes in {:.1} ms; kernel cost cache hits={} misses={} \
              failures={}; estimator (HIR→KIR + analysis) {:.1} ms total, {:.2} ms/run",
             gf.nodes.len(),
             cost_t0.elapsed().as_secs_f64() * 1e3,
@@ -600,7 +600,7 @@ fn fuse_graph_v2_inner(
     let mut fallback_reason = solution.fallback.clone();
     if options.verbose {
         eprintln!(
-            "[fusion-v2] solve: {:.1} ms, status={:?}, fallback={:?}, selected={}",
+            "[fusion] solve: {:.1} ms, status={:?}, fallback={:?}, selected={}",
             solve_t0.elapsed().as_secs_f64() * 1e3,
             solution.status,
             solution.fallback,
@@ -610,14 +610,14 @@ fn fuse_graph_v2_inner(
     }
 
     // Step 4: apply solution back to the builder. A rejected solution is
-    // a v2 invariant violation (the insertion guards should have made it
+    // a fusion invariant violation (the insertion guards should have made it
     // unrepresentable); `apply_solution` restored the original seed
     // graph, so keep the unfused graph and record the fallback rather
     // than failing the compile.
     let apply_t0 = std::time::Instant::now();
     if let Err(e) = apply_solution(g, gf, &solution) {
         eprintln!(
-            "[fusion-v2] apply rejected the selected solution ({e}); falling back to the \
+            "[fusion] apply rejected the selected solution ({e}); falling back to the \
              original graph"
         );
         fallback_reason = Some(FallbackReason::InternalError {
@@ -627,7 +627,7 @@ fn fuse_graph_v2_inner(
     // Debug-only: statically access-check every selected kernel and dump
     // the HIR of violators (keeps going; the graph compile's own
     // `check_accesses` gate is the enforcing one).
-    if std::env::var_os("FUSION_V2_CHECK_SELECTED").is_some() {
+    if std::env::var_os("FUSION_CHECK_SELECTED").is_some() {
         for node in &g.nodes {
             let crate::graph_ir::GraphNode::Kernel(k) = node else {
                 continue;
@@ -636,7 +636,7 @@ fn fuse_graph_v2_inner(
                 crate::passes::check_accesses::check_module_accesses(&k.module, &k.param_bindings)
             {
                 eprintln!(
-                    "[fusion-v2-check] module `{}` failed ({e}); bindings={:?}\n{}",
+                    "[fusion-check] module `{}` failed ({e}); bindings={:?}\n{}",
                     k.module.name,
                     k.param_bindings,
                     crate::dump::dump_hir(&k.module)
@@ -646,14 +646,14 @@ fn fuse_graph_v2_inner(
     }
     if options.verbose {
         eprintln!(
-            "[fusion-v2] apply: {:.1} ms, nodes {} -> {}",
+            "[fusion] apply: {:.1} ms, nodes {} -> {}",
             apply_t0.elapsed().as_secs_f64() * 1e3,
             nodes_before,
             g.nodes.len(),
         );
     }
 
-    Ok(FusionReportV2 {
+    Ok(FusionReport {
         nodes_before,
         nodes_after: g.nodes.len(),
         candidates_generated,
@@ -744,7 +744,7 @@ fn dump_extraction(gf: &GraphFuser, data: &ExtractionData, solution: &Extraction
         .map(|c| c.runtime_units)
         .fold(0i64, i64::saturating_add);
     eprintln!(
-        "[fusion-v2] extraction: {fused} fused node(s) replace {seeds_fused}/{} seeds \
+        "[fusion] extraction: {fused} fused node(s) replace {seeds_fused}/{} seeds \
          ({seeds_kept} seeds kept unfused; selected {}/{} alt-graph nodes, est. runtime \
          {selected_runtime_units} units)",
         gf.seed_node_count,
@@ -762,7 +762,7 @@ fn enumerate_producer_consumer(
     sat: &SaturationState,
     frozen: usize,
     min_new_parent_id: usize,
-    options: &FusionOptionsV2,
+    options: &FusionOptions,
     deadline: Option<std::time::Instant>,
 ) -> Vec<producer_consumer::CandidateDraft> {
     let enable_all = options.enable_all_keep_variants && options.enable_keep_variants;
@@ -819,7 +819,7 @@ fn build_extraction_data(
     gf: &GraphFuser,
     bufs: &[crate::graph_ir::BufInfo],
     manager: &mut KernelCostManager,
-    options: &FusionOptionsV2,
+    options: &FusionOptions,
 ) -> ExtractionData {
     let mut costs = Vec::with_capacity(gf.nodes.len());
     let mut artifact_keys = Vec::with_capacity(gf.nodes.len());
@@ -833,16 +833,16 @@ fn build_extraction_data(
                 let cost = manager
                     .cost_of(hash, &k.module, &k.param_bindings)
                     .unwrap_or_else(|e| {
-                        if std::env::var_os("FUSION_V2_DEBUG").is_some() {
+                        if std::env::var_os("FUSION_DEBUG").is_some() {
                             eprintln!(
-                                "[fusion-v2-debug] cost_of `{}` failed (block_hint={:?}, \
+                                "[fusion-debug] cost_of `{}` failed (block_hint={:?}, \
                                  params={:?}, bindings={:?}): {e}",
                                 k.module.name,
                                 k.module.builder.block_hint(),
                                 k.module.builder.params(),
                                 k.param_bindings,
                             );
-                            if crate::passes::fusion_v2::fusions::debug_reject_level() >= 2 {
+                            if crate::passes::fusion::fusions::debug_reject_level() >= 2 {
                                 eprintln!("{}", crate::dump::dump_hir(&k.module));
                             }
                         }
@@ -855,7 +855,7 @@ fn build_extraction_data(
                 let cost = estimate_non_kernel(
                     other,
                     bufs,
-                    &crate::passes::fusion_v2::cost::EstimateContext {
+                    &crate::passes::fusion::cost::EstimateContext {
                         graph_symbols: options.graph_symbols.clone(),
                         param_bindings: Default::default(),
                     },
@@ -885,7 +885,7 @@ fn choose_extractor(
 ) -> ExtractionSolution {
     #[cfg(feature = "planner-ortools")]
     {
-        crate::passes::fusion_v2::extract::cpsat::extract(gf, data, options)
+        crate::passes::fusion::extract::cpsat::extract(gf, data, options)
     }
     #[cfg(not(feature = "planner-ortools"))]
     {

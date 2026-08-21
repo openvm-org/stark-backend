@@ -17,7 +17,7 @@
 //!
 //! - the seam is a registered graph output;
 //! - the seed graph has another original consumer of the seam that is not the current consumer;
-//! - the caller requests all keep variants via `FusionOptionsV2::enable_all_keep_variants`.
+//! - the caller requests all keep variants via `FusionOptions::enable_all_keep_variants`.
 //!
 //! Supported cases (drop variant):
 //!
@@ -68,7 +68,7 @@ use crate::{
     module_hash::children_of,
     passes::{
         fusion_utils::{clone_expr_with_params, CloneError},
-        fusion_v2::model::{AltGraphNode, GraphFuser, NodeId, ValueClassId},
+        fusion::model::{AltGraphNode, GraphFuser, NodeId, ValueClassId},
         utils::hir_to_sexpr,
     },
     quast::{ParSpec, SExpr, Scatter, SymConst},
@@ -1415,7 +1415,7 @@ pub fn enumerate(gf: &GraphFuser, ctx: &EnumerateContext) -> Vec<CandidateDraft>
             Err(e) => {
                 if debug >= 2 {
                     eprintln!(
-                        "[fusion-v2-debug] pc drop p={} c={} seam={}: {:?}",
+                        "[fusion-debug] pc drop p={} c={} seam={}: {:?}",
                         p_node.0, c_node.0, seam.0, e
                     );
                 }

@@ -57,7 +57,7 @@ use crate::{
     ir::{IRBuilder, Module, Node, NodeId as HirNodeId, SizeExpr, VarId},
     passes::{
         fusion_utils::{clone_expr_with_params, remap_size_expr, CloneError},
-        fusion_v2::{
+        fusion::{
             fusions::producer_consumer::{
                 identify_kernel_shape, CandidateDraft, EnumerateContext, FusionVariant,
                 KernelShape, ReadSite,

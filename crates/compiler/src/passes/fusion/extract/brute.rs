@@ -13,7 +13,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::passes::fusion_v2::{
+use crate::passes::fusion::{
     cost::ArtifactKey,
     extract::{ExtractOptions, ExtractionData, ExtractionSolution, SolverStatus},
     model::{GraphFuser, NodeId, ValueClassId},

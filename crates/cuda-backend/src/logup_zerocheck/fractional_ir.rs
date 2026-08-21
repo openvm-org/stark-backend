@@ -45,7 +45,7 @@ use std::{
 
 use crypto_compiler::{
     field_ext::ef_inverse_coeffs,
-    graph_ir::{BufId, BufInfo, DeviceType, GraphBuilder},
+    graph_ir::{BufId, DeviceType, GraphBuilder},
     ir::{IRBuilder, Module, NodeId, ScalarType, SizeExpr},
     quast::Quast,
 };
@@ -62,10 +62,12 @@ use super::{
         precompute_m_target_blocks, virtual_padding_q, BufferScheduler, BufferTarget,
         FractionalInputSize, GkrRoundStrategy,
     },
-    fractional_ir_dsl::{
-        frac_claims_fold_ir_dsl, frac_m_lagrange3_ir_dsl, frac_m_lagrange3_lerp_ir_dsl,
-        frac_m_lerp_ir_dsl, frac_m_outer_product_ir_dsl, frac_precompute_m_eval_lambda_ir_dsl,
-        frac_precompute_m_eval_round_ir_dsl, frac_tree_revert_two_input_ir_dsl,
+    fractional_ir_utils::{
+        add_ef_buf, add_ext_scalar_buf, add_frac_ef_buf, ef_const_ext_scalar_buf,
+        fpext_from_coeffs, frac_claims_fold_ir_dsl, frac_m_lagrange3_ir_dsl,
+        frac_m_lagrange3_lerp_ir_dsl, frac_m_lerp_ir_dsl, frac_m_outer_product_ir_dsl,
+        frac_precompute_m_eval_lambda_ir_dsl, frac_precompute_m_eval_round_ir_dsl,
+        frac_tree_revert_two_input_ir_dsl, load_ext_coeffs, FRAC_EF_BYTES, GKR_S_DEG,
     },
 };
 use crate::{
@@ -88,87 +90,6 @@ use crate::{
     sponge_graph_ir::FiatShamirTranscriptGraphIR,
     types::D_EF,
 };
-
-// ---------------------------------------------------------------------------
-// Buffer allocation helpers.
-
-/// Byte size of a `Frac<EF>` element (two `EF`s = 8 base-field elements).
-#[allow(dead_code)]
-pub(crate) const FRAC_EF_BYTES: usize = size_of::<Frac<EF>>();
-/// Byte size of a bare `EF` element.
-#[allow(dead_code)]
-pub(crate) const EF_BYTES: usize = size_of::<EF>();
-
-/// Allocate a device buffer of `n` `Frac<EF>` elements on `device`.
-#[allow(dead_code)]
-pub(crate) fn add_frac_ef_buf(
-    g: &mut GraphBuilder,
-    device: DeviceType,
-    name: &str,
-    n: usize,
-) -> BufId {
-    g.add_buf(BufInfo {
-        name: Some(name.to_string()),
-        device_type: device,
-        size: crypto_compiler::quast::Quast::cst((n * FRAC_EF_BYTES) as i64),
-        concrete_size: n * FRAC_EF_BYTES,
-        elem_size: FRAC_EF_BYTES,
-    })
-}
-
-/// Allocate a device buffer of `n` `EF` elements on `device`.
-#[allow(dead_code)]
-pub(crate) fn add_ef_buf(g: &mut GraphBuilder, device: DeviceType, name: &str, n: usize) -> BufId {
-    g.add_buf(BufInfo {
-        name: Some(name.to_string()),
-        device_type: device,
-        size: crypto_compiler::quast::Quast::cst((n * EF_BYTES) as i64),
-        concrete_size: n * EF_BYTES,
-        elem_size: EF_BYTES,
-    })
-}
-
-/// Allocate a `[D_EF]`-shaped `BabyBear` buffer (`D_EF * 4` bytes,
-/// `elem_size = 4`) — the exact shape [`FiatShamirTranscriptGraphIR`]'s
-/// `observe_ext` / `sample_ext` expect.
-///
-/// The bytes stored are those of an `EF` value (four `F`s in coefficient
-/// order, Montgomery-encoded — the raw p3 / CUDA memory layout, which the
-/// DSL's Montgomery codegen reads directly); the transcript reads them raw.
-///
-/// `elem_size` is 16 (not 4): structured kernels also bind these buffers as
-/// `[1]`-shaped `ScalarType::FpExt` tensors, whose loads/stores are 128-bit
-/// vector instructions — the memory planner aligns buffer offsets to
-/// `elem_size`, and 16-byte alignment satisfies the BabyBear view too.
-pub(crate) fn add_ext_scalar_buf(g: &mut GraphBuilder, device: DeviceType, name: &str) -> BufId {
-    g.add_buf(BufInfo {
-        name: Some(name.to_string()),
-        device_type: device,
-        size: crypto_compiler::quast::Quast::cst((D_EF as i64) * 4),
-        concrete_size: D_EF * 4,
-        elem_size: (D_EF * 4),
-    })
-}
-
-/// Allocate an EF-scalar buffer (see [`add_ext_scalar_buf`]) holding the
-/// bytes of a host `EF` constant.
-///
-/// The buffer must stay read-only: const buffers are staged once by the
-/// graph runtime, so no kernel may mutate them.
-pub(crate) fn ef_const_ext_scalar_buf(
-    g: &mut GraphBuilder,
-    device: DeviceType,
-    name: &str,
-    value: EF,
-) -> BufId {
-    use crypto_compiler::graph_ir::ConstBuf;
-    let buf = add_ext_scalar_buf(g, device, name);
-    let bytes: Vec<u8> = unsafe {
-        std::slice::from_raw_parts(&value as *const EF as *const u8, size_of::<EF>()).to_vec()
-    };
-    g.insert_const(buf, ConstBuf::HostBuf(bytes));
-    buf
-}
 
 // ---------------------------------------------------------------------------
 // Blackbox kernel wrappers.
@@ -1315,36 +1236,9 @@ const INV2_CANONICAL: u32 = 1_006_632_961;
 // 16-byte aligned) bind directly as `ScalarType::FpExt` tensors and use the
 // DSL's native FpExt arithmetic. Transcript-produced challenge buffers bind
 // as `[D_EF]` BabyBear (the shape `sample_ext` guarantees, 4-byte aligned)
-// and are lifted to an FpExt scalar with the two helpers below — the same
-// convention as [`build_eq_hypercube_stage_module`].
-
-/// Load the four base-field coefficients of a `[D_EF]`-shaped BabyBear
-/// input.
-pub(crate) fn load_ext_coeffs(b: &mut IRBuilder, x: NodeId) -> [NodeId; D_EF] {
-    std::array::from_fn(|k| {
-        let idx = b.const_u32(k as u32);
-        b.index(x, &[idx])
-    })
-}
-
-/// Recombine four BabyBear coefficient scalars into one `FpExt` scalar
-/// against the extension basis `{1, t, t², t³}`.
-pub(crate) fn fpext_from_coeffs(b: &mut IRBuilder, coeffs: [NodeId; D_EF]) -> NodeId {
-    let [a0, a1, a2, a3] = coeffs;
-    let e0 = b.lift_fpext(a0);
-    let e1 = b.lift_fpext(a1);
-    let e2 = b.lift_fpext(a2);
-    let e3 = b.lift_fpext(a3);
-    let t = b.const_fpext([0, 1, 0, 0]);
-    let t2 = b.const_fpext([0, 0, 1, 0]);
-    let t3 = b.const_fpext([0, 0, 0, 1]);
-    let e1t = b.mul(e1, t);
-    let e2t2 = b.mul(e2, t2);
-    let e3t3 = b.mul(e3, t3);
-    let sum01 = b.add(e0, e1t);
-    let sum23 = b.add(e2t2, e3t3);
-    b.add(sum01, sum23)
-}
+// and are lifted to an FpExt scalar with [`load_ext_coeffs`] +
+// [`fpext_from_coeffs`], both re-exported from
+// [`super::fractional_ir_utils`].
 
 /// Graph-IR port of `super::fractional::reconstruct_s_evals`.
 ///
@@ -1541,9 +1435,6 @@ fn build_eq_mle_points_module() -> Module {
     });
     b.finish("eq_mle_points", out)
 }
-
-/// Number of s-poly evaluations returned per sumcheck round.
-pub(crate) const GKR_S_DEG: usize = 3;
 
 /// Graph-IR port of `super::fractional::observe_and_update`.
 ///
@@ -2519,14 +2410,14 @@ pub struct FracSumcheckIrOptions {
     pub force_precompute_m: bool,
     /// Replaces the first-window inline-fold M build with two builds at
     /// `lambda ∈ {0, 1}` plus a
-    /// [`frac_m_lerp_ir_dsl`][crate::logup_zerocheck::fractional_ir_dsl::frac_m_lerp_ir_dsl]
+    /// [`frac_m_lerp_ir_dsl`][crate::logup_zerocheck::fractional_ir_utils::frac_m_lerp_ir_dsl]
     /// combine (the M-build output is affine in `lambda`). The builds
     /// then have no RAW dep on the outer-round `lambda` sample. Costs 2×
     /// M-build compute per outer round.
     pub use_lambda_split: bool,
     /// Replaces the first-window inline-fold M build with three builds at
     /// `r_prev ∈ {0, 1, 2}` plus a
-    /// [`frac_m_lagrange3_ir_dsl`][crate::logup_zerocheck::fractional_ir_dsl::frac_m_lagrange3_ir_dsl]
+    /// [`frac_m_lagrange3_ir_dsl`][crate::logup_zerocheck::fractional_ir_utils::frac_m_lagrange3_ir_dsl]
     /// quadratic-interpolation combine (the inline-folded M-build output
     /// is quadratic in `r_prev`, round 0's challenge). Costs 3× M-build
     /// compute per outer round; crossed with `use_lambda_split` the six
@@ -4393,19 +4284,13 @@ mod tests {
         bl.iter().copied().fold(0.0_f64, f64::max)
     }
 
-    /// [`cc_compiler`] with fusion off by default (an explicit
-    /// `CC_FUSION` still wins) — the compiler for the pipelined driver.
-    /// Its heavy compute is all blackbox kernels, so fusion only touches
-    /// the tiny per-inner-round scalar chains, and each fused cluster
-    /// bakes in round-specific structure: v1 fusion produced 173 unique
-    /// JIT modules at 2^12 vs a few dozen fixed-name symbolic modules
-    /// unfused.
+    /// [`cc_compiler`] with fusion disabled — the compiler for the
+    /// pipelined driver. Its heavy compute is all blackbox kernels, so
+    /// fusion only touches the tiny per-inner-round scalar chains, and
+    /// each fused cluster bakes in round-specific structure that blows
+    /// up the JIT module cache without a runtime win.
     fn pipelined_cc_compiler() -> GraphCompiler {
-        let mut compiler = cc_compiler(DeviceType::Cuda(0));
-        if std::env::var("CC_FUSION").is_err() {
-            compiler = compiler.without_fusion();
-        }
-        compiler
+        cc_compiler(DeviceType::Cuda(0)).without_fusion()
     }
 
     /// Compile a graph with no runtime inputs, run it, and read back the
@@ -4427,14 +4312,14 @@ mod tests {
             g.register_output(b);
         }
         let mut exe = compiler.compile(g).expect("graph compile");
-        if let Some(v2) = exe.fusion_report().and_then(|r| r.v2.as_ref()) {
+        if let Some(r) = exe.fusion_report() {
             eprintln!(
-                "[frac-ir-fusion-v2] nodes {} -> {}, inserted={}, selected={}, fallback={:?}",
-                v2.nodes_before,
-                v2.nodes_after,
-                v2.candidates_inserted,
-                v2.selected_from_solver,
-                v2.fallback_reason,
+                "[frac-ir-fusion] nodes {} -> {}, inserted={}, selected={}, fallback={:?}",
+                r.nodes_before,
+                r.nodes_after,
+                r.candidates_inserted,
+                r.selected_from_solver,
+                r.fallback_reason,
             );
         }
         exe.run(ctx).expect("graph run");
@@ -6118,9 +6003,9 @@ mod tests {
     /// `<dir>/frac_ir.n{n}.cy.json` (cytoscape elements + embedded
     /// timings for the browser viewer) plus `<dir>/frac_ir.n{n}.timings.json`
     /// (the raw `GraphInfo` for offline analysis). Recommended
-    /// invocation for the fusion-v2 pipeline at `LOG_N=26`:
+    /// invocation for the fusion pipeline at `LOG_N=26`:
     ///
-    ///     FRAC_LOG_N=26 CC_FUSION=v2 CC_FUSION_OUTER_ITERS=2 \
+    ///     FRAC_LOG_N=26 CC_FUSION_OUTER_ITERS=2 \
     ///         CC_FUSION_MAX_ALTS=10000 CC_FUSION_MAX_ENUM_MS=2000 \
     ///         CC_FUSION_SOLVER_SECS=15 \
     ///         CC_CY_DUMP_PATH=target/frac_ir_dump \
@@ -6281,14 +6166,14 @@ mod tests {
                     fused_snapshot_path,
                 );
             let compile_ms = t_prep.elapsed().as_secs_f64() * 1e3 - build_ms;
-            if let Some(v2) = exe.fusion_report().and_then(|r| r.v2.as_ref()) {
+            if let Some(r) = exe.fusion_report() {
                 println!(
-                    "fusion v2: nodes {} -> {}, inserted={}, selected={}, fallback={:?}",
-                    v2.nodes_before,
-                    v2.nodes_after,
-                    v2.candidates_inserted,
-                    v2.selected_from_solver,
-                    v2.fallback_reason,
+                    "fusion: nodes {} -> {}, inserted={}, selected={}, fallback={:?}",
+                    r.nodes_before,
+                    r.nodes_after,
+                    r.candidates_inserted,
+                    r.selected_from_solver,
+                    r.fallback_reason,
                 );
             }
             println!(

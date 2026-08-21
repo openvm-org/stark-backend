@@ -2,7 +2,7 @@
 use std::path::PathBuf;
 
 use crypto_compiler::{graph_exe::GraphCompiler, graph_ir::GraphModule, runtime::Verbosity};
-use openvm_cuda_backend::logup_zerocheck::fractional_ir_dsl::build_frac_precompute_m_eval_round_module;
+use openvm_cuda_backend::logup_zerocheck::fractional_ir_utils::build_frac_precompute_m_eval_round_module;
 
 fn main() {
     let w = std::env::var("W")

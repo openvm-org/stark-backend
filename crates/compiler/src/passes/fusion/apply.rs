@@ -1,4 +1,4 @@
-//! Reconstruct a [`GraphBuilder`] from a v2 [`ExtractionSolution`].
+//! Reconstruct a [`GraphBuilder`] from an [`ExtractionSolution`].
 //!
 //! `detailed-fusion-plan-v2.md` §7 and §14. Reconstruction runs after
 //! extraction and turns the selected alternative-graph nodes back into a
@@ -30,7 +30,7 @@ use thiserror::Error;
 
 use crate::{
     graph_ir::{GraphBuilder, GraphNode},
-    passes::fusion_v2::{
+    passes::fusion::{
         extract::ExtractionSolution,
         model::{GraphFuser, NodeId, ValueClassId},
     },
@@ -52,7 +52,7 @@ pub enum ApplyError {
         second: usize,
     },
     #[error(
-        "storage-hazard precedence graph has a cycle involving NodeId({node}); this is a v2 \
+        "storage-hazard precedence graph has a cycle involving NodeId({node}); this is a fusion \
          invariant violation"
     )]
     HazardCycle { node: usize },

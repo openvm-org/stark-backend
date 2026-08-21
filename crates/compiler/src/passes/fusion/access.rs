@@ -1,14 +1,14 @@
 //! Access relations attached to structured-kernel graph nodes.
 //!
 //! `detailed-fusion-plan-v2.md` §8. This module currently defines the
-//! canonical [`AccessRelation`] layout so [`crate::passes::fusion_v2::model::GraphFuser`]
+//! canonical [`AccessRelation`] layout so [`crate::passes::fusion::model::GraphFuser`]
 //! can carry it in its `access_relations` sidecar. The extractor
 //! (`AccessCollector`) itself is deferred until M0-part 2; every seed
 //! `access_relations` entry starts as `None`.
 
 use std::collections::HashMap;
 
-use crate::{ir, passes::fusion_v2::model::ValueClassId, quast::Quast};
+use crate::{ir, passes::fusion::model::ValueClassId, quast::Quast};
 
 /// Read/write summary of one structured-kernel graph node, bound to
 /// [`ValueClassId`]s. The extractor (M0-part 2) walks the canonical HIR

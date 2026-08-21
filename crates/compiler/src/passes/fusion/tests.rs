@@ -1,7 +1,7 @@
 //! M1 exit-gate tests: versioned seed model + original-fallback round-trip.
 //!
 //! Each test builds a small `GraphBuilder`, snapshots its state, runs the
-//! v2 seed conversion, extracts the original solution, applies it, and
+//! fusion seed conversion, extracts the original solution, applies it, and
 //! verifies that the resulting graph matches the snapshot: same node
 //! kinds in a hazard-respecting order, same interface, same physical
 //! [`BufId`] bindings.
@@ -11,7 +11,7 @@ use std::sync::Arc;
 use crate::{
     graph_ir::{BufId, BufInfo, DeviceType, GraphBuilder, GraphNode},
     ir::{IRBuilder, ScalarType},
-    passes::fusion_v2::{apply_solution, take_graph, ExtractionSolution, NodeId},
+    passes::fusion::{apply_solution, take_graph, ExtractionSolution, NodeId},
     quast::Quast,
 };
 
@@ -100,7 +100,7 @@ fn take_graph_rejects_read_before_write() {
     g.register_output(b);
     g.insert_kernel(scale_by_two_module(), vec![a], vec![b], &[]);
     match take_graph(&mut g) {
-        Err(crate::passes::fusion_v2::TakeGraphError::ReadBeforeWrite { node, buf }) => {
+        Err(crate::passes::fusion::TakeGraphError::ReadBeforeWrite { node, buf }) => {
             assert_eq!(node, 0);
             assert_eq!(buf, a.0);
         }
@@ -290,7 +290,7 @@ fn alias_sibling_war_orders_fused_read_before_clobber() {
     // Fused P+C stand-in: consumes `x` directly, produces the existing
     // `z` value class. Apply only looks at the positional bindings, so a
     // named blackbox is enough to track emission order.
-    let fused = gf.insert_candidate(crate::passes::fusion_v2::model::AltGraphNode {
+    let fused = gf.insert_candidate(crate::passes::fusion::model::AltGraphNode {
         inputs: vec![v_x],
         outputs: vec![v_z],
         node: GraphNode::BlackboxKernel(crate::graph_ir::KernelNode {
@@ -391,7 +391,7 @@ fn mixed_mutation_graph() -> (GraphBuilder, [BufId; 6]) {
 
 #[test]
 fn storage_hazard_guard_rejects_pre_and_post_mutation_merge() {
-    use crate::passes::fusion_v2::validate::StorageHazardIndex;
+    use crate::passes::fusion::validate::StorageHazardIndex;
 
     let (mut g, _bufs) = mixed_mutation_graph();
     let gf = take_graph(&mut g).unwrap();
@@ -426,7 +426,7 @@ fn apply_error_restores_seed_graph() {
     let v_z = gf.nodes[4].outputs[0];
     // Unschedulable fused stand-in (the insertion guard would reject
     // it; here we bypass the guard to hit apply's own cycle detection).
-    let fused = gf.insert_candidate(crate::passes::fusion_v2::model::AltGraphNode {
+    let fused = gf.insert_candidate(crate::passes::fusion::model::AltGraphNode {
         inputs: vec![v_x, v_w],
         outputs: vec![v_z],
         node: GraphNode::BlackboxKernel(crate::graph_ir::KernelNode {
@@ -446,7 +446,7 @@ fn apply_error_restores_seed_graph() {
     assert!(
         matches!(
             err,
-            crate::passes::fusion_v2::ApplyError::HazardCycle { .. }
+            crate::passes::fusion::ApplyError::HazardCycle { .. }
         ),
         "expected HazardCycle, got {err:?}"
     );
@@ -464,7 +464,7 @@ fn apply_error_restores_seed_graph() {
 
 mod extractor {
     use super::*;
-    use crate::passes::fusion_v2::{
+    use crate::passes::fusion::{
         cost::{ArtifactKey, GraphNodeCost},
         extract::{brute, ExtractOptions, ExtractionData, ExtractionSolution},
         AltGraphNode, GraphFuser,
@@ -716,7 +716,7 @@ impl GraphNode {
 #[cfg(feature = "planner-ortools")]
 mod cpsat_agreement {
     use super::*;
-    use crate::passes::fusion_v2::{
+    use crate::passes::fusion::{
         cost::{ArtifactKey, GraphNodeCost},
         extract::{brute, cpsat, ExtractOptions, ExtractionData},
         AltGraphNode,
@@ -730,7 +730,7 @@ mod cpsat_agreement {
         }
     }
 
-    fn assert_agree(gf: &crate::passes::fusion_v2::GraphFuser, data: &ExtractionData) {
+    fn assert_agree(gf: &crate::passes::fusion::GraphFuser, data: &ExtractionData) {
         let opts = ExtractOptions::default();
         let b = brute::extract(gf, data, &opts).unwrap();
         let c = cpsat::extract(gf, data, &opts);
@@ -748,7 +748,7 @@ mod cpsat_agreement {
 
     fn build_chain() -> (
         crate::graph_ir::GraphBuilder,
-        crate::passes::fusion_v2::GraphFuser,
+        crate::passes::fusion::GraphFuser,
     ) {
         let mut g = crate::graph_ir::GraphBuilder::new();
         let a = sized_buf(&mut g, "a", 32);
@@ -832,7 +832,7 @@ mod cpsat_agreement {
     fn random_gf_and_data(
         seed: u64,
         n_candidates: usize,
-    ) -> (crate::passes::fusion_v2::GraphFuser, ExtractionData) {
+    ) -> (crate::passes::fusion::GraphFuser, ExtractionData) {
         let mut state = seed;
         let mut g = crate::graph_ir::GraphBuilder::new();
         let a = sized_buf(&mut g, "a", 32);
@@ -918,9 +918,9 @@ mod cpsat_agreement {
     /// node_count, value_count), with artifact_count zeroed when the
     /// artifact stage is disabled.
     fn solution_cost(
-        gf: &crate::passes::fusion_v2::GraphFuser,
+        gf: &crate::passes::fusion::GraphFuser,
         data: &ExtractionData,
-        sol: &crate::passes::fusion_v2::ExtractionSolution,
+        sol: &crate::passes::fusion::ExtractionSolution,
         optimize_artifact_count: bool,
     ) -> (i128, u64, u64, u64) {
         let runtime: i128 = sol
@@ -963,7 +963,7 @@ mod producer_consumer_tests {
     use super::*;
     use crate::{
         module_hash::module_hash,
-        passes::fusion_v2::{
+        passes::fusion::{
             apply_solution,
             cost::GraphNodeCost,
             extract::{brute, ExtractOptions, ExtractionData},
@@ -1611,8 +1611,8 @@ mod producer_consumer_tests {
             .iter()
             .find(|d| d.variant == producer_consumer::FusionVariant::Drop)
             .unwrap();
-        let cfg = crate::passes::fusion_v2::cost::EstimatorConfig::default();
-        let ctx = crate::passes::fusion_v2::cost::EstimateContext::default();
+        let cfg = crate::passes::fusion::cost::EstimatorConfig::default();
+        let ctx = crate::passes::fusion::cost::EstimateContext::default();
         let hash_keep = module_hash(match &keep.alt.node {
             GraphNode::Kernel(k) => &k.module,
             _ => unreachable!(),
@@ -1621,7 +1621,7 @@ mod producer_consumer_tests {
             GraphNode::Kernel(k) => &k.module,
             _ => unreachable!(),
         });
-        let (keep_cost, _) = crate::passes::fusion_v2::cost::estimate_kernel(
+        let (keep_cost, _) = crate::passes::fusion::cost::estimate_kernel(
             match &keep.alt.node {
                 GraphNode::Kernel(k) => &k.module,
                 _ => unreachable!(),
@@ -1632,7 +1632,7 @@ mod producer_consumer_tests {
             1,
         )
         .unwrap();
-        let (drop_cost, _) = crate::passes::fusion_v2::cost::estimate_kernel(
+        let (drop_cost, _) = crate::passes::fusion::cost::estimate_kernel(
             match &drop.alt.node {
                 GraphNode::Kernel(k) => &k.module,
                 _ => unreachable!(),
@@ -1660,7 +1660,7 @@ mod producer_consumer_tests {
 
 mod validate_tests {
     use super::*;
-    use crate::passes::fusion_v2::{take_graph, would_create_cycle, ValueClassId};
+    use crate::passes::fusion::{take_graph, would_create_cycle, ValueClassId};
 
     #[test]
     fn candidate_that_cycles_is_rejected() {
@@ -1726,12 +1726,12 @@ mod validate_tests {
 }
 
 // -------------------------------------------------------------------------
-// Top-level fuse_graph_v2 driver end-to-end tests.
+// Top-level fuse_graph driver end-to-end tests.
 // -------------------------------------------------------------------------
 
 mod driver_tests {
     use super::*;
-    use crate::passes::fusion_v2::{fuse_graph_v2, FusionOptionsV2};
+    use crate::passes::fusion::{fuse_graph, FusionOptions};
 
     fn scale_by(n: usize, c: u32) -> Arc<crate::ir::Module> {
         let mut b = IRBuilder::new();
@@ -1756,11 +1756,11 @@ mod driver_tests {
         g.insert_kernel(scale_by(n, 2), vec![x], vec![y], &[]);
         g.insert_kernel(scale_by(n, 3), vec![y], vec![z], &[]);
 
-        let options = FusionOptionsV2 {
+        let options = FusionOptions {
             enable_small_kernel: false, // isolate producer-consumer counting
-            ..FusionOptionsV2::default()
+            ..FusionOptions::default()
         };
-        let report = fuse_graph_v2(&mut g, &options).unwrap();
+        let report = fuse_graph(&mut g, &options).unwrap();
         assert_eq!(report.nodes_before, 2);
         assert_eq!(report.candidates_generated, 1);
         assert_eq!(report.candidates_inserted, 1);
@@ -1783,7 +1783,7 @@ mod driver_tests {
         g.register_output(y);
         g.insert_kernel(scale_by(n, 2), vec![x], vec![y], &[]);
 
-        let report = fuse_graph_v2(&mut g, &FusionOptionsV2::default()).unwrap();
+        let report = fuse_graph(&mut g, &FusionOptions::default()).unwrap();
         assert_eq!(report.candidates_generated, 0);
         assert_eq!(report.nodes_after, 1);
     }
@@ -1806,18 +1806,18 @@ mod driver_tests {
         g.insert_kernel(scale_by(n, 2), vec![x1], vec![y1], &[]);
         g.insert_kernel(scale_by(n, 3), vec![x2], vec![y2], &[]);
 
-        let options = FusionOptionsV2 {
+        let options = FusionOptions {
             enable_horizontal: false,
-            ..FusionOptionsV2::default()
+            ..FusionOptions::default()
         };
-        let report = fuse_graph_v2(&mut g, &options).unwrap();
+        let report = fuse_graph(&mut g, &options).unwrap();
         assert_eq!(report.candidates_generated, 0);
         assert_eq!(report.nodes_after, 2);
     }
 
     #[test]
     fn driver_produces_hand_authored_reference_module() {
-        // The single kernel remaining after fuse_graph_v2 must match a
+        // The single kernel remaining after fuse_graph must match a
         // hand-described fused shape. Under Gap 1 (warp-aligned launch)
         // the cost model prefers the nested `small_kernel` synthesis
         // over the flat vertical fuse for this shape (block=32 with 24
@@ -1834,7 +1834,7 @@ mod driver_tests {
         g.register_output(z);
         g.insert_kernel(scale_by(n, 2), vec![x], vec![y], &[]);
         g.insert_kernel(scale_by(n, 3), vec![y], vec![z], &[]);
-        let _ = fuse_graph_v2(&mut g, &FusionOptionsV2::default()).unwrap();
+        let _ = fuse_graph(&mut g, &FusionOptions::default()).unwrap();
         let fused = match &g.nodes[0] {
             GraphNode::Kernel(k) => k.module.clone(),
             _ => panic!("expected Kernel"),
@@ -1894,12 +1894,12 @@ mod driver_tests {
         // Isolate producer-consumer counts by turning off M7 fanout
         // and M9 horizontal (the two consumers are dataflow-independent
         // and would horizontally fuse).
-        let options = FusionOptionsV2 {
+        let options = FusionOptions {
             enable_fanout: false,
             enable_horizontal: false,
-            ..FusionOptionsV2::default()
+            ..FusionOptions::default()
         };
-        let report = fuse_graph_v2(&mut g, &options).unwrap();
+        let report = fuse_graph(&mut g, &options).unwrap();
         // Round 1: two drop candidates (one per consumer) plus two keep
         // candidates (seam has another consumer). Round 2: each round-1
         // keep node is a multi-output producer of `y`, so it composes
@@ -1921,12 +1921,12 @@ mod driver_tests {
         g.register_output(z);
         g.insert_kernel(scale_by(n, 2), vec![x], vec![y], &[]);
         g.insert_kernel(scale_by(n, 3), vec![y], vec![z], &[]);
-        let options = FusionOptionsV2 {
+        let options = FusionOptions {
             max_total_alternatives: 0,
             enable_small_kernel: false, // isolate producer-consumer counting
-            ..FusionOptionsV2::default()
+            ..FusionOptions::default()
         };
-        let report = fuse_graph_v2(&mut g, &options).unwrap();
+        let report = fuse_graph(&mut g, &options).unwrap();
         assert_eq!(report.candidates_generated, 1);
         assert_eq!(report.candidates_inserted, 0);
         assert_eq!(report.candidates_rejected_cap, 1);
@@ -1944,14 +1944,14 @@ mod driver_tests {
         g.register_output(z);
         g.insert_kernel(scale_by(n, 2), vec![x], vec![y], &[]);
         g.insert_kernel(scale_by(n, 3), vec![y], vec![z], &[]);
-        let options = FusionOptionsV2 {
+        let options = FusionOptions {
             enable_producer_consumer: false,
             enable_fanout: false,
             enable_small_kernel: false,
             enable_horizontal: false,
-            ..FusionOptionsV2::default()
+            ..FusionOptions::default()
         };
-        let report = fuse_graph_v2(&mut g, &options).unwrap();
+        let report = fuse_graph(&mut g, &options).unwrap();
         assert_eq!(report.candidates_generated, 0);
         assert_eq!(report.candidates_inserted, 0);
         assert_eq!(report.nodes_after, 2);
@@ -1976,11 +1976,11 @@ mod driver_tests {
         g.insert_kernel(scale_by(n, 2), vec![x], vec![y], &[]);
         g.insert_kernel(scale_by(n, 3), vec![y], vec![z], &[]);
 
-        let options = FusionOptionsV2 {
+        let options = FusionOptions {
             enable_small_kernel: false, // isolate producer-consumer counting
-            ..FusionOptionsV2::default()
+            ..FusionOptions::default()
         };
-        let report = fuse_graph_v2(&mut g, &options).unwrap();
+        let report = fuse_graph(&mut g, &options).unwrap();
         // Drop candidate + keep candidate (seam-is-graph-output trigger).
         assert_eq!(report.candidates_generated, 2);
         assert_eq!(g.output_bufs(), &[y, z]);
@@ -2013,13 +2013,13 @@ mod driver_tests {
         g.insert_kernel(scale_by(n, 2), vec![x], vec![y], &[]);
         g.insert_kernel(scale_by(n, 3), vec![y], vec![z1], &[]);
         g.insert_kernel(scale_by(n, 5), vec![y], vec![z2], &[]);
-        let options = FusionOptionsV2 {
+        let options = FusionOptions {
             enable_keep_variants: false,
             enable_fanout: false,     // isolate producer-consumer
             enable_horizontal: false, // the two consumers would fuse horizontally
-            ..FusionOptionsV2::default()
+            ..FusionOptions::default()
         };
-        let report = fuse_graph_v2(&mut g, &options).unwrap();
+        let report = fuse_graph(&mut g, &options).unwrap();
         assert_eq!(report.candidates_generated, 2, "drop candidates only");
         // Solver keeps the original producer alive; interface unchanged.
         assert_eq!(g.output_bufs(), &[z1, z2]);
@@ -2032,7 +2032,7 @@ mod driver_tests {
 
 mod saturation_tests {
     use super::*;
-    use crate::passes::fusion_v2::{fuse_graph_v2, FusionOptionsV2};
+    use crate::passes::fusion::{fuse_graph, FusionOptions};
 
     fn scale_by(n: usize, c: u32) -> Arc<crate::ir::Module> {
         let mut b = IRBuilder::new();
@@ -2075,7 +2075,7 @@ mod saturation_tests {
     fn three_kernel_chain_collapses_to_one_kernel() {
         let n = 8;
         let (mut g, x, z) = three_chain(n);
-        let report = fuse_graph_v2(&mut g, &FusionOptionsV2::default()).unwrap();
+        let report = fuse_graph(&mut g, &FusionOptions::default()).unwrap();
         assert_eq!(report.nodes_before, 3);
         assert_eq!(report.nodes_after, 1);
         assert!(matches!(&g.nodes[0], GraphNode::Kernel(_)));
@@ -2103,7 +2103,7 @@ mod saturation_tests {
         // CandidateKey; dedup keeps one and rejects the other.
         let n = 8;
         let (mut g, _x, _z) = three_chain(n);
-        let report = fuse_graph_v2(&mut g, &FusionOptionsV2::default()).unwrap();
+        let report = fuse_graph(&mut g, &FusionOptions::default()).unwrap();
         // Round 1 emits 2 drop candidates. Round 2 emits 2 more
         // composed drafts, of which one is dedup-rejected.
         assert!(
@@ -2123,7 +2123,7 @@ mod saturation_tests {
         let n = 8;
         let run = || {
             let (mut g, _x, _z) = three_chain(n);
-            let report = fuse_graph_v2(&mut g, &FusionOptionsV2::default()).unwrap();
+            let report = fuse_graph(&mut g, &FusionOptions::default()).unwrap();
             let fingerprint = graph_fingerprint(&g);
             (report, fingerprint)
         };
@@ -2150,12 +2150,12 @@ mod saturation_tests {
         // producer-consumer + chain-composition behavior. With M8 on,
         // a single round emits a 3-kernel chain candidate that
         // collapses the whole chain in round 1.
-        let options = FusionOptionsV2 {
+        let options = FusionOptions {
             max_rounds: 1,
             enable_small_kernel: false,
-            ..FusionOptionsV2::default()
+            ..FusionOptions::default()
         };
-        let report = fuse_graph_v2(&mut g, &options).unwrap();
+        let report = fuse_graph(&mut g, &options).unwrap();
         assert_eq!(report.rounds_run, 1);
         assert!(report.max_rounds_hit);
         // Round 1 producer-consumer can fuse adjacent pairs but not
@@ -2176,11 +2176,11 @@ mod saturation_tests {
     fn saturation_terminates_at_fixpoint_before_max_rounds() {
         let n = 8;
         let (mut g, _x, _z) = three_chain(n);
-        let options = FusionOptionsV2 {
+        let options = FusionOptions {
             max_rounds: 8,
-            ..FusionOptionsV2::default()
+            ..FusionOptions::default()
         };
-        let report = fuse_graph_v2(&mut g, &options).unwrap();
+        let report = fuse_graph(&mut g, &options).unwrap();
         assert!(
             !report.max_rounds_hit,
             "loop should terminate before max_rounds when saturated: {:?}",
@@ -2213,13 +2213,13 @@ mod saturation_tests {
         g.insert_kernel(scale_by(n, 2), vec![x], vec![y], &[]);
         g.insert_kernel(scale_by(n, 3), vec![y], vec![z1], &[]);
         g.insert_kernel(scale_by(n, 5), vec![y], vec![z2], &[]);
-        let options = FusionOptionsV2 {
+        let options = FusionOptions {
             max_alternatives_per_pass_per_round: 1,
             max_rounds: 1,
             enable_horizontal: false, // would add a 6th candidate (the two arms)
-            ..FusionOptionsV2::default()
+            ..FusionOptions::default()
         };
-        let report = fuse_graph_v2(&mut g, &options).unwrap();
+        let report = fuse_graph(&mut g, &options).unwrap();
         assert_eq!(report.candidates_generated, 5);
         // 4 excess candidates rejected by the per-pass cap.
         assert_eq!(report.candidates_rejected_pass_cap, 4);
@@ -2246,11 +2246,11 @@ mod saturation_tests {
         // (M8 emits chain candidates that also collapse the chain).
         let n = 8;
         let (mut g, _x, _z) = three_chain(n);
-        let options = FusionOptionsV2 {
+        let options = FusionOptions {
             enable_small_kernel: false,
-            ..FusionOptionsV2::default()
+            ..FusionOptions::default()
         };
-        let report = fuse_graph_v2(&mut g, &options).unwrap();
+        let report = fuse_graph(&mut g, &options).unwrap();
         // Chain composition still succeeds via (fused(A,B), C) or
         // (A, fused(B,C)), so we end with one node.
         assert_eq!(report.nodes_after, 1);
@@ -2273,12 +2273,12 @@ mod fanout_tests {
     use super::*;
     use crate::{
         module_hash::module_hash,
-        passes::fusion_v2::{
+        passes::fusion::{
             apply_solution,
             extract::{brute, ExtractOptions, ExtractionData},
-            fuse_graph_v2,
+            fuse_graph,
             fusions::{fanout, producer_consumer},
-            take_graph, FusionOptionsV2, GraphFuser,
+            take_graph, FusionOptions, GraphFuser,
         },
     };
 
@@ -2489,7 +2489,7 @@ mod fanout_tests {
         // original gives 3.
         let n = 8;
         let (mut g, _x, z1, z2) = fanout_two(n);
-        let report = fuse_graph_v2(&mut g, &FusionOptionsV2::default()).unwrap();
+        let report = fuse_graph(&mut g, &FusionOptions::default()).unwrap();
         // Fanout drop + producer_consumer drops+keeps all enumerated.
         // Solver should pick the fanout candidate (1 node covers both
         // z1 and z2).
@@ -2604,13 +2604,13 @@ mod fanout_tests {
     #[test]
     fn disable_fanout_flag_suppresses_fanout_candidates() {
         let (mut g, _x, _z1, _z2) = fanout_two(8);
-        let options = FusionOptionsV2 {
+        let options = FusionOptions {
             enable_fanout: false,
             enable_keep_variants: false,
             enable_horizontal: false, // the two arms would fuse horizontally
-            ..FusionOptionsV2::default()
+            ..FusionOptions::default()
         };
-        let report = fuse_graph_v2(&mut g, &options).unwrap();
+        let report = fuse_graph(&mut g, &options).unwrap();
         // Without fanout and keep, only drop candidates: 2 per fanout.
         assert_eq!(report.candidates_generated, 2);
     }
@@ -2624,10 +2624,10 @@ mod small_kernel_tests {
     use super::*;
     use crate::{
         ir::SizeExpr,
-        passes::fusion_v2::{
-            fuse_graph_v2,
+        passes::fusion::{
+            fuse_graph,
             fusions::{producer_consumer, small_kernel},
-            take_graph, FusionOptionsV2, GraphFuser,
+            take_graph, FusionOptions, GraphFuser,
         },
     };
 
@@ -2884,13 +2884,13 @@ mod small_kernel_tests {
         g.insert_kernel(scale_by(n, 3), vec![y], vec![z], &[]);
         // Turn off producer-consumer so the small_kernel candidate
         // is the only fusion in play.
-        let options = FusionOptionsV2 {
+        let options = FusionOptions {
             enable_producer_consumer: false,
             enable_fanout: false,
             enable_small_kernel: true,
-            ..FusionOptionsV2::default()
+            ..FusionOptions::default()
         };
-        let report = fuse_graph_v2(&mut g, &options).unwrap();
+        let report = fuse_graph(&mut g, &options).unwrap();
         assert_eq!(report.candidates_generated, 1);
         assert!(matches!(&g.nodes[0], GraphNode::Kernel(_)));
         assert_eq!(g.output_bufs(), &[z]);
@@ -2912,11 +2912,11 @@ mod small_kernel_tests {
         g.register_output(z);
         g.insert_kernel(scale_by(n, 2), vec![x], vec![y], &[]);
         g.insert_kernel(scale_by(n, 3), vec![y], vec![z], &[]);
-        let options = FusionOptionsV2 {
+        let options = FusionOptions {
             enable_small_kernel: true,
-            ..FusionOptionsV2::default()
+            ..FusionOptions::default()
         };
-        let report = fuse_graph_v2(&mut g, &options).unwrap();
+        let report = fuse_graph(&mut g, &options).unwrap();
         // producer_consumer drop + small_kernel = 2 candidates.
         assert_eq!(report.candidates_generated, 2);
         assert_eq!(g.nodes.len(), 1);
@@ -2942,11 +2942,11 @@ mod small_kernel_tests {
         g.insert_kernel(scale_by(n, 2), vec![x], vec![y1], &[]);
         g.insert_kernel(scale_by(n, 3), vec![y1], vec![y2], &[]);
         g.insert_kernel(scale_by(n, 5), vec![y2], vec![z], &[]);
-        let options = FusionOptionsV2 {
+        let options = FusionOptions {
             enable_small_kernel: true,
-            ..FusionOptionsV2::default()
+            ..FusionOptions::default()
         };
-        let report = fuse_graph_v2(&mut g, &options).unwrap();
+        let report = fuse_graph(&mut g, &options).unwrap();
         // No panic in the estimator; at least one candidate was
         // generated and the graph collapsed to a single node.
         assert!(report.candidates_generated > 0);
@@ -2963,13 +2963,13 @@ mod horizontal_tests {
     use crate::{
         ir::SizeExpr,
         module_hash::module_hash,
-        passes::fusion_v2::{
-            fuse_graph_v2,
+        passes::fusion::{
+            fuse_graph,
             fusions::{
                 horizontal::{self, HorizontalFailure},
                 producer_consumer,
             },
-            take_graph, FusionOptionsV2, GraphFuser,
+            take_graph, FusionOptions, GraphFuser,
         },
     };
 
@@ -3427,14 +3427,14 @@ mod horizontal_tests {
     #[test]
     fn driver_end_to_end_fuses_independent_kernels() {
         let (mut g, y1, y2) = independent_pair(8);
-        let options = FusionOptionsV2 {
+        let options = FusionOptions {
             enable_producer_consumer: false,
             enable_fanout: false,
             enable_small_kernel: false,
             enable_horizontal: true,
-            ..FusionOptionsV2::default()
+            ..FusionOptions::default()
         };
-        let report = fuse_graph_v2(&mut g, &options).unwrap();
+        let report = fuse_graph(&mut g, &options).unwrap();
         assert_eq!(report.candidates_generated, 1);
         assert_eq!(g.nodes.len(), 1);
         assert!(matches!(&g.nodes[0], GraphNode::Kernel(_)));
@@ -3444,14 +3444,14 @@ mod horizontal_tests {
     #[test]
     fn horizontal_composes_across_rounds() {
         let (mut g, z1, z2, z3) = shared_input_triple(8);
-        let options = FusionOptionsV2 {
+        let options = FusionOptions {
             enable_producer_consumer: false,
             enable_fanout: false,
             enable_small_kernel: false,
             enable_horizontal: true,
-            ..FusionOptionsV2::default()
+            ..FusionOptions::default()
         };
-        let report = fuse_graph_v2(&mut g, &options).unwrap();
+        let report = fuse_graph(&mut g, &options).unwrap();
         // Round 1: three pairs. Round 2: pair ∪ remaining kernel
         // (disjoint origins) — the three-way merges.
         assert!(
@@ -3472,13 +3472,13 @@ mod epilogue_tests {
     use crate::{
         ir::Node,
         module_hash::module_hash,
-        passes::fusion_v2::{
-            fuse_graph_v2,
+        passes::fusion::{
+            fuse_graph,
             fusions::{
                 epilogue::{self, EpilogueFailure},
                 producer_consumer,
             },
-            take_graph, FusionOptionsV2, GraphFuser,
+            take_graph, FusionOptions, GraphFuser,
         },
     };
 
@@ -3592,14 +3592,14 @@ mod epilogue_tests {
             (n * m * 4) as i64,
             n,
         );
-        let options = FusionOptionsV2 {
+        let options = FusionOptions {
             enable_producer_consumer: false,
             enable_fanout: false,
             enable_small_kernel: false,
             enable_horizontal: false,
-            ..FusionOptionsV2::default()
+            ..FusionOptions::default()
         };
-        let report = fuse_graph_v2(&mut g, &options).unwrap();
+        let report = fuse_graph(&mut g, &options).unwrap();
         assert_eq!(report.candidates_generated, 1, "{report:?}");
         assert_eq!(g.nodes.len(), 1, "{report:?}");
         let GraphNode::Kernel(k) = &g.nodes[0] else {
@@ -3919,7 +3919,7 @@ mod estimator_tests {
     use crate::{
         graph_ir::{BufId, BufInfo, ConstBuf, GraphNode, MemSetNode, MemcpyNode},
         ir::{IRBuilder, ScalarType},
-        passes::fusion_v2::cost::{
+        passes::fusion::cost::{
             estimate_kernel, estimate_non_kernel, DeviceModel, EstimateContext, EstimatorConfig,
             KernelCostManager,
         },
@@ -4107,7 +4107,7 @@ mod estimator_tests {
     #[test]
     fn cost_manager_caches_repeated_lookups() {
         let cfg = synthetic_cfg();
-        let artifact = crate::passes::fusion_v2::cost::ArtifactContext {
+        let artifact = crate::passes::fusion::cost::ArtifactContext {
             target_arch: "test".into(),
             compiler_flags_hash: [0; 32],
         };
@@ -4131,7 +4131,7 @@ mod estimator_tests {
     #[test]
     fn cost_manager_keys_on_param_bindings() {
         let cfg = synthetic_cfg();
-        let artifact = crate::passes::fusion_v2::cost::ArtifactContext {
+        let artifact = crate::passes::fusion::cost::ArtifactContext {
             target_arch: "test".into(),
             compiler_flags_hash: [0; 32],
         };
@@ -4251,15 +4251,14 @@ mod estimator_tests {
 /// M11 exit-gate tests: opt-in `GraphCompiler` integration (plan §16).
 ///
 /// These run the CPU-side `GraphCompiler::fuse` entry point — the same
-/// normalize prelude/postlude the full `compile` pipeline uses — with the
-/// v2 strategy selected, and check the strategy routing, the §15 report
-/// embedding, and the env → `graph_symbols` threading. Measured-runtime
-/// and compile-time comparisons on real workloads land with M12's
-/// `dsl_port_tests` replay.
+/// normalize prelude/postlude the full `compile` pipeline uses — and
+/// check the strategy routing, the §15 report embedding, and the env →
+/// `graph_symbols` threading. Measured-runtime and compile-time
+/// comparisons on real workloads land with M12's `dsl_port_tests` replay.
 #[cfg(feature = "planner")]
 mod graph_compiler_tests {
     use super::*;
-    use crate::{graph_exe::GraphCompiler, ir::VarId, passes::fusion_v2::FusionOptionsV2};
+    use crate::{graph_exe::GraphCompiler, ir::VarId, passes::fusion::FusionOptions};
 
     fn scale_by(n: usize, c: u32) -> Arc<crate::ir::Module> {
         let mut b = IRBuilder::new();
@@ -4286,48 +4285,41 @@ mod graph_compiler_tests {
     }
 
     #[test]
-    fn v2_strategy_fuses_two_kernel_chain_and_embeds_report() {
+    fn fuses_two_kernel_chain_and_embeds_report() {
         let mut g = two_chain(8);
         let report = GraphCompiler::new()
-            .fusion_v2_options(FusionOptionsV2::default())
+            .fusion_options(FusionOptions::default())
             .fuse(&mut g)
             .expect("fuse")
             .expect("fusion enabled");
 
-        // v1 wrapper fields carry only the node counts (plan §15).
         assert_eq!(report.nodes_before, 2);
         assert_eq!(report.nodes_after, 1);
-        assert!(report.fused.is_empty());
-        assert_eq!(report.rounds, 0);
-
-        let v2 = report.v2.as_ref().expect("v2 report embedded");
-        assert_eq!(v2.nodes_before, 2);
-        assert_eq!(v2.nodes_after, 1);
-        assert!(v2.candidates_inserted >= 1);
+        assert!(report.candidates_inserted >= 1);
         // Small graph: with `planner-ortools` CP-SAT solves it; without,
         // the brute-force extractor does. Neither path may fall back.
-        assert_eq!(v2.fallback_reason, None);
+        assert_eq!(report.fallback_reason, None);
 
         assert_eq!(g.nodes.len(), 1);
         assert!(matches!(&g.nodes[0], GraphNode::Kernel(_)));
     }
 
     #[test]
-    fn existing_strategy_stays_default_with_no_v2_report() {
+    fn default_strategy_fuses_and_embeds_report() {
         let mut g = two_chain(8);
         let report = GraphCompiler::new()
             .fuse(&mut g)
             .expect("fuse")
             .expect("fusion enabled");
-        assert!(report.v2.is_none());
+        assert!(report.candidates_inserted >= 1);
         assert_eq!(g.nodes.len(), 1);
     }
 
     #[test]
-    fn without_fusion_disables_both_strategies() {
+    fn without_fusion_disables_the_pass() {
         let mut g = two_chain(8);
         let report = GraphCompiler::new()
-            .fusion_v2_options(FusionOptionsV2::default())
+            .fusion_options(FusionOptions::default())
             .without_fusion()
             .fuse(&mut g)
             .expect("fuse");
@@ -4335,11 +4327,10 @@ mod graph_compiler_tests {
         assert_eq!(g.nodes.len(), 2);
     }
 
-    /// Module-count golden comparison (M11): on a three-kernel chain the
-    /// v2 strategy must reach the same fused node count as the existing
-    /// pass, and both must improve on the unfused baseline.
+    /// Module-count golden (M11): a three-kernel chain must fuse down to
+    /// a single node.
     #[test]
-    fn v2_matches_existing_node_count_on_three_chain() {
+    fn three_chain_fuses_to_single_node() {
         let three_chain = |n: usize| {
             let mut g = GraphBuilder::new();
             let x = sized_buf(&mut g, "x", (n * 4) as i64);
@@ -4353,32 +4344,22 @@ mod graph_compiler_tests {
             g.insert_kernel(scale_by(n, 5), vec![z], vec![w], &[]);
             g
         };
-        let unfused_nodes = three_chain(8).nodes.len();
+        assert_eq!(three_chain(8).nodes.len(), 3);
 
-        let mut g_v1 = three_chain(8);
+        let mut g = three_chain(8);
         GraphCompiler::new()
-            .fuse(&mut g_v1)
-            .expect("v1 fuse")
+            .fuse(&mut g)
+            .expect("fuse")
             .expect("fusion enabled");
-
-        let mut g_v2 = three_chain(8);
-        GraphCompiler::new()
-            .fusion_v2_options(FusionOptionsV2::default())
-            .fuse(&mut g_v2)
-            .expect("v2 fuse")
-            .expect("fusion enabled");
-
-        assert_eq!(unfused_nodes, 3);
-        assert_eq!(g_v1.nodes.len(), 1);
-        assert_eq!(g_v2.nodes.len(), g_v1.nodes.len());
+        assert_eq!(g.nodes.len(), 1);
     }
 
-    /// `GraphCompiler::symbol` bindings must reach the v2 estimator
-    /// (`FusionOptionsV2::graph_symbols`): an unbound symbolic memcpy
+    /// `GraphCompiler::symbol` bindings must reach the estimator
+    /// (`FusionOptions::graph_symbols`): an unbound symbolic memcpy
     /// size falls back to a 1 KiB estimate, so binding the symbol to a
     /// large value must strictly raise the estimated total runtime.
     #[test]
-    fn env_symbols_thread_into_v2_estimator() {
+    fn env_symbols_thread_into_estimator() {
         let build = || {
             let nsym = VarId(7);
             let mut g = GraphBuilder::new();
@@ -4404,7 +4385,7 @@ mod graph_compiler_tests {
 
         let (_, mut g_unbound) = build();
         let unbound = GraphCompiler::new()
-            .fusion_v2_options(FusionOptionsV2::default())
+            .fusion_options(FusionOptions::default())
             .fuse(&mut g_unbound)
             .expect("fuse")
             .expect("fusion enabled");
@@ -4412,13 +4393,13 @@ mod graph_compiler_tests {
         let (nsym, mut g_bound) = build();
         let bound = GraphCompiler::new()
             .symbol(nsym, 1 << 26)
-            .fusion_v2_options(FusionOptionsV2::default())
+            .fusion_options(FusionOptions::default())
             .fuse(&mut g_bound)
             .expect("fuse")
             .expect("fusion enabled");
 
-        let unbound_units = unbound.v2.expect("v2 report").total_runtime_units;
-        let bound_units = bound.v2.expect("v2 report").total_runtime_units;
+        let unbound_units = unbound.total_runtime_units;
+        let bound_units = bound.total_runtime_units;
         assert!(
             bound_units > unbound_units,
             "bound symbol must raise the memcpy estimate: {bound_units} vs {unbound_units}"
@@ -4431,7 +4412,7 @@ mod graph_compiler_tests {
     #[cfg(not(feature = "planner-ortools"))]
     #[test]
     fn no_solver_large_graph_reports_solver_unavailable() {
-        use crate::passes::fusion_v2::FallbackReason;
+        use crate::passes::fusion::FallbackReason;
         // 34 disjoint kernels exceed BRUTE_FORCE_LIMIT (32) with zero
         // fusion candidates, so extraction must fall back to original.
         let n = 8;
@@ -4444,15 +4425,14 @@ mod graph_compiler_tests {
             g.insert_kernel(scale_by(n, 2), vec![x], vec![y], &[]);
         }
         let report = GraphCompiler::new()
-            .fusion_v2_options(FusionOptionsV2 {
+            .fusion_options(FusionOptions {
                 enable_horizontal: false,
-                ..FusionOptionsV2::default()
+                ..FusionOptions::default()
             })
             .fuse(&mut g)
             .expect("fuse")
             .expect("fusion enabled");
-        let v2 = report.v2.expect("v2 report");
-        assert_eq!(v2.fallback_reason, Some(FallbackReason::SolverUnavailable));
+        assert_eq!(report.fallback_reason, Some(FallbackReason::SolverUnavailable));
         assert_eq!(g.nodes.len(), 34);
     }
 }
@@ -4469,7 +4449,7 @@ mod general_pc_tests {
     use crate::{
         ir::SizeExpr,
         module_hash::module_hash,
-        passes::fusion_v2::{
+        passes::fusion::{
             fusions::producer_consumer::{
                 self, EnumerateOptions, FusionVariant, OwnedEnumerateContext,
             },
@@ -5294,7 +5274,7 @@ mod multi_seam_tests {
     use super::*;
     use crate::{
         module_hash::module_hash,
-        passes::fusion_v2::{
+        passes::fusion::{
             fusions::{fanout, producer_consumer},
             GraphFuser,
         },
@@ -5355,7 +5335,7 @@ mod multi_seam_tests {
         g.insert_kernel(scale_by(n, 2), vec![x], vec![y], &[]);
         g.insert_kernel(scale_by(n, 3), vec![y], vec![z], &[]);
         g.insert_kernel(scale_by(n, 5), vec![z], vec![w], &[]);
-        crate::passes::fusion_v2::take_graph(&mut g).unwrap()
+        crate::passes::fusion::take_graph(&mut g).unwrap()
     }
 
     /// `y = 2*x; z = 3*y; u = 5*z; v = 7*z` with `y`, `u`, `v` graph
@@ -5375,7 +5355,7 @@ mod multi_seam_tests {
         g.insert_kernel(scale_by(n, 3), vec![y], vec![z], &[]);
         g.insert_kernel(scale_by(n, 5), vec![z], vec![u], &[]);
         g.insert_kernel(scale_by(n, 7), vec![z], vec![v], &[]);
-        crate::passes::fusion_v2::take_graph(&mut g).unwrap()
+        crate::passes::fusion::take_graph(&mut g).unwrap()
     }
 
     #[test]
@@ -5511,11 +5491,11 @@ mod composed_keep_canonicalize_tests {
     use super::*;
     use crate::{
         module_hash::module_hash,
-        passes::fusion_v2::{
+        passes::fusion::{
             cost::{estimate_kernel, EstimateContext, EstimatorConfig},
-            fuse_graph_v2,
+            fuse_graph,
             fusions::{epilogue, producer_consumer, small_kernel},
-            take_graph, FusionOptionsV2,
+            take_graph, FusionOptions,
         },
     };
 
@@ -5675,7 +5655,7 @@ mod composed_keep_canonicalize_tests {
     #[test]
     fn driver_halving_chain_has_no_sentinel_cost_failures() {
         let mut g = halving_chain_with_epilogue();
-        let report = fuse_graph_v2(&mut g, &FusionOptionsV2::default()).unwrap();
+        let report = fuse_graph(&mut g, &FusionOptions::default()).unwrap();
         // Composition must actually happen (round 2 inserts composed
         // candidates) or the sentinel assertion below is vacuous.
         assert!(

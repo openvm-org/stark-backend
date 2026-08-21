@@ -37,19 +37,16 @@ use p3_util::log2_strict_usize;
 use super::{
     errors::FractionalSumcheckError,
     fractional_ir::{
-        add_frac_ef_buf, claim_combine_ir, ef_const_ext_scalar_buf, extract_claim_pair_ir,
-        extract_root_pq_ir, reduce_to_single_evaluation_ir, FracSumcheckProofIR, GkrLayerClaimIR,
-        SqrtEqLayersIR,
+        claim_combine_ir, extract_claim_pair_ir, extract_root_pq_ir, observe_and_update_ir,
+        reduce_to_single_evaluation_ir, FracSumcheckProofIR, GkrLayerClaimIR, SqrtEqLayersIR,
     },
-    fractional_ir_dsl::{
-        bind_challenge_as_fpext, fold_ef_frac_columns_ir_dsl, frac_compute_round_ir_dsl,
+    fractional_ir_utils::{
+        add_ef_buf, add_ext_scalar_buf, add_frac_ef_buf, bind_challenge_as_fpext,
+        ef_const_ext_scalar_buf, fold_ef_frac_columns_ir_dsl, frac_compute_round_ir_dsl,
+        GKR_S_DEG,
     },
 };
-use crate::{
-    logup_zerocheck::fractional_ir::{add_ef_buf, add_ext_scalar_buf, observe_and_update_ir},
-    prelude::EF,
-    sponge_graph_ir::FiatShamirTranscriptGraphIR,
-};
+use crate::{prelude::EF, sponge_graph_ir::FiatShamirTranscriptGraphIR};
 
 // ---------------------------------------------------------------------------
 // DSL bit-reversal helper.
@@ -337,7 +334,7 @@ where
     }
     let mu_1 = transcript.sample_ext(g);
     let mut xi_prev: Vec<BufId> = vec![mu_1];
-    let mut sumcheck_polys: Vec<Vec<[BufId; crate::logup_zerocheck::fractional_ir::GKR_S_DEG]>> =
+    let mut sumcheck_polys: Vec<Vec<[BufId; GKR_S_DEG]>> =
         Vec::with_capacity(total_rounds);
 
     // Shared read-only `EF::ONE` seed for `eq_r_acc` reset each round.
@@ -369,7 +366,7 @@ where
         // Eq buffer covering the tail challenges xi_prev[1..].
         let mut eq_buffer = SqrtEqLayersIR::from_xi(g, &xi_prev[1..], device);
 
-        let mut round_polys: Vec<[BufId; crate::logup_zerocheck::fractional_ir::GKR_S_DEG]> =
+        let mut round_polys: Vec<[BufId; GKR_S_DEG]> =
             Vec::with_capacity(round);
         let mut r_vec: Vec<BufId> = Vec::with_capacity(round);
 
@@ -381,7 +378,7 @@ where
                 g,
                 device,
                 &format!("d_sum_v2_{round}_{t}"),
-                crate::logup_zerocheck::fractional_ir::GKR_S_DEG - 1,
+                GKR_S_DEG - 1,
             );
             let (eq_low, eq_high, eq_low_cap) = eq_layer_bufs(&eq_buffer, pq_size / 2);
             frac_compute_round_ir_dsl(
@@ -470,7 +467,6 @@ mod tests {
     use crypto_compiler::{
         graph_exe::GraphCompiler,
         graph_ir::{DeviceType, GraphBuilder},
-        passes::fusion::FusionOptions,
         planner::SchedulerMode,
     };
     use openvm_cuda_common::{
@@ -490,7 +486,7 @@ mod tests {
                 load_or_compile_and_dump,
             },
             fractional::{fractional_sumcheck_gpu, FractionalInputSize},
-            fractional_ir::{add_frac_ef_buf, GKR_S_DEG},
+            fractional_ir_utils::{add_frac_ef_buf, GKR_S_DEG},
         },
         prelude::SC,
         sponge::DuplexSpongeGpu,
@@ -797,7 +793,7 @@ mod tests {
     ///
     /// Input size via `FRAC_LOG_N` (log2 leaf count, default 6); output
     /// dir via `CRYPTO_COMPILER_DUMP_IR` (default `target/ir_dump_v2/`).
-    /// Fusion strategy and tunables via `CC_FUSION*` (see
+    /// Fusion tunables via `CC_FUSION_*` (see
     /// [`super::frac_bench_utils`]); build with
     /// `--features crypto-compiler/planner-ortools`.
     ///
@@ -807,7 +803,7 @@ mod tests {
     /// JSON with `bench_fractional_sumcheck_eager_vs_ir` +
     /// `CC_CY_DUMP_PATH=…`; each per-node timing lines up with the
     /// fused graph's node indices when the same `FRAC_LOG_N` +
-    /// `CC_FUSION*` env are supplied on both sides.
+    /// `CC_FUSION_*` env are supplied on both sides.
     ///
     /// Run:
     ///
@@ -863,21 +859,10 @@ mod tests {
         );
 
         // Run the normalize + fusion passes without compiling, and dump
-        // the post-fusion graph alongside per-round stats. Honor
-        // `CC_FUSION` for strategy selection; the dump path defaults to a
-        // verbose v1 configuration so the on-disk artifacts capture the
-        // per-round stats useful for offline analysis.
-        let compiler = if std::env::var_os("CC_FUSION").is_some() {
-            cc_compiler(device)
-        } else {
-            GraphCompiler::new()
-                .device(device)
-                .fusion_options(FusionOptions {
-                    verbose: true,
-                    max_iterations: 50,
-                    ..FusionOptions::default()
-                })
-        };
+        // the post-fusion graph alongside per-round stats. Uses the
+        // `cc_compiler` config so the on-disk artifacts capture the
+        // exact fusion settings the rest of the pipeline sees.
+        let compiler = cc_compiler(device);
         let mut g_fused = g;
         let report = compiler
             .fuse(&mut g_fused)
@@ -916,40 +901,23 @@ mod tests {
             g_fused.to_cytoscape_json_with_timings(timings.as_ref()),
         )
         .expect("write fused cytoscape dump");
-        if let Some(v2) = report.v2.as_ref() {
-            println!(
-                "fusion v2 summary: nodes {} -> {}, generated={}, inserted={}, \
-                 selected={}, rounds_run={} (inserted per round: {:?}, max_rounds_hit={}), \
-                 cost cache {}h/{}m ({} sentinel failures), fallback={:?}",
-                v2.nodes_before,
-                v2.nodes_after,
-                v2.candidates_generated,
-                v2.candidates_inserted,
-                v2.selected_from_solver,
-                v2.rounds_run,
-                v2.rounds_inserted,
-                v2.max_rounds_hit,
-                v2.cost_cache_hits,
-                v2.cost_cache_misses,
-                v2.cost_failures,
-                v2.fallback_reason,
-            );
-        } else {
-            println!(
-                "fusion summary: nodes {} -> {} (deduped modules: {}), rounds: {}",
-                report.nodes_before, report.nodes_after, report.deduped, report.rounds,
-            );
-            for stats in &report.rounds_detail {
-                println!(
-                    "  round {}: fused={}, dce_removed={}, nodes_after={}, est_modules={}",
-                    stats.round,
-                    stats.fused,
-                    stats.dce_removed,
-                    stats.nodes_after,
-                    stats.est_modules,
-                );
-            }
-        }
+        println!(
+            "fusion summary: nodes {} -> {}, generated={}, inserted={}, \
+             selected={}, rounds_run={} (inserted per round: {:?}, max_rounds_hit={}), \
+             cost cache {}h/{}m ({} sentinel failures), fallback={:?}",
+            report.nodes_before,
+            report.nodes_after,
+            report.candidates_generated,
+            report.candidates_inserted,
+            report.selected_from_solver,
+            report.rounds_run,
+            report.rounds_inserted,
+            report.max_rounds_hit,
+            report.cost_cache_hits,
+            report.cost_cache_misses,
+            report.cost_failures,
+            report.fallback_reason,
+        );
 
         // At very large `n` the full compile (~hundreds of unique nvcc
         // kernels + planner) is prohibitively expensive; skip it when
@@ -1120,30 +1088,30 @@ mod tests {
             let compile_ms = t_prep.elapsed().as_secs_f64() * 1e3 - build_ms;
             let (n_nodes_post_fusion, fusion_rounds, fused_total) = exe
                 .fusion_report()
-                .map(|r| (r.nodes_after, r.rounds, r.fused.len()))
+                .map(|r| (r.nodes_after, r.rounds_run, r.selected_from_solver))
                 .unwrap_or((n_nodes, 0, 0));
             let unique_modules = exe.num_unique_modules();
             println!(
                 "graph build: {build_ms:>8.2} ms ({n_nodes} nodes pre-fusion, \
                  {n_nodes_post_fusion} post-fusion via {fusion_rounds} rounds, \
-                 {fused_total} fusions applied); \
+                 {fused_total} selected candidates); \
                  compile-or-load: {compile_ms:>8.2} ms ({unique_modules} unique modules, \
                  {} loaded from cache, scratch pool {} bytes)",
                 exe.num_cached_modules(),
                 exe.scratch_bytes(),
             );
-            if let Some(v2) = exe.fusion_report().and_then(|r| r.v2.as_ref()) {
+            if let Some(r) = exe.fusion_report() {
                 println!(
-                    "fusion v2: generated={}, inserted={}, selected={}, rounds={:?}, \
+                    "fusion: generated={}, inserted={}, selected={}, rounds={:?}, \
                      cost cache {}h/{}m, total_runtime_units={}, fallback={:?}",
-                    v2.candidates_generated,
-                    v2.candidates_inserted,
-                    v2.selected_from_solver,
-                    v2.rounds_inserted,
-                    v2.cost_cache_hits,
-                    v2.cost_cache_misses,
-                    v2.total_runtime_units,
-                    v2.fallback_reason,
+                    r.candidates_generated,
+                    r.candidates_inserted,
+                    r.selected_from_solver,
+                    r.rounds_inserted,
+                    r.cost_cache_hits,
+                    r.cost_cache_misses,
+                    r.total_runtime_units,
+                    r.fallback_reason,
                 );
             }
 
@@ -1457,7 +1425,6 @@ mod tests {
         let log_n: usize = frac_log_n_single(20);
         let n = 1usize << log_n;
         let nsys_enabled = std::env::var_os("NSYS_ENABLED").is_some();
-        let no_fusion = matches!(std::env::var("CC_FUSION").as_deref(), Ok("off"));
 
         // ---------- Setup phase (excluded from cudaProfilerStart window) ----------
 
@@ -1560,7 +1527,6 @@ mod tests {
         // shared across variants so only the first compile pays nvcc.
         let mut compiled: Vec<Compiled> = Vec::with_capacity(configs.len());
         for (name, mode) in configs {
-            let _ = no_fusion; // recorded above; cc_compiler applied CC_FUSION already
             println!("[setup] compiling scheduler={name} ...");
             let t0 = Instant::now();
             let compiler = cc_compiler(device)

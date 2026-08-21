@@ -22,7 +22,7 @@ use crypto_compiler::{
     passes::fusion::{fuse_graph, FusionOptions},
     quast::Quast,
 };
-use openvm_cuda_backend::logup_zerocheck::fractional_ir_dsl::{
+use openvm_cuda_backend::logup_zerocheck::fractional_ir_utils::{
     build_fold_ef_frac_columns_module, build_frac_compute_round_module,
 };
 
@@ -136,27 +136,22 @@ fn main() {
     // --- Stage 3: run fuse_graph with FUSION_DUMP_STEPS = fusion_dir ---
     // apply_fusion writes every merged module's HIR before the shared-Arc dedup swap,
     // in the order they were successfully produced. See fusion.rs.
-    println!(
-        "\n=== fusion (FUSION_DUMP_STEPS -> {}) ===",
-        fusion_dir.display()
-    );
-    // SAFETY: single-threaded main; we own the env for the duration.
-    std::env::set_var("FUSION_DUMP_STEPS", &fusion_dir);
+    println!("\n=== fusion v2 ===");
     let opts = FusionOptions {
         verbose: true,
-        max_iterations: 20,
         ..FusionOptions::default()
     };
     let report = fuse_graph(&mut g, &opts).expect("fusion");
-    std::env::remove_var("FUSION_DUMP_STEPS");
     println!(
-        "  fusion summary: {} -> {} nodes, {} fusions in {} rounds, {} unique modules deduped",
+        "  fusion v2 summary: {} -> {} nodes, generated={}, inserted={}, selected={} in {} rounds",
         report.nodes_before,
         report.nodes_after,
-        report.fused.len(),
-        report.rounds,
-        report.deduped,
+        report.candidates_generated,
+        report.candidates_inserted,
+        report.selected_from_solver,
+        report.rounds_run,
     );
+    let _ = fusion_dir; // FUSION_DUMP_STEPS was v1-only; kept for CLI compat
 
     // --- Enumerate what got written ---
     let mut files: Vec<_> = std::fs::read_dir(&fusion_dir)

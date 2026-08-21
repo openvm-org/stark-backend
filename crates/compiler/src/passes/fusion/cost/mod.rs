@@ -1,10 +1,10 @@
-//! Cost estimation for the fusion-v2 extractor.
+//! Cost estimation for the fusion extractor.
 //!
 //! `detailed-fusion-plan-v2.md` §5.5 (artifact keys), §12 (KIR
 //! estimator), and §12.10 (`KernelCostManager`).
 //!
 //! The extractor consumes an
-//! [`crate::passes::fusion_v2::extract::ExtractionData`] sidecar: one
+//! [`crate::passes::fusion::extract::ExtractionData`] sidecar: one
 //! [`GraphNodeCost`] plus an optional [`ArtifactKey`] per alternative
 //! graph node. This module supplies both.
 //!
@@ -74,7 +74,7 @@ impl ArtifactContext {
 ///
 /// `detailed-fusion-plan-v2.md` §13.5: `runtime_units(a) = max(1,
 /// round(total_cycles(a) / cycle_quantum))`. The quantum lives on the
-/// [`ExtractOptions`](crate::passes::fusion_v2::extract::ExtractOptions)
+/// [`ExtractOptions`](crate::passes::fusion::extract::ExtractOptions)
 /// so bounds can be checked in `i128` before constructing the CP-SAT
 /// model.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]

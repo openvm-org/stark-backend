@@ -1,4 +1,4 @@
-//! Insertion-time validation for fusion-v2 candidates.
+//! Insertion-time validation for fusion candidates.
 //!
 //! `detailed-fusion-plan-v2.md` §9.1 — the alternative graph is a
 //! directed bipartite DAG:
@@ -16,7 +16,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::passes::fusion_v2::model::{GraphFuser, NodeId, ValueClassId};
+use crate::passes::fusion::model::{GraphFuser, NodeId, ValueClassId};
 
 /// Whether inserting an alternative-graph node with the given `inputs`
 /// and `outputs` would introduce a cycle into `gf`.
@@ -54,7 +54,7 @@ pub fn would_create_cycle(
 }
 
 /// Index of every multi-version storage class, built once per
-/// [`crate::passes::fusion_v2::fuse_graph_v2`] invocation right after
+/// [`crate::passes::fusion::fuse_graph`] invocation right after
 /// `take_graph` — value classes never grow afterwards (candidates reuse
 /// existing versions), so the index stays valid across saturation
 /// rounds.

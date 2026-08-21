@@ -26,7 +26,7 @@ use openvm_cuda_backend::{
             frac_compute_round_ir_bufid, frac_multifold_ir, frac_precompute_m_eval_round_ir,
             SqrtEqLayersIR,
         },
-        fractional_ir_dsl::{
+        fractional_ir_utils::{
             fold_ef_frac_columns_ir_dsl, frac_build_tree_layer_revert_ir_dsl,
             frac_build_tree_two_layers_ir_dsl, frac_compute_round_and_fold_ir_dsl,
             frac_compute_round_and_revert_ir_dsl, frac_compute_round_ir_dsl, frac_multifold_ir_dsl,

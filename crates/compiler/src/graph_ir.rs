@@ -28,7 +28,7 @@ use crate::{
     ir::{self, Node, VarId},
     module_hash::{children_of, module_hash, Hasher},
     passes::{
-        fusion::renumber_module,
+        fusion_utils::renumber_module,
         split_module::{ModuleSubgraph, SubgraphValue},
     },
     planner::StreamMemoryPlan,
@@ -726,7 +726,7 @@ impl fmt::Debug for GraphNode {
 
 impl GraphNode {
     /// Positional logical operands of this node, in the fixed convention
-    /// used by the fusion-v2 alternative graph (see
+    /// used by the fusion alternative graph (see
     /// `detailed-fusion-plan-v2.md` §5.1):
     ///
     /// - explicit operands come first, in variant-defined order;
@@ -790,7 +790,7 @@ impl GraphNode {
     /// of [`Self::get_results`].
     ///
     /// This is the inverse of [`Self::get_operands`]/[`Self::get_results`]:
-    /// it centralizes the variant-specific rewrite that fusion v2 needs
+    /// it centralizes the variant-specific rewrite that fusion needs
     /// during materialization so the fuser doesn't open-code the mapping.
     ///
     /// - `Kernel` and `BlackboxKernel`: rewrites `k.inputs` and the explicit-outputs prefix of

@@ -1,9 +1,5 @@
-//! Independent HIR traversal and rewrite utilities used by the fusion v2
-//! passes. See `detailed-fusion-plan-v2.md` §8.2.
-//!
-//! This module intentionally does not depend on any code from
-//! [`crate::passes::fusion`] — the v2 pipeline is built beside the existing
-//! implementation, not on top of it.
+//! Shared HIR helpers used by the fusion pass and the wider compile
+//! pipeline. See `detailed-fusion-plan-v2.md` §8.2.
 //!
 //! The central primitive is an occurrence-based [`HirVisitor`]. Because HIR
 //! nodes are hash-consed, a single [`ir::NodeId`] can appear under several
@@ -20,16 +16,28 @@
 //! - [`collect_structure`]: compute/reduce/let nesting and other structural facts used by
 //!   pass-specific legality checks;
 //! - [`clone_expr`]: deterministic alpha-renamed HIR cloning with an explicit `ir::NodeId ->
-//!   ir::NodeId` substitution map.
+//!   ir::NodeId` substitution map;
+//! - [`renumber_module`]: canonical `VarId` renumbering used by monomorphize and codegen so
+//!   `Arc<Module>`s that differ only by `VarId` labels hash-identical;
+//! - [`dce`]: post-fusion dead-node elimination, driven by the alias table and interface
+//!   buffer set;
+//! - [`FusionReport`]: what the fusion pass did to the graph, as observed by the graph exe
+//!   builder.
 //!
 //! Pass-specific legality rules, cost models, and rewrite algorithms live in
 //! their respective modules; this module supplies mechanisms only.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::{
+    collections::{BTreeMap, HashMap, HashSet},
+    sync::Arc,
+};
 
 use crate::{
+    graph_ir::{BufId, GraphBuilder, GraphNode},
     ir::{IRBuilder, Module, Node, NodeId, SizeExpr, VarId},
     module_hash::children_of,
+    quast,
+    quast::Quast,
 };
 
 /// Whether the visitor should descend into the current node's children.
@@ -783,6 +791,278 @@ pub fn bound_vars(module: &Module, root: NodeId) -> BTreeMap<NodeId, VarId> {
     let _ = visit_hir(module, root, &mut c);
     c.vars
 }
+
+// ---------------------------------------------------------------------
+// Post-fusion DCE.
+// ---------------------------------------------------------------------
+
+/// Drops kernel nodes whose outputs no live node reads.
+///
+/// Live-set seed: any buffer that's an interface (canonicalised via
+/// [`GraphBuilder::canonical_buf`] + [`GraphBuilder::buf_is_interface`])
+/// is considered read, so writes to aliased renames of a graph
+/// input/output survive. Blackbox kernels are always kept — their
+/// closures may have side effects the graph doesn't model.
+///
+/// Dead nodes are dropped from `g.nodes`; the bufs table is left
+/// untouched — orphaned buffers get no pool slot (the planner skips
+/// buffers with no readers and no writers).
+///
+/// Returns the number of nodes removed.
+pub fn dce(g: &mut GraphBuilder) -> usize {
+    // Seed through the alias table: an SSA rename of an interface
+    // buffer (see `restore_ssa`) shares its pool slot, so a write to
+    // any version of the class is observable by the caller.
+    let mut needed: Vec<bool> = (0..g.bufs.len())
+        .map(|b| g.buf_is_interface(g.canonical_buf(BufId(b))))
+        .collect();
+    let mut live = vec![false; g.nodes.len()];
+    for (n, node) in g.nodes.iter().enumerate().rev() {
+        let (reads, writes) = g.node_reads_writes(node);
+        live[n] =
+            matches!(node, GraphNode::BlackboxKernel(_)) || writes.iter().any(|b| needed[b.0]);
+        if live[n] {
+            for (b, _) in reads {
+                needed[b.0] = true;
+            }
+        }
+    }
+    let before = g.nodes.len();
+    let mut it = live.iter();
+    g.nodes.retain(|_| *it.next().unwrap());
+    before - g.nodes.len()
+}
+
+// ---------------------------------------------------------------------
+// Canonical VarId renumbering.
+// ---------------------------------------------------------------------
+
+/// Rebuilds `m` with a canonical `VarId` numbering: reachable nodes are
+/// walked in the same canonical post-order [`module_hash`] uses, and
+/// every `VarId` slot — `Var` references, `Compute`/`Reduce`/`Let`
+/// binders, scatter params / exprs / bounds and `ParSpec` symbols — is
+/// assigned a new id in first-occurrence order over that walk. Modules
+/// that differ only by a `VarId` bijection renumber to hash-identical
+/// modules; renumbering an already-canonical module is a no-op (up to
+/// arena garbage, which the hash never sees).
+pub(crate) fn renumber_module(m: &Module) -> Module {
+    let b = &m.builder;
+
+    // Canonical post-order over reachable nodes (mirrors module_hash's
+    // WalkCtx: children depth-first, left-to-right; DAG, so no cycles).
+    fn number(b: &IRBuilder, id: NodeId, seen: &mut HashSet<NodeId>, order: &mut Vec<NodeId>) {
+        if seen.contains(&id) {
+            return;
+        }
+        for child in children_of(b.node(id)) {
+            number(b, child, seen, order);
+        }
+        seen.insert(id);
+        order.push(id);
+    }
+    let mut order = Vec::new();
+    let mut seen = HashSet::new();
+    number(b, m.body, &mut seen, &mut order);
+
+    // Pass 1: assign new VarIds in first-occurrence order.
+    fn visit_var(vmap: &mut HashMap<VarId, VarId>, v: VarId) {
+        let next = VarId(vmap.len() as u32);
+        vmap.entry(v).or_insert(next);
+    }
+    fn visit_quast(vmap: &mut HashMap<VarId, VarId>, q: &Quast) {
+        match q {
+            Quast::Sym(v) => visit_var(vmap, *v),
+            Quast::Const(_) => {}
+            Quast::Add(a, b) => {
+                visit_quast(vmap, a);
+                visit_quast(vmap, b);
+            }
+            Quast::Mul(a, _) | Quast::FloorDiv(a, _) | Quast::Neg(a) => visit_quast(vmap, a),
+        }
+    }
+    let mut vmap: HashMap<VarId, VarId> = HashMap::new();
+    for (v, _) in b.params() {
+        visit_var(&mut vmap, *v);
+    }
+    for &id in &order {
+        match b.node(id) {
+            Node::Var(v) => visit_var(&mut vmap, *v),
+            Node::Compute {
+                var, scatter, par, ..
+            } => {
+                visit_var(&mut vmap, *var);
+                if let Some(s) = scatter {
+                    for &p in &s.params {
+                        visit_var(&mut vmap, p);
+                    }
+                    for e in &s.exprs {
+                        visit_quast(&mut vmap, e);
+                    }
+                    for &p in &s.inv_params {
+                        visit_var(&mut vmap, p);
+                    }
+                    for e in &s.inv_exprs {
+                        visit_quast(&mut vmap, e);
+                    }
+                    for &v in s.bounds.keys() {
+                        visit_var(&mut vmap, v);
+                    }
+                }
+                if let Some(p) = par {
+                    visit_var(&mut vmap, p.thread);
+                    visit_var(&mut vmap, p.seq);
+                    visit_quast(&mut vmap, &p.expr);
+                }
+            }
+            Node::Reduce { var, .. } | Node::Let { var, .. } => visit_var(&mut vmap, *var),
+            _ => {}
+        }
+    }
+
+    // Pass 2: rebuild into a fresh builder in canonical order, remapping
+    // every VarId; children precede parents in `order`, so operand ids
+    // are always already mapped.
+    let mut nb = IRBuilder::new();
+    for (v, name) in b.params() {
+        nb.inherit_param(vmap[v], name.clone());
+    }
+    if let Some(block) = b.block_hint() {
+        nb.set_block_hint(block);
+    }
+    for d in b.inputs() {
+        let shape: Vec<SizeExpr> = d.shape.iter().map(|e| remap_sexpr(e, &vmap)).collect();
+        nb.input(d.name.clone(), d.elem, shape);
+    }
+    let mut node_map: HashMap<NodeId, NodeId> = HashMap::new();
+    for &id in &order {
+        let new = match b.node(id) {
+            Node::Input(k) => nb.intern(Node::Input(*k)),
+            Node::Var(v) => nb.intern(Node::Var(vmap[v])),
+            Node::ConstU32(c) => nb.const_u32(*c),
+            Node::ConstField(c) => nb.const_field(*c),
+            Node::ConstFpExt(c) => nb.const_fpext(*c),
+            Node::ConstSym(e) => nb.intern(Node::ConstSym(remap_sexpr(e, &vmap))),
+            Node::LiftFpExt(x) => nb.lift_fpext(node_map[x]),
+            Node::Bin(op, x, y) => nb.bin(*op, node_map[x], node_map[y]),
+            Node::Select {
+                cond,
+                then_val,
+                else_val,
+            } => nb.select(node_map[cond], node_map[then_val], node_map[else_val]),
+            Node::Index { tensor, indices } => {
+                let idx: Vec<NodeId> = indices.iter().map(|i| node_map[i]).collect();
+                nb.index(node_map[tensor], &idx)
+            }
+            Node::Compute {
+                bound,
+                var,
+                body,
+                scatter,
+                par,
+                threads,
+            } => nb.intern(Node::Compute {
+                bound: remap_sexpr(bound, &vmap),
+                var: vmap[var],
+                body: node_map[body],
+                scatter: scatter.as_ref().map(|s| Box::new(remap_scatter(s, &vmap))),
+                par: par.as_ref().map(|p| Box::new(remap_par(p, &vmap))),
+                threads: *threads,
+            }),
+            Node::Reduce {
+                op,
+                bound,
+                var,
+                body,
+            } => nb.intern(Node::Reduce {
+                op: *op,
+                bound: remap_sexpr(bound, &vmap),
+                var: vmap[var],
+                body: node_map[body],
+            }),
+            Node::Let { var, value, body } => nb.intern(Node::Let {
+                var: vmap[var],
+                value: node_map[value],
+                body: node_map[body],
+            }),
+            Node::Tuple(es) => {
+                let es: Vec<NodeId> = es.iter().map(|e| node_map[e]).collect();
+                nb.tuple(&es)
+            }
+            Node::Proj(t, k) => nb.proj(node_map[t], *k),
+            Node::Pack(es) => {
+                let es: Vec<NodeId> = es.iter().map(|e| node_map[e]).collect();
+                nb.pack(&es)
+            }
+        };
+        node_map.insert(id, new);
+    }
+    nb.raise_var_watermark(vmap.len() as u32);
+    Module {
+        name: m.name.clone(),
+        builder: nb,
+        body: node_map[&m.body],
+    }
+}
+
+fn remap_sexpr(e: &SizeExpr, vmap: &HashMap<VarId, VarId>) -> SizeExpr {
+    use quast::SymConst;
+    let c = |k: &SymConst| match k {
+        SymConst::Sym(v) => SymConst::Sym(vmap[v]),
+        lit => *lit,
+    };
+    match e {
+        SizeExpr::Sym(v) => SizeExpr::Sym(vmap[v]),
+        SizeExpr::Const(k) => SizeExpr::Const(c(k)),
+        SizeExpr::Add(a, b) => SizeExpr::Add(
+            Arc::new(remap_sexpr(a, vmap)),
+            Arc::new(remap_sexpr(b, vmap)),
+        ),
+        SizeExpr::Mul(a, k) => SizeExpr::Mul(Arc::new(remap_sexpr(a, vmap)), c(k)),
+        SizeExpr::FloorDiv(a, k) => SizeExpr::FloorDiv(Arc::new(remap_sexpr(a, vmap)), c(k)),
+        SizeExpr::Neg(a) => SizeExpr::Neg(Arc::new(remap_sexpr(a, vmap))),
+    }
+}
+
+fn remap_quast(q: &Quast, vmap: &HashMap<VarId, VarId>) -> Quast {
+    match q {
+        Quast::Sym(v) => Quast::Sym(vmap[v]),
+        Quast::Const(c) => Quast::Const(*c),
+        Quast::Add(a, b) => Quast::Add(
+            Arc::new(remap_quast(a, vmap)),
+            Arc::new(remap_quast(b, vmap)),
+        ),
+        Quast::Mul(a, c) => Quast::Mul(Arc::new(remap_quast(a, vmap)), *c),
+        Quast::FloorDiv(a, c) => Quast::FloorDiv(Arc::new(remap_quast(a, vmap)), *c),
+        Quast::Neg(a) => Quast::Neg(Arc::new(remap_quast(a, vmap))),
+    }
+}
+
+fn remap_scatter(s: &quast::Scatter, vmap: &HashMap<VarId, VarId>) -> quast::Scatter {
+    quast::Scatter {
+        params: s.params.iter().map(|p| vmap[p]).collect(),
+        exprs: s.exprs.iter().map(|e| remap_quast(e, vmap)).collect(),
+        inv_params: s.inv_params.iter().map(|p| vmap[p]).collect(),
+        inv_exprs: s.inv_exprs.iter().map(|e| remap_quast(e, vmap)).collect(),
+        out_shape: s.out_shape.clone(),
+        bounds: s.bounds.iter().map(|(v, &bnd)| (vmap[v], bnd)).collect(),
+    }
+}
+
+fn remap_par(p: &quast::ParSpec, vmap: &HashMap<VarId, VarId>) -> quast::ParSpec {
+    quast::ParSpec {
+        thread: vmap[&p.thread],
+        seq: vmap[&p.seq],
+        expr: remap_quast(&p.expr, vmap),
+    }
+}
+
+// ---------------------------------------------------------------------
+// Report re-export.
+// ---------------------------------------------------------------------
+
+/// What the fusion pass did to the graph. Re-exported from the pass
+/// module so callers only depend on `fusion_utils` for the type.
+pub use crate::passes::fusion::FusionReport as FusionReport;
 
 #[cfg(test)]
 mod tests {

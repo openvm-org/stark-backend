@@ -4,7 +4,7 @@
 //! optimization passes: par-attr inference (`layout_infer::infer_par_attr`,
 //! B.6.1), shared-layout selection (`layout_infer::choose_shared_layout`,
 //! B.6.2), and `ConvertLayout` decomposition (`codegen::best_decomposition`,
-//! B.6.3). The fusion-v2 estimator also consumes it once B.1 lands.
+//! B.6.3). The fusion estimator also consumes it once B.1 lands.
 //!
 //! Numbers are chosen for the current RTX 5090 / GB202 target. Wrap them in
 //! one type so a hardware retune (or per-op measured overrides from a

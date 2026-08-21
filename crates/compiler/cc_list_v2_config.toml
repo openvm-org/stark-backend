@@ -40,7 +40,7 @@ max_bytes = 10737418240   # 10 GiB
 
 # ---------- Fusion ----------
 [fusion]
-kind = "v2"
+kind = "on"
 max_total_alternatives = 5000
 max_enumeration_time_per_round_ms = 2000
 max_outer_iterations = 1

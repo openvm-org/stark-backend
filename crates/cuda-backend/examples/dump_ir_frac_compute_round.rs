@@ -14,7 +14,7 @@
 use std::path::PathBuf;
 
 use crypto_compiler::{graph_exe::GraphCompiler, graph_ir::GraphModule, runtime::Verbosity};
-use openvm_cuda_backend::logup_zerocheck::fractional_ir_dsl::build_frac_compute_round_module;
+use openvm_cuda_backend::logup_zerocheck::fractional_ir_utils::build_frac_compute_round_module;
 
 fn parse_usize(name: &str, default: usize) -> usize {
     std::env::var(name)

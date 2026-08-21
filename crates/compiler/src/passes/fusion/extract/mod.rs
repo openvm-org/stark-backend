@@ -17,7 +17,7 @@ pub mod brute;
 #[cfg(feature = "planner-ortools")]
 pub mod cpsat;
 
-use crate::passes::fusion_v2::{
+use crate::passes::fusion::{
     cost::{ArtifactKey, GraphNodeCost},
     model::{GraphFuser, NodeId, NodeIdMap},
 };
@@ -48,13 +48,13 @@ pub enum SolverStatus {
     /// The solver returned no solution before the deadline (or
     /// otherwise gave up).
     Unknown,
-    /// The model is infeasible — a v2 bug when no user budget excludes
+    /// The model is infeasible — a fusion bug when no user budget excludes
     /// the original solution.
     Infeasible,
 }
 
-/// Enumerates every path that causes v2 to emit the original extraction
-/// instead of the solver's answer (§15).
+/// Enumerates every path that causes the fusion pass to emit the original
+/// extraction instead of the solver's answer (§15).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FallbackReason {
     /// Built without `planner-ortools`, or the CP-SAT extractor has not
@@ -66,13 +66,13 @@ pub enum FallbackReason {
     SolverStatusInfeasible,
     /// CP-SAT wall-time limit expired with no `Feasible` or better status.
     SolverTimeout,
-    /// [`crate::passes::fusion_v2::apply::apply_solution`] rejected the
+    /// [`crate::passes::fusion::apply::apply_solution`] rejected the
     /// solver solution during pre-commit validation.
     ReconstructBindingMismatch { node: NodeId, kind: String },
     /// The solver's objective did not beat the original within the
     /// configured tolerance.
     NoImprovementOverOriginal,
-    /// Catch-all for any other v2-side failure before commit.
+    /// Catch-all for any other fusion-side failure before commit.
     InternalError { message: String },
 }
 

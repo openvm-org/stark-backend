@@ -65,7 +65,6 @@ to minutes. Run them explicitly with `--run-ignored all --no-capture` (`nextest`
 | `CC_CONFIG`                    | Path to compiler-config TOML (`cc_default_config.toml` = list_v1,   |
 |                                | `cc_list_v2_config.toml` = list_v2).                                 |
 | `NSYS_ENABLED=1`               | Enable `cudaProfilerStart/Stop` + NVTX ranges in every bench.        |
-| `CC_FUSION={v2,off,v1}`        | Override fusion policy from `CC_CONFIG`.                             |
 | `CC_GRAPH_DUMP_PATH=<file>`    | Cache the compiled `GraphExe` between runs (skips fusion/schedule).  |
 | `CC_CY_DUMP_PATH=<dir>`        | Dump post-fuse+dce graph + cytoscape JSON + timings JSON.            |
 | `FRAC_BENCH_DUMP_EXE=<file>`   | Dump `exe.print()` (used by `bench_fractional_sumcheck_eager_vs_ir`).|
@@ -154,7 +153,7 @@ CUDA_VISIBLE_DEVICES=5 NSYS_ENABLED=1 \
 **`bench_fractional_sumcheck_eager_vs_irv2`** — fusion-v2 optimised full sumcheck:
 
 ```bash
-CUDA_VISIBLE_DEVICES=5 NSYS_ENABLED=1 CC_FUSION=v2 \
+CUDA_VISIBLE_DEVICES=5 NSYS_ENABLED=1 \
   CC_CONFIG=$(pwd)/crates/compiler/$CFG FRAC_LOG_N=24 \
   nsys profile --capture-range=cudaProfilerApi --capture-range-end=stop \
     --cuda-graph-trace=node --gpu-metrics-devices=cuda-visible \
@@ -167,7 +166,7 @@ CUDA_VISIBLE_DEVICES=5 NSYS_ENABLED=1 CC_FUSION=v2 \
 **`bench_pipelined_ir_vs_eager`** — single-round pipelined driver (choose the round via `FRAC_ROUND`):
 
 ```bash
-CUDA_VISIBLE_DEVICES=5 NSYS_ENABLED=1 CC_FUSION=v2 FRAC_ROUND=12 \
+CUDA_VISIBLE_DEVICES=5 NSYS_ENABLED=1 FRAC_ROUND=12 \
   CC_CONFIG=$(pwd)/crates/compiler/$CFG \
   nsys profile --capture-range=cudaProfilerApi --capture-range-end=stop \
     --cuda-graph-trace=node --gpu-metrics-devices=cuda-visible \
@@ -180,7 +179,7 @@ CUDA_VISIBLE_DEVICES=5 NSYS_ENABLED=1 CC_FUSION=v2 FRAC_ROUND=12 \
 **`bench_pipelined_full_sumcheck_vs_eager`** — full pipelined sumcheck:
 
 ```bash
-CUDA_VISIBLE_DEVICES=5 NSYS_ENABLED=1 CC_FUSION=v2 FRAC_LOG_N=24 \
+CUDA_VISIBLE_DEVICES=5 NSYS_ENABLED=1 FRAC_LOG_N=24 \
   CC_CONFIG=$(pwd)/crates/compiler/$CFG \
   nsys profile --capture-range=cudaProfilerApi --capture-range-end=stop \
     --cuda-graph-trace=node --gpu-metrics-devices=cuda-visible \
@@ -193,7 +192,7 @@ CUDA_VISIBLE_DEVICES=5 NSYS_ENABLED=1 CC_FUSION=v2 FRAC_LOG_N=24 \
 **`bench_pipelined_ir_sweep`** — per-round sweep across `FRAC_ROUNDS` (default `4,10,16,20,24`):
 
 ```bash
-CUDA_VISIBLE_DEVICES=5 NSYS_ENABLED=1 CC_FUSION=v2 FRAC_ROUNDS=4,10,16,20,24 \
+CUDA_VISIBLE_DEVICES=5 NSYS_ENABLED=1 FRAC_ROUNDS=4,10,16,20,24 \
   CC_CONFIG=$(pwd)/crates/compiler/$CFG \
   nsys profile --capture-range=cudaProfilerApi --capture-range-end=stop \
     --cuda-graph-trace=node --gpu-metrics-devices=cuda-visible \
@@ -206,7 +205,7 @@ CUDA_VISIBLE_DEVICES=5 NSYS_ENABLED=1 CC_FUSION=v2 FRAC_ROUNDS=4,10,16,20,24 \
 **`bench_pipelined_full_sumcheck_sweep`** — eager + IR + pipelined per `FRAC_LOG_N`:
 
 ```bash
-CUDA_VISIBLE_DEVICES=5 NSYS_ENABLED=1 CC_FUSION=v2 FRAC_LOG_N=16,20,24 \
+CUDA_VISIBLE_DEVICES=5 NSYS_ENABLED=1 FRAC_LOG_N=16,20,24 \
   CC_CONFIG=$(pwd)/crates/compiler/$CFG \
   nsys profile --capture-range=cudaProfilerApi --capture-range-end=stop \
     --cuda-graph-trace=node --gpu-metrics-devices=cuda-visible \
@@ -220,7 +219,7 @@ CUDA_VISIBLE_DEVICES=5 NSYS_ENABLED=1 CC_FUSION=v2 FRAC_LOG_N=16,20,24 \
 Set `CC_STREAMS_SWEEP` to override the list_v2 stream sweep:
 
 ```bash
-CUDA_VISIBLE_DEVICES=5 NSYS_ENABLED=1 CC_FUSION=v2 FRAC_LOG_N=24 \
+CUDA_VISIBLE_DEVICES=5 NSYS_ENABLED=1 FRAC_LOG_N=24 \
   CC_STREAMS_SWEEP=1,4,8 \
   nsys profile --capture-range=cudaProfilerApi --capture-range-end=stop \
     --cuda-graph-trace=node --gpu-metrics-devices=cuda-visible \

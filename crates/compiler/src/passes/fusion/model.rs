@@ -1,4 +1,4 @@
-//! Core data model of the fusion-v2 alternative graph.
+//! Core data model of the fusion alternative graph.
 //!
 //! `detailed-fusion-plan-v2.md` §5. The alternative graph is a versioned,
 //! DAG-shaped bipartite structure over dense arenas: [`ValueClassId`] indexes
@@ -13,7 +13,7 @@
 
 use crate::{
     graph_ir::{BufId, BufInfo, GraphNode},
-    passes::fusion_v2::access::AccessRelation,
+    passes::fusion::access::AccessRelation,
 };
 
 /// Dense index of a logical value class in [`GraphFuser::bufs`]. Every
@@ -55,8 +55,8 @@ pub struct UseInfo {
     pub pos: usize,
 }
 
-/// Versioned alternative graph. Owned by the v2 fusion pass for the
-/// duration of `fuse_graph_v2`; on error paths the pass restores the
+/// Versioned alternative graph. Owned by the fusion pass for the
+/// duration of `fuse_graph`; on error paths the pass restores the
 /// original [`crate::graph_ir::GraphBuilder`] via the take-graph guard
 /// (§14.3).
 pub struct GraphFuser {

@@ -407,7 +407,7 @@ pub fn monomorphize_for_graph(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ir::ScalarType, module_hash::module_hash, passes::fusion::renumber_module};
+    use crate::{ir::ScalarType, module_hash::module_hash, passes::fusion_utils::renumber_module};
 
     /// `n` only bounds the top-level compute (outer); `m` bounds the inner
     /// reduce. Only `m` must be concretized.

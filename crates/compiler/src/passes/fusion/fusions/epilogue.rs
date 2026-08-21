@@ -44,7 +44,7 @@ use crate::{
     ir::{IRBuilder, Module, Node, NodeId as HirNodeId, SizeExpr, VarId},
     passes::{
         fusion_utils::clone_expr_with_params,
-        fusion_v2::model::{AltGraphNode, GraphFuser, NodeId, ValueClassId},
+        fusion::model::{AltGraphNode, GraphFuser, NodeId, ValueClassId},
     },
     quast::{ParSpec, SExpr},
     CompileError,

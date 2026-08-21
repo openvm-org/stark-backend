@@ -21,7 +21,7 @@ use thiserror::Error;
 
 use crate::{
     ir,
-    passes::fusion_v2::cost::{
+    passes::fusion::cost::{
         estimator::{estimate_kernel, EstimateContext, EstimatorConfig, KernelCostBreakdown},
         ArtifactContext, GraphNodeCost,
     },
@@ -108,7 +108,7 @@ pub enum CostError {
 
 /// Memoizing wrapper around [`estimate_kernel`] (§12.10).
 ///
-/// One instance is created per `fuse_graph_v2` invocation. Enumeration,
+/// One instance is created per `fuse_graph` invocation. Enumeration,
 /// boundary pruning, and multiple fusion patterns all share the same
 /// cache: the same normalized module derived by different pattern paths
 /// hits once and reuses the cached cost.

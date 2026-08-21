@@ -23,7 +23,7 @@ use cp_sat::{
     proto::{CpSolverStatus, SatParameters},
 };
 
-use crate::passes::fusion_v2::{
+use crate::passes::fusion::{
     cost::{ArtifactKey, GraphNodeCost},
     extract::{ExtractOptions, ExtractionData, ExtractionSolution, FallbackReason, SolverStatus},
     model::{GraphFuser, NodeId, ValueClassId},
@@ -195,7 +195,7 @@ pub fn extract(
     };
     if options.verbose {
         eprintln!(
-            "[fusion-v2] cpsat model: x={n_nodes} y={} z={n_artifacts} \
+            "[fusion] cpsat model: x={n_nodes} y={} z={n_artifacts} \
              ({} seeds, {} cost-failure excluded), time limit {:.1}s/stage, {} worker(s)",
             gf.num_values(),
             gf.seed_node_count,
@@ -209,7 +209,7 @@ pub fn extract(
             if options.verbose {
                 let obj = obj.map_or("none".to_string(), |v| v.to_string());
                 eprintln!(
-                    "[fusion-v2] cpsat stage {stage}: status={status:?}, objective={obj}, {:.1}s",
+                    "[fusion] cpsat stage {stage}: status={status:?}, objective={obj}, {:.1}s",
                     t.elapsed().as_secs_f64(),
                 );
             }
@@ -272,7 +272,7 @@ pub fn extract(
     let stage1_artifact_count: i64 = z.iter().map(|zv| zv.solution_value(&r1) as i64).sum();
     if options.verbose {
         eprintln!(
-            "[fusion-v2] cpsat stage 1 artifacts-active={stage1_artifact_count}/{n_artifacts}"
+            "[fusion] cpsat stage 1 artifacts-active={stage1_artifact_count}/{n_artifacts}"
         );
     }
     // Stage 1 -> Stage 2 lock. Honor runtime_tolerance_ppm as an upper
@@ -292,7 +292,7 @@ pub fn extract(
     let r2 = if !options.optimize_artifact_count {
         if options.verbose {
             eprintln!(
-                "[fusion-v2] cpsat stage 2 (artifacts): skipped (optimize_artifact_count=false)"
+                "[fusion] cpsat stage 2 (artifacts): skipped (optimize_artifact_count=false)"
             );
         }
         r1

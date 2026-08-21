@@ -9,16 +9,13 @@
 //! Fields excluded from the TOML surface (still available on the builder):
 //! - Symbol bindings ([`GraphCompiler::symbol`](crate::graph_exe::GraphCompiler::symbol)):
 //!   graph-specific and set by the caller that owns the graph.
-//! - Fusion v2 [`estimator`](crate::passes::fusion_v2::FusionOptionsV2::estimator),
-//!   [`artifact`](crate::passes::fusion_v2::FusionOptionsV2::artifact), and
-//!   [`graph_symbols`](crate::passes::fusion_v2::FusionOptionsV2::graph_symbols): hardware /
+//! - Fusion [`estimator`](crate::passes::fusion::FusionOptions::estimator),
+//!   [`artifact`](crate::passes::fusion::FusionOptions::artifact), and
+//!   [`graph_symbols`](crate::passes::fusion::FusionOptions::graph_symbols): hardware /
 //!   graph-specific; defaults are kept.
-//! - Fusion v1 [`node_times`](crate::planner::ListSchedulerV1::node_times) / v2
+//! - List-scheduler [`node_times`](crate::planner::ListSchedulerV1::node_times) /
 //!   [`node_times`](crate::planner::ListSchedulerV2::node_times): populated from profiling, not
 //!   user tuning.
-//!
-//! Fusion v1 is deprecated; new profiles should use
-//! [`FusionConfig::V2`]. `V1` remains only to keep old snapshots loading.
 
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
@@ -27,7 +24,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     graph_ir::DeviceType,
     kernel_cache::KernelCache,
-    passes::{fusion::FusionOptions, fusion_v2::FusionOptionsV2},
+    passes::fusion::FusionOptions,
     planner::{ListSchedulerV1, ListSchedulerV2, SchedulerMode},
     runtime::Verbosity,
 };
@@ -302,66 +299,18 @@ impl KernelCacheConfig {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum FusionConfig {
     Off,
-    /// **Deprecated.** V1 is retained only for compatibility with old
-    /// snapshots; new profiles should use [`FusionConfig::V2`]. See the
-    /// `passes/fusion_v2` module docs for the DAG-hypergraph rewrite.
-    V1(FusionV1Config),
-    V2(FusionV2Config),
+    On(FusionSettings),
 }
 
 impl Default for FusionConfig {
     fn default() -> Self {
-        FusionConfig::V2(FusionV2Config::default())
+        FusionConfig::On(FusionSettings::default())
     }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-pub struct FusionV1Config {
-    pub max_iterations: usize,
-    pub max_body_ops: usize,
-    pub launch_cost: f64,
-    pub bw_eff: f64,
-    pub flop_eff: f64,
-    pub gamma: f64,
-    pub per_thread_bw: f64,
-    pub verbose: bool,
-}
-
-impl Default for FusionV1Config {
-    fn default() -> Self {
-        let d = FusionOptions::default();
-        Self {
-            max_iterations: d.max_iterations,
-            max_body_ops: d.max_body_ops,
-            launch_cost: d.launch_cost,
-            bw_eff: d.bw_eff,
-            flop_eff: d.flop_eff,
-            gamma: d.gamma,
-            per_thread_bw: d.per_thread_bw,
-            verbose: d.verbose,
-        }
-    }
-}
-
-impl From<FusionV1Config> for FusionOptions {
-    fn from(c: FusionV1Config) -> Self {
-        FusionOptions {
-            max_iterations: c.max_iterations,
-            max_body_ops: c.max_body_ops,
-            launch_cost: c.launch_cost,
-            bw_eff: c.bw_eff,
-            flop_eff: c.flop_eff,
-            gamma: c.gamma,
-            per_thread_bw: c.per_thread_bw,
-            verbose: c.verbose,
-        }
-    }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct FusionV2Config {
+pub struct FusionSettings {
     pub max_total_alternatives: usize,
     pub max_enumeration_time_per_round_ms: u64,
     pub max_outer_iterations: usize,
@@ -385,9 +334,9 @@ pub struct FusionV2Config {
     pub verbose: bool,
 }
 
-impl Default for FusionV2Config {
+impl Default for FusionSettings {
     fn default() -> Self {
-        let d = FusionOptionsV2::default();
+        let d = FusionOptions::default();
         Self {
             max_total_alternatives: d.max_total_alternatives,
             max_enumeration_time_per_round_ms: d.max_enumeration_time_per_round.as_millis() as u64,
@@ -414,12 +363,12 @@ impl Default for FusionV2Config {
     }
 }
 
-impl FusionV2Config {
-    /// Applies TOML-configurable knobs onto a fresh [`FusionOptionsV2`],
+impl FusionSettings {
+    /// Applies TOML-configurable knobs onto a fresh [`FusionOptions`],
     /// leaving fields that are outside the TOML surface (`estimator`,
     /// `artifact`, `graph_symbols`) at their defaults.
-    pub(crate) fn to_options(&self) -> FusionOptionsV2 {
-        FusionOptionsV2 {
+    pub(crate) fn to_options(&self) -> FusionOptions {
+        FusionOptions {
             max_total_alternatives: self.max_total_alternatives,
             max_enumeration_time_per_round: Duration::from_millis(
                 self.max_enumeration_time_per_round_ms,
@@ -443,7 +392,7 @@ impl FusionV2Config {
             max_alternatives_per_pass_per_round: self.max_alternatives_per_pass_per_round,
             optimize_artifact_count: self.optimize_artifact_count,
             verbose: self.verbose,
-            ..FusionOptionsV2::default()
+            ..FusionOptions::default()
         }
     }
 }
@@ -475,10 +424,9 @@ mod tests {
         let s = cfg.to_toml_string().unwrap();
         let back = GraphCompilerConfig::from_toml_str(&s).unwrap();
         // Spot-check every top-level section survives the round trip.
-        // Fusion default is v2 (v1 deprecated).
         assert!(matches!(back.device, DeviceConfig::Cuda { ordinal: 0 }));
         assert!(matches!(back.scheduler, SchedulerConfig::ListV1(_)));
-        assert!(matches!(back.fusion, FusionConfig::V2(_)));
+        assert!(matches!(back.fusion, FusionConfig::On(_)));
         assert!(matches!(back.kernel_cache, KernelCacheConfig::Enabled(_)));
     }
 
@@ -534,10 +482,9 @@ mod tests {
             .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
         let cfg = GraphCompilerConfig::from_toml_str(&text)
             .unwrap_or_else(|e| panic!("parse {}: {e}", path.display()));
-        // V1 fusion is deprecated; the shipped default must use v2.
         assert!(
-            matches!(cfg.fusion, FusionConfig::V2(_)),
-            "cc_default_config.toml must default to fusion v2 (v1 is deprecated); got {:?}",
+            matches!(cfg.fusion, FusionConfig::On(_)),
+            "cc_default_config.toml must enable fusion by default; got {:?}",
             cfg.fusion,
         );
     }

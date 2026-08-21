@@ -97,13 +97,13 @@ max_bytes = 10737418240   # 10 GiB
 #
 # `kind` = "v2" (default), "off", or "v1" (deprecated — retained for
 # compatibility with old snapshots). New profiles should use v2; see
-# `passes/fusion_v2` for the DAG-hypergraph rewrite.
+# `passes/fusion` for the DAG-hypergraph rewrite.
 #
 # The v2 knobs below mirror `FusionOptionsV2`; fields outside the TOML
 # surface (`estimator`, `artifact`, `graph_symbols`) keep the crate
 # defaults.
 [fusion]
-kind = "v2"
+kind = "on"
 max_total_alternatives = 5000
 max_enumeration_time_per_round_ms = 2000
 max_outer_iterations = 1

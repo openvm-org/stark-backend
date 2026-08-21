@@ -28,10 +28,7 @@
 
 use std::ffi::c_void;
 
-use crypto_compiler::{
-    graph_ir::{BufId, DeviceType, GraphBuilder},
-    quast::Quast,
-};
+use crypto_compiler::graph_ir::{BufId, DeviceType, GraphBuilder};
 use openvm_cuda_common::{
     copy::{cuda_memcpy_on, MemCopyD2H},
     d_buffer::DeviceBuffer,
@@ -48,12 +45,12 @@ use super::{
     errors::FractionalSumcheckError,
     fractional::eval_mle_table,
     fractional_ir::{
-        add_ef_buf, add_frac_ef_buf, eq_mle_table_ir_with_seed, eq_tail_bufs_with_seed,
-        extract_claim_pair_ir, frac_compute_round_and_fold_inplace_ir_bufid,
-        frac_compute_round_ir_bufid, frac_multifold_inplace_ir, frac_multifold_ir,
-        frac_precompute_m_build_ir_bufid, frac_precompute_m_eval_round_ir, observe_and_update_ir,
-        GkrLayerClaimIR, SqrtEqLayersIR,
+        eq_mle_table_ir_with_seed, eq_tail_bufs_with_seed, extract_claim_pair_ir,
+        frac_compute_round_and_fold_inplace_ir_bufid, frac_compute_round_ir_bufid,
+        frac_multifold_inplace_ir, frac_multifold_ir, frac_precompute_m_build_ir_bufid,
+        frac_precompute_m_eval_round_ir, observe_and_update_ir, GkrLayerClaimIR, SqrtEqLayersIR,
     },
+    fractional_ir_utils::{add_ef_buf, add_frac_ef_buf, GKR_S_DEG},
 };
 use crate::{
     cuda::logup_zerocheck::{
@@ -65,10 +62,6 @@ use crate::{
     prelude::EF,
     sponge_graph_ir::FiatShamirTranscriptGraphIR,
 };
-
-/// Degree of the sumcheck round polynomial `s(X)` (i.e. we transmit three
-/// evaluations per inner round: `s(1), s(2), s(3)`).
-pub const GKR_S_DEG: usize = 3;
 
 /// PrecomputeM window size the pipelined driver targets. The M-build and
 /// M-eval CUDA kernels are template-free (they accept any `w > 0`); the
@@ -1322,10 +1315,13 @@ pub fn fractional_sumcheck_round_foldeval_ir<TS>(
 where
     TS: FiatShamirTranscriptGraphIR,
 {
-    use super::fractional_ir::{
-        add_frac_ef_buf, do_fused_sumcheck_round_inplace_ir, do_fused_sumcheck_round_ir,
-        do_sumcheck_round_and_revert_ir, fold_ef_frac_columns_inplace_ir_bufid,
-        fold_ef_frac_columns_ir_bufid,
+    use super::{
+        fractional_ir::{
+            do_fused_sumcheck_round_inplace_ir, do_fused_sumcheck_round_ir,
+            do_sumcheck_round_and_revert_ir, fold_ef_frac_columns_inplace_ir_bufid,
+            fold_ef_frac_columns_ir_bufid,
+        },
+        fractional_ir_utils::add_frac_ef_buf,
     };
 
     let RoundInputIR {
@@ -1641,26 +1637,6 @@ where
 }
 
 // ---------------------------------------------------------------------------
-// Layout helpers (kept out of the driver body for reuse in tests).
-
-/// `BufInfo` for a plain `Frac<EF>` device buffer of exact length `n`,
-/// used when we need to allocate a work / claim buffer inline. Kept here
-/// (rather than in [`super::fractional_ir`]) because the pipelined
-/// driver is the only caller that pins the concrete size rather than
-/// leaning on the fusion planner.
-#[allow(dead_code)]
-pub(crate) fn frac_ef_buf_exact(g: &mut GraphBuilder, device: DeviceType, name: &str, n: usize) {
-    let byte_size = n * std::mem::size_of::<Frac<EF>>();
-    let _ = g.add_buf(crypto_compiler::graph_ir::BufInfo {
-        name: Some(name.to_string()),
-        device_type: device,
-        size: Quast::cst(byte_size as i64),
-        concrete_size: byte_size,
-        elem_size: std::mem::size_of::<Frac<EF>>(),
-    });
-}
-
-// ---------------------------------------------------------------------------
 // Tests.
 
 #[cfg(test)]
@@ -1683,9 +1659,8 @@ mod tests {
     use crate::{
         logup_zerocheck::{
             frac_bench_utils::cc_compiler,
-            fractional_ir::{
-                add_ext_scalar_buf, add_frac_ef_buf, ef_const_ext_scalar_buf, SqrtEqLayersIR,
-            },
+            fractional_ir::SqrtEqLayersIR,
+            fractional_ir_utils::{add_ext_scalar_buf, add_frac_ef_buf, ef_const_ext_scalar_buf},
         },
         prelude::{EF, SC},
         sponge::DuplexSpongeGpu,
@@ -1955,9 +1930,9 @@ mod tests {
     //
     // Structure mirrors [`crate::logup_zerocheck::fractional_ir::tests::
     // bench_fractional_sumcheck_eager_vs_ir`]:
-    //   1. Setup — build + compile the pipelined graph exe (always run with `CC_FUSION=v2`; v1
-    //      is deprecated). Set the input, run one warmup, verify correctness against the eager
-    //      baseline, then capture a CUDA graph. Everything here happens *before*
+    //   1. Setup — build + compile the pipelined graph exe. Set the input, run one warmup,
+    //      verify correctness against the eager baseline, then capture a CUDA graph. Everything
+    //      here happens *before*
     //      `cudaProfilerStart`, so the profile contains only measured kernel work.
     //   2. Timed pass — a single `cudaProfilerStart / Stop` window wraps `ITERS` eager runs
     //      followed by `ITERS` pipelined `launch_graph` runs. Each iteration is bracketed by its
@@ -1967,8 +1942,7 @@ mod tests {
     //   - `FRAC_ROUND` — outer-round index `j` (default 12); pq_size at round start = `2 << j`.
     //   - `NSYS_ENABLED=1` — flip on the `cudaProfilerStart/Stop` + NVTX push/pop calls (no-op
     //     otherwise, so unattended `cargo nextest` runs still time cleanly).
-    //   - `CC_FUSION=v2` — v2 fusion (v1 is deprecated). Other `cc_compiler` knobs (`CC_STREAMS`,
-    //     `CC_FUSION_SOLVER_SECS`, etc.) flow through as usual.
+    //   - `cc_compiler` knobs (`CC_STREAMS`, `CC_FUSION_SOLVER_SECS`, etc.) flow through as usual.
     //
     // Output registration: every s-poly BufId (`round_polys[i][k]` for `i ∈ 0..j`, `k ∈ 0..3`) and
     // every Fiat-Shamir sample `r_vec[i]` is `register_output`-ed directly — no post-driver
@@ -1976,7 +1950,7 @@ mod tests {
     // The graph runtime keeps registered BufIds live at their producing kernels' output slots.
     //
     // Recommended nsys invocation (matches the AGENTS.md profiling rules):
-    //   NSYS_ENABLED=1 CC_FUSION=v2 FRAC_ROUND=12 \
+    //   NSYS_ENABLED=1 FRAC_ROUND=12 \
     //     nsys profile --capture-range=cudaProfilerApi \
     //       --cuda-graph-trace=node --gpu-metrics-devices=visible \
     //       --trace=cuda,nvtx -o pipelined_bench \
@@ -2098,14 +2072,14 @@ mod tests {
         let t_compile = Instant::now();
         let mut exe: GraphExe = cc_compiler(device).compile(g).expect("graph compile");
         let compile_ms = t_compile.elapsed().as_secs_f64() * 1e3;
-        if let Some(v2) = exe.fusion_report().and_then(|r| r.v2.as_ref()) {
+        if let Some(r) = exe.fusion_report() {
             println!(
-                "fusion v2: nodes {} -> {}, inserted={}, selected={}, fallback={:?}",
-                v2.nodes_before,
-                v2.nodes_after,
-                v2.candidates_inserted,
-                v2.selected_from_solver,
-                v2.fallback_reason,
+                "fusion: nodes {} -> {}, inserted={}, selected={}, fallback={:?}",
+                r.nodes_before,
+                r.nodes_after,
+                r.candidates_inserted,
+                r.selected_from_solver,
+                r.fallback_reason,
             );
         }
         println!(
@@ -2321,12 +2295,11 @@ mod tests {
     // Env vars:
     //   - `FRAC_LOG_N` — comma-separated log2(leaf count), first entry taken (default 16).
     //   - `NSYS_ENABLED=1` — flip on the profiler + NVTX calls.
-    //   - `CC_FUSION=v2` — v2 fusion (v1 is deprecated; always run with v2). Other `cc_compiler`
-    //     knobs (`CC_STREAMS`, `CC_FUSION_SOLVER_SECS`, `CC_FUSION_MAX_ALTS`, etc.) flow through
-    //     as usual.
+    //   - `cc_compiler` knobs (`CC_STREAMS`, `CC_FUSION_SOLVER_SECS`, `CC_FUSION_MAX_ALTS`, etc.)
+    //     flow through as usual.
     //
     // Recommended nsys invocation (per AGENTS.md):
-    //   NSYS_ENABLED=1 CC_FUSION=v2 FRAC_LOG_N=16 \
+    //   NSYS_ENABLED=1 FRAC_LOG_N=16 \
     //     nsys profile --capture-range=cudaProfilerApi \
     //       --cuda-graph-trace=node --gpu-metrics-devices=cuda-visible \
     //       --trace=cuda,nvtx -o pipelined_full_bench \
@@ -2465,14 +2438,14 @@ mod tests {
         let t_compile = Instant::now();
         let mut exe: GraphExe = cc_compiler(device).compile(g).expect("graph compile");
         let compile_ms = t_compile.elapsed().as_secs_f64() * 1e3;
-        if let Some(v2) = exe.fusion_report().and_then(|r| r.v2.as_ref()) {
+        if let Some(r) = exe.fusion_report() {
             println!(
-                "fusion v2: nodes {} -> {}, inserted={}, selected={}, fallback={:?}",
-                v2.nodes_before,
-                v2.nodes_after,
-                v2.candidates_inserted,
-                v2.selected_from_solver,
-                v2.fallback_reason,
+                "fusion: nodes {} -> {}, inserted={}, selected={}, fallback={:?}",
+                r.nodes_before,
+                r.nodes_after,
+                r.candidates_inserted,
+                r.selected_from_solver,
+                r.fallback_reason,
             );
         }
         println!(
@@ -2669,10 +2642,9 @@ mod tests {
     // Env vars:
     //   - `FRAC_ROUNDS` — comma-separated `j` values (default `"4,10,16,20,24"`).
     //   - `NSYS_ENABLED=1` — flip on the profiler + NVTX calls.
-    //   - `CC_FUSION=v2` — v2 fusion (v1 is deprecated).
     //
     // Recommended nsys invocation:
-    //   NSYS_ENABLED=1 CC_FUSION=v2 FRAC_ROUNDS=4,10,16,20,24 \
+    //   NSYS_ENABLED=1 FRAC_ROUNDS=4,10,16,20,24 \
     //     nsys profile --capture-range=cudaProfilerApi \
     //       --cuda-graph-trace=node --gpu-metrics-devices=cuda-visible \
     //       --trace=cuda,nvtx -o pipelined_sweep \
@@ -2820,15 +2792,15 @@ mod tests {
             let t_compile = Instant::now();
             let mut exe: GraphExe = cc_compiler(device).compile(g).expect("graph compile");
             let compile_ms = t_compile.elapsed().as_secs_f64() * 1e3;
-            if let Some(v2) = exe.fusion_report().and_then(|r| r.v2.as_ref()) {
+            if let Some(r) = exe.fusion_report() {
                 println!(
-                    "[setup j={j}] fusion v2: nodes {} -> {}, inserted={}, selected={}, \
+                    "[setup j={j}] fusion: nodes {} -> {}, inserted={}, selected={}, \
                      fallback={:?}",
-                    v2.nodes_before,
-                    v2.nodes_after,
-                    v2.candidates_inserted,
-                    v2.selected_from_solver,
-                    v2.fallback_reason,
+                    r.nodes_before,
+                    r.nodes_after,
+                    r.candidates_inserted,
+                    r.selected_from_solver,
+                    r.fallback_reason,
                 );
             }
             println!(
@@ -2985,11 +2957,10 @@ mod tests {
     // Env vars:
     //   - `FRAC_LOG_N` — comma-separated log2(leaf count) (default `16,20,24`).
     //   - `NSYS_ENABLED=1` — enable the profiler + NVTX calls.
-    //   - `CC_FUSION=v2` — v2 fusion (v1 deprecated).
     //   - `CC_SCHEDULER={list_v1,list_v2}` — flow through cc_scheduler_mode.
     //
     // Recommended nsys invocation:
-    //   NSYS_ENABLED=1 CC_FUSION=v2 FRAC_LOG_N=16,20,24 \
+    //   NSYS_ENABLED=1 FRAC_LOG_N=16,20,24 \
     //     nsys profile --capture-range=cudaProfilerApi \
     //       --cuda-graph-trace=node --gpu-metrics-devices=cuda-visible \
     //       --trace=cuda,nvtx -o pipelined_full_sweep \
@@ -3126,10 +3097,10 @@ mod tests {
             let t_compile = Instant::now();
             let mut ir_exe: GraphExe = cc_compiler(device).compile(g).expect("compile ir");
             let ir_compile_ms = t_compile.elapsed().as_secs_f64() * 1e3;
-            if let Some(v2) = ir_exe.fusion_report().and_then(|r| r.v2.as_ref()) {
+            if let Some(r) = ir_exe.fusion_report() {
                 println!(
-                    "[setup log_n={log_n} ir] fusion v2: {} -> {} nodes, selected={}",
-                    v2.nodes_before, v2.nodes_after, v2.selected_from_solver,
+                    "[setup log_n={log_n} ir] fusion: {} -> {} nodes, selected={}",
+                    r.nodes_before, r.nodes_after, r.selected_from_solver,
                 );
             }
             println!(
@@ -3209,10 +3180,10 @@ mod tests {
             let t_compile = Instant::now();
             let mut pipe_exe: GraphExe = cc_compiler(device).compile(g).expect("compile pipe");
             let pipe_compile_ms = t_compile.elapsed().as_secs_f64() * 1e3;
-            if let Some(v2) = pipe_exe.fusion_report().and_then(|r| r.v2.as_ref()) {
+            if let Some(r) = pipe_exe.fusion_report() {
                 println!(
-                    "[setup log_n={log_n} pipe] fusion v2: {} -> {} nodes, selected={}",
-                    v2.nodes_before, v2.nodes_after, v2.selected_from_solver,
+                    "[setup log_n={log_n} pipe] fusion: {} -> {} nodes, selected={}",
+                    r.nodes_before, r.nodes_after, r.selected_from_solver,
                 );
             }
             println!(

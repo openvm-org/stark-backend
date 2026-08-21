@@ -14,12 +14,12 @@
 
 use std::collections::{BTreeSet, HashSet};
 
-use crate::passes::fusion_v2::{
+use crate::passes::fusion::{
     cost::ArtifactKey,
     model::{NodeId, ValueClassId},
 };
 
-/// Sidecar state for one `fuse_graph_v2` invocation. Owned by the
+/// Sidecar state for one `fuse_graph` invocation. Owned by the
 /// driver and threaded through every fusion-pass call in the current
 /// round.
 ///

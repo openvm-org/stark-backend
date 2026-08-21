@@ -21,7 +21,7 @@ use crate::{
     kernel_ir::{KBound, KirProgram, SSAOpCode},
     module_compiler::ModuleCompiler,
     passes::{
-        fusion_v2::cost::{
+        fusion::cost::{
             interpreter::{interpret, CriticalPath, InterpLatencies, OpLatencyTable},
             liveness::{estimate_registers, RegisterEstimate},
             transactions::{estimate_access, is_global, AccessSampleCfg},

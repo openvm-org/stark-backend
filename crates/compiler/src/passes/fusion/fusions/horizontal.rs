@@ -55,7 +55,7 @@ use crate::{
     module_hash::children_of,
     passes::{
         fusion_utils::clone_expr_with_params,
-        fusion_v2::{
+        fusion::{
             fusions::producer_consumer::{
                 find_input_nodes, identify_kernel_shape, remap_size_expr, CandidateDraft,
                 EnumerateContext, FusionVariant, KernelShape,
@@ -108,7 +108,7 @@ pub fn enumerate(gf: &GraphFuser, ctx: &EnumerateContext) -> Vec<CandidateDraft>
         .collect();
     if debug >= 1 {
         let eligible = elig.iter().filter(|e| e.is_some()).count();
-        eprintln!("[fusion-v2-debug] horizontal: eligible={eligible}/{frozen} nodes");
+        eprintln!("[fusion-debug] horizontal: eligible={eligible}/{frozen} nodes");
     }
     // One parallel task per row `a`; the inner `b` loop stays
     // sequential within the task (rayon work-stealing balances the

@@ -121,8 +121,8 @@ use crate::{
     module_hash::module_hash,
     passes::{
         check_accesses::check_module_accesses,
-        fusion::{fuse_graph, FusionOptions, FusionReport},
-        fusion_v2::{fuse_graph_v2, FusionOptionsV2},
+        fusion_utils::{dce, FusionReport},
+        fusion::{fuse_graph, FusionOptions},
         type_infer,
     },
     planner::{
@@ -162,18 +162,9 @@ pub struct GraphCompiler {
     /// compilation entirely. `None` disables the cache. Defaults to a shared
     /// `~/.openvm/kernel_cache` with the [`KernelCache`] defaults.
     kernel_cache: Option<Arc<KernelCache>>,
-    /// Kernel-fusion strategy; `None` disables the pass. Defaults to the
-    /// existing implementation with [`FusionOptions::default`].
-    fusion: Option<FusionStrategy>,
-}
-
-/// Which kernel-fusion implementation [`GraphCompiler::fuse`] runs
-/// (plan v2 §16). The existing pass stays the default; v2 is selected
-/// explicitly via [`GraphCompiler::fusion_v2_options`] until the plan's
-/// §21 completion criteria flip the default.
-enum FusionStrategy {
-    Existing(FusionOptions),
-    V2(Box<FusionOptionsV2>),
+    /// Kernel-fusion options; `None` disables the pass. Defaults to
+    /// [`FusionOptions::default`].
+    fusion: Option<Box<FusionOptions>>,
 }
 
 impl Default for GraphCompiler {
@@ -191,7 +182,7 @@ impl GraphCompiler {
             scheduler: SchedulerMode::default(),
             node_times: None,
             kernel_cache: Some(Arc::new(KernelCache::new())),
-            fusion: Some(FusionStrategy::Existing(FusionOptions::default())),
+            fusion: Some(Box::new(FusionOptions::default())),
         }
     }
 
@@ -301,29 +292,18 @@ impl GraphCompiler {
         self
     }
 
-    /// Overrides the kernel-fusion tunables and selects the existing
-    /// fusion implementation (the default). The pass runs with
-    /// [`FusionOptions::default`] unless disabled via [`Self::without_fusion`].
-    pub fn fusion_options(mut self, opts: FusionOptions) -> Self {
-        self.fusion = Some(FusionStrategy::Existing(opts));
-        self
-    }
-
-    /// Selects the opt-in fusion v2 pipeline
-    /// ([`fuse_graph_v2`](crate::passes::fusion_v2::fuse_graph_v2)) instead
-    /// of the existing pass. Symbol bindings registered via
-    /// [`Self::symbol`] are merged into `opts.graph_symbols` at fuse time,
-    /// overriding any caller-set bindings for the same symbol — the
-    /// compiler's `env` is authoritative because memory planning and size
-    /// evaluation already use it.
+    /// Overrides the kernel-fusion tunables. Symbol bindings registered
+    /// via [`Self::symbol`] are merged into `opts.graph_symbols` at fuse
+    /// time, overriding any caller-set bindings for the same symbol —
+    /// the compiler's `env` is authoritative because memory planning
+    /// and size evaluation already use it.
     ///
-    /// Without the `planner-ortools` feature, v2 still enumerates and
-    /// cost-ranks candidates but extraction is limited to the brute-force
-    /// extractor (small graphs) or the original graph with
-    /// [`FallbackReason::SolverUnavailable`](crate::passes::fusion_v2::FallbackReason) —
-    /// it never silently runs the existing implementation.
-    pub fn fusion_v2_options(mut self, opts: FusionOptionsV2) -> Self {
-        self.fusion = Some(FusionStrategy::V2(Box::new(opts)));
+    /// Without the `planner-ortools` feature, the fusion pass still
+    /// enumerates and cost-ranks candidates but extraction is limited to
+    /// the brute-force extractor (small graphs) or the original graph with
+    /// [`FallbackReason::SolverUnavailable`](crate::passes::fusion::FallbackReason).
+    pub fn fusion_options(mut self, opts: FusionOptions) -> Self {
+        self.fusion = Some(Box::new(opts));
         self
     }
 
@@ -335,7 +315,7 @@ impl GraphCompiler {
     }
 
     /// Builds a `GraphCompiler` from a serialized [`GraphCompilerConfig`].
-    /// Fields outside the TOML surface (symbol bindings, fusion-v2
+    /// Fields outside the TOML surface (symbol bindings, fusion
     /// estimator / artifact / graph_symbols) are left at their builder
     /// defaults; callers that need them keep using the builder setters on
     /// top of the returned compiler.
@@ -375,8 +355,7 @@ impl GraphCompiler {
         // Fusion strategy.
         compiler = match fusion {
             FusionConfig::Off => compiler.without_fusion(),
-            FusionConfig::V1(v1) => compiler.fusion_options(v1.into()),
-            FusionConfig::V2(v2) => compiler.fusion_v2_options(v2.to_options()),
+            FusionConfig::On(cfg) => compiler.fusion_options(cfg.to_options()),
         };
 
         compiler
@@ -663,31 +642,22 @@ impl GraphCompiler {
     /// `canonicalize` + `monomorphize` to re-normalize and block-hint the
     /// fused outputs.
     ///
-    /// Returns the [`FusionReport`] from `fuse_graph`, or `None` when
-    /// fusion is disabled. When [`Self::fusion_v2_options`] selected the
-    /// v2 pipeline, the returned report carries only
-    /// `nodes_before`/`nodes_after` of the v1 fields and embeds the full
-    /// [`FusionReportV2`](crate::passes::fusion_v2::FusionReportV2) in
-    /// [`FusionReport::v2`] (plan §15).
+    /// Returns the [`FusionReport`] from the fusion pass, or `None`
+    /// when fusion is disabled.
     pub fn fuse(&self, g: &mut GraphBuilder) -> Result<Option<FusionReport>, CompileError> {
         self.lower_reduce(g)?;
         self.monomorphize(g)?;
         self.canonicalize(g)?;
         let report = match &self.fusion {
             None => None,
-            Some(FusionStrategy::Existing(opts)) => Some(fuse_graph(g, opts)?),
-            Some(FusionStrategy::V2(opts)) => {
+            Some(opts) => {
                 let mut opts = opts.as_ref().clone();
                 opts.graph_symbols
                     .extend(self.env.iter().map(|(k, v)| (*k, *v)));
-                let v2 = fuse_graph_v2(g, &opts)
-                    .map_err(|e| CompileError::Verify(format!("fusion v2: {e}")))?;
-                Some(FusionReport {
-                    nodes_before: v2.nodes_before,
-                    nodes_after: v2.nodes_after,
-                    v2: Some(v2),
-                    ..FusionReport::default()
-                })
+                Some(
+                    fuse_graph(g, &opts)
+                        .map_err(|e| CompileError::Verify(format!("fusion: {e}")))?,
+                )
             }
         };
 
@@ -698,11 +668,11 @@ impl GraphCompiler {
     }
 
     /// Drops kernel nodes whose outputs no live node reads. Wraps
-    /// [`fusion::dce`](crate::passes::fusion::dce) and resets `g.plan`
-    /// on removal (structural mutation invalidates the memory plan).
-    /// Returns the number of nodes removed.
+    /// [`fusion_utils::dce`](crate::passes::fusion_utils::dce) and
+    /// resets `g.plan` on removal (structural mutation invalidates the
+    /// memory plan). Returns the number of nodes removed.
     pub fn dce(&self, g: &mut GraphBuilder) -> usize {
-        let removed = crate::passes::fusion::dce(g);
+        let removed = dce(g);
         if removed > 0 {
             g.plan = None;
         }
@@ -796,7 +766,7 @@ impl GraphCompiler {
     ///
     /// Callers therefore use the hook to serialize the post-fuse+dce
     /// `GraphBuilder` (see [`crate::graph_serializer`]) without having
-    /// to re-run fusion themselves — the fusion-v2 solver isn't
+    /// to re-run fusion themselves — the fusion solver isn't
     /// deterministic under multi-worker CP-SAT, so a re-fused graph
     /// may pick a different solution and shift node indices.
     pub fn compile_with_post_fuse_hook<F>(
