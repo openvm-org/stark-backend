@@ -134,10 +134,6 @@ impl ModuleCompilerConfig {
 pub enum SchedulerConfig {
     ListV1(ListSchedulerV1Config),
     ListV2(ListSchedulerV2Config),
-    #[cfg(feature = "planner-ortools")]
-    CpSat {
-        max_secs: f64,
-    },
 }
 
 impl Default for SchedulerConfig {
@@ -151,8 +147,6 @@ impl From<SchedulerConfig> for SchedulerMode {
         match cfg {
             SchedulerConfig::ListV1(v) => SchedulerMode::ListV1 { params: v.into() },
             SchedulerConfig::ListV2(v) => SchedulerMode::ListV2 { params: v.into() },
-            #[cfg(feature = "planner-ortools")]
-            SchedulerConfig::CpSat { max_secs } => SchedulerMode::CpSat { max_secs },
         }
     }
 }
@@ -195,7 +189,6 @@ impl From<ListSchedulerV1Config> for ListSchedulerV1 {
             w_cp: c.w_cp,
             w_mem: c.w_mem,
             mem_target_frac: c.mem_target_frac,
-            node_times: Vec::new(),
         }
     }
 }
@@ -240,7 +233,6 @@ impl From<ListSchedulerV2Config> for ListSchedulerV2 {
             w_m: c.w_m,
             w_t: c.w_t,
             w_c: c.w_c,
-            node_times: Vec::new(),
         }
     }
 }
