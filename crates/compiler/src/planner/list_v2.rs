@@ -11,7 +11,7 @@ use crate::{
     graph_ir::{BufId, DeviceType},
     planner::{
         plan::{StreamInstr, StreamMemoryPlan},
-        AbstractTimingGraph, PlanError,
+        AbstractTimingGraph, NodeId, PlanError,
     },
 };
 
@@ -22,7 +22,7 @@ fn bottom_levels(g: &AbstractTimingGraph) -> Vec<f64> {
     let n = g.num_nodes;
     // Successor list from `buf_producers` / `buf_users`: v's successors
     // are the nodes that consume any buf v produces.
-    let mut succ: Vec<Vec<usize>> = vec![Vec::new(); n];
+    let mut succ: Vec<Vec<NodeId>> = vec![Vec::new(); n];
     for v in 0..n {
         for &bid in &g.node_produces[v] {
             if let Some(users) = g.buf_users.get(&bid) {
@@ -42,9 +42,9 @@ fn bottom_levels(g: &AbstractTimingGraph) -> Vec<f64> {
             indeg[u] += 1;
         }
     }
-    let mut ready: Vec<usize> = (0..n).filter(|&v| indeg[v] == 0).collect();
+    let mut ready: Vec<NodeId> = (0..n).filter(|&v| indeg[v] == 0).collect();
     let mut cur = 0;
-    let mut fwd = Vec::with_capacity(n);
+    let mut fwd: Vec<NodeId> = Vec::with_capacity(n);
     while cur < ready.len() {
         let v = ready[cur];
         cur += 1;
@@ -114,12 +114,12 @@ struct ScheduleState<'a> {
     /// when the last remaining consumer schedules. Graph inputs are
     /// *not* tracked here — their memory sits outside the scheduler's
     /// budget (matches the pre-refactor `cur_mem_used = 0` at init).
-    live_bufs: ImHashMap<BufId, ImHashSet<usize>>,
+    live_bufs: ImHashMap<BufId, ImHashSet<NodeId>>,
     /// Nodes that have been placed → stream index. Grows one entry
     /// per `put_on` call.
-    stream_of: ImHashMap<usize, usize>,
+    stream_of: ImHashMap<NodeId, usize>,
     stream_end_t: Vec<f64>,
-    ready_queue: ImHashSet<usize>,
+    ready_queue: ImHashSet<NodeId>,
     /// Lazy-grown counter: entries appear only when a producer of one
     /// of `v`'s reads schedules for the first time (initial value =
     /// `initial_deps[v] - 1`), decrement on subsequent producers, and
@@ -129,13 +129,20 @@ struct ScheduleState<'a> {
     /// buf_producers.contains_key(bid) }|` — the number of reads
     /// with an external producer. Nodes with `initial_deps == 0` are
     /// initially ready and never touch this map.
-    remaining_deps: ImHashMap<usize, usize>,
+    remaining_deps: ImHashMap<NodeId, usize>,
     /// Placed nodes → simulated start time on their assigned stream.
     /// Grows one entry per `put_on` call.
-    node_start_times: ImHashMap<usize, f64>,
+    node_start_times: ImHashMap<NodeId, f64>,
     /// Immutable per-node initial dep count (see [`remaining_deps`]).
     /// Precomputed once and shared across every state via `Arc`.
     initial_deps: Arc<Vec<usize>>,
+    /// Per-buf flag (indexed by [`BufId::0`]): `true` iff some node has
+    /// this buf in both `node_consumes` and `node_produces` (an
+    /// in-place carrier exists). Mutated bufs are tracked via the
+    /// ATG's synthetic ordering-edge buffers, so `initial_deps`
+    /// excludes them and the produce-side consumer decrement chain
+    /// skips them.
+    mutated_bufs: Arc<Vec<bool>>,
     /// Immutable per-node bottom-level (longest downstream chain
     /// length). Shared across every state via `Arc` — clone is a
     /// refcount bump.
@@ -183,17 +190,33 @@ impl<'a> ScheduleState<'a> {
             .fold(0.0f64, f64::max)
             .max(f64::MIN_POSITIVE);
 
-        // Under SSA every consumed buf has either a real external
-        // producer or no producer at all (graph input) — a node never
-        // produces something it consumes. So the initial dep count
-        // collapses to `|{ bid ∈ node_consumes[v] :
-        // buf_producers.contains_key(bid) }|` (no self-producer
-        // filter needed).
+        // `mutated_bufs[b]` = true iff some node has BufId(b) in both
+        // `node_consumes` and `node_produces` (an in-place carrier).
+        // Derived from `output_aliased` in one pass over
+        // `node_produces`. Synthetic ordering-edge bufs are always
+        // single-writer non-aliased, so `mutated_bufs[synth] = false`.
+        let mut mutated_bufs = vec![false; g.buf_info.len()];
+        for v in 0..g.num_nodes {
+            for (i, bid) in g.node_produces[v].iter().enumerate() {
+                if g.output_aliased[v][i] {
+                    mutated_bufs[bid.0] = true;
+                }
+            }
+        }
+
+        // Initial dep count excludes mutated bufs: for a mutated buf
+        // the ATG emits synthetic ordering-edge bufs from every writer
+        // to every later user, so the dep chain is carried by the
+        // synthetics — counting the mutated buf itself would
+        // double-count and (worse) require a decrement from a
+        // downstream carrier that never fires (the produce loop
+        // skips mutated bufs).
         let initial_deps: Vec<usize> = (0..g.num_nodes)
             .map(|v| {
                 g.node_consumes[v]
                     .iter()
                     .filter(|bid| g.buf_producers.contains_key(bid))
+                    .filter(|bid| !mutated_bufs[bid.0])
                     .count()
             })
             .collect();
@@ -204,21 +227,61 @@ impl<'a> ScheduleState<'a> {
         // proportional to the "active frontier" (nodes whose deps
         // are partially resolved) rather than to all unscheduled
         // nodes.
-        let remaining_deps: ImHashMap<usize, usize> = ImHashMap::new();
+        let remaining_deps: ImHashMap<NodeId, usize> = ImHashMap::new();
 
-        let ready_queue: ImHashSet<usize> = g.inital_ready_nodes.iter().cloned().collect();
+        // Nodes with `initial_deps == 0` are roots: they have no
+        // non-mutated consumes with an external producer, so nothing
+        // will ever decrement them. This includes:
+        //   * Pure sources (Const, node with no consumes).
+        //   * The earliest user of a mutation chain (later users
+        //     carry synthetic `__ord_<earlier>` bufs in their
+        //     consumes; the earliest one doesn't, since the ATG
+        //     only emits synthetic edges `v → v1` with `v < v1`).
+        //   * Nodes whose non-mutated consumes are all graph inputs
+        //     (no producer to wait on).
+        // The ATG's `inital_ready_nodes` uses the stricter
+        // "all consumes are graph inputs" check and thus omits the
+        // first-user-of-a-mutation-chain roots; we bypass it here.
+        let ready_queue: ImHashSet<NodeId> = (0..g.num_nodes)
+            .filter(|&v| initial_deps[v] == 0)
+            .collect();
+
+        // Pre-populate `live_bufs` with graph inputs: their storage
+        // exists from time zero, and downstream consumers (including
+        // carriers reading the input as a fake read to encode WAR
+        // ordering) need to find the entry to correctly remove
+        // themselves from the consumer set and eventually free the
+        // slot. Graph inputs contribute their bytes to `cur_mem_used`
+        // so peak accounting reflects live storage; the killed-bytes
+        // path when the last consumer schedules brings the tally back
+        // down.
+        let mut live_bufs: ImHashMap<BufId, ImHashSet<NodeId>> = ImHashMap::new();
+        let mut cur_mem_used: usize = 0;
+        for &input_bid in &g.inputs {
+            let consumers: ImHashSet<NodeId> = g
+                .buf_users
+                .get(&input_bid)
+                .map(|users| users.iter().copied().collect())
+                .unwrap_or_default();
+            if !consumers.is_empty() {
+                cur_mem_used += g.buf_info[input_bid.0].concrete_size;
+                live_bufs.insert(input_bid, consumers);
+            }
+        }
+        let max_peak_mem = cur_mem_used;
 
         ScheduleState {
-            cur_mem_used: 0,
-            max_peak_mem: 0,
+            cur_mem_used,
+            max_peak_mem,
             cur_max_time: 0.0,
-            live_bufs: ImHashMap::new(),
+            live_bufs,
             stream_of: ImHashMap::new(),
             stream_end_t: vec![0.0; streams],
             ready_queue,
             remaining_deps,
             node_start_times: ImHashMap::new(),
             initial_deps: Arc::new(initial_deps),
+            mutated_bufs: Arc::new(mutated_bufs),
             bl: Arc::new(bl),
             s_norm,
             b_norm,
@@ -234,35 +297,44 @@ impl<'a> ScheduleState<'a> {
     /// Kahn's topological sort. Ties (multiple ready nodes on the
     /// same stream) are broken by lowest node id — deterministic and
     /// good enough for downstream lifetime accounting.
-    fn per_stream_orders(&self) -> Vec<Vec<usize>> {
+    ///
+    /// Mirrors [`ScheduleState::new`]'s dep model: `remaining[v]`
+    /// counts only *non-mutated* consumed bufs with a producer.
+    /// Mutation chains are ordered via the ATG's synthetic edges (a
+    /// separate BufId per producer, which *is* non-mutated), so
+    /// the topological pass sees exactly one incoming edge per
+    /// synthetic per consumer. Ready-seed is `remaining[v] == 0`
+    /// — this includes mutation-chain roots that the ATG's
+    /// stricter `inital_ready_nodes` predicate misses.
+    fn per_stream_orders(&self) -> Vec<Vec<NodeId>> {
         let g = self.g;
         let n_streams = self.stream_end_t.len();
-        let mut orders: Vec<Vec<usize>> = vec![Vec::new(); n_streams];
+        let mut orders: Vec<Vec<NodeId>> = vec![Vec::new(); n_streams];
         let mut remaining: Vec<usize> = (0..g.num_nodes)
             .map(|v| {
                 g.node_consumes[v]
                     .iter()
-                    .filter(|bid| {
-                        g.buf_producers
-                            .get(bid)
-                            .map(|ps| ps.iter().any(|&p| p != v))
-                            .unwrap_or(false)
-                    })
+                    .filter(|bid| g.buf_producers.contains_key(bid))
+                    .filter(|bid| !self.mutated_bufs[bid.0])
                     .count()
             })
             .collect();
-        let mut ready: HashSet<usize> = g.inital_ready_nodes.iter().copied().collect();
+        let mut ready: HashSet<NodeId> = (0..g.num_nodes)
+            .filter(|&v| remaining[v] == 0)
+            .collect();
         while !ready.is_empty() {
             let v = *ready.iter().min().expect("ready non-empty");
             ready.remove(&v);
             orders[*self.stream_of.get(&v).unwrap_or(&0)].push(v);
             for &bid in &g.node_produces[v] {
+                if self.mutated_bufs[bid.0] {
+                    continue;
+                }
                 if let Some(users) = g.buf_users.get(&bid) {
                     for &u in users {
                         if u == v {
                             continue;
                         }
-                        // Only decrement for consumers (u reads bid, u ≠ producer).
                         if g.node_consumes[u].contains(&bid) && remaining[u] > 0 {
                             remaining[u] -= 1;
                             if remaining[u] == 0 {
@@ -425,7 +497,7 @@ impl<'a> ScheduleState<'a> {
         // (2a) A producer needs an event iff any of its outputs is
         // consumed by a node on a *different* stream. Assign event ids
         // in visit order for determinism.
-        let mut producer_event: HashMap<usize, u32> = HashMap::new();
+        let mut producer_event: HashMap<NodeId, u32> = HashMap::new();
         for v in 0..n_nodes {
             if node_pos_in_stream[v] == usize::MAX {
                 continue;
@@ -470,11 +542,33 @@ impl<'a> ScheduleState<'a> {
 
                 // Cross-stream data-dep readiness check + collect the
                 // set of syncs we'd need if we dispatch v now.
+                //
+                // For a mutated bid the direct `buf_producers` list
+                // contains every writer in the chain — waiting for
+                // all of them cross-stream is both wrong (we only
+                // need the writers that precede v semantically) and
+                // over-constraining (later writers of the chain
+                // would have to emit before v). The ATG's synthetic
+                // ordering-edge bufs already encode the precise
+                // "wait for `__ord_<earlier writer>`" as a
+                // single-writer SSA-clean bid in v's consumes, so
+                // the sync check via *those* is both necessary and
+                // sufficient. Skip mutated bufs here.
                 let mut needed: HashMap<usize, (u32, i64)> = HashMap::new();
                 let mut ready = true;
                 for &bid in &g.node_consumes[v] {
                     if let Some(prods) = g.buf_producers.get(&bid) {
                         for &p_node in prods {
+                            // For a mutated buf, only sync with
+                            // writers that precede `v` in node-id
+                            // order — the ATG's synth-edge direction.
+                            // Later writers (WAR successors) don't
+                            // affect `v`'s reads, and requiring their
+                            // events would deadlock the interleaved
+                            // emission (they haven't emitted yet).
+                            if self.mutated_bufs[bid.0] && p_node > v {
+                                continue;
+                            }
                             let s_p = *self.stream_of.get(&p_node).unwrap_or(&0);
                             if s_p == s {
                                 continue;
@@ -630,8 +724,16 @@ impl<'a> ScheduleState<'a> {
     /// feasibility filter — the beam-search discards these).
     /// Otherwise:
     ///   `cost = w_m * mem_delta / M  +  w_t * time_cost / S  +  w_c * bl[node] / B`
-    fn cost(&self, node: usize, on_stream: usize) -> f64 {
+    fn cost(&self, node: NodeId, on_stream: usize) -> f64 {
+        // Track both `max_producer_end_t` (for time_cost) and the
+        // stream of the *latest* predecessor. The latter is the
+        // "chain predecessor" — placing `node` on its stream avoids
+        // a cross-stream WaitOn and keeps a chain of dependent
+        // nodes on one stream. Used as a tiebreaker below to spread
+        // *independent* chains across streams while keeping each
+        // chain co-located (mirrors `list_v1`'s stream picker).
         let mut max_producer_end_t = 0.0;
+        let mut pred_stream: Option<usize> = None;
         for bid in self.g.node_consumes[node].iter() {
             if let Some(prods) = self.g.buf_producers.get(bid) {
                 for n in prods {
@@ -639,36 +741,73 @@ impl<'a> ScheduleState<'a> {
                     let end_t = start + self.g.node_times[*n];
                     if end_t > max_producer_end_t {
                         max_producer_end_t = end_t;
+                        pred_stream = self.stream_of.get(n).copied();
                     }
                 }
             }
         }
-        let time_cost = max_producer_end_t.max(self.stream_end_t[on_stream]) - self.cur_max_time;
+        // v1-style ranking: score by *projected total makespan* if
+        // this node is placed on `on_stream`.
+        //   est_start   = max(latest-input-ready, this-stream-free)
+        //   est_finish  = est_start + rt[node]
+        //   projected   = bl[node] + est_finish
+        // This inherently couples the critical-path length with the
+        // current-state timing, so a gap-fill that lies on the
+        // critical path is preferred over one that isn't. Contrast
+        // with the marginal `time_cost` we used before, which was
+        // stream-relative and blind to remaining downstream length.
+        let est_start = max_producer_end_t.max(self.stream_end_t[on_stream]);
+        let est_finish = est_start + self.g.node_times[node];
+        let projected = self.bl[node] + est_finish;
 
-        let mut killed_bytes: i64 = 0;
+        // Chain-affinity tiebreaker: prefer the chain predecessor's
+        // stream. Coefficient is O(1e-9), dominated by any
+        // legitimate difference in the main cost terms but strictly
+        // resolves same-cost stream choices.
+        let chain_bonus = match pred_stream {
+            Some(s) if s == on_stream => -1e-9,
+            _ => 0.0,
+        };
+
         let mut produced_bytes: i64 = 0;
-        for bid in self.g.node_consumes[node].iter() {
-            if let Some(set) = self.live_bufs.get(bid) {
-                if set.len() == 1 && set.contains(&node) {
-                    killed_bytes += self.g.buf_info[bid.0].concrete_size as i64;
-                }
+        // Aliased (in-place) outputs reuse an input's storage — they
+        // contribute zero new bytes. Skip them so the M-bound
+        // feasibility check doesn't spuriously reject carriers.
+        for (i, bid) in self.g.node_produces[node].iter().enumerate() {
+            if self.g.output_aliased[node][i] {
+                continue;
             }
-        }
-        for bid in self.g.node_produces[node].iter() {
             produced_bytes += self.g.buf_info[bid.0].concrete_size as i64;
         }
-        let mem_delta = produced_bytes - killed_bytes;
 
         if (self.cur_mem_used as i64) + produced_bytes > self.m_bound as i64 {
             return f64::INFINITY;
         }
 
-        self.w_m * (mem_delta as f64) / (self.m_bound as f64)
-            + self.w_t * time_cost / self.s_norm
+        // v1-style mem penalty: one-sided ReLU above the target
+        // fraction. We reuse `m_bound` as the hard cap and set the
+        // target at `w_m * m_bound` — i.e., interpret `w_m` as
+        // `mem_target_frac` here (backwards-compat with existing
+        // knobs). If `w_m` is 0 or 1 this collapses to "penalise
+        // exceeding the cap" and "no penalty".
+        let mem_after = (self.cur_mem_used as i64 + produced_bytes).max(0) as u64;
+        let target = if self.m_bound == usize::MAX {
+            u64::MAX
+        } else {
+            (self.m_bound as f64 * self.w_m.clamp(0.0, 1.0)) as u64
+        };
+        let mem_pen = mem_after.saturating_sub(target) as f64;
+
+        // `w_t` acts as v1's `w_cp` (weight on projected makespan);
+        // `w_c` is kept as an *additional* pure bl bias so callers
+        // can still tune critical-path priority independently.
+        self.w_t * projected / self.s_norm
             + self.w_c * self.bl[node] / self.b_norm
+            + mem_pen / (self.m_bound as f64).max(1.0)
+            + chain_bonus
     }
 
-    fn put_on(&mut self, node: usize, on_stream: usize) {
+    fn put_on(&mut self, node: NodeId, on_stream: usize) {
         let mut max_producer_end_t = 0.0;
         for bid in self.g.node_consumes[node].iter() {
             if let Some(prods) = self.g.buf_producers.get(bid) {
@@ -709,16 +848,44 @@ impl<'a> ScheduleState<'a> {
 
         // Produce: each newly-produced buf enters `live_bufs` with the
         // set of its unscheduled readers (from `g.buf_users` minus
-        // `node` itself, the writer under SSA). Each such reader has
-        // one fewer unresolved dep — first visit inserts
-        // `initial_deps[c] - 1`; subsequent visits decrement the
-        // existing counter. When a count reaches 0 the node moves
-        // into `ready_queue`. This lazy growth keeps `remaining_deps`
-        // proportional to the active dep-partial-resolution frontier
-        // rather than to all unscheduled nodes.
-        for bid in self.g.node_produces[node].iter() {
-            produced_bytes += self.g.buf_info[bid.0].concrete_size;
-            let consumers: ImHashSet<usize> = self
+        // `node` itself). Each such reader has one fewer unresolved
+        // dep — first visit inserts `initial_deps[c] - 1`; subsequent
+        // visits decrement the existing counter. When a count reaches
+        // 0 the node moves into `ready_queue`. This lazy growth keeps
+        // `remaining_deps` proportional to the active
+        // dep-partial-resolution frontier rather than to all
+        // unscheduled nodes.
+        //
+        // In-place carriers (`output_aliased[node][i]`) have two
+        // effects that differ from fresh writes:
+        //   * Memory: an aliased output reuses an input's storage,
+        //     so it adds zero new bytes to `produced_bytes` (Bug 3).
+        //   * `live_bufs`: the entry for `bid` is already correctly
+        //     populated by the upstream writer that seeded the
+        //     buffer. Overwriting it here with `buf_users \ {node}`
+        //     would pollute the consumer set (Bug 2) — `buf_users`
+        //     conflates readers and other writers.
+        // The consumer decrement chain still fires unconditionally:
+        // downstream readers of a mutated buf need their
+        // `remaining_deps` counter dropped so they can be scheduled,
+        // regardless of whether this write is a fresh producer or
+        // an in-place carry.
+        for (i, bid) in self.g.node_produces[node].iter().enumerate() {
+            let aliased = self.g.output_aliased[node][i];
+            if !aliased {
+                produced_bytes += self.g.buf_info[bid.0].concrete_size;
+            }
+            // Mutated bufs are tracked via synthetic ordering edges,
+            // not directly. `initial_deps` excludes them, so we mirror
+            // that here — the produce chain fires only for
+            // non-mutated (SSA-clean) bufs. This also naturally
+            // sidesteps the `buf_users`-conflates-readers-and-writers
+            // problem: only non-mutated bufs are single-writer, so
+            // `buf_users \ {node}` is exactly the reader set.
+            if self.mutated_bufs[bid.0] {
+                continue;
+            }
+            let consumers: ImHashSet<NodeId> = self
                 .g
                 .buf_users
                 .get(bid)
@@ -804,8 +971,8 @@ pub fn bench_ops(
         // Enumerate (ready, stream) candidates. For each, time a
         // `clone + put_on` to observe the beam-expand primitive.
         // (The greedy commit itself uses a separate `put_on`.)
-        let mut best: Option<(usize, usize, f64)> = None;
-        let ready: Vec<usize> = state.ready_queue.iter().copied().collect();
+        let mut best: Option<(NodeId, usize, f64)> = None;
+        let ready: Vec<NodeId> = state.ready_queue.iter().copied().collect();
         for &node in &ready {
             for s in 0..num_streams {
                 let t = Instant::now();
@@ -881,7 +1048,7 @@ pub fn plan_v2(
 
     // Beam entry: (state after applying trajectory, actions committed
     // so far in this rollout, cumulative action cost).
-    type Beam<'a> = (ScheduleState<'a>, Vec<(usize, usize)>, f64);
+    type Beam<'a> = (ScheduleState<'a>, Vec<(NodeId, usize)>, f64);
 
     let trace = std::env::var("LIST_V2_TRACE").is_ok();
     let t_plan_start = std::time::Instant::now();
@@ -916,7 +1083,7 @@ pub fn plan_v2(
                     if state.done() {
                         return vec![(state, traj, cum)];
                     }
-                    let mut ready: Vec<usize> = state.ready_queue.iter().copied().collect();
+                    let mut ready: Vec<NodeId> = state.ready_queue.iter().copied().collect();
                     if frontier_cap > 0 && ready.len() > frontier_cap {
                         let bl = &state.bl;
                         ready.sort_by(|&a, &b| bl[b].total_cmp(&bl[a]));
@@ -957,13 +1124,15 @@ pub fn plan_v2(
         match best {
             Some((_, traj, _)) if !traj.is_empty() => {
                 let (node, s) = traj[0];
-                let already = current.stream_of.contains_key(&node);
-                if trace && already && commits_since_report < 5 {
-                    eprintln!(
-                        "[list_v2] RE-COMMIT node={node} (already scheduled), ready_queue.len={}",
-                        current.ready_queue.len()
-                    );
-                }
+                // With `output_aliased` skipping the produce chain for
+                // in-place carriers, no already-scheduled node should
+                // reappear in `ready_queue`. If this fires, there is
+                // still an aliasing/decrement bug to hunt down.
+                debug_assert!(
+                    !current.stream_of.contains_key(&node),
+                    "[list_v2] RE-COMMIT of node={node} (already scheduled); \
+                     output_aliased fix regressed",
+                );
                 current.put_on(node, s);
             }
             _ => break,

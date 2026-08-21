@@ -126,7 +126,8 @@ use crate::{
         type_infer,
     },
     planner::{
-        access_from_node, ListSchedulerV1, PlanError, SchedulerMode, StreamInstr, StreamMemoryPlan,
+        access_from_node, eval_size, AbstractTimingGraph, ListSchedulerV1, PlanError,
+        SchedulerMode, StreamInstr, StreamMemoryPlan,
     },
     quast::Quast,
     runtime::KernelProgram,
@@ -151,6 +152,12 @@ pub struct GraphCompiler {
     /// through this — see the passthrough setters on `GraphCompiler`.
     module_compiler: ModuleCompiler,
     scheduler: SchedulerMode,
+    /// Optional per-node runtime timings (ms), indexed by
+    /// post-fuse+dce graph node position. Threaded onto the
+    /// [`AbstractTimingGraph`] the memory planner consumes; when
+    /// `None` [`Self::plan_memory`] falls back to uniform `1.0` (the
+    /// depth-only priority used on the first compile).
+    node_times: Option<Vec<f64>>,
     /// On-disk cache queried before hitting nvcc; kernels found here skip
     /// compilation entirely. `None` disables the cache. Defaults to a shared
     /// `~/.openvm/kernel_cache` with the [`KernelCache`] defaults.
@@ -182,6 +189,7 @@ impl GraphCompiler {
             env: BTreeMap::new(),
             module_compiler: ModuleCompiler::new(),
             scheduler: SchedulerMode::default(),
+            node_times: None,
             kernel_cache: Some(Arc::new(KernelCache::new())),
             fusion: Some(FusionStrategy::Existing(FusionOptions::default())),
         }
@@ -253,6 +261,16 @@ impl GraphCompiler {
     /// 30.0` (requires the OR-Tools install described in the compiler
     /// crate's `Cargo.toml`); without it, [`SchedulerMode::Heuristic`] —
     /// the OR-Tools-free fallback described in [`planner::plan_heuristic`].
+    /// Attach per-node runtime timings (ms), typically populated from a
+    /// prior [`GraphExe::collect_graph_info`]. The vec length must match
+    /// the post-fuse+dce node count at compile time — [`Self::plan_memory`]
+    /// will panic in debug builds otherwise. Pass `None` to reset back to
+    /// the default (uniform 1.0 / depth-only priority).
+    pub fn node_times(mut self, times: Option<Vec<f64>>) -> Self {
+        self.node_times = times;
+        self
+    }
+
     pub fn scheduler(mut self, scheduler: SchedulerMode) -> Self {
         self.scheduler = scheduler;
         self
@@ -699,25 +717,45 @@ impl GraphCompiler {
         if g.plan.is_some() {
             return Ok(());
         }
-        let plan = crate::planner::plan_raw(
-            &g.bufs,
-            &g.nodes.iter().map(access_from_node).collect::<Vec<_>>(),
-            &self.env,
+        // Build an ATG (with synthetic ordering-edge buffers) and hand
+        // it to the planner. Sizes are evaluated against `self.env`.
+        let mut bufs = g.bufs.clone();
+        for (i, info) in bufs.iter_mut().enumerate() {
+            if info.device_type == self.device {
+                let s = eval_size(BufId(i), &info.size, &self.env).map_err(|e| {
+                    CompileError::Type(format!("graph plan: {e}"))
+                })?;
+                info.concrete_size = s.max(0) as usize;
+            }
+        }
+        let reads: Vec<Vec<BufId>> = g
+            .nodes
+            .iter()
+            .map(|n| access_from_node(n).reads)
+            .collect();
+        let writes: Vec<Vec<BufId>> = g
+            .nodes
+            .iter()
+            .map(|n| access_from_node(n).writes)
+            .collect();
+        let node_times = self
+            .node_times
+            .clone()
+            .filter(|t| t.len() == g.nodes.len())
+            .unwrap_or_else(|| vec![1.0; g.nodes.len()]);
+        let atg = AbstractTimingGraph::from_accesses(
+            bufs,
+            &reads,
+            &writes,
+            node_times,
             self.device,
-            &g.input_bufs()
-                .iter()
-                .chain(g.output_bufs().iter())
-                .copied()
-                .collect::<Vec<_>>(),
-            &g.aliases,
-            &self.scheduler,
-        )
-        .map_err(|e| match e {
+            g.input_bufs().to_vec(),
+            g.output_bufs().to_vec(),
+        );
+        let plan = crate::planner::plan(&atg, &self.scheduler).map_err(|e| match e {
             PlanError::UnboundSizeSymbol { .. } | PlanError::NegativeSize { .. } => {
                 CompileError::Type(format!("graph plan: {e}"))
             }
-            #[cfg(feature = "planner-ortools")]
-            PlanError::NoSolution(_) => CompileError::Runtime(format!("graph plan: {e}")),
             PlanError::Infeasible(_) => CompileError::Runtime(format!("graph plan: {e}")),
         })?;
         g.plan = Some(plan);

@@ -26,6 +26,7 @@ use crate::{
     planner::{
         abstract_timing::AbstractTimingGraph,
         plan::{StreamInstr, StreamMemoryPlan},
+        NodeId,
     },
 };
 
@@ -40,18 +41,18 @@ pub enum ValidationError {
         found: usize,
     },
     /// Some node id didn't appear as any `Node(_)` instruction.
-    NodeUnscheduled(usize),
+    NodeUnscheduled(NodeId),
     /// Some node id appeared as `Node(_)` more than once.
-    NodeScheduledTwice(usize),
+    NodeScheduledTwice(NodeId),
     /// `plan.stream[node]` is `>= num_streams`.
     StreamOutOfRange {
-        node: usize,
+        node: NodeId,
         stream: u32,
         num_streams: u32,
     },
     /// `plan.record_event[node] = Some(e)` with `e >= num_events`.
     RecordEventOutOfRange {
-        node: usize,
+        node: NodeId,
         event: u32,
         num_events: u32,
     },
@@ -72,8 +73,8 @@ pub enum ValidationError {
     /// Two different nodes both claim `record_event = Some(e)`.
     EventRecordedTwice {
         event: u32,
-        node_a: usize,
-        node_b: usize,
+        node_a: NodeId,
+        node_b: NodeId,
     },
     /// A dataflow edge `producer -> consumer` (via `buf`) is not
     /// respected: the simulator sees `producer_finish > consumer_start`.
@@ -81,8 +82,8 @@ pub enum ValidationError {
     /// before `producer` in the emitted stream; for a cross-stream
     /// pair it means the required `WaitOn` is missing or mis-placed.
     DataDepRace {
-        producer: usize,
-        consumer: usize,
+        producer: NodeId,
+        consumer: NodeId,
         buf: BufId,
         producer_finish: f64,
         consumer_start: f64,
@@ -96,8 +97,8 @@ pub enum ValidationError {
     /// satisfy this — the check is *transitive*, matching how
     /// `list_v2::make_schedule` emits collapsed syncs.
     MissingCrossStreamSync {
-        producer: usize,
-        consumer: usize,
+        producer: NodeId,
+        consumer: NodeId,
         producer_stream: u32,
         consumer_stream: u32,
         producer_pos_in_stream: usize,
@@ -366,13 +367,31 @@ pub fn validate_plan(atg: &AbstractTimingGraph, plan: &StreamMemoryPlan) -> Vec<
                 }
                 // Check every RAW dep P → v at this exact global
                 // position (before further WaitOns arrive).
+                //
+                // The ATG's synthetic ordering-edge buffers (see
+                // `AbstractTimingGraph`) carry mutation-chain
+                // ordering as single-writer synthetic bufs; those
+                // pass the check below directly. But we must ALSO
+                // walk multi-writer real bufs — otherwise a missing
+                // WaitOn on a mutation-chain producer→reader pair
+                // would only be observable through the corresponding
+                // `__ord_earlier` synthetic, and if `make_schedule`
+                // emits a plan that fails to sync one of those the
+                // validator would silently pass a broken schedule.
+                //
+                // For multi-writer bufs we only inspect writers `p`
+                // that precede `v` in node-id order (the ATG's
+                // synth-edge direction). Writers `p > v` are WAR
+                // successors — `v` reads before they overwrite the
+                // buf, so the ordering is `v → p`, not `p → v`, and
+                // checking a RAW from those would flag spurious
+                // aliasing artifacts.
                 for &bid in &atg.node_consumes[v] {
-                    let producers = match atg.buf_producers.get(&bid) {
-                        Some(p) => p,
-                        None => continue,
+                    let Some(producers) = atg.buf_producers.get(&bid) else {
+                        continue;
                     };
                     for &p in producers {
-                        if p == v {
+                        if p == v || p > v {
                             continue;
                         }
                         if !checked_edges.insert((p, v)) {

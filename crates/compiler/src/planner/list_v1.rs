@@ -17,11 +17,26 @@
 
 use std::collections::HashMap;
 
-use crate::planner::{
-    ctx::PlanCtx,
-    plan::{StreamInstr, StreamMemoryPlan},
-    PlanError,
+use crate::{
+    graph_ir::BufId,
+    planner::{
+        abstract_timing::AbstractTimingGraph,
+        plan::{StreamInstr, StreamMemoryPlan},
+        NodeId, PlanError,
+    },
 };
+
+/// Nodes that write buffer `b`. Post-fake-edge insertion this is `0` for
+/// graph inputs and `1` for most buffers; multi-writer real bufs
+/// (in-place carry chains) may exceed 1. The scheduler only reads the
+/// list, never mutates it.
+#[inline]
+fn writers_of<'a>(atg: &'a AbstractTimingGraph, b: usize) -> &'a [usize] {
+    atg.buf_producers
+        .get(&BufId(b))
+        .map(|v| v.as_slice())
+        .unwrap_or(&[])
+}
 
 /// Tunable parameters for the list scheduler.
 #[derive(Debug, Clone)]
@@ -40,12 +55,6 @@ pub struct ListSchedulerV1 {
     /// Fraction of `max_memory` above which the memory-pressure penalty
     /// starts contributing (`0.9` = last 10% of the pool is expensive).
     pub mem_target_frac: f64,
-    /// Per-node runtime cost in milliseconds, indexed by
-    /// `plan_raw` node index. Length must equal the input `nodes.len()`
-    /// at plan time — populated from a prior
-    /// [`crate::graph_exe::GraphExe::collect_graph_info`]. An empty vec
-    /// degrades to uniform `1.0` for first-compile bootstrapping.
-    pub node_times: Vec<f64>,
 }
 
 impl Default for ListSchedulerV1 {
@@ -58,36 +67,43 @@ impl Default for ListSchedulerV1 {
             w_cp: 1.0,
             w_mem: 1e-3,
             mem_target_frac: 0.9,
-            node_times: Vec::new(),
         }
     }
 }
 
+/// Run the list_v1 scheduler over `atg` with `params`. Node runtime
+/// timings come from [`AbstractTimingGraph::node_times`] — a zero-
+/// filled vec degrades to depth-only priority for first-compile
+/// bootstrapping.
+pub fn plan_list_v1(
+    atg: &AbstractTimingGraph,
+    params: &ListSchedulerV1,
+) -> Result<StreamMemoryPlan, PlanError> {
+    params.schedule(atg)
+}
+
 impl ListSchedulerV1 {
-    /// Runs the scheduler. `ctx` is consumed to match the target signature.
-    /// `est_time(node_idx)` returns the per-node runtime estimate.
-    pub fn schedule(
-        &self,
-        ctx: PlanCtx,
-        est_time: impl Fn(usize) -> f64,
-    ) -> Result<StreamMemoryPlan, PlanError> {
-        if ctx.n_nodes == 0 {
+    /// Runs the scheduler. Node timings are read from
+    /// [`AbstractTimingGraph::node_times`].
+    pub fn schedule(&self, atg: &AbstractTimingGraph) -> Result<StreamMemoryPlan, PlanError> {
+        if atg.num_nodes == 0 {
             return Ok(StreamMemoryPlan {
                 instructions: Vec::new(),
                 stream: Vec::new(),
                 record_event: Vec::new(),
-                offsets: vec![None; ctx.n_bufs],
+                offsets: vec![None; atg.n_bufs()],
                 peak_bytes: 0,
                 num_streams: self.max_concurrency.max(1),
                 num_events: 0,
             });
         }
 
-        let n = ctx.n_nodes;
-        let rt: Vec<f64> = (0..n).map(|i| est_time(i).max(0.0)).collect();
+        let n = atg.num_nodes;
+        let rt: Vec<f64> = atg.node_times.iter().map(|t| t.max(0.0)).collect();
+        debug_assert_eq!(rt.len(), n, "ATG node_times length must equal num_nodes");
 
-        let (succ, indeg) = ctx.edges();
-        let mut preds: Vec<Vec<usize>> = vec![vec![]; n];
+        let (succ, indeg) = atg.edges();
+        let mut preds: Vec<Vec<NodeId>> = vec![vec![]; n];
         for (u, sv) in succ.iter().enumerate() {
             for &v in sv {
                 preds[v].push(u);
@@ -95,13 +111,13 @@ impl ListSchedulerV1 {
         }
 
         let bl = bottom_levels(&succ, &rt);
-        let (node_writes, node_reads) = ctx.per_node_access();
+        let (node_writes, node_reads) = atg.per_node_access();
 
         let m = self.max_concurrency.max(1) as usize;
         let beam = self.beam.max(1);
         let k = self.lookahead_k;
 
-        let mut state = SchedState::new(&ctx, &indeg, &node_reads, m);
+        let mut state = SchedState::new(atg, &indeg, &node_reads, m);
 
         // Pre-place *only* bufs with no writer (real graph inputs supplied
         // by the caller): they must occupy a stable pool slot from t=0
@@ -112,22 +128,22 @@ impl ListSchedulerV1 {
         // Pinned bufs *with* a writer (graph outputs) are handled by the
         // regular `commit()` allocation path: their writer takes an
         // ordinary pool slot when it runs, and `offline_repack` at the
-        // end sees `death = INF` (via `ctx.pinned[b]`) so the slot stays
+        // end sees `death = INF` (via `atg.pinned(b)`) so the slot stays
         // reserved to end-of-plan. Pre-placing them at t=0 forces the
         // full output footprint (950 bufs × their concrete sizes in this
         // graph) to live in the pool for the entire schedule, which
         // blows even multi-GB `max_memory` budgets on graphs with many
         // outputs.
-        for b in 0..ctx.n_bufs {
-            if !ctx.packable(b) {
+        for b in 0..atg.n_bufs() {
+            if !atg.packable(b) {
                 continue;
             }
-            let no_writer = ctx.writers[b].is_empty();
+            let no_writer = writers_of(atg, b).is_empty();
             if !no_writer {
                 continue;
             }
-            let size = ctx.sizes[b] as u64;
-            let align = ctx.aligns[b].max(1);
+            let size = atg.size(b) as u64;
+            let align = atg.align(b).max(1);
             let off = state
                 .best_fit(size, align, self.max_memory)
                 .ok_or_else(|| {
@@ -154,7 +170,7 @@ impl ListSchedulerV1 {
         while state.order.len() < n {
             let picked = self.look_ahead_pick(
                 &state,
-                &ctx,
+                atg,
                 &rt,
                 &bl,
                 &succ,
@@ -170,7 +186,7 @@ impl ListSchedulerV1 {
                     self.commit(
                         &mut state,
                         v,
-                        &ctx,
+                        atg,
                         &rt,
                         &succ,
                         &node_writes,
@@ -209,7 +225,7 @@ impl ListSchedulerV1 {
         // each in the smallest gap that avoids every already-placed
         // lifetime-overlapping buffer. It's much stronger than the online
         // best-fit inside `commit()` because it sees every buffer at once.
-        offline_repack(&mut state, &ctx);
+        offline_repack(&mut state, atg);
 
         Ok(state.into_plan(m as u32))
     }
@@ -218,10 +234,10 @@ impl ListSchedulerV1 {
     fn look_ahead_pick(
         &self,
         state: &SchedState,
-        ctx: &PlanCtx,
+        atg: &AbstractTimingGraph,
         rt: &[f64],
         bl: &[f64],
-        succ: &[Vec<usize>],
+        succ: &[Vec<NodeId>],
         node_writes: &[Vec<usize>],
         node_reads: &[Vec<usize>],
         k: usize,
@@ -233,7 +249,7 @@ impl ListSchedulerV1 {
             .iter()
             .map(|&v| {
                 (
-                    self.score_step(state, ctx, rt, bl, node_writes, node_reads, v, m),
+                    self.score_step(state, atg,rt, bl, node_writes, node_reads, v, m),
                     v,
                 )
             })
@@ -246,7 +262,7 @@ impl ListSchedulerV1 {
 
         if k <= 1 || candidates.len() == 1 {
             for (_, v) in candidates {
-                if self.feasible(state, ctx, node_writes, v) {
+                if self.feasible(state, atg,node_writes, v) {
                     return Some(v);
                 }
             }
@@ -256,19 +272,19 @@ impl ListSchedulerV1 {
         let mut best_score = f64::INFINITY;
         let mut best_first = None;
         for (_, v) in candidates {
-            if !self.feasible(state, ctx, node_writes, v) {
+            if !self.feasible(state, atg,node_writes, v) {
                 continue;
             }
             let mut trial = state.clone();
             if self
-                .commit(&mut trial, v, ctx, rt, succ, node_writes, node_reads, m)
+                .commit(&mut trial, v, atg,rt, succ, node_writes, node_reads, m)
                 .is_err()
             {
                 continue;
             }
             let rollout = self.rollout_score(
                 &trial,
-                ctx,
+                atg,
                 rt,
                 bl,
                 succ,
@@ -290,17 +306,17 @@ impl ListSchedulerV1 {
     fn rollout_score(
         &self,
         state: &SchedState,
-        ctx: &PlanCtx,
+        atg: &AbstractTimingGraph,
         rt: &[f64],
         bl: &[f64],
-        succ: &[Vec<usize>],
+        succ: &[Vec<NodeId>],
         node_writes: &[Vec<usize>],
         node_reads: &[Vec<usize>],
         depth: usize,
         beam: usize,
         m: usize,
     ) -> f64 {
-        if depth == 0 || state.order.len() == ctx.n_nodes {
+        if depth == 0 || state.order.len() == atg.num_nodes {
             return leaf_score(state);
         }
         let mut candidates: Vec<(f64, usize)> = state
@@ -308,7 +324,7 @@ impl ListSchedulerV1 {
             .iter()
             .map(|&v| {
                 (
-                    self.score_step(state, ctx, rt, bl, node_writes, node_reads, v, m),
+                    self.score_step(state, atg,rt, bl, node_writes, node_reads, v, m),
                     v,
                 )
             })
@@ -321,19 +337,19 @@ impl ListSchedulerV1 {
 
         let mut best = f64::INFINITY;
         for (_, v) in candidates {
-            if !self.feasible(state, ctx, node_writes, v) {
+            if !self.feasible(state, atg,node_writes, v) {
                 continue;
             }
             let mut trial = state.clone();
             if self
-                .commit(&mut trial, v, ctx, rt, succ, node_writes, node_reads, m)
+                .commit(&mut trial, v, atg,rt, succ, node_writes, node_reads, m)
                 .is_err()
             {
                 continue;
             }
             let s = self.rollout_score(
                 &trial,
-                ctx,
+                atg,
                 rt,
                 bl,
                 succ,
@@ -358,7 +374,7 @@ impl ListSchedulerV1 {
     fn score_step(
         &self,
         state: &SchedState,
-        ctx: &PlanCtx,
+        atg: &AbstractTimingGraph,
         rt: &[f64],
         bl: &[f64],
         node_writes: &[Vec<usize>],
@@ -381,17 +397,17 @@ impl ListSchedulerV1 {
 
         let mut mem_delta: i64 = 0;
         for &b in &node_writes[v] {
-            if ctx.packable(b) && !state.buf_placed[b] {
-                mem_delta += ctx.sizes[b];
+            if atg.packable(b) && !state.buf_placed[b] {
+                mem_delta += atg.size(b);
             }
         }
         for &b in &node_reads[v] {
             if state.remaining_readers[b] == 1
-                && ctx.packable(b)
-                && !ctx.pinned[b]
+                && atg.packable(b)
+                && !atg.pinned(b)
                 && state.buf_placed[b]
             {
-                mem_delta -= ctx.sizes[b];
+                mem_delta -= atg.size(b);
             }
         }
         let mem_after = (state.live_bytes as i64 + mem_delta).max(0) as u64;
@@ -412,7 +428,7 @@ impl ListSchedulerV1 {
     fn feasible(
         &self,
         state: &SchedState,
-        ctx: &PlanCtx,
+        atg: &AbstractTimingGraph,
         node_writes: &[Vec<usize>],
         v: usize,
     ) -> bool {
@@ -424,8 +440,8 @@ impl ListSchedulerV1 {
         }
         let mut need = 0i64;
         for &b in &node_writes[v] {
-            if ctx.packable(b) && !state.buf_placed[b] {
-                need += ctx.sizes[b];
+            if atg.packable(b) && !state.buf_placed[b] {
+                need += atg.size(b);
             }
         }
         state.live_bytes.saturating_add(need as u64) <= self.max_memory
@@ -435,10 +451,10 @@ impl ListSchedulerV1 {
     fn commit(
         &self,
         state: &mut SchedState,
-        v: usize,
-        ctx: &PlanCtx,
+        v: NodeId,
+        atg: &AbstractTimingGraph,
         rt: &[f64],
-        succ: &[Vec<usize>],
+        succ: &[Vec<NodeId>],
         node_writes: &[Vec<usize>],
         node_reads: &[Vec<usize>],
         m: usize,
@@ -486,11 +502,11 @@ impl ListSchedulerV1 {
         // Allocate outputs (best-fit, aligned) against currently-live intervals.
         let mut new_placements: Vec<(usize, u64)> = Vec::new();
         for &b in &node_writes[v] {
-            if !ctx.packable(b) || state.buf_placed[b] {
+            if !atg.packable(b) || state.buf_placed[b] {
                 continue;
             }
-            let size = ctx.sizes[b] as u64;
-            let align = ctx.aligns[b].max(1);
+            let size = atg.size(b) as u64;
+            let align = atg.align(b).max(1);
             let off = state
                 .best_fit(size, align, self.max_memory)
                 .ok_or_else(|| {
@@ -625,8 +641,8 @@ impl ListSchedulerV1 {
             if state.remaining_readers[b] > 0 {
                 state.remaining_readers[b] -= 1;
                 if state.remaining_readers[b] == 0
-                    && ctx.packable(b)
-                    && !ctx.pinned[b]
+                    && atg.packable(b)
+                    && !atg.pinned(b)
                     && state.buf_placed[b]
                 {
                     if let Some(iv) = state
@@ -655,7 +671,7 @@ impl ListSchedulerV1 {
     }
 }
 
-fn bottom_levels(succ: &[Vec<usize>], rt: &[f64]) -> Vec<f64> {
+fn bottom_levels(succ: &[Vec<NodeId>], rt: &[f64]) -> Vec<f64> {
     let n = succ.len();
     let mut bl = vec![0.0f64; n];
     let order = reverse_topo_order(succ);
@@ -671,7 +687,7 @@ fn bottom_levels(succ: &[Vec<usize>], rt: &[f64]) -> Vec<f64> {
     bl
 }
 
-fn reverse_topo_order(succ: &[Vec<usize>]) -> Vec<usize> {
+fn reverse_topo_order(succ: &[Vec<NodeId>]) -> Vec<NodeId> {
     let n = succ.len();
     let mut indeg = vec![0usize; n];
     for sv in succ {
@@ -679,9 +695,9 @@ fn reverse_topo_order(succ: &[Vec<usize>]) -> Vec<usize> {
             indeg[v] += 1;
         }
     }
-    let mut fwd: Vec<usize> = (0..n).filter(|&i| indeg[i] == 0).collect();
+    let mut fwd: Vec<NodeId> = (0..n).filter(|&i| indeg[i] == 0).collect();
     let mut cursor = 0;
-    let mut fwd_order: Vec<usize> = Vec::with_capacity(n);
+    let mut fwd_order: Vec<NodeId> = Vec::with_capacity(n);
     while cursor < fwd.len() {
         let u = fwd[cursor];
         cursor += 1;
@@ -711,8 +727,9 @@ fn reverse_topo_order(succ: &[Vec<usize>]) -> Vec<usize> {
 /// lifetime-overlapping buffer. Overwrites `state.offsets` and
 /// `state.peak_bytes` with the tighter packing; the schedule (order,
 /// stream assignment, instructions, events) is untouched.
-fn offline_repack(state: &mut SchedState, ctx: &PlanCtx) {
-    let n_bufs = ctx.n_bufs;
+fn offline_repack(state: &mut SchedState, atg: &AbstractTimingGraph) {
+    let n_bufs = atg.n_bufs();
+    let n_nodes = atg.num_nodes;
 
     // Per-buffer lifetime in wall-clock time.
     //
@@ -724,56 +741,61 @@ fn offline_repack(state: &mut SchedState, ctx: &PlanCtx) {
     //   slot valid through the overwrite itself, matching CP-SAT semantics).
     let mut birth = vec![f64::INFINITY; n_bufs];
     let mut death = vec![f64::NEG_INFINITY; n_bufs];
-    for b in 0..n_bufs {
-        if !ctx.packable(b) {
-            continue;
-        }
-        for &w in &ctx.writers[b] {
-            if state.t_start[w] < birth[b] {
-                birth[b] = state.t_start[w];
-            }
-            if state.t_finish[w] > death[b] {
-                death[b] = state.t_finish[w];
-            }
-        }
-        for &r in &ctx.readers[b] {
-            if state.t_finish[r] > death[b] {
-                death[b] = state.t_finish[r];
-            }
-        }
-        if ctx.writers[b].is_empty() {
-            birth[b] = f64::NEG_INFINITY;
-        }
-        if ctx.pinned[b] || ctx.readers[b].is_empty() {
-            death[b] = f64::INFINITY;
-        }
-    }
-
-    // For each packable canonical, the set of streams that touch it.
-    // `Some(s)`: every access is on stream `s`. `None`: the buffer sees
-    // multiple streams — it can never share pool bytes with anyone,
-    // because `commit()` only emits cross-stream events for hazards on
-    // the same canonical BufId; a WAW/WAR between *different* canonicals
-    // sharing a pool slot would race.
+    let mut has_writer = vec![false; n_bufs];
+    let mut has_reader = vec![false; n_bufs];
+    // Single stream that touches each buf, or `Some(None)` if the buf
+    // is touched by more than one stream. Outer option tracks "seen
+    // any touch at all"; inner tracks the single-stream tag.
     let mut buf_stream: Vec<Option<u32>> = vec![None; n_bufs];
-    for (b, slot) in buf_stream.iter_mut().enumerate() {
-        if !ctx.packable(b) {
-            continue;
-        }
-        let mut chosen: Option<u32> = None;
-        let mut multi = false;
-        for &v in ctx.writers[b].iter().chain(ctx.readers[b].iter()) {
-            let s = state.stream[v];
-            match chosen {
-                None => chosen = Some(s),
-                Some(prev) if prev != s => {
-                    multi = true;
-                    break;
-                }
+    let mut buf_multi: Vec<bool> = vec![false; n_bufs];
+    for v in 0..n_nodes {
+        let s = state.stream[v];
+        let t_start = state.t_start[v];
+        let t_finish = state.t_finish[v];
+        for b in &atg.node_produces[v] {
+            let b = b.0;
+            if !atg.packable(b) {
+                continue;
+            }
+            has_writer[b] = true;
+            if t_start < birth[b] {
+                birth[b] = t_start;
+            }
+            if t_finish > death[b] {
+                death[b] = t_finish;
+            }
+            match buf_stream[b] {
+                None => buf_stream[b] = Some(s),
+                Some(prev) if prev != s => buf_multi[b] = true,
                 _ => {}
             }
         }
-        *slot = if multi { None } else { chosen };
+        for b in &atg.node_consumes[v] {
+            let b = b.0;
+            if !atg.packable(b) {
+                continue;
+            }
+            has_reader[b] = true;
+            if t_finish > death[b] {
+                death[b] = t_finish;
+            }
+            match buf_stream[b] {
+                None => buf_stream[b] = Some(s),
+                Some(prev) if prev != s => buf_multi[b] = true,
+                _ => {}
+            }
+        }
+    }
+    for b in 0..n_bufs {
+        if !has_writer[b] {
+            birth[b] = f64::NEG_INFINITY;
+        }
+        if atg.pinned(b) || !has_reader[b] {
+            death[b] = f64::INFINITY;
+        }
+        if buf_multi[b] {
+            buf_stream[b] = None;
+        }
     }
 
     // Two buffers "overlap" (cannot share pool bytes) if EITHER:
@@ -795,10 +817,10 @@ fn offline_repack(state: &mut SchedState, ctx: &PlanCtx) {
         }
     };
 
-    let mut to_place: Vec<usize> = (0..n_bufs).filter(|&b| ctx.packable(b)).collect();
+    let mut to_place: Vec<usize> = (0..n_bufs).filter(|&b| atg.packable(b)).collect();
     to_place.sort_by(|&a, &b| {
-        let sa = ctx.sizes[a];
-        let sb = ctx.sizes[b];
+        let sa = atg.size(a);
+        let sb = atg.size(b);
         sb.cmp(&sa)
             .then_with(|| birth[a].total_cmp(&birth[b]))
             .then_with(|| a.cmp(&b))
@@ -808,8 +830,8 @@ fn offline_repack(state: &mut SchedState, ctx: &PlanCtx) {
     let mut peak: u64 = 0;
 
     for &b in &to_place {
-        let size = ctx.sizes[b] as u64;
-        let align = ctx.aligns[b].max(1);
+        let size = atg.size(b) as u64;
+        let align = atg.align(b).max(1);
 
         let mut blocked: Vec<(u64, u64)> = to_place
             .iter()
@@ -818,7 +840,7 @@ fn offline_repack(state: &mut SchedState, ctx: &PlanCtx) {
                     return None;
                 }
                 let off = offsets[b2]?;
-                overlaps(b, b2).then_some((off, off + ctx.sizes[b2] as u64))
+                overlaps(b, b2).then_some((off, off + atg.size(b2) as u64))
             })
             .collect();
         blocked.sort_unstable();
@@ -868,7 +890,7 @@ struct LiveInterval {
 #[derive(Clone)]
 struct SchedState {
     /// Order of committed node launches (excluding WaitOns).
-    order: Vec<usize>,
+    order: Vec<NodeId>,
     /// Flat instruction stream — the eventual `plan.instructions`.
     instructions: Vec<StreamInstr>,
     /// Stream assignment per graph node (0 for unplaced).
@@ -888,7 +910,7 @@ struct SchedState {
     buf_ready: HashMap<usize, (f64, u32)>,
     /// `(producer_node, event_idx)` for each buffer that a consumer on
     /// another stream may need to wait for.
-    event_of_buf: HashMap<usize, (usize, u32)>,
+    event_of_buf: HashMap<usize, (NodeId, u32)>,
     num_events: u32,
 
     /// Currently-allocated intervals in the memory pool.
@@ -908,7 +930,7 @@ struct SchedState {
     remaining_writers: Vec<usize>,
     /// Nodes that read each buffer since its last writer was scheduled —
     /// the WAR-wait set for the next writer of that buffer.
-    readers_since_write: HashMap<usize, Vec<usize>>,
+    readers_since_write: HashMap<usize, Vec<NodeId>>,
     /// In-degree per node (predecessors still to schedule).
     indeg: Vec<usize>,
     ready: BTreeSetLike,
@@ -919,30 +941,30 @@ struct SchedState {
 /// candidates deterministically.
 #[derive(Clone)]
 struct BTreeSetLike {
-    v: Vec<usize>,
+    v: Vec<NodeId>,
 }
 impl BTreeSetLike {
     fn new() -> Self {
         Self { v: Vec::new() }
     }
-    fn insert(&mut self, x: usize) {
+    fn insert(&mut self, x: NodeId) {
         if let Err(pos) = self.v.binary_search(&x) {
             self.v.insert(pos, x);
         }
     }
-    fn remove(&mut self, x: &usize) {
+    fn remove(&mut self, x: &NodeId) {
         if let Ok(pos) = self.v.binary_search(x) {
             self.v.remove(pos);
         }
     }
-    fn iter(&self) -> impl Iterator<Item = &usize> {
+    fn iter(&self) -> impl Iterator<Item = &NodeId> {
         self.v.iter()
     }
 }
 
 impl SchedState {
-    fn new(ctx: &PlanCtx, indeg: &[usize], _node_reads: &[Vec<usize>], m: usize) -> Self {
-        let n = ctx.n_nodes;
+    fn new(atg: &AbstractTimingGraph, indeg: &[usize], _node_reads: &[Vec<usize>], m: usize) -> Self {
+        let n = atg.num_nodes;
         let mut ready = BTreeSetLike::new();
         for (i, &d) in indeg.iter().enumerate().take(n) {
             if d == 0 {
@@ -954,8 +976,8 @@ impl SchedState {
             instructions: Vec::new(),
             stream: vec![0; n],
             record_event: vec![None; n],
-            offsets: vec![None; ctx.n_bufs],
-            buf_placed: vec![false; ctx.n_bufs],
+            offsets: vec![None; atg.n_bufs()],
+            buf_placed: vec![false; atg.n_bufs()],
             now: 0.0,
             stream_free: vec![0.0; m],
             buf_ready: HashMap::new(),
@@ -964,8 +986,24 @@ impl SchedState {
             live: Vec::new(),
             live_bytes: 0,
             peak_bytes: 0,
-            remaining_readers: ctx.readers.iter().map(|r| r.len()).collect(),
-            remaining_writers: ctx.writers.iter().map(|w| w.len()).collect(),
+            remaining_readers: {
+                let mut r = vec![0usize; atg.n_bufs()];
+                for consumes in &atg.node_consumes {
+                    for b in consumes {
+                        r[b.0] += 1;
+                    }
+                }
+                r
+            },
+            remaining_writers: {
+                let mut w = vec![0usize; atg.n_bufs()];
+                for produces in &atg.node_produces {
+                    for b in produces {
+                        w[b.0] += 1;
+                    }
+                }
+                w
+            },
             readers_since_write: HashMap::new(),
             indeg: indeg.to_vec(),
             ready,
@@ -1062,12 +1100,9 @@ fn align_up_u(off: u64, align: u64) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
-
     use super::*;
     use crate::{
-        graph_ir::{BufInfo, DeviceType},
-        planner::ctx::NodeAccess,
+        graph_ir::{BufId, BufInfo, DeviceType},
         quast::Quast,
     };
 
@@ -1088,14 +1123,17 @@ mod tests {
     #[test]
     fn single_node_schedules() {
         let bufs = make_bufs(&[64]);
-        let nodes = vec![NodeAccess {
-            reads: vec![],
-            writes: vec![crate::graph_ir::BufId(0)],
-        }];
-        let ctx =
-            PlanCtx::build(&bufs, &nodes, &BTreeMap::new(), DeviceType::Cuda(0), &[]).unwrap();
+        let atg = AbstractTimingGraph::from_accesses(
+            bufs,
+            &[vec![]],
+            &[vec![BufId(0)]],
+            vec![1.0],
+            DeviceType::Cuda(0),
+            vec![],
+            vec![],
+        );
         let sched = ListSchedulerV1::default();
-        let plan = sched.schedule(ctx, |_| 1.0).unwrap();
+        let plan = sched.schedule(&atg).unwrap();
         assert_eq!(plan.instructions.len(), 1);
         assert!(matches!(plan.instructions[0], StreamInstr::Node(0)));
         assert_eq!(plan.stream[0], 0);
@@ -1107,30 +1145,25 @@ mod tests {
         // want the producers on different streams and the consumer to
         // WaitOn one of them.
         let bufs = make_bufs(&[64, 64, 128]);
-        let a = crate::graph_ir::BufId(0);
-        let b = crate::graph_ir::BufId(1);
-        let c = crate::graph_ir::BufId(2);
-        let nodes = vec![
-            NodeAccess {
-                reads: vec![],
-                writes: vec![a],
-            },
-            NodeAccess {
-                reads: vec![],
-                writes: vec![b],
-            },
-            NodeAccess {
-                reads: vec![a, b],
-                writes: vec![c],
-            },
-        ];
-        let ctx =
-            PlanCtx::build(&bufs, &nodes, &BTreeMap::new(), DeviceType::Cuda(0), &[]).unwrap();
+        let a = BufId(0);
+        let b = BufId(1);
+        let c = BufId(2);
+        let reads = vec![vec![], vec![], vec![a, b]];
+        let writes = vec![vec![a], vec![b], vec![c]];
+        let atg = AbstractTimingGraph::from_accesses(
+            bufs,
+            &reads,
+            &writes,
+            vec![1.0; 3],
+            DeviceType::Cuda(0),
+            vec![],
+            vec![],
+        );
         let sched = ListSchedulerV1 {
             max_concurrency: 2,
             ..Default::default()
         };
-        let plan = sched.schedule(ctx, |_| 1.0).unwrap();
+        let plan = sched.schedule(&atg).unwrap();
         // The two producers should be on different streams.
         assert_ne!(plan.stream[0], plan.stream[1]);
         // A WaitOn must be emitted before the consumer.
