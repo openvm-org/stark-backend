@@ -14,8 +14,8 @@ use openvm_stark_backend::prover::{fractional_sumcheck_gkr::Frac, DeviceMultiSta
 use crate::{
     cuda::logup_zerocheck::{
         _logup_batch_mle_intermediates_buffer_size, _zerocheck_batch_mle_intermediates_buffer_size,
-        logup_batch_eval_mle, zerocheck_batch_eval_mle, BlockCtx, EvalCoreCtx, LogupCtx,
-        MainMatrixPtrs, ZerocheckCtx,
+        logup_batch_eval_mle, zerocheck_batch_eval_mle, BaseOff, BlockCtx, EvalCoreCtx, LogupCtx,
+        MainMatrixDesc, ZerocheckCtx,
     },
     error::KernelError,
     gpu_backend::GenericGpuBackend,
@@ -100,8 +100,8 @@ pub(crate) struct TraceCtx {
     // shared eval pointers (same for zerocheck + logup)
     pub eq_xi_ptr: *const EF,
     pub sels_ptr: *const EF,
-    pub prep_ptr: MainMatrixPtrs<EF>,
-    pub main_ptrs_dev: DeviceBuffer<MainMatrixPtrs<EF>>,
+    pub prep_ptr: MainMatrixDesc,
+    pub main_ptrs_dev: DeviceBuffer<MainMatrixDesc>,
     pub public_ptr: *const F,
     pub eq_3bs_ptr: *const EF,
 }
@@ -175,21 +175,28 @@ impl<'a> ZerocheckMleBatchBuilder<'a> {
                 std::ptr::null_mut()
             };
 
+            // The eager encoding of the base+offset ABI: absolute device
+            // addresses, decoded against a null base at launch. See
+            // [`BaseOff`].
             let eval_ctx = EvalCoreCtx {
-                d_selectors: t.sels_ptr,
+                d_selectors: BaseOff::from_ptr(t.sels_ptr),
                 d_preprocessed: t.prep_ptr,
-                d_main: t.main_ptrs_dev.as_ptr(),
-                d_public: t.public_ptr,
+                d_main: BaseOff::from_ptr(t.main_ptrs_dev.as_ptr()),
+                d_public: BaseOff::from_ptr(t.public_ptr),
             };
 
             zc_ctxs_h.push(ZerocheckCtx {
                 eval_ctx,
-                d_intermediates,
+                d_intermediates: BaseOff::from_mut_ptr(d_intermediates),
                 num_y: t.num_y,
-                d_eq_xi: t.eq_xi_ptr,
-                d_rules: air_pk.other_data.zerocheck_mle.inner.d_rules.as_raw_ptr(),
+                d_eq_xi: BaseOff::from_ptr(t.eq_xi_ptr),
+                d_rules: BaseOff::from_ptr(
+                    air_pk.other_data.zerocheck_mle.inner.d_rules.as_raw_ptr(),
+                ),
                 rules_len: air_pk.other_data.zerocheck_mle.inner.d_rules.len(),
-                d_used_nodes: air_pk.other_data.zerocheck_mle.inner.d_used_nodes.as_ptr(),
+                d_used_nodes: BaseOff::from_ptr(
+                    air_pk.other_data.zerocheck_mle.inner.d_used_nodes.as_ptr(),
+                ),
                 used_nodes_len: air_pk.other_data.zerocheck_mle.inner.d_used_nodes.len(),
                 buffer_size,
             });
@@ -222,6 +229,41 @@ impl<'a> ZerocheckMleBatchBuilder<'a> {
         self.traces.iter().map(|t| t.trace_idx)
     }
 
+    /// Evaluate this batch through an arbitrary base+offset encoding of the
+    /// *same* descriptor array.
+    ///
+    /// `rebase` receives the eager-encoded `ZerocheckCtx` array (absolute
+    /// addresses, null base) and must return an equivalent array encoded
+    /// against `pool_base`. The launch is otherwise byte-identical to
+    /// [`Self::evaluate`], so the two outputs must match exactly — that is
+    /// the differential oracle for the R6 decode path.
+    #[cfg(test)]
+    pub(crate) fn evaluate_with_base(
+        &self,
+        lambda_pows: &DeviceBuffer<EF>,
+        num_x: u32,
+        pool_base: *const u8,
+        rebase: impl FnOnce(Vec<ZerocheckCtx>) -> Vec<ZerocheckCtx>,
+    ) -> Result<DeviceBuffer<EF>, KernelError> {
+        use openvm_cuda_common::copy::{MemCopyD2H, MemCopyH2D};
+        if self.traces.is_empty() {
+            return Ok(DeviceBuffer::new());
+        }
+        let host = self.d_zc_ctxs.to_host_on(&self.device_ctx)?;
+        let rebased = rebase(host).to_device_on(&self.device_ctx)?;
+        evaluate_mle_constraints_gpu_batch(
+            &self.d_block_ctxs,
+            &rebased,
+            pool_base,
+            &self.air_offsets,
+            lambda_pows,
+            lambda_pows.len(),
+            num_x,
+            self.threads_per_block,
+            &self.device_ctx,
+        )
+    }
+
     /// Evaluates the batch and returns the output device buffer.
     ///
     /// The buffer contains `num_airs * num_x` elements, laid out as
@@ -238,6 +280,8 @@ impl<'a> ZerocheckMleBatchBuilder<'a> {
         evaluate_mle_constraints_gpu_batch(
             &self.d_block_ctxs,
             &self.d_zc_ctxs,
+            // The eager encoding: absolute addresses, null base.
+            std::ptr::null(),
             &self.air_offsets,
             lambda_pows,
             lambda_pows.len(),
@@ -315,33 +359,39 @@ impl<'a> LogupMleBatchBuilder<'a> {
             };
 
             let eval_ctx = EvalCoreCtx {
-                d_selectors: t.sels_ptr,
+                d_selectors: BaseOff::from_ptr(t.sels_ptr),
                 d_preprocessed: t.prep_ptr,
-                d_main: t.main_ptrs_dev.as_ptr(),
-                d_public: t.public_ptr,
+                d_main: BaseOff::from_ptr(t.main_ptrs_dev.as_ptr()),
+                d_public: BaseOff::from_ptr(t.public_ptr),
             };
 
             logup_ctxs_h.push(LogupCtx {
                 eval_ctx,
-                d_intermediates,
+                d_intermediates: BaseOff::from_mut_ptr(d_intermediates),
                 num_y: t.num_y,
-                d_eq_xi: t.eq_xi_ptr,
-                d_challenges: d_challenges_ptr,
-                d_eq_3bs: t.eq_3bs_ptr,
-                d_rules: air_pk
-                    .other_data
-                    .interaction_rules
-                    .inner
-                    .d_rules
-                    .as_raw_ptr(),
+                d_eq_xi: BaseOff::from_ptr(t.eq_xi_ptr),
+                d_challenges: BaseOff::from_ptr(d_challenges_ptr),
+                d_eq_3bs: BaseOff::from_ptr(t.eq_3bs_ptr),
+                d_rules: BaseOff::from_ptr(
+                    air_pk
+                        .other_data
+                        .interaction_rules
+                        .inner
+                        .d_rules
+                        .as_raw_ptr(),
+                ),
                 rules_len: air_pk.other_data.interaction_rules.inner.d_rules.len(),
-                d_used_nodes: air_pk
-                    .other_data
-                    .interaction_rules
-                    .inner
-                    .d_used_nodes
-                    .as_ptr(),
-                d_pair_idxs: air_pk.other_data.interaction_rules.d_pair_idxs.as_ptr(),
+                d_used_nodes: BaseOff::from_ptr(
+                    air_pk
+                        .other_data
+                        .interaction_rules
+                        .inner
+                        .d_used_nodes
+                        .as_ptr(),
+                ),
+                d_pair_idxs: BaseOff::from_ptr(
+                    air_pk.other_data.interaction_rules.d_pair_idxs.as_ptr(),
+                ),
                 used_nodes_len: air_pk.other_data.interaction_rules.inner.d_used_nodes.len(),
                 buffer_size,
             });
@@ -672,6 +722,9 @@ fn evaluate_single_logup<HS: GpuHashScheme>(
 fn evaluate_mle_constraints_gpu_batch(
     block_ctxs: &DeviceBuffer<BlockCtx>,
     zc_ctxs: &DeviceBuffer<ZerocheckCtx>,
+    // The base every `BaseOff` in `zc_ctxs` decodes against; null for the
+    // eager encoding.
+    pool_base: *const u8,
     air_block_offsets: &DeviceBuffer<u32>,
     lambda_pows: &DeviceBuffer<EF>,
     lambda_len: usize,
@@ -698,6 +751,7 @@ fn evaluate_mle_constraints_gpu_batch(
             &mut output,
             block_ctxs,
             zc_ctxs,
+            pool_base,
             air_block_offsets,
             lambda_pows,
             lambda_len,
@@ -733,6 +787,7 @@ fn evaluate_mle_interactions_gpu_batch(
             &mut output,
             block_ctxs,
             logup_ctxs,
+            std::ptr::null(),
             air_block_offsets,
             num_blocks as u32,
             num_x,

@@ -17,8 +17,8 @@ use crate::{
     cuda::logup_zerocheck::{
         logup_monomial_batched, precompute_lambda_combinations,
         precompute_logup_denom_combinations, precompute_logup_numer_combinations,
-        zerocheck_monomial_batched, zerocheck_monomial_par_y_batched, BlockCtx, EvalCoreCtx,
-        LogupMonomialCommonCtx, LogupMonomialCtx, MonomialAirCtx,
+        zerocheck_monomial_batched, zerocheck_monomial_par_y_batched, BaseOff, BlockCtx,
+        EvalCoreCtx, LogupMonomialCommonCtx, LogupMonomialCtx, MonomialAirCtx,
     },
     error::KernelError,
     gpu_backend::GenericGpuBackend,
@@ -174,10 +174,10 @@ impl<'a> ZerocheckMonomialBatch<'a> {
                     .unwrap();
 
                 let eval_ctx = EvalCoreCtx {
-                    d_selectors: t.sels_ptr,
+                    d_selectors: BaseOff::from_ptr(t.sels_ptr),
                     d_preprocessed: t.prep_ptr,
-                    d_main: t.main_ptrs_dev.as_ptr(),
-                    d_public: t.public_ptr,
+                    d_main: BaseOff::from_ptr(t.main_ptrs_dev.as_ptr()),
+                    d_public: BaseOff::from_ptr(t.public_ptr),
                 };
 
                 MonomialAirCtx {
@@ -252,6 +252,8 @@ impl<'a> ZerocheckMonomialBatch<'a> {
                 &mut output,
                 &self.block_ctxs,
                 &self.air_ctxs,
+                // Eager encoding: absolute addresses, null base ([`BaseOff`]).
+                std::ptr::null(),
                 &self.air_offsets,
                 num_blocks as u32,
                 num_x,
@@ -392,10 +394,10 @@ impl<'a> ZerocheckMonomialParYBatch<'a> {
                     .unwrap();
 
                 let eval_ctx = EvalCoreCtx {
-                    d_selectors: t.sels_ptr,
+                    d_selectors: BaseOff::from_ptr(t.sels_ptr),
                     d_preprocessed: t.prep_ptr,
-                    d_main: t.main_ptrs_dev.as_ptr(),
-                    d_public: t.public_ptr,
+                    d_main: BaseOff::from_ptr(t.main_ptrs_dev.as_ptr()),
+                    d_public: BaseOff::from_ptr(t.public_ptr),
                 };
 
                 MonomialAirCtx {
@@ -473,6 +475,8 @@ impl<'a> ZerocheckMonomialParYBatch<'a> {
                 &mut output,
                 &self.block_ctxs,
                 &self.air_ctxs,
+                // Eager encoding: absolute addresses, null base ([`BaseOff`]).
+                std::ptr::null(),
                 &self.air_offsets,
                 self.num_blocks,
                 num_x,
@@ -659,10 +663,10 @@ impl<'a> LogupMonomialBatch<'a> {
                 let mono_blocks = max_monomials.div_ceil(threads_per_block).max(1);
 
                 let eval_ctx = EvalCoreCtx {
-                    d_selectors: t.sels_ptr,
+                    d_selectors: BaseOff::from_ptr(t.sels_ptr),
                     d_preprocessed: t.prep_ptr,
-                    d_main: t.main_ptrs_dev.as_ptr(),
-                    d_public: t.public_ptr,
+                    d_main: BaseOff::from_ptr(t.main_ptrs_dev.as_ptr()),
+                    d_public: BaseOff::from_ptr(t.public_ptr),
                 };
 
                 LogupMonomialCommonCtx {
@@ -776,6 +780,7 @@ impl<'a> LogupMonomialBatch<'a> {
                 &self.common_ctxs,
                 &self.numer_ctxs,
                 &self.denom_ctxs,
+                std::ptr::null(),
                 &self.air_offsets,
                 self.num_blocks,
                 num_x,

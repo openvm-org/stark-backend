@@ -6,11 +6,98 @@ use crate::{
     poly::SqrtEqLayers,
 };
 
+/// A device address encoded as a byte offset from a single base pointer —
+/// the ABI mirrored by `BaseOff` in `cuda/include/base_off.cuh`.
+///
+/// Two producers encode into it:
+///
+/// * the **graph-IR** path stores `GraphExe::plan().offsets[b]` (plus an intra-buffer byte offset)
+///   and hands the kernel the base of the exe's unified device pool, so the descriptor arrays hold
+///   *integers* and no device pointer is ever embedded in an uploaded struct;
+/// * the **eager** path stores the absolute device address ([`Self::from_ptr`]) and hands the
+///   kernel a null base, so `base + off` reproduces the original pointer exactly and eager
+///   behaviour is unchanged.
+///
+/// [`Self::NULL`] is the "absent" encoding. Offset `0` cannot serve as the
+/// sentinel: it is a valid pool offset — the first packed buffer lives there.
+#[repr(transparent)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct BaseOff(pub u64);
+
+impl BaseOff {
+    /// Decodes to a null pointer for every base.
+    pub const NULL: Self = BaseOff(u64::MAX);
+
+    /// A byte offset inside the graph's unified pool.
+    pub const fn from_offset(off: u64) -> Self {
+        BaseOff(off)
+    }
+
+    /// The eager encoding: an absolute device address, decoded against a null
+    /// base. A null pointer maps to [`Self::NULL`].
+    pub fn from_ptr<T>(p: *const T) -> Self {
+        if p.is_null() {
+            Self::NULL
+        } else {
+            BaseOff(p as usize as u64)
+        }
+    }
+
+    /// [`Self::from_ptr`] for a mutable pointer.
+    pub fn from_mut_ptr<T>(p: *mut T) -> Self {
+        Self::from_ptr(p.cast_const())
+    }
+
+    /// `base + self`, the host-side twin of `base_off_ptr` in
+    /// `cuda/include/base_off.cuh`. Used by tests and by the descriptor
+    /// builders' debug assertions.
+    pub fn resolve(self, base: *const u8) -> *const u8 {
+        if self == Self::NULL {
+            std::ptr::null()
+        } else {
+            (base as usize).wrapping_add(self.0 as usize) as *const u8
+        }
+    }
+}
+
+impl std::fmt::Debug for BaseOff {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if *self == Self::NULL {
+            f.write_str("BaseOff::NULL")
+        } else {
+            write!(f, "BaseOff({:#x})", self.0)
+        }
+    }
+}
+
+/// One matrix's device base address — as a [`BaseOff`] — plus its padded AIR
+/// width. Mirrors `MainMatrixDesc` in `cuda/include/matrix.cuh`.
+///
+/// This is what the context arrays store, so those arrays hold integers rather
+/// than embedded device pointers. `MainMatrixPtrs` (the decoded pointer form)
+/// still exists on the CUDA side as the device-local register type; it has no
+/// Rust mirror any more because no host code produces one.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
-pub struct MainMatrixPtrs<T> {
-    pub data: *const T,
+pub struct MainMatrixDesc {
+    pub data: BaseOff,
     pub air_width: u32,
+}
+
+impl MainMatrixDesc {
+    /// The eager encoding of one main/preprocessed matrix.
+    pub fn from_ptr(data: *const EF, air_width: u32) -> Self {
+        Self {
+            data: BaseOff::from_ptr(data),
+            air_width,
+        }
+    }
+
+    /// The "no preprocessed trace" encoding (`batch_mle.rs`'s null branch).
+    pub const ABSENT: Self = MainMatrixDesc {
+        data: BaseOff::NULL,
+        air_width: 0,
+    };
 }
 
 // Types for batch MLE:
@@ -39,22 +126,24 @@ pub struct MonomialAirCtx {
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct EvalCoreCtx {
-    pub d_selectors: *const EF,
-    pub d_preprocessed: MainMatrixPtrs<EF>,
-    pub d_main: *const MainMatrixPtrs<EF>,
-    pub d_public: *const F,
+    pub d_selectors: BaseOff,
+    pub d_preprocessed: MainMatrixDesc,
+    /// Offset of the `MainMatrixDesc` array — descriptors, not pointers, so no
+    /// level of this structure embeds a device address.
+    pub d_main: BaseOff,
+    pub d_public: BaseOff,
 }
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct ZerocheckCtx {
     pub eval_ctx: EvalCoreCtx,
-    pub d_intermediates: *mut EF,
+    pub d_intermediates: BaseOff,
     pub num_y: u32,
-    pub d_eq_xi: *const EF,
-    pub d_rules: *const std::ffi::c_void,
+    pub d_eq_xi: BaseOff,
+    pub d_rules: BaseOff,
     pub rules_len: usize,
-    pub d_used_nodes: *const usize,
+    pub d_used_nodes: BaseOff,
     pub used_nodes_len: usize,
     pub buffer_size: u32,
 }
@@ -63,15 +152,15 @@ pub struct ZerocheckCtx {
 #[derive(Clone, Copy, Debug)]
 pub struct LogupCtx {
     pub eval_ctx: EvalCoreCtx,
-    pub d_intermediates: *mut EF,
+    pub d_intermediates: BaseOff,
     pub num_y: u32,
-    pub d_eq_xi: *const EF,
-    pub d_challenges: *const EF,
-    pub d_eq_3bs: *const EF,
-    pub d_rules: *const std::ffi::c_void,
+    pub d_eq_xi: BaseOff,
+    pub d_challenges: BaseOff,
+    pub d_eq_3bs: BaseOff,
+    pub d_rules: BaseOff,
     pub rules_len: usize,
-    pub d_used_nodes: *const usize,
-    pub d_pair_idxs: *const u32,
+    pub d_used_nodes: BaseOff,
+    pub d_pair_idxs: BaseOff,
     pub used_nodes_len: usize,
     pub buffer_size: u32,
 }
@@ -552,8 +641,8 @@ extern "C" {
         output: *mut EF,
         eq_xi: *const EF,
         selectors: *const EF,
-        preprocessed: MainMatrixPtrs<EF>,
-        main: *const MainMatrixPtrs<EF>,
+        preprocessed: MainMatrixDesc,
+        main: *const MainMatrixDesc,
         lambda_pows: *const EF,
         public_values: *const F,
         rules: *const std::ffi::c_void,
@@ -576,8 +665,8 @@ extern "C" {
         output: *mut Frac<EF>,
         eq_xi: *const EF,
         selectors: *const EF,
-        preprocessed: MainMatrixPtrs<EF>,
-        main: *const MainMatrixPtrs<EF>,
+        preprocessed: MainMatrixDesc,
+        main: *const MainMatrixDesc,
         challenges: *const EF,
         eq_3bs: *const EF,
         public_values: *const F,
@@ -610,6 +699,7 @@ extern "C" {
         output: *mut EF,
         block_ctxs: *const BlockCtx,
         zc_ctxs: *const ZerocheckCtx,
+        pool_base: *const u8,
         air_block_offsets: *const u32,
         lambda_pows: *const EF,
         lambda_len: usize,
@@ -625,6 +715,7 @@ extern "C" {
         output: *mut Frac<EF>,
         block_ctxs: *const BlockCtx,
         logup_ctxs: *const LogupCtx,
+        pool_base: *const u8,
         air_block_offsets: *const u32,
         num_blocks: u32,
         num_x: u32,
@@ -633,65 +724,9 @@ extern "C" {
         stream: cudaStream_t,
     ) -> i32;
 
-    // ---- ctx materializers (graph-IR) --------------------------------------
-    // See `cuda/src/logup_zerocheck/batch_mle.cu` "CTX MATERIALIZERS": these
-    // build one element of a batched ctx array *on the device* from typed
-    // pointer arguments, so no host-assembled struct-of-pointers has to be
-    // uploaded and every pointer stays a real graph edge.
-
-    fn _materialize_main_matrix_ptr(
-        out: *mut MainMatrixPtrs<EF>,
-        idx: u32,
-        data: *const EF,
-        air_width: u32,
-        stream: cudaStream_t,
-    ) -> i32;
-
-    fn _materialize_zerocheck_ctx(
-        out: *mut ZerocheckCtx,
-        idx: u32,
-        d_selectors: *const EF,
-        d_preprocessed_data: *const EF,
-        preprocessed_air_width: u32,
-        d_main: *const MainMatrixPtrs<EF>,
-        d_public: *const F,
-        d_intermediates: *mut EF,
-        num_y: u32,
-        d_eq_xi: *const EF,
-        d_rules: *const std::ffi::c_void,
-        rules_len: usize,
-        d_used_nodes: *const usize,
-        used_nodes_len: usize,
-        buffer_size: u32,
-        stream: cudaStream_t,
-    ) -> i32;
-
-    #[allow(clippy::too_many_arguments)]
-    fn _materialize_logup_ctx(
-        out: *mut LogupCtx,
-        idx: u32,
-        d_selectors: *const EF,
-        d_preprocessed_data: *const EF,
-        preprocessed_air_width: u32,
-        d_main: *const MainMatrixPtrs<EF>,
-        d_public: *const F,
-        d_intermediates: *mut EF,
-        num_y: u32,
-        d_eq_xi: *const EF,
-        d_challenges: *const EF,
-        d_eq_3bs: *const EF,
-        d_rules: *const std::ffi::c_void,
-        rules_len: usize,
-        d_used_nodes: *const usize,
-        d_pair_idxs: *const u32,
-        used_nodes_len: usize,
-        buffer_size: u32,
-        stream: cudaStream_t,
-    ) -> i32;
-
     /// `sizeof` of the C++ ctx ABI, for the layout static-asserts in
     /// [`assert_ctx_abi_matches_cuda`].
-    pub fn _main_matrix_ptrs_ext_size() -> usize;
+    pub fn _main_matrix_desc_size() -> usize;
     pub fn _eval_core_ctx_size() -> usize;
     pub fn _zerocheck_ctx_size() -> usize;
     pub fn _logup_ctx_size() -> usize;
@@ -701,6 +736,7 @@ extern "C" {
         output: *mut EF,
         block_ctxs: *const BlockCtx,
         air_ctxs: *const MonomialAirCtx,
+        pool_base: *const u8,
         air_block_offsets: *const u32,
         num_blocks: u32,
         num_x: u32,
@@ -714,6 +750,7 @@ extern "C" {
         output: *mut EF,
         block_ctxs: *const BlockCtx,
         air_ctxs: *const MonomialAirCtx,
+        pool_base: *const u8,
         air_block_offsets: *const u32,
         num_blocks: u32,
         num_x: u32,
@@ -759,6 +796,7 @@ extern "C" {
         common_ctxs: *const LogupMonomialCommonCtx,
         numer_ctxs: *const LogupMonomialCtx,
         denom_ctxs: *const LogupMonomialCtx,
+        pool_base: *const u8,
         air_block_offsets: *const u32,
         num_blocks: u32,
         num_x: u32,
@@ -1659,8 +1697,8 @@ pub unsafe fn zerocheck_eval_mle(
     output: &mut DeviceBuffer<EF>,
     eq_xi: *const EF,
     selectors: *const EF,
-    preprocessed: MainMatrixPtrs<EF>,
-    main_ptrs: *const MainMatrixPtrs<EF>,
+    preprocessed: MainMatrixDesc,
+    main_ptrs: *const MainMatrixDesc,
     lambda_pows: *const EF,
     lambda_len: usize,
     public_values: *const F,
@@ -1702,6 +1740,7 @@ pub unsafe fn zerocheck_batch_eval_mle(
     output: &mut DeviceBuffer<EF>,
     block_ctxs: &DeviceBuffer<BlockCtx>,
     zc_ctxs: &DeviceBuffer<ZerocheckCtx>,
+    pool_base: *const u8,
     air_block_offsets: &DeviceBuffer<u32>,
     lambda_pows: &DeviceBuffer<EF>,
     lambda_len: usize,
@@ -1716,6 +1755,7 @@ pub unsafe fn zerocheck_batch_eval_mle(
         output.as_mut_ptr(),
         block_ctxs.as_ptr(),
         zc_ctxs.as_ptr(),
+        pool_base,
         air_block_offsets.as_ptr(),
         lambda_pows.as_ptr(),
         lambda_len,
@@ -1734,8 +1774,8 @@ pub unsafe fn logup_eval_mle(
     output: &mut DeviceBuffer<Frac<EF>>,
     eq_xi: *const EF,
     selectors: *const EF,
-    preprocessed: MainMatrixPtrs<EF>,
-    main_ptrs: *const MainMatrixPtrs<EF>,
+    preprocessed: MainMatrixDesc,
+    main_ptrs: *const MainMatrixDesc,
     challenges: *const EF,
     eq_3bs: *const EF,
     public_values: *const F,
@@ -1777,6 +1817,7 @@ pub unsafe fn logup_batch_eval_mle(
     output: &mut DeviceBuffer<Frac<EF>>,
     block_ctxs: &DeviceBuffer<BlockCtx>,
     logup_ctxs: &DeviceBuffer<LogupCtx>,
+    pool_base: *const u8,
     air_block_offsets: &DeviceBuffer<u32>,
     num_blocks: u32,
     num_x: u32,
@@ -1789,6 +1830,7 @@ pub unsafe fn logup_batch_eval_mle(
         output.as_mut_ptr(),
         block_ctxs.as_ptr(),
         logup_ctxs.as_ptr(),
+        pool_base,
         air_block_offsets.as_ptr(),
         num_blocks,
         num_x,
@@ -1804,6 +1846,7 @@ pub unsafe fn zerocheck_monomial_batched(
     output: &mut DeviceBuffer<EF>,
     block_ctxs: &DeviceBuffer<BlockCtx>,
     air_ctxs: &DeviceBuffer<MonomialAirCtx>,
+    pool_base: *const u8,
     air_block_offsets: &DeviceBuffer<u32>,
     num_blocks: u32,
     num_x: u32,
@@ -1816,6 +1859,7 @@ pub unsafe fn zerocheck_monomial_batched(
         output.as_mut_ptr(),
         block_ctxs.as_ptr(),
         air_ctxs.as_ptr(),
+        pool_base,
         air_block_offsets.as_ptr(),
         num_blocks,
         num_x,
@@ -1831,6 +1875,7 @@ pub unsafe fn zerocheck_monomial_par_y_batched(
     output: &mut DeviceBuffer<EF>,
     block_ctxs: &DeviceBuffer<BlockCtx>,
     air_ctxs: &DeviceBuffer<MonomialAirCtx>,
+    pool_base: *const u8,
     air_block_offsets: &DeviceBuffer<u32>,
     num_blocks: u32,
     num_x: u32,
@@ -1844,6 +1889,7 @@ pub unsafe fn zerocheck_monomial_par_y_batched(
         output.as_mut_ptr(),
         block_ctxs.as_ptr(),
         air_ctxs.as_ptr(),
+        pool_base,
         air_block_offsets.as_ptr(),
         num_blocks,
         num_x,
@@ -1918,6 +1964,7 @@ pub unsafe fn logup_monomial_batched(
     common_ctxs: &DeviceBuffer<LogupMonomialCommonCtx>,
     numer_ctxs: &DeviceBuffer<LogupMonomialCtx>,
     denom_ctxs: &DeviceBuffer<LogupMonomialCtx>,
+    pool_base: *const u8,
     air_block_offsets: &DeviceBuffer<u32>,
     num_blocks: u32,
     num_x: u32,
@@ -1932,6 +1979,7 @@ pub unsafe fn logup_monomial_batched(
         common_ctxs.as_ptr(),
         numer_ctxs.as_ptr(),
         denom_ctxs.as_ptr(),
+        pool_base,
         air_block_offsets.as_ptr(),
         num_blocks,
         num_x,
@@ -2036,122 +2084,24 @@ pub unsafe fn fold_selectors_round0(
 // wrappers must not construct owning `DeviceBuffer`s (that would free pool
 // memory on drop), matching `fractional_ir.rs`'s device-challenge wrappers.
 
-/// Write `out[idx] = MainMatrixPtrs { data, air_width }` on the device.
-pub unsafe fn materialize_main_matrix_ptr_raw(
-    out: *mut MainMatrixPtrs<EF>,
-    idx: u32,
-    data: *const EF,
-    air_width: u32,
-    stream: cudaStream_t,
-) -> Result<(), CudaError> {
-    CudaError::from_result(_materialize_main_matrix_ptr(
-        out, idx, data, air_width, stream,
-    ))
-}
-
-/// Write `out[idx]` of a `ZerocheckCtx` array on the device.
-///
-/// Field order mirrors the eager builder in `logup_zerocheck/batch_mle.rs`.
-#[allow(clippy::too_many_arguments)]
-pub unsafe fn materialize_zerocheck_ctx_raw(
-    out: *mut ZerocheckCtx,
-    idx: u32,
-    d_selectors: *const EF,
-    d_preprocessed_data: *const EF,
-    preprocessed_air_width: u32,
-    d_main: *const MainMatrixPtrs<EF>,
-    d_public: *const F,
-    d_intermediates: *mut EF,
-    num_y: u32,
-    d_eq_xi: *const EF,
-    d_rules: *const std::ffi::c_void,
-    rules_len: usize,
-    d_used_nodes: *const usize,
-    used_nodes_len: usize,
-    buffer_size: u32,
-    stream: cudaStream_t,
-) -> Result<(), CudaError> {
-    CudaError::from_result(_materialize_zerocheck_ctx(
-        out,
-        idx,
-        d_selectors,
-        d_preprocessed_data,
-        preprocessed_air_width,
-        d_main,
-        d_public,
-        d_intermediates,
-        num_y,
-        d_eq_xi,
-        d_rules,
-        rules_len,
-        d_used_nodes,
-        used_nodes_len,
-        buffer_size,
-        stream,
-    ))
-}
-
-/// Write `out[idx]` of a `LogupCtx` array on the device.
-///
-/// Field order mirrors the eager builder in `logup_zerocheck/batch_mle.rs`.
-#[allow(clippy::too_many_arguments)]
-pub unsafe fn materialize_logup_ctx_raw(
-    out: *mut LogupCtx,
-    idx: u32,
-    d_selectors: *const EF,
-    d_preprocessed_data: *const EF,
-    preprocessed_air_width: u32,
-    d_main: *const MainMatrixPtrs<EF>,
-    d_public: *const F,
-    d_intermediates: *mut EF,
-    num_y: u32,
-    d_eq_xi: *const EF,
-    d_challenges: *const EF,
-    d_eq_3bs: *const EF,
-    d_rules: *const std::ffi::c_void,
-    rules_len: usize,
-    d_used_nodes: *const usize,
-    d_pair_idxs: *const u32,
-    used_nodes_len: usize,
-    buffer_size: u32,
-    stream: cudaStream_t,
-) -> Result<(), CudaError> {
-    CudaError::from_result(_materialize_logup_ctx(
-        out,
-        idx,
-        d_selectors,
-        d_preprocessed_data,
-        preprocessed_air_width,
-        d_main,
-        d_public,
-        d_intermediates,
-        num_y,
-        d_eq_xi,
-        d_challenges,
-        d_eq_3bs,
-        d_rules,
-        rules_len,
-        d_used_nodes,
-        d_pair_idxs,
-        used_nodes_len,
-        buffer_size,
-        stream,
-    ))
-}
-
 /// Panics unless the Rust ctx mirrors agree byte-for-byte in size with the
 /// private C++ definitions in `batch_mle.cu`.
 ///
-/// The two layouts are hand-duplicated and already relied upon by the eager
-/// H2D upload; the materializers make a device writer depend on them too, so
-/// drift must fail loudly. Field *order* is covered by the graph-vs-eager
-/// field-by-field test in `zerocheck_ir.rs`.
+/// The two layouts are hand-duplicated and relied upon by both producers of
+/// the base+offset ABI — the eager H2D upload and the graph-IR descriptor
+/// builder — so drift must fail loudly. Field *order* is covered by the
+/// graph-vs-eager field-by-field test in `zerocheck_ir.rs`.
 pub fn assert_ctx_abi_matches_cuda() {
     unsafe {
         assert_eq!(
-            std::mem::size_of::<MainMatrixPtrs<EF>>(),
-            _main_matrix_ptrs_ext_size(),
-            "MainMatrixPtrs<EF> layout drift vs CUDA"
+            std::mem::size_of::<BaseOff>(),
+            8,
+            "BaseOff must be exactly the `uint64_t` the CUDA ABI stores"
+        );
+        assert_eq!(
+            std::mem::size_of::<MainMatrixDesc>(),
+            _main_matrix_desc_size(),
+            "MainMatrixDesc layout drift vs CUDA"
         );
         assert_eq!(
             std::mem::size_of::<EvalCoreCtx>(),

@@ -11,13 +11,13 @@
 namespace logup_zerocheck_mle {
 
 __device__ __forceinline__ FpExt
-eval_variable(PackedVar var, uint32_t row, const EvalCoreCtx &ctx, uint32_t height) {
+eval_variable(PackedVar var, uint32_t row, const EvalCoreRT &ctx, uint32_t height) {
     uint8_t entry_type = var.entry_type();
     uint8_t offset = var.offset();
 
     switch (entry_type) {
     case 1: { // MAIN
-        auto main_ptr = ctx.d_main[var.part_index()];
+        auto main_ptr = resolve_main_matrix<FpExt>(ctx.d_main[var.part_index()], ctx.base);
         const auto stride = height * main_ptr.air_width;
         const FpExt *__restrict__ matrix = main_ptr.data + stride * offset;
         const FpExt *__restrict__ column = matrix + height * var.col_index();
@@ -103,6 +103,7 @@ __global__ void zerocheck_monomial_kernel(
     FpExt *__restrict__ tmp_sums,
     const BlockCtx *__restrict__ block_ctxs,
     const MonomialAirCtx *__restrict__ air_ctxs,
+    const uint8_t *__restrict__ pool_base,
     uint32_t threads_per_block
 ) {
     extern __shared__ char smem[];
@@ -110,6 +111,7 @@ __global__ void zerocheck_monomial_kernel(
 
     BlockCtx bctx = block_ctxs[blockIdx.x];
     MonomialAirCtx actx = air_ctxs[bctx.air_idx];
+    EvalCoreRT eval_ctx = resolve_eval_core(actx.eval_ctx, pool_base);
 
     uint32_t num_x = gridDim.y;
     uint32_t x_int = blockIdx.y;
@@ -133,7 +135,7 @@ __global__ void zerocheck_monomial_kernel(
         FpExt product(Fp::one());
         for (uint16_t v = 0; v < hdr.num_vars; ++v) {
             PackedVar var = actx.d_variables[hdr.var_offset + v];
-            product *= eval_variable(var, row, actx.eval_ctx, height);
+            product *= eval_variable(var, row, eval_ctx, height);
         }
 
         sum = product * actx.d_lambda_combinations[m];
@@ -155,6 +157,7 @@ extern "C" int _zerocheck_monomial_batched(
     FpExt *output,
     const BlockCtx *block_ctxs,
     const MonomialAirCtx *air_ctxs,
+    const uint8_t *pool_base,
     const uint32_t *air_block_offsets,
     uint32_t num_blocks,
     uint32_t num_x,
@@ -173,7 +176,7 @@ extern "C" int _zerocheck_monomial_batched(
 
     // Phase 1: Main monomial evaluation kernel
     zerocheck_monomial_kernel<<<grid, block, shmem, stream>>>(
-        tmp_sums, block_ctxs, air_ctxs, threads_per_block
+        tmp_sums, block_ctxs, air_ctxs, pool_base, threads_per_block
     );
     int err = CHECK_KERNEL();
     if (err != 0)
@@ -201,6 +204,7 @@ __global__ void zerocheck_monomial_par_y_kernel(
     FpExt *__restrict__ tmp_sums,
     const BlockCtx *__restrict__ block_ctxs,
     const MonomialAirCtx *__restrict__ air_ctxs,
+    const uint8_t *__restrict__ pool_base,
     uint32_t threads_per_block,
     uint32_t chunk_size // monomials per mono_chunk
 ) {
@@ -209,6 +213,7 @@ __global__ void zerocheck_monomial_par_y_kernel(
 
     BlockCtx bctx = block_ctxs[blockIdx.x];
     MonomialAirCtx actx = air_ctxs[bctx.air_idx];
+    EvalCoreRT eval_ctx = resolve_eval_core(actx.eval_ctx, pool_base);
 
     uint32_t num_x = gridDim.y;
     uint32_t x_int = blockIdx.y;
@@ -239,7 +244,7 @@ __global__ void zerocheck_monomial_par_y_kernel(
             FpExt product(Fp::one());
             for (uint16_t v = 0; v < hdr.num_vars; ++v) {
                 PackedVar var = actx.d_variables[hdr.var_offset + v];
-                product *= eval_variable(var, row, actx.eval_ctx, height);
+                product *= eval_variable(var, row, eval_ctx, height);
             }
 
             sum += product * actx.d_lambda_combinations[m];
@@ -262,6 +267,7 @@ extern "C" int _zerocheck_monomial_par_y_batched(
     FpExt *output,
     const BlockCtx *block_ctxs,
     const MonomialAirCtx *air_ctxs,
+    const uint8_t *pool_base,
     const uint32_t *air_block_offsets,
     uint32_t num_blocks,
     uint32_t num_x,
@@ -281,7 +287,7 @@ extern "C" int _zerocheck_monomial_par_y_batched(
 
     // Phase 1: Main par-y kernel
     zerocheck_monomial_par_y_kernel<<<grid, block, shmem, stream>>>(
-        tmp_sums, block_ctxs, air_ctxs, threads_per_block, chunk_size
+        tmp_sums, block_ctxs, air_ctxs, pool_base, threads_per_block, chunk_size
     );
     int err = CHECK_KERNEL();
     if (err != 0)
@@ -396,7 +402,8 @@ __global__ void logup_monomial_kernel(
     FracExt *__restrict__ tmp_sums,
     const BlockCtx *__restrict__ block_ctxs,
     const LogupMonomialCommonCtx *__restrict__ common_ctxs,
-    const LogupMonomialCtx *__restrict__ ctxs
+    const LogupMonomialCtx *__restrict__ ctxs,
+    const uint8_t *__restrict__ pool_base
 ) {
     extern __shared__ char smem[];
     FpExt *shared = (FpExt *)smem;
@@ -404,6 +411,7 @@ __global__ void logup_monomial_kernel(
     BlockCtx bctx = block_ctxs[blockIdx.x];
     LogupMonomialCommonCtx common_ctx = common_ctxs[bctx.air_idx];
     LogupMonomialCtx ctx = ctxs[bctx.air_idx];
+    EvalCoreRT eval_ctx = resolve_eval_core(common_ctx.eval_ctx, pool_base);
 
     uint32_t num_x = gridDim.y;
     uint32_t x_int = blockIdx.y;
@@ -424,7 +432,7 @@ __global__ void logup_monomial_kernel(
         FpExt monomial = ctx.d_combinations[m];
         for (uint16_t v = 0; v < hdr.num_vars; ++v) {
             PackedVar var = ctx.d_variables[hdr.var_offset + v];
-            monomial *= eval_variable(var, row, common_ctx.eval_ctx, height);
+            monomial *= eval_variable(var, row, eval_ctx, height);
         }
         sum = monomial * common_ctx.d_eq_xi[y_int];
     }
@@ -450,6 +458,7 @@ extern "C" int _logup_monomial_batched(
     const LogupMonomialCommonCtx *common_ctxs,
     const LogupMonomialCtx *numer_ctxs,
     const LogupMonomialCtx *denom_ctxs,
+    const uint8_t *pool_base,
     const uint32_t *air_block_offsets,
     uint32_t num_blocks,
     uint32_t num_x,
@@ -467,7 +476,7 @@ extern "C" int _logup_monomial_batched(
 
     // Phase 1: Evaluate numerator monomials
     logup_monomial_kernel<false><<<grid, block, shmem, stream>>>(
-        tmp_sums, block_ctxs, common_ctxs, numer_ctxs
+        tmp_sums, block_ctxs, common_ctxs, numer_ctxs, pool_base
     );
     int err = CHECK_KERNEL();
     if (err != 0)
@@ -475,7 +484,7 @@ extern "C" int _logup_monomial_batched(
 
     // Phase 1b: Evaluate denominator monomials
     logup_monomial_kernel<true><<<grid, block, shmem, stream>>>(
-        tmp_sums, block_ctxs, common_ctxs, denom_ctxs
+        tmp_sums, block_ctxs, common_ctxs, denom_ctxs, pool_base
     );
     err = CHECK_KERNEL();
     if (err != 0)

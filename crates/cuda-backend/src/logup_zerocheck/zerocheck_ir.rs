@@ -57,13 +57,14 @@
 //! hides every embedded pointer from the planner — a struct of host-baked
 //! addresses is an opaque leaf and alias analysis through it is impossible.
 //!
-//! `ZerocheckCtx` and `LogupCtx` (and the `MainMatrixPtrs<EF>` descriptor
-//! array they point at) are instead built **on the device**, one element per
-//! node, by [`materialize_zerocheck_ctx_ir`] / [`materialize_logup_ctx_ir`] /
-//! [`materialize_main_matrix_ptr_ir`]. Each pointer field is a
-//! [`DevicePtrArg::Graph`] whose `BufId` is bound as a node input and
-//! resolved at invocation time, so it stays a real graph edge; only
-//! host-known scalars are captured by value.
+//! `ZerocheckCtx` and `LogupCtx` (and the `MainMatrixDesc` array they point
+//! at) instead hold **no pointers at all**: every device-pointer field is a
+//! [`BaseOff`] byte offset into the `GraphExe`'s unified pool, and the
+//! launcher takes the pool base as a kernel argument. The offsets come
+//! straight from `GraphExe::plan().offsets`, so the whole array is
+//! host-computable after `compile()` and is uploaded once as a registered
+//! graph input by [`DescriptorPlan::bind`]. See the "base+offset descriptor
+//! ABI (R6)" section below.
 //!
 //! Still host-assembled, and therefore still opaque: the three *monomial* ctx
 //! structs (`MonomialAirCtx`, `LogupMonomialCommonCtx`, `LogupMonomialCtx`),
@@ -71,7 +72,13 @@
 //! `interpolate_columns` column-pointer table. Each is the same shape of hole
 //! and the same shape of fix.
 
-use std::mem::{forget, size_of};
+use std::{
+    mem::{forget, size_of},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
+};
 
 use crypto_compiler::{
     graph_ir::{BufId, BufInfo, ConstBuf, DeviceType, GraphBuilder},
@@ -88,13 +95,11 @@ use crate::{
             _logup_batch_mle_intermediates_buffer_size,
             _zerocheck_batch_mle_intermediates_buffer_size, fold_ple_from_evals,
             fold_selectors_round0, interpolate_columns_gpu, logup_bary_eval_interactions_round0,
-            logup_batch_eval_mle, logup_monomial_batched, materialize_logup_ctx_raw,
-            materialize_main_matrix_ptr_raw, materialize_zerocheck_ctx_raw,
-            precompute_lambda_combinations, precompute_logup_denom_combinations,
-            precompute_logup_numer_combinations, zerocheck_batch_eval_mle,
-            zerocheck_monomial_batched, zerocheck_monomial_par_y_batched,
-            zerocheck_ntt_eval_constraints, BlockCtx, LogupCtx, LogupMonomialCommonCtx,
-            LogupMonomialCtx, MainMatrixPtrs, MonomialAirCtx, ZerocheckCtx,
+            logup_batch_eval_mle, logup_monomial_batched, precompute_lambda_combinations,
+            precompute_logup_denom_combinations, precompute_logup_numer_combinations,
+            zerocheck_batch_eval_mle, zerocheck_monomial_batched, zerocheck_monomial_par_y_batched,
+            zerocheck_ntt_eval_constraints, BaseOff, BlockCtx, EvalCoreCtx, LogupCtx,
+            LogupMonomialCommonCtx, LogupMonomialCtx, MainMatrixDesc, MonomialAirCtx, ZerocheckCtx,
         },
         poly::eq_hypercube_interleaved_stage_ext,
         sumcheck::batch_fold_mle,
@@ -411,14 +416,14 @@ pub struct Round0ZcBufs {
 // TODO(cc-ir,T5): `main_ptrs` is a `*const F` pointer table assembled on the
 //   host (`mod.rs:826-832`), the round-0 analogue of the ctx hole T5 closed
 //   for stage D.
-// WHY: T5 scoped device materializers for `MainMatrixPtrs<EF>` /
+// WHY: R6 scoped the base+offset descriptor ABI for `MainMatrixDesc` /
 //   `ZerocheckCtx` / `LogupCtx`; the round-0 table is a bare `*const F[]`
 //   with a different ABI and was not in scope.
 // RISK: the planner cannot see through the table to the matrices it points
 //   at, so the individual `mats` buffers must be bound explicitly by the
 //   caller (as `interpolate_columns_ir` does) or the ordering is unstated.
-//   The fix is a `_materialize_main_ptr_f` twin of
-//   `_materialize_main_matrix_ptr`.
+//   The fix is a `MainMatrixDesc`-shaped `*const F` table on the same
+//   base+offset ABI, filled by [`DescriptorPlan`].
 pub fn zerocheck_ntt_eval_constraints_ir(
     g: &mut GraphBuilder,
     bufs: Round0ZcBufs,
@@ -755,7 +760,7 @@ pub fn fold_selectors_round0_ir(
 ///
 /// `columns` is a device table of `*const EF` column pointers assembled
 /// host-side (`mod.rs:1189-1199`) — the last unclosed instance of the ctx
-/// pointer hole T5 closed for `ZerocheckCtx` / `LogupCtx`. The node
+/// pointer hole R6 closed for `ZerocheckCtx` / `LogupCtx`. The node
 /// therefore binds `srcs` (the buffers the table points at) explicitly, so
 /// the ordering is declared even though the planner cannot see through the
 /// table itself.
@@ -793,26 +798,45 @@ pub fn interpolate_columns_ir(
 }
 
 // ===========================================================================
-// Device-side ctx materialization (T5).
+// The base+offset descriptor ABI (R6).
 // ===========================================================================
 //
-// The eager path assembles `MainMatrixPtrs<EF>` / `ZerocheckCtx` / `LogupCtx`
-// on the host and uploads them (`batch_mle.rs:158-201`,
-// `batch_mle_monomial.rs:176-192`). Every device pointer inside those structs
-// is then a *host-baked address*: the planner sees an opaque leaf and cannot
-// alias-analyse through it to the buffers the evaluator will dereference.
+// The eager path assembles `ZerocheckCtx` / `LogupCtx` / the `MainMatrixDesc`
+// array on the host and uploads them (`batch_mle.rs:158-201`,
+// `batch_mle_monomial.rs:176-192`). When those structs embedded raw device
+// pointers, the planner saw an opaque leaf and could not alias-analyse through
+// it to the buffers the evaluator would dereference — and the IR mirror had to
+// build them with one device *materializer launch per pointer field* just to
+// keep each address on a graph edge.
 //
-// The materializers below write one element of a ctx array on the device from
-// explicitly-typed launcher arguments. Each pointer argument is either a
-// [`DevicePtrArg::Graph`] — a `BufId` bound as a node input and resolved to
-// its pool address at invocation time — or a [`DevicePtrArg::Static`] address
-// the graph does not own (keygen-static proving-key tables, or null). Only
-// host-known scalars are captured by value. That is what puts every device
-// pointer back on a real graph edge.
+// Both problems go away once the descriptor arrays hold **integers**. Every
+// device-pointer field is now a [`BaseOff`]: a byte offset from one
+// `pool_base` pointer that the launcher takes as a kernel argument
+// (`cuda/include/base_off.cuh`). The graph-IR encoding of that offset is
+// literally `GraphExe::plan().offsets[b]` (`crates/compiler/src/planner/plan.rs:44-52`,
+// exposed by `GraphExe::plan()`, `graph_exe.rs:317-324`), and the base is the
+// pool we hand the exe ourselves via `GraphExe::set_scratch`
+// (`graph_exe.rs:565`). Both terms are constant for the exe's lifetime — the
+// same invariant that makes CUDA-graph capture legal (`graph_exe.rs:5-12`) —
+// so the whole array is host-computable before any kernel runs, uploaded once
+// as a graph input, and never touched again.
 //
-// The CUDA side is `cuda/src/logup_zerocheck/batch_mle.cu`
-// ("CTX MATERIALIZERS"); it zeroes the destination element first, so ABI
-// padding is deterministic across replays, then assigns field by field.
+// What that buys, concretely:
+//
+// * no embedded device pointers anywhere in an uploaded struct;
+// * no per-round, per-pointer device materializer launches in the captured graph;
+// * the descriptor array is a *registered graph input*, so `GraphExe::run` refuses to run until
+//   [`DescriptorPlan::bind`] has filled it (`graph_exe.rs:719`) — a forgotten bind is a hard error,
+//   not silent garbage.
+//
+// What it does **not** buy (stated plainly, because it is easy to oversell): a
+// batched multi-AIR kernel must still be handed *some* per-AIR array, and the
+// kernel still indexes it by `air_idx`. Base+offset removes the embedded
+// pointers and the runtime materialization; it does not collapse N descriptors
+// into a scalar. Nor does it remove the evaluator's obligation to *declare*
+// every buffer whose offset it embeds: an offset into a pool slot the planner
+// has handed to someone else is exactly as wrong as a stale pointer. That
+// declaration is still machine-derived — see [`OffSink`].
 
 /// One device-pointer field of a batched ctx struct.
 #[derive(Clone, Copy, Debug)]
@@ -856,77 +880,115 @@ impl DevicePtrArg {
     }
 }
 
-/// How one declared [`DevicePtrArg`] is recovered inside a blackbox closure.
-#[derive(Clone, Copy, Debug)]
-enum PtrSlot {
-    /// `inputs[idx] + byte_offset`.
-    Input { idx: usize, byte_offset: usize },
-    /// A raw address captured by value.
-    Static(usize),
-}
-
-/// Build-time half: collects a materializer node's graph inputs and remembers
-/// where each declared pointer argument ended up.
-struct PtrBinder {
-    inputs: Vec<BufId>,
-    slots: Vec<PtrSlot>,
-}
-
-impl PtrBinder {
-    /// `out` is bound as input 0 with `modifies = true` (the node's only
-    /// write), so graph pointer arguments start at input index 1.
-    fn new(out: BufId) -> Self {
-        Self {
-            inputs: vec![out],
-            slots: Vec::new(),
-        }
-    }
-
-    fn push(&mut self, arg: DevicePtrArg) {
-        let slot = match arg {
-            DevicePtrArg::Static(addr) => PtrSlot::Static(addr),
-            DevicePtrArg::Graph { buf, byte_offset } => {
-                // Dedupe: one buffer may back several fields.
-                let idx = self
-                    .inputs
-                    .iter()
-                    .position(|&b| b == buf)
-                    .unwrap_or_else(|| {
-                        self.inputs.push(buf);
-                        self.inputs.len() - 1
-                    });
-                PtrSlot::Input { idx, byte_offset }
-            }
-        };
-        self.slots.push(slot);
-    }
-
-    fn push_all(&mut self, args: impl IntoIterator<Item = DevicePtrArg>) {
-        for a in args {
-            self.push(a);
-        }
-    }
-
-    fn finish(self) -> (Vec<BufId>, Vec<bool>, PtrResolver) {
-        let mut modifies = vec![false; self.inputs.len()];
-        modifies[0] = true;
-        (self.inputs, modifies, PtrResolver { slots: self.slots })
-    }
-}
-
-/// The read set a materializer node declares: its [`PtrBinder`] inputs with
-/// `out` (index 0, the node's only write) dropped.
+/// The pool base every [`BaseOff`] in this graph decodes against.
 ///
-/// This is the *machine-derived* half of the Principle-1 access set. Every
-/// evaluator that dereferences a materialized ctx element must declare at
-/// least these buffers, or the planner will give their pool slots away while
-/// the evaluator still needs them (`planner/heuristic.rs:184-190`). Deriving
-/// the list from the binder — instead of re-typing it by hand at the call
-/// site — is what makes an under-declared access set unrepresentable: a new
-/// pointer field cannot be added to a ctx struct without its buffer flowing
-/// into this vector.
-fn declared_reads(inputs: &[BufId]) -> Vec<BufId> {
-    inputs[1..].to_vec()
+/// Published exactly once, by [`DescriptorPlan::bind`], after
+/// `GraphExe::set_scratch` has taken ownership of the pool we allocated. The
+/// evaluator closures read it when they launch; it is constant from that point
+/// on, so a CUDA-graph capture bakes in the same value a plain replay uses.
+///
+/// `0` means "not published yet" — a real CUDA allocation is never at address
+/// zero, and [`Self::get`] panics rather than launching against a null base.
+#[derive(Clone, Debug, Default)]
+pub struct PoolBase(Arc<AtomicU64>);
+
+impl PoolBase {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Records the base. Idempotent for the same value; panics on a second,
+    /// different base, because the descriptors already encoded against the
+    /// first one would silently address the wrong pool.
+    fn publish(&self, base: *const u8) {
+        let v = base as usize as u64;
+        assert_ne!(v, 0, "pool base must not be null");
+        let prev = self.0.swap(v, Ordering::SeqCst);
+        assert!(
+            prev == 0 || prev == v,
+            "pool base republished ({prev:#x} -> {v:#x}); descriptors encoded \
+             against the old base would address the wrong pool"
+        );
+    }
+
+    /// The published base. Panics if [`DescriptorPlan::bind`] has not run.
+    pub fn get(&self) -> *const u8 {
+        let v = self.0.load(Ordering::SeqCst);
+        assert_ne!(
+            v, 0,
+            "pool base not published: call `DescriptorPlan::bind` after \
+             `GraphCompiler::compile` and before `GraphExe::run`"
+        );
+        v as *const u8
+    }
+}
+
+/// Sink for the device-pointer fields of one descriptor, in ABI order.
+///
+/// Every `*_desc` writer below funnels **all** of its pointer fields through
+/// this trait, and the trait is instantiated twice over the same code:
+///
+/// * [`ReadCollector`] at graph-build time, which records the `BufId`s and returns a placeholder
+///   offset — that recorded list *is* the access set the consuming evaluator declares;
+/// * [`OffEncoder`] at bind time, which returns the real `plan().offsets[b] + byte_offset`.
+///
+/// This is what makes an under-declared access set unrepresentable: a new
+/// pointer field cannot reach the device without also flowing into the read
+/// set, because both come from the same call.
+trait OffSink {
+    fn off(&mut self, arg: DevicePtrArg) -> BaseOff;
+}
+
+/// Build-time [`OffSink`]: collects the graph buffers a descriptor references.
+#[derive(Default)]
+struct ReadCollector {
+    reads: Vec<BufId>,
+}
+
+impl OffSink for ReadCollector {
+    fn off(&mut self, arg: DevicePtrArg) -> BaseOff {
+        if let DevicePtrArg::Graph { buf, .. } = arg {
+            if !self.reads.contains(&buf) {
+                self.reads.push(buf);
+            }
+        }
+        // Never reaches the device: `bind` re-runs the same writer with
+        // [`OffEncoder`].
+        BaseOff::NULL
+    }
+}
+
+/// Bind-time [`OffSink`]: the real pool encoding.
+struct OffEncoder<'a> {
+    /// `GraphExe::plan().offsets`, byte offset per `BufId` in the pool.
+    offsets: &'a [Option<u64>],
+    /// The pool base, needed only to re-base [`DevicePtrArg::Static`]
+    /// addresses the graph does not own.
+    base: u64,
+}
+
+impl OffSink for OffEncoder<'_> {
+    fn off(&mut self, arg: DevicePtrArg) -> BaseOff {
+        match arg {
+            // `Static(0)` is the eager path's "absent" encoding.
+            DevicePtrArg::Static(0) => BaseOff::NULL,
+            // A keygen-static proving-key table: not in the pool, so store the
+            // delta that recovers it. Wrapping is deliberate and exact — the
+            // kernel adds the same wrapped value back to `base`.
+            DevicePtrArg::Static(addr) => {
+                BaseOff::from_offset((addr as u64).wrapping_sub(self.base))
+            }
+            DevicePtrArg::Graph { buf, byte_offset } => {
+                let off = self.offsets[buf.0].unwrap_or_else(|| {
+                    panic!(
+                        "buffer {buf:?} has no pool slot on the plan's device; a descriptor \
+                         field cannot be encoded against the pool base"
+                    )
+                });
+                BaseOff::from_offset(off + byte_offset as u64)
+            }
+        }
+    }
 }
 
 /// Union `reads` into `set` in first-seen order, dropping duplicates.
@@ -943,26 +1005,6 @@ fn extend_reads(set: &mut Vec<BufId>, reads: impl IntoIterator<Item = BufId>) {
     }
 }
 
-/// Invocation-time half of [`PtrBinder`].
-#[derive(Clone, Debug)]
-struct PtrResolver {
-    slots: Vec<PtrSlot>,
-}
-
-impl PtrResolver {
-    /// Resolve the `k`-th declared pointer argument against the pointers the
-    /// graph runner handed the closure.
-    ///
-    /// # Safety
-    /// `inputs` must be the slice the graph runner passed to the closure.
-    unsafe fn ptr(&self, k: usize, inputs: &[*mut ()]) -> *mut u8 {
-        match self.slots[k] {
-            PtrSlot::Static(addr) => addr as *mut u8,
-            PtrSlot::Input { idx, byte_offset } => (inputs[idx] as *mut u8).add(byte_offset),
-        }
-    }
-}
-
 /// The five logical components of `EvalCoreCtx` (`cuda/logup_zerocheck.rs:39`).
 #[derive(Clone, Copy, Debug)]
 pub struct EvalCoreCtxArgs {
@@ -971,7 +1013,7 @@ pub struct EvalCoreCtxArgs {
     pub d_preprocessed_data: DevicePtrArg,
     /// `d_preprocessed.air_width`; `0` when the AIR has no preprocessed data.
     pub preprocessed_air_width: u32,
-    /// The materialized `MainMatrixPtrs<EF>` descriptor array.
+    /// The `MainMatrixDesc` array for this AIR.
     pub d_main: DevicePtrArg,
     pub d_public: DevicePtrArg,
 }
@@ -1011,163 +1053,341 @@ pub struct LogupCtxArgs {
     pub buffer_size: u32,
 }
 
-/// Insert a `materialize_main_matrix_ptr` node: writes `out[idx]` of a
-/// `MainMatrixPtrs<EF>` descriptor array.
-///
-/// Mirrors the host-side `MainMatrixPtrs` construction the eager path does
-/// per trace (`mod.rs:1131-1149, 1224-1256`).
-///
-/// Returns the node's *declared pointer reads* — see
-/// [`materialize_zerocheck_ctx_ir`] for why the caller must forward them.
-#[must_use = "the declared reads must reach the evaluator's `ctx_reads`"]
-pub fn materialize_main_matrix_ptr_ir(
-    g: &mut GraphBuilder,
-    out: BufId,
-    idx: u32,
+// ---------------------------------------------------------------------------
+// Descriptor writers.
+//
+// One function per `#[repr(C)]` context struct. Each routes *every* device
+// pointer field through the [`OffSink`], and is run twice: once at graph-build
+// time with a [`ReadCollector`] (to derive the evaluator's access set) and once
+// at bind time with an [`OffEncoder`] (to produce the bytes that are uploaded).
+
+fn write_main_matrix_desc<S: OffSink>(
+    s: &mut S,
     data: DevicePtrArg,
     air_width: u32,
-) -> Vec<BufId> {
-    let mut b = PtrBinder::new(out);
-    b.push(data);
-    let (inputs, modifies, ptrs) = b.finish();
-    let reads = declared_reads(&inputs);
-    g.insert_blackbox_kernel(
-        "materialize_main_matrix_ptr",
-        inputs.into_iter(),
-        std::iter::empty(),
-        modifies.into_iter(),
-        move |inputs, _outputs, stream| unsafe {
-            materialize_main_matrix_ptr_raw(
-                inputs[0] as *mut MainMatrixPtrs<EF>,
-                idx,
-                ptrs.ptr(0, inputs) as *const EF,
-                air_width,
-                stream,
-            )
-            .expect("materialize_main_matrix_ptr");
-        },
-    );
-    reads
+) -> MainMatrixDesc {
+    MainMatrixDesc {
+        data: s.off(data),
+        air_width,
+    }
 }
 
-/// Insert a `materialize_zerocheck_ctx` node: writes `out[idx]` of a
-/// `ZerocheckCtx` array.
-///
+/// Mirrors the eager `EvalCoreCtx` construction (`batch_mle.rs:178-183`).
+fn write_eval_core_ctx<S: OffSink>(s: &mut S, a: &EvalCoreCtxArgs) -> EvalCoreCtx {
+    EvalCoreCtx {
+        d_selectors: s.off(a.d_selectors),
+        d_preprocessed: write_main_matrix_desc(s, a.d_preprocessed_data, a.preprocessed_air_width),
+        d_main: s.off(a.d_main),
+        d_public: s.off(a.d_public),
+    }
+}
+
 /// Mirrors `ZerocheckMleBatchBuilder::new`'s per-trace struct
 /// (`batch_mle.rs:158-201`) field for field.
-///
-/// Returns the node's *declared pointer reads* — see [`declared_reads`].
-#[must_use = "the declared reads must reach the evaluator's `ctx_reads`"]
-pub fn materialize_zerocheck_ctx_ir(
-    g: &mut GraphBuilder,
-    out: BufId,
-    idx: u32,
-    args: ZerocheckCtxArgs,
-) -> Vec<BufId> {
-    let mut b = PtrBinder::new(out);
-    b.push_all([
-        args.eval_ctx.d_selectors,
-        args.eval_ctx.d_preprocessed_data,
-        args.eval_ctx.d_main,
-        args.eval_ctx.d_public,
-        args.d_intermediates,
-        args.d_eq_xi,
-        args.d_rules,
-        args.d_used_nodes,
-    ]);
-    let (inputs, modifies, ptrs) = b.finish();
-    let reads = declared_reads(&inputs);
-    g.insert_blackbox_kernel(
-        "materialize_zerocheck_ctx",
-        inputs.into_iter(),
-        std::iter::empty(),
-        modifies.into_iter(),
-        move |inputs, _outputs, stream| unsafe {
-            materialize_zerocheck_ctx_raw(
-                inputs[0] as *mut ZerocheckCtx,
-                idx,
-                ptrs.ptr(0, inputs) as *const EF,
-                ptrs.ptr(1, inputs) as *const EF,
-                args.eval_ctx.preprocessed_air_width,
-                ptrs.ptr(2, inputs) as *const MainMatrixPtrs<EF>,
-                ptrs.ptr(3, inputs) as *const F,
-                ptrs.ptr(4, inputs) as *mut EF,
-                args.num_y,
-                ptrs.ptr(5, inputs) as *const EF,
-                ptrs.ptr(6, inputs) as *const std::ffi::c_void,
-                args.rules_len,
-                ptrs.ptr(7, inputs) as *const usize,
-                args.used_nodes_len,
-                args.buffer_size,
-                stream,
-            )
-            .expect("materialize_zerocheck_ctx");
-        },
-    );
-    reads
+fn write_zerocheck_ctx<S: OffSink>(s: &mut S, a: &ZerocheckCtxArgs) -> ZerocheckCtx {
+    ZerocheckCtx {
+        eval_ctx: write_eval_core_ctx(s, &a.eval_ctx),
+        d_intermediates: s.off(a.d_intermediates),
+        num_y: a.num_y,
+        d_eq_xi: s.off(a.d_eq_xi),
+        d_rules: s.off(a.d_rules),
+        rules_len: a.rules_len,
+        d_used_nodes: s.off(a.d_used_nodes),
+        used_nodes_len: a.used_nodes_len,
+        buffer_size: a.buffer_size,
+    }
 }
 
-/// Insert a `materialize_logup_ctx` node: writes `out[idx]` of a `LogupCtx`
-/// array.
-///
 /// Mirrors `LogupMleBatchBuilder::new`'s per-trace struct
 /// (`batch_mle.rs:297-353`) field for field.
+fn write_logup_ctx<S: OffSink>(s: &mut S, a: &LogupCtxArgs) -> LogupCtx {
+    LogupCtx {
+        eval_ctx: write_eval_core_ctx(s, &a.eval_ctx),
+        d_intermediates: s.off(a.d_intermediates),
+        num_y: a.num_y,
+        d_eq_xi: s.off(a.d_eq_xi),
+        d_challenges: s.off(a.d_challenges),
+        d_eq_3bs: s.off(a.d_eq_3bs),
+        d_rules: s.off(a.d_rules),
+        rules_len: a.rules_len,
+        d_used_nodes: s.off(a.d_used_nodes),
+        d_pair_idxs: s.off(a.d_pair_idxs),
+        used_nodes_len: a.used_nodes_len,
+        buffer_size: a.buffer_size,
+    }
+}
+
+/// One element of a descriptor array, recorded at graph-build time and encoded
+/// at bind time.
+#[derive(Clone, Debug)]
+enum DescElem {
+    MainMatrix { data: DevicePtrArg, air_width: u32 },
+    Zerocheck(Box<ZerocheckCtxArgs>),
+    Logup(Box<LogupCtxArgs>),
+}
+
+impl DescElem {
+    /// Run this element's writer against `sink`, returning its raw ABI bytes.
+    fn encode<S: OffSink>(&self, sink: &mut S) -> Vec<u8> {
+        fn bytes_of<T>(v: &T) -> Vec<u8> {
+            unsafe { std::slice::from_raw_parts(v as *const T as *const u8, size_of::<T>()) }
+                .to_vec()
+        }
+        match self {
+            DescElem::MainMatrix { data, air_width } => {
+                bytes_of(&write_main_matrix_desc(sink, *data, *air_width))
+            }
+            DescElem::Zerocheck(a) => bytes_of(&write_zerocheck_ctx(sink, a)),
+            DescElem::Logup(a) => bytes_of(&write_logup_ctx(sink, a)),
+        }
+    }
+}
+
+/// One descriptor array: a registered graph input whose bytes are computed on
+/// the host after `compile()` and uploaded once.
+#[derive(Clone, Debug)]
+struct DescArray {
+    buf: BufId,
+    name: String,
+    elem_bytes: usize,
+    /// `None` for an element no `set_*` call ever filled — it stays zeroed,
+    /// exactly as the old `insert_memset(arr, 0)` left it.
+    elems: Vec<Option<DescElem>>,
+}
+
+/// Every base+offset descriptor array in one graph, plus the pool base they
+/// decode against.
 ///
-/// Returns the node's *declared pointer reads* — see [`declared_reads`].
-#[must_use = "the declared reads must reach the evaluator's `ctx_reads`"]
-pub fn materialize_logup_ctx_ir(
-    g: &mut GraphBuilder,
-    out: BufId,
-    idx: u32,
-    args: LogupCtxArgs,
-) -> Vec<BufId> {
-    let mut b = PtrBinder::new(out);
-    b.push_all([
-        args.eval_ctx.d_selectors,
-        args.eval_ctx.d_preprocessed_data,
-        args.eval_ctx.d_main,
-        args.eval_ctx.d_public,
-        args.d_intermediates,
-        args.d_eq_xi,
-        args.d_challenges,
-        args.d_eq_3bs,
-        args.d_rules,
-        args.d_used_nodes,
-        args.d_pair_idxs,
-    ]);
-    let (inputs, modifies, ptrs) = b.finish();
-    let reads = declared_reads(&inputs);
-    g.insert_blackbox_kernel(
-        "materialize_logup_ctx",
-        inputs.into_iter(),
-        std::iter::empty(),
-        modifies.into_iter(),
-        move |inputs, _outputs, stream| unsafe {
-            materialize_logup_ctx_raw(
-                inputs[0] as *mut LogupCtx,
-                idx,
-                ptrs.ptr(0, inputs) as *const EF,
-                ptrs.ptr(1, inputs) as *const EF,
-                args.eval_ctx.preprocessed_air_width,
-                ptrs.ptr(2, inputs) as *const MainMatrixPtrs<EF>,
-                ptrs.ptr(3, inputs) as *const F,
-                ptrs.ptr(4, inputs) as *mut EF,
-                args.num_y,
-                ptrs.ptr(5, inputs) as *const EF,
-                ptrs.ptr(6, inputs) as *const EF,
-                ptrs.ptr(7, inputs) as *const EF,
-                ptrs.ptr(8, inputs) as *const std::ffi::c_void,
-                args.rules_len,
-                ptrs.ptr(9, inputs) as *const usize,
-                ptrs.ptr(10, inputs) as *const u32,
-                args.used_nodes_len,
-                args.buffer_size,
-                stream,
-            )
-            .expect("materialize_logup_ctx");
-        },
-    );
-    reads
+/// Built while the graph is built; filled in by [`Self::bind`] once the plan's
+/// buffer offsets and our pool's address are both known.
+#[derive(Clone, Debug, Default)]
+pub struct DescriptorPlan {
+    base: PoolBase,
+    arrays: Vec<DescArray>,
+}
+
+/// Handle to one array inside a [`DescriptorPlan`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DescArrayId(usize);
+
+impl DescriptorPlan {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The base handle the evaluator closures read at launch time.
+    pub fn pool_base(&self) -> &PoolBase {
+        &self.base
+    }
+
+    /// Register `buf` as a `len`-element descriptor array of `T`, and as a
+    /// *graph input* — which is what makes a forgotten [`Self::bind`] a hard
+    /// error at `GraphExe::run` (`graph_exe.rs:719`) instead of silent garbage.
+    fn add_array<T>(
+        &mut self,
+        g: &mut GraphBuilder,
+        buf: BufId,
+        name: &str,
+        len: usize,
+    ) -> DescArrayId {
+        g.register_input(buf);
+        self.arrays.push(DescArray {
+            buf,
+            name: name.to_string(),
+            elem_bytes: size_of::<T>(),
+            elems: vec![None; len],
+        });
+        DescArrayId(self.arrays.len() - 1)
+    }
+
+    /// Record one element and return the graph buffers it references.
+    ///
+    /// The returned reads are the machine-derived half of the Principle-1
+    /// access set: every evaluator that dereferences this descriptor must
+    /// declare at least these buffers, or the planner will hand their pool
+    /// slots to someone else while the evaluator still needs them
+    /// (`planner/list_v1.rs` liveness is derived only from declared accesses,
+    /// `planner/abstract_timing.rs`). Deriving the list from the same writer
+    /// that produces the bytes — instead of retyping it at the call site — is
+    /// what makes an under-declared set unrepresentable.
+    #[must_use = "the declared reads must reach the evaluator's `ctx_reads`"]
+    fn set(&mut self, arr: DescArrayId, idx: usize, elem: DescElem) -> Vec<BufId> {
+        let mut rc = ReadCollector::default();
+        let _ = elem.encode(&mut rc);
+        let a = &mut self.arrays[arr.0];
+        assert!(
+            idx < a.elems.len(),
+            "descriptor index {idx} out of range for `{}` ({} elements)",
+            a.name,
+            a.elems.len()
+        );
+        a.elems[idx] = Some(elem);
+        rc.reads
+    }
+
+    /// Record `out[idx]` of a `MainMatrixDesc` array.
+    #[must_use = "the declared reads must reach the evaluator's `ctx_reads`"]
+    pub fn set_main_matrix_desc(
+        &mut self,
+        arr: DescArrayId,
+        idx: usize,
+        data: DevicePtrArg,
+        air_width: u32,
+    ) -> Vec<BufId> {
+        self.set(arr, idx, DescElem::MainMatrix { data, air_width })
+    }
+
+    /// Record `out[idx]` of a `ZerocheckCtx` array.
+    #[must_use = "the declared reads must reach the evaluator's `ctx_reads`"]
+    pub fn set_zerocheck_ctx(
+        &mut self,
+        arr: DescArrayId,
+        idx: usize,
+        args: ZerocheckCtxArgs,
+    ) -> Vec<BufId> {
+        self.set(arr, idx, DescElem::Zerocheck(Box::new(args)))
+    }
+
+    /// Record `out[idx]` of a `LogupCtx` array.
+    #[must_use = "the declared reads must reach the evaluator's `ctx_reads`"]
+    pub fn set_logup_ctx(
+        &mut self,
+        arr: DescArrayId,
+        idx: usize,
+        args: LogupCtxArgs,
+    ) -> Vec<BufId> {
+        self.set(arr, idx, DescElem::Logup(Box::new(args)))
+    }
+
+    /// Every graph buffer reachable from the descriptor array `root` by
+    /// following stored offsets, transitively.
+    ///
+    /// An array's elements contribute the `BufId`s they reference; if one of
+    /// those is itself a descriptor array (a `ZerocheckCtx`'s `d_main` points
+    /// at a `MainMatrixDesc` array), its references are folded in too. This is
+    /// the exact dereference closure an evaluator's declared access set must
+    /// cover — see [`ZerocheckEvalBufs::ctx_reads`].
+    pub fn referenced_bufs(&self, root: BufId) -> Vec<BufId> {
+        let mut seen = vec![root];
+        loop {
+            let before = seen.len();
+            for a in &self.arrays {
+                if !seen.contains(&a.buf) {
+                    continue;
+                }
+                for elem in a.elems.iter().flatten() {
+                    let mut rc = ReadCollector::default();
+                    let _ = elem.encode(&mut rc);
+                    for b in rc.reads {
+                        if !seen.contains(&b) {
+                            seen.push(b);
+                        }
+                    }
+                }
+            }
+            if seen.len() == before {
+                return seen;
+            }
+        }
+    }
+
+    /// `(buffer, name, filled elements, total elements)` per array, in
+    /// registration order. Exposed for the R6 invariant tests.
+    pub fn array_summary(&self) -> Vec<(BufId, String, usize, usize)> {
+        self.arrays
+            .iter()
+            .map(|a| {
+                (
+                    a.buf,
+                    a.name.clone(),
+                    a.elems.iter().flatten().count(),
+                    a.elems.len(),
+                )
+            })
+            .collect()
+    }
+
+    /// The raw bytes of every array, encoded against `offsets` and `base`.
+    ///
+    /// Split out from [`Self::bind`] so a test can encode without a device.
+    fn encode_all(&self, offsets: &[Option<u64>], base: u64) -> Vec<(BufId, Vec<u8>)> {
+        self.arrays
+            .iter()
+            .map(|a| {
+                let mut bytes = vec![0u8; a.elems.len() * a.elem_bytes];
+                for (i, elem) in a.elems.iter().enumerate() {
+                    let Some(elem) = elem else { continue };
+                    let mut enc = OffEncoder { offsets, base };
+                    let e = elem.encode(&mut enc);
+                    assert_eq!(
+                        e.len(),
+                        a.elem_bytes,
+                        "descriptor element size mismatch in `{}`",
+                        a.name
+                    );
+                    bytes[i * a.elem_bytes..(i + 1) * a.elem_bytes].copy_from_slice(&e);
+                }
+                (a.buf, bytes)
+            })
+            .collect()
+    }
+
+    /// Hand `pool` to `exe`, publish its base, and upload every descriptor
+    /// array.
+    ///
+    /// This is the whole R6 contract in one place, and the ordering inside it
+    /// is load-bearing:
+    ///
+    /// 1. `set_scratch` must precede the first `set_input`/`run`, because the pool is what gives
+    ///    every buffer its stable address (`graph_exe.rs:565-572` rejects a late call);
+    /// 2. the offsets are read from `exe.plan()` *after* the exe exists and are never re-read — the
+    ///    graph must not be recompiled or replanned between here and `run`, which is guaranteed by
+    ///    taking `&mut GraphExe` and by `plan()` being immutable on it;
+    /// 3. the base is published before any launch, so every evaluator closure sees it.
+    ///
+    /// `pool` must be at least `exe.scratch_bytes()` long; use
+    /// [`Self::alloc_pool`].
+    pub fn bind(
+        &self,
+        exe: &mut crypto_compiler::graph_exe::GraphExe,
+        ctx: &openvm_cuda_common::stream::GpuDeviceCtx,
+        pool: DeviceBuffer<u8>,
+    ) -> Result<(), crypto_compiler::CompileError> {
+        use openvm_cuda_common::copy::MemCopyH2D;
+
+        let base = pool.as_mut_raw_ptr() as *const u8;
+        exe.set_scratch(pool)?;
+        self.base.publish(base);
+
+        let encoded = self.encode_all(&exe.plan().offsets, base as usize as u64);
+        for (buf, bytes) in encoded {
+            let i = (0..exe.num_inputs())
+                .find(|&i| exe.input_buf_id(i) == buf)
+                .unwrap_or_else(|| {
+                    panic!("descriptor array {buf:?} is not a registered graph input")
+                });
+            assert_eq!(
+                exe.input_size(i),
+                bytes.len(),
+                "descriptor array {buf:?} is {} bytes in the plan, {} encoded",
+                exe.input_size(i),
+                bytes.len()
+            );
+            let staged = bytes
+                .to_device_on(ctx)
+                .expect("stage descriptor array to device");
+            exe.set_input(ctx, i, &staged)?;
+        }
+        Ok(())
+    }
+
+    /// Allocate a pool of exactly the size the plan needs.
+    pub fn alloc_pool(
+        exe: &crypto_compiler::graph_exe::GraphExe,
+        ctx: &openvm_cuda_common::stream::GpuDeviceCtx,
+    ) -> DeviceBuffer<u8> {
+        DeviceBuffer::<u8>::with_capacity_on(exe.scratch_bytes().max(1), ctx)
+    }
 }
 
 /// Launch geometry shared by every batched MLE evaluator in stage D.
@@ -1224,18 +1444,31 @@ pub struct ZerocheckEvalBufs {
     /// Written by the reducer.
     pub out: BufId,
     pub block_ctxs: BufId,
-    /// The `ZerocheckCtx` / `LogupCtx` / `MonomialAirCtx` array, built on the
-    /// device by the T5 materializers.
+    /// The `ZerocheckCtx` / `LogupCtx` / `MonomialAirCtx` array. For the two
+    /// DAG kinds it is a registered graph input filled by
+    /// [`DescriptorPlan::bind`]; for `Monomial` it is still a zeroed
+    /// placeholder (see the TODO on [`push_monomial_reads`]).
     pub air_ctxs: BufId,
+    /// [`Self::air_ctxs`]'s slot in the [`DescriptorPlan`]. Unused for the
+    /// monomial placeholder arrays.
+    pub ctx_array: DescArrayId,
+    /// The pool base the kernel decodes every [`BaseOff`] against.
+    pub pool_base: PoolBase,
     /// Read by the reducer only.
     pub air_block_offsets: BufId,
     /// `lambda_pows`; unused by the monomial evaluators.
     pub lambda_pows: Option<BufId>,
     /// Principle-1 access set: every buffer the kernels **read** that is
     /// reachable only by dereferencing `air_ctxs` — selectors, folded main /
-    /// preprocessed matrices, the `MainMatrixPtrs` descriptor array, public
+    /// preprocessed matrices, the `MainMatrixDesc` array, public
     /// values, `eq_xi`, the rule / used-node / pair-index streams, logup
     /// challenges and `eq_3bs`.
+    ///
+    /// Base+offset does **not** retire this obligation: an offset into a pool
+    /// slot the planner has reassigned is exactly as wrong as a stale pointer.
+    /// What it retires is the *materializer* node whose own access set could
+    /// be under-declared; the list here is still machine-derived, now from the
+    /// descriptor writer itself ([`OffSink`]).
     pub ctx_reads: Vec<BufId>,
     /// Principle-1 access set: per-AIR `d_intermediates` scratch, **written**
     /// through the ctx by the DAG interpreter (`batch_mle.cu:186`). Bound
@@ -1302,6 +1535,7 @@ pub fn zerocheck_batch_eval_mle_ir(
         &bufs.intermediates,
         &bufs.ctx_reads,
     );
+    let pool_base = bufs.pool_base.clone();
     g.insert_blackbox_kernel(
         "zerocheck_batch_eval_mle",
         inputs.into_iter(),
@@ -1330,6 +1564,7 @@ pub fn zerocheck_batch_eval_mle_ir(
                 &mut out,
                 &block_ctxs,
                 &zc_ctxs,
+                pool_base.get(),
                 &offsets,
                 &pows,
                 shape.lambda_pows_len,
@@ -1363,6 +1598,7 @@ pub fn logup_batch_eval_mle_ir(
         &bufs.intermediates,
         &bufs.ctx_reads,
     );
+    let pool_base = bufs.pool_base.clone();
     g.insert_blackbox_kernel(
         "logup_batch_eval_mle",
         inputs.into_iter(),
@@ -1394,6 +1630,7 @@ pub fn logup_batch_eval_mle_ir(
                 &mut out,
                 &block_ctxs,
                 &logup_ctxs,
+                pool_base.get(),
                 &offsets,
                 shape.num_blocks,
                 shape.num_x,
@@ -1429,6 +1666,7 @@ pub fn zerocheck_monomial_batched_ir(
         &bufs.intermediates,
         &bufs.ctx_reads,
     );
+    let pool_base = bufs.pool_base.clone();
     g.insert_blackbox_kernel(
         if par_y {
             "zerocheck_monomial_par_y_batched"
@@ -1460,6 +1698,7 @@ pub fn zerocheck_monomial_batched_ir(
                     &mut out,
                     &block_ctxs,
                     &air_ctxs,
+                    pool_base.get(),
                     &offsets,
                     shape.num_blocks,
                     shape.num_x,
@@ -1475,6 +1714,7 @@ pub fn zerocheck_monomial_batched_ir(
                     &mut out,
                     &block_ctxs,
                     &air_ctxs,
+                    pool_base.get(),
                     &offsets,
                     shape.num_blocks,
                     shape.num_x,
@@ -1506,6 +1746,8 @@ pub fn zerocheck_monomial_batched_ir(
 /// written".
 #[derive(Clone, Debug)]
 pub struct LogupMonomialBufs {
+    /// The pool base the kernel decodes every [`BaseOff`] against.
+    pub pool_base: PoolBase,
     /// Written by the numerator pass (`.p`) then the denominator pass (`.q`),
     /// read by the reducer.
     pub tmp_sums: BufId,
@@ -1518,7 +1760,7 @@ pub struct LogupMonomialBufs {
     pub air_block_offsets: BufId,
     /// Principle-1 access set: buffers read only through the three ctx
     /// arrays (monomial headers / variable streams / combination tables,
-    /// selectors, folded matrices, the `MainMatrixPtrs` array, public
+    /// selectors, folded matrices, the `MainMatrixDesc` array, public
     /// values, `eq_xi`).
     pub ctx_reads: Vec<BufId>,
 }
@@ -1531,11 +1773,11 @@ pub struct LogupMonomialBufs {
 // TODO(cc-ir,T5): `LogupMonomialCommonCtx::bus_term_sum` is an `EF` challenge
 //   scalar riding *inside* the uploaded ctx (`batch_mle_monomial.rs:671`), so
 //   this node is challenge-by-value in disguise.
-// WHY: T5 scoped device materializers for `MainMatrixPtrs` / `ZerocheckCtx` /
+// WHY: R6 scoped the base+offset ABI for `MainMatrixDesc` / `ZerocheckCtx` /
 //   `LogupCtx` only; the three monomial ctx structs are not covered and are
 //   still staged host-side (here: zeroed placeholders).
 // RISK: a `_dev_challenge` port of the monomial path has to reach into the
-//   struct, i.e. it needs a `materialize_logup_monomial_common_ctx` that
+//   struct, i.e. it needs a `LogupMonomialCommonCtx` descriptor writer that
 //   takes `bus_term_sum` as a `BufId` rather than a value. Until then the
 //   monomial evaluators cannot be driven by device-sampled challenges.
 pub fn logup_monomial_batched_ir(
@@ -1554,6 +1796,7 @@ pub fn logup_monomial_batched_ir(
         &[],
         &bufs.ctx_reads,
     );
+    let pool_base = bufs.pool_base.clone();
     g.insert_blackbox_kernel(
         "logup_monomial_batched",
         inputs.into_iter(),
@@ -1593,6 +1836,7 @@ pub fn logup_monomial_batched_ir(
                 &common,
                 &numer,
                 &denom,
+                pool_base.get(),
                 &offsets,
                 shape.num_blocks,
                 shape.num_x,
@@ -2024,6 +2268,11 @@ pub struct ZerocheckPhaseProofIR {
     pub column_openings: Vec<Vec<BufId>>,
     /// Final sponge state after the whole phase.
     pub transcript_state: BufId,
+    /// Every base+offset descriptor array this phase emitted. The caller must
+    /// call [`DescriptorPlan::bind`] on the compiled `GraphExe` before
+    /// `run` — the arrays are registered graph inputs, so `run` refuses
+    /// otherwise (`graph_exe.rs:719`).
+    pub descriptors: DescriptorPlan,
 }
 
 // ===========================================================================
@@ -2077,6 +2326,10 @@ where
     let sp_deg = plan.constraint_degree;
     let s_deg = plan.s_deg();
     let skip_domain = 1usize << l_skip;
+
+    // Every base+offset descriptor array this phase needs. Filled in after
+    // `compile()` by [`DescriptorPlan::bind`]; see the R6 section above.
+    let mut descs = DescriptorPlan::new();
 
     // -----------------------------------------------------------------------
     // STAGE C — univariate round 0 (`mod.rs:253-374`).
@@ -2496,18 +2749,17 @@ where
                 add_typed_buf::<*const EF>(g, device, &format!("t{t}_r{round}_cols"), num_columns);
             // TODO(cc-ir,T5): the column pointer table is still assembled
             //   host-side from the *current* folded buffers
-            //   (`mod.rs:1189-1199`) — the ctx-pointer hole T5 closed for
+            //   (`mod.rs:1189-1199`) — the ctx-pointer hole R6 closed for
             //   `ZerocheckCtx` / `LogupCtx`, in its last remaining form here.
             // WHY: `interpolate_columns` takes a bare `*const EF[]` table,
-            //   not one of the three structs T5 scoped materializers for; the
-            //   fix is a `_materialize_column_ptr` twin of
-            //   `_materialize_main_matrix_ptr`, one node per column.
+            //   not one of the three structs R6 converted; the fix is a
+            //   `BaseOff` column table filled by [`DescriptorPlan`].
             // RISK: the planner cannot see through this table to
             //   `cur_mats[t]` / `cur_sels[t]`, so those are listed as
             //   explicit extra inputs of the node below to keep the ordering
             //   honest. Correct, but the table's contents are unwritten (the
             //   memset below leaves it null), so this node cannot RUN until
-            //   the materializer twin lands.
+            //   the descriptor writer lands.
             g.insert_memset(columns, 0);
             let interpolated = add_ef_buf(
                 g,
@@ -2546,8 +2798,8 @@ where
             .filter(|&t| plan.traces[t].has_interactions)
             .collect();
 
-        // Per-trace stage-D device inputs, as `BufId`s. This is what the T5
-        // ctx materializers consume: every pointer that used to be baked into
+        // Per-trace stage-D device inputs, as `BufId`s. This is what the R6
+        // descriptor writers consume: every pointer that used to be baked into
         // a host-assembled ctx struct is a graph edge here.
         let round_bufs: Vec<Option<RoundTraceBufs>> = (0..num_traces)
             .map(|t| {
@@ -2594,7 +2846,7 @@ where
             })
             .collect();
 
-        // One `MainMatrixPtrs` array per (round, trace), shared across the
+        // One `MainMatrixDesc` array per (round, trace), shared across the
         // two families — see [`MainDescCache`].
         let mut main_descs = MainDescCache::default();
         let zc_eval = (!zc_traces.is_empty()).then(|| {
@@ -2607,6 +2859,7 @@ where
                 lambda_pows,
                 &round_bufs,
                 &mut main_descs,
+                &mut descs,
             )
         });
         let lg_eval = (!lg_traces.is_empty()).then(|| {
@@ -2618,6 +2871,7 @@ where
                 &lg_traces,
                 &round_bufs,
                 &mut main_descs,
+                &mut descs,
             )
         });
         round_evals.push([zc_eval, lg_eval]);
@@ -2779,6 +3033,7 @@ where
         round_evals,
         column_openings,
         transcript_state,
+        descriptors: descs,
     }
 }
 
@@ -2787,9 +3042,9 @@ where
 /// Which ctx struct a batched evaluator's per-AIR array holds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CtxKind {
-    /// `ZerocheckCtx` — built on the device by [`materialize_zerocheck_ctx_ir`].
+    /// `ZerocheckCtx` — a base+offset descriptor array ([`DescriptorPlan`]).
     Zerocheck,
-    /// `LogupCtx` — built on the device by [`materialize_logup_ctx_ir`].
+    /// `LogupCtx` — a base+offset descriptor array ([`DescriptorPlan`]).
     Logup,
     /// `MonomialAirCtx` — still a zeroed placeholder, see the TODO on
     /// [`LogupMonomialBufs`].
@@ -2798,7 +3053,7 @@ enum CtxKind {
 
 /// One trace's stage-D device inputs at a given round, as `BufId`s.
 ///
-/// This is what the T5 ctx materializers turn into one device-resident ctx
+/// This is what the R6 descriptor writers turn into one device-resident ctx
 /// element. Every field that becomes a pointer inside `ZerocheckCtx` /
 /// `LogupCtx` is a `BufId` here, which is exactly what keeps it a graph edge.
 #[derive(Clone, Debug)]
@@ -2836,42 +3091,39 @@ pub struct RoundTraceBufs {
     pub logup_combinations: Option<(BufId, BufId)>,
 }
 
-/// Emit the per-trace `MainMatrixPtrs<EF>` descriptor array on the device.
+/// Emit the per-trace `MainMatrixDesc` array as a graph input.
 ///
-/// The eager path builds this array on the host out of raw pointers
-/// (`mod.rs:1131-1149, 1224-1256`); here each element is written by a
-/// materializer node whose `data` pointer is a resolved `BufId`, so the
-/// planner keeps an edge from the folded matrix to every evaluator that
-/// dereferences it.
+/// The eager path builds this array on the host out of absolute addresses
+/// (`mod.rs:1131-1149, 1224-1256`); here each element stores a pool byte
+/// offset instead, so the array holds integers and the planner never sees an
+/// embedded pointer.
 ///
-/// Returns `(array, reads)`. `reads` is the union of the element
-/// materializers' declared reads — the folded main matrices the array points
-/// at. The array itself is *not* in `reads`: it reaches the evaluator through
-/// the ctx materializer, which binds it as `EvalCoreCtxArgs::d_main`.
+/// Returns `(array, reads)`. `reads` is the union of the elements' declared
+/// reads — the folded main matrices the array points at. The array itself is
+/// *not* in `reads`: it reaches the evaluator through the ctx descriptor,
+/// which stores it as `EvalCoreCtxArgs::d_main`.
 fn emit_main_matrix_ptrs(
     g: &mut GraphBuilder,
     device: DeviceType,
+    descs: &mut DescriptorPlan,
     tag: &str,
     rb: &RoundTraceBufs,
 ) -> (BufId, Vec<BufId>) {
-    let arr = add_typed_buf::<MainMatrixPtrs<EF>>(
-        g,
-        device,
-        &format!("{tag}_main_desc"),
-        rb.mains.len().max(1),
-    );
-    g.insert_memset(arr, 0);
+    let name = format!("{tag}_main_desc");
+    let len = rb.mains.len().max(1);
+    let arr = add_typed_buf::<MainMatrixDesc>(g, device, &name, len);
+    let id = descs.add_array::<MainMatrixDesc>(g, arr, &name, len);
     let mut reads = Vec::with_capacity(rb.mains.len());
     for (i, &(buf, air_width)) in rb.mains.iter().enumerate() {
         extend_reads(
             &mut reads,
-            materialize_main_matrix_ptr_ir(g, arr, i as u32, DevicePtrArg::buf(buf), air_width),
+            descs.set_main_matrix_desc(id, i, DevicePtrArg::buf(buf), air_width),
         );
     }
     (arr, reads)
 }
 
-/// One `MainMatrixPtrs<EF>` descriptor array per `(round, trace)`, shared by
+/// One `MainMatrixDesc` array per `(round, trace)`, shared by
 /// the zerocheck and logup evaluator families.
 ///
 /// Before this cache both families emitted their own array for the same AIR
@@ -2898,6 +3150,7 @@ impl MainDescCache {
         &mut self,
         g: &mut GraphBuilder,
         device: DeviceType,
+        descs: &mut DescriptorPlan,
         round: usize,
         trace: usize,
         rb: &RoundTraceBufs,
@@ -2905,7 +3158,7 @@ impl MainDescCache {
         if let Some(hit) = self.entries.get(&trace) {
             return hit.clone();
         }
-        let entry = emit_main_matrix_ptrs(g, device, &format!("r{round}_t{trace}"), rb);
+        let entry = emit_main_matrix_ptrs(g, device, descs, &format!("r{round}_t{trace}"), rb);
         self.entries.insert(trace, entry.clone());
         entry
     }
@@ -2948,16 +3201,17 @@ fn alloc_intermediates(
         }
     };
     let b = add_ef_buf(g, device, &format!("{tag}_inter"), len.max(1));
-    // The materializer *reads* this buffer's address before the evaluator
-    // writes its contents, and the graph requires a writer to precede every
-    // reader in insertion order. There is no "address-of" edge, so the
+    // The evaluator declares this scratch as a *written* input, and the graph
+    // requires a writer to precede every reader in insertion order, so the
     // scratch gets an explicit zero producer.
-    // TODO(cc-ir,T5): one extra memset per AIR per round purely to satisfy
-    //   write-before-read on an address-only dependency.
-    // WHY: `insert_blackbox_kernel` declares whole-buffer reads/writes; the
-    //   materializer wants "I need your pointer, I touch no bytes".
+    // TODO(cc-ir,R6): one extra memset per AIR per round purely to give the
+    //   scratch a producer.
+    // WHY: `insert_blackbox_kernel` declares whole-buffer reads/writes; there
+    //   is no "this buffer is pure output scratch" declaration.
     // RISK: performance only (a tiny memset), never correctness — the DAG
-    //   interpreter writes every intermediate slot before reading it.
+    //   interpreter writes every intermediate slot before reading it. Note
+    //   R6 removed the *other* reason this memset existed (the materializer's
+    //   address-only read), so it is now a pure planner artefact.
     g.insert_memset(b, 0);
     Some(b)
 }
@@ -2972,6 +3226,7 @@ fn alloc_intermediates(
 fn emit_zerocheck_ctx_element(
     g: &mut GraphBuilder,
     device: DeviceType,
+    descs: &mut DescriptorPlan,
     tag: &str,
     bufs: &mut ZerocheckEvalBufs,
     air: u32,
@@ -2989,10 +3244,9 @@ fn emit_zerocheck_ctx_element(
         rb.num_y,
         /* logup */ false,
     );
-    let reads = materialize_zerocheck_ctx_ir(
-        g,
-        bufs.air_ctxs,
-        air,
+    let reads = descs.set_zerocheck_ctx(
+        bufs.ctx_array,
+        air as usize,
         ZerocheckCtxArgs {
             eval_ctx: eval_core_args(main_desc, rb),
             d_intermediates: inter.map(DevicePtrArg::buf).unwrap_or(DevicePtrArg::NULL),
@@ -3018,6 +3272,7 @@ fn emit_zerocheck_ctx_element(
 fn emit_logup_ctx_element(
     g: &mut GraphBuilder,
     device: DeviceType,
+    descs: &mut DescriptorPlan,
     tag: &str,
     bufs: &mut ZerocheckEvalBufs,
     air: u32,
@@ -3035,10 +3290,9 @@ fn emit_logup_ctx_element(
         rb.num_y,
         /* logup */ true,
     );
-    let reads = materialize_logup_ctx_ir(
-        g,
-        bufs.air_ctxs,
-        air,
+    let reads = descs.set_logup_ctx(
+        bufs.ctx_array,
+        air as usize,
         LogupCtxArgs {
             eval_ctx: eval_core_args(main_desc, rb),
             d_intermediates: inter.map(DevicePtrArg::buf).unwrap_or(DevicePtrArg::NULL),
@@ -3059,24 +3313,24 @@ fn emit_logup_ctx_element(
 }
 
 /// Principle-1 access set for the monomial evaluators, whose ctx arrays are
-/// still zeroed placeholders (T5 covers only the three DAG ctx structs).
+/// still zeroed placeholders (R6 converts only the three DAG ctx structs).
 ///
 /// The reads are declared anyway: an under-declared access set is a real
 /// correctness bug the moment the ctx arrays are filled, and declaring them
 /// now costs nothing but a few planner edges.
 // TODO(cc-ir,R4): this is the last *hand-written* read list in the phase.
-//   The three DAG ctx structs derive theirs from the materializer that binds
-//   them ([`declared_reads`]), so they cannot drift; this one can.
+//   The three DAG ctx structs derive theirs from the descriptor writer that
+//   encodes them ([`OffSink`]), so they cannot drift; this one can.
 // WHY: there is nothing to derive it from. `MonomialAirCtx`,
-//   `LogupMonomialCommonCtx` and `LogupMonomialCtx` have no materializers yet
-//   — their arrays are `memset` to zero (`alloc_eval_bufs`), so no
-//   `PtrBinder` exists whose inputs could be returned.
-// RISK: `evaluator_declares_every_materialized_buffer` cannot police this
+//   `LogupMonomialCommonCtx` and `LogupMonomialCtx` have no descriptor
+//   writers yet — their arrays are `memset` to zero (`alloc_eval_bufs`), so
+//   no [`ReadCollector`] run exists whose reads could be returned.
+// RISK: `evaluator_declares_every_referenced_buffer` cannot police this
 //   list — its closure over a monomial ctx array is the bare array, so the
 //   assertion is satisfied vacuously for those nodes. A monomial ctx field
 //   added without a matching line here is silent, exactly as the DAG structs
 //   were before R4. Closing it is DA step 5.3 (write the monomial
-//   materializers); the assertion then starts policing them for free.
+//   descriptor writers); the assertion then starts policing them for free.
 fn push_monomial_reads(reads: &mut Vec<BufId>, rb: &RoundTraceBufs) {
     reads.push(rb.selectors);
     reads.push(rb.public_values);
@@ -3101,6 +3355,7 @@ fn emit_zerocheck_round_eval(
     lambda_pows: BufId,
     round_bufs: &[Option<RoundTraceBufs>],
     main_descs: &mut MainDescCache,
+    descs: &mut DescriptorPlan,
 ) -> BufId {
     let num_airs = traces.len() as u32;
     let num_x = plan.constraint_degree as u32;
@@ -3126,6 +3381,7 @@ fn emit_zerocheck_round_eval(
     let mut bufs = alloc_eval_bufs(
         g,
         device,
+        descs,
         &tag,
         shape,
         Some(lambda_pows),
@@ -3141,10 +3397,10 @@ fn emit_zerocheck_round_eval(
             .as_ref()
             .expect("stage-D trace bufs for an evaluated trace");
         if kind == RoundEvalKind::Dag {
-            let (main_desc, desc_reads) = main_descs.get_or_emit(g, device, round, t, rb);
+            let (main_desc, desc_reads) = main_descs.get_or_emit(g, device, descs, round, t, rb);
             extend_reads(&mut bufs.ctx_reads, desc_reads);
             emit_zerocheck_ctx_element(
-                g, device, &tag, &mut bufs, air as u32, rb, num_x, main_desc,
+                g, device, descs, &tag, &mut bufs, air as u32, rb, num_x, main_desc,
             );
         } else {
             push_monomial_reads(&mut bufs.ctx_reads, rb);
@@ -3169,6 +3425,7 @@ fn emit_logup_round_eval(
     traces: &[usize],
     round_bufs: &[Option<RoundTraceBufs>],
     main_descs: &mut MainDescCache,
+    descs: &mut DescriptorPlan,
 ) -> BufId {
     let num_airs = traces.len() as u32;
     let num_x = plan.constraint_degree as u32;
@@ -3226,6 +3483,7 @@ fn emit_logup_round_eval(
                 denom_ctxs,
                 air_block_offsets,
                 ctx_reads,
+                pool_base: descs.pool_base().clone(),
             },
             shape,
         );
@@ -3235,6 +3493,7 @@ fn emit_logup_round_eval(
         let mut bufs = alloc_eval_bufs(
             g,
             device,
+            descs,
             &tag,
             shape,
             None,
@@ -3245,9 +3504,11 @@ fn emit_logup_round_eval(
             let rb = round_bufs[t]
                 .as_ref()
                 .expect("stage-D trace bufs for an evaluated trace");
-            let (main_desc, desc_reads) = main_descs.get_or_emit(g, device, round, t, rb);
+            let (main_desc, desc_reads) = main_descs.get_or_emit(g, device, descs, round, t, rb);
             extend_reads(&mut bufs.ctx_reads, desc_reads);
-            emit_logup_ctx_element(g, device, &tag, &mut bufs, air as u32, rb, num_x, main_desc);
+            emit_logup_ctx_element(
+                g, device, descs, &tag, &mut bufs, air as u32, rb, num_x, main_desc,
+            );
         }
         logup_batch_eval_mle_ir(g, &bufs, shape);
         g.register_output(bufs.out);
@@ -3255,13 +3516,15 @@ fn emit_logup_round_eval(
     }
 }
 
-/// Allocate (and zero) the ctx / scratch buffers one batched evaluator needs.
+/// Allocate the ctx / scratch buffers one batched evaluator needs.
 ///
-/// The ctx array is only *allocated* here; its elements are written by the T5
-/// materializer nodes (device-side), not staged from the host.
+/// For the two DAG kinds the ctx array is registered as a *graph input* and
+/// its bytes are computed on the host by [`DescriptorPlan::bind`]; the
+/// monomial placeholder array is still memset to zero.
 fn alloc_eval_bufs(
     g: &mut GraphBuilder,
     device: DeviceType,
+    descs: &mut DescriptorPlan,
     tag: &str,
     shape: BatchEvalShape,
     lambda_pows: Option<BufId>,
@@ -3286,15 +3549,36 @@ fn alloc_eval_bufs(
         &format!("{tag}_blocks"),
         shape.num_blocks as usize,
     );
-    let air_ctxs = match ctx_kind {
-        CtxKind::Zerocheck => add_typed_buf::<ZerocheckCtx>(g, device, &format!("{tag}_ctxs"), n),
-        CtxKind::Logup => add_typed_buf::<LogupCtx>(g, device, &format!("{tag}_ctxs"), n),
-        CtxKind::Monomial => add_typed_buf::<MonomialAirCtx>(g, device, &format!("{tag}_ctxs"), n),
+    let ctx_name = format!("{tag}_ctxs");
+    let (air_ctxs, ctx_array) = match ctx_kind {
+        CtxKind::Zerocheck => {
+            let b = add_typed_buf::<ZerocheckCtx>(g, device, &ctx_name, n);
+            let id = descs.add_array::<ZerocheckCtx>(g, b, &ctx_name, n);
+            (b, id)
+        }
+        CtxKind::Logup => {
+            let b = add_typed_buf::<LogupCtx>(g, device, &ctx_name, n);
+            let id = descs.add_array::<LogupCtx>(g, b, &ctx_name, n);
+            (b, id)
+        }
+        // TODO(cc-ir,R6): the three monomial ctx structs still carry their own
+        //   raw pointer fields (`d_headers`, `d_variables`,
+        //   `d_lambda_combinations`, `d_eq_xi`); only their embedded
+        //   `EvalCoreCtx` is base+offset.
+        // WHY: the IR mirror never fills these arrays — they are zeroed
+        //   placeholders — so converting the remaining fields buys nothing
+        //   today and would widen an already large ABI change.
+        // RISK: whoever fills them must convert those fields first, or they
+        //   will be host-baked addresses again. `MonomialAirCtx` is *not*
+        //   registered as a graph input, so nothing forces a bind.
+        CtxKind::Monomial => {
+            let b = add_typed_buf::<MonomialAirCtx>(g, device, &ctx_name, n);
+            g.insert_memset(b, 0);
+            (b, DescArrayId(usize::MAX))
+        }
     };
     let air_block_offsets = add_typed_buf::<u32>(g, device, &format!("{tag}_offsets"), n + 1);
-    // The ctx array is memset first so the materializers' per-element writes
-    // chain off a defined value and ABI padding is deterministic.
-    for b in [block_ctxs, air_ctxs, air_block_offsets] {
+    for b in [block_ctxs, air_block_offsets] {
         g.insert_memset(b, 0);
     }
     ZerocheckEvalBufs {
@@ -3302,6 +3586,8 @@ fn alloc_eval_bufs(
         out,
         block_ctxs,
         air_ctxs,
+        ctx_array,
+        pool_base: descs.pool_base().clone(),
         air_block_offsets,
         lambda_pows,
         ctx_reads: Vec::new(),
@@ -3457,63 +3743,26 @@ mod zerocheck_ir_tests {
         g.bufs[b.0].name.as_deref().unwrap_or("<unnamed>")
     }
 
-    /// Every buffer reachable from `root` by following materializer nodes.
-    ///
-    /// A materializer's input 0 is the array it writes and inputs `1..` are
-    /// the pointer fields it stores into that array
-    /// ([`PtrBinder::new`]), so the fixpoint over "a materializer whose
-    /// target is already in the set contributes its pointer fields" is
-    /// exactly the transitive dereference closure of the ctx array — two
-    /// levels deep here, since a ctx element points at the
-    /// `MainMatrixPtrs` array which points at the folded main matrices.
-    fn materializer_closure(g: &GraphBuilder, root: BufId) -> Vec<BufId> {
-        let mut seen = vec![root];
-        loop {
-            let before = seen.len();
-            for node in &g.nodes {
-                let GraphNode::BlackboxKernel(k) = node else {
-                    continue;
-                };
-                if !k.name.starts_with("materialize_")
-                    || k.inputs.is_empty()
-                    || !seen.contains(&k.inputs[0])
-                {
-                    continue;
-                }
-                for &b in &k.inputs[1..] {
-                    if !seen.contains(&b) {
-                        seen.push(b);
-                    }
-                }
-            }
-            if seen.len() == before {
-                return seen;
-            }
-        }
-    }
-
-    /// R4 step 1: an evaluator must declare every buffer the materializers
-    /// reached through its ctx array.
+    /// R6 step 1: an evaluator must declare every buffer its descriptor array
+    /// references, transitively.
     ///
     /// This is the machine check for the property this phase's correctness
-    /// rests on. The compiler has **no pointer analysis**: a blackbox node's
-    /// entire access model is the hand-supplied `(inputs, outputs, modifies)`
-    /// triple (`graph_ir.rs:1259-1266`), folded into `NodeAccess { reads,
-    /// writes }` verbatim (`planner/ctx.rs:26-29, 274-281`), and
-    /// `verify_graph` skips blackbox nodes on its first line
-    /// (`graph_ir.rs:2191-2192`). So an evaluator that dereferences
-    /// `ctx->d_selectors` without declaring `selectors` gives the packer
-    /// permission to hand that pool slot to another buffer
-    /// (`planner/heuristic.rs:184-190`) and then reads garbage — silently,
-    /// with no compile error and no other test failing.
+    /// rests on, and base+offset does **not** retire it. The compiler has no
+    /// pointer analysis: a blackbox node's entire access model is the
+    /// hand-supplied `(inputs, outputs, modifies)` triple
+    /// (`graph_ir.rs:1259-1266`), and `verify_graph` skips blackbox nodes on
+    /// its first line (`graph_ir.rs:2191-2192`). An evaluator that reaches
+    /// `selectors` through a stored *offset* without declaring `selectors`
+    /// gives the packer permission to hand that pool slot to another buffer,
+    /// and then reads garbage — exactly as it would through a stale pointer.
     ///
-    /// Before R4 the declared set was retyped by hand at the emit sites
-    /// beside the materializer call. Now it is derived from the same
-    /// [`PtrBinder`] the materializer binds ([`declared_reads`]), so the two
-    /// cannot drift; this test is what proves the derivation actually
-    /// reaches the evaluator node.
+    /// What changed at R6 is where the declaration comes from. Before, it was
+    /// derived from the removed materializer node's own inputs; now from
+    /// the [`OffSink`] run that produces the descriptor bytes
+    /// ([`DescriptorPlan::set`]). Same "cannot drift" guarantee, one fewer
+    /// node in the graph.
     #[test]
-    fn evaluator_declares_every_materialized_buffer() {
+    fn evaluator_declares_every_referenced_buffer() {
         let device = DeviceType::Cuda(0);
         let plan = synthetic_plan(
             /* num_traces */ 3, /* l_skip */ 2, /* n_max */ 3,
@@ -3524,7 +3773,7 @@ mod zerocheck_ir_tests {
         let bufs: Vec<TraceBufs> = (0..plan.num_traces())
             .map(|t| TraceBufs::alloc_zeroed(&mut g, device, &plan, t))
             .collect();
-        let _ = logup_zerocheck_gpu_ir(&mut g, &mut transcript, &plan, &bufs, device);
+        let proof = logup_zerocheck_gpu_ir(&mut g, &mut transcript, &plan, &bufs, device);
 
         let mut evaluators = 0usize;
         let mut widest = 0usize;
@@ -3538,14 +3787,14 @@ mod zerocheck_ir_tests {
             // `air_ctxs` is input 1 of every batched evaluator — the fixed
             // positional prefix `eval_node_bindings` is called with.
             let ctx_arr = k.inputs[1];
-            let closure = materializer_closure(&g, ctx_arr);
+            let closure = proof.descriptors.referenced_bufs(ctx_arr);
             widest = widest.max(closure.len());
             for b in closure {
                 assert!(
                     k.inputs.contains(&b),
-                    "`{}` does not declare `{}` ({b:?}), which its ctx array `{}` \
-                     ({ctx_arr:?}) points at (directly or through a pointer table). \
-                     An undeclared read is a pool-reuse corruption hazard.",
+                    "`{}` does not declare `{}` ({b:?}), which its descriptor array `{}` \
+                     ({ctx_arr:?}) references (directly or through a nested descriptor \
+                     array). An undeclared read is a pool-reuse corruption hazard.",
                     k.name,
                     buf_name(&g, b),
                     buf_name(&g, ctx_arr),
@@ -3560,7 +3809,55 @@ mod zerocheck_ir_tests {
         );
     }
 
-    /// R4 step 3: one `MainMatrixPtrs` array per `(round, trace)`, shared by
+    /// R6: every descriptor array is a registered graph input, and every
+    /// element that an evaluator will index is filled.
+    ///
+    /// The teeth: an unbound input makes `GraphExe::run` fail outright
+    /// (`graph_exe.rs:719`), so a descriptor array that is registered but
+    /// never filled would run against zeroed offsets — i.e. against the pool
+    /// base — silently. Checking "filled == total" here is what catches that
+    /// at build time.
+    #[test]
+    fn every_descriptor_array_is_a_registered_input_and_fully_filled() {
+        let device = DeviceType::Cuda(0);
+        let plan = synthetic_plan(
+            /* num_traces */ 3, /* l_skip */ 2, /* n_max */ 3,
+        );
+
+        let mut g = GraphBuilder::new();
+        let mut transcript = DuplexSpongeGpuIR::new(&mut g, device);
+        let bufs: Vec<TraceBufs> = (0..plan.num_traces())
+            .map(|t| TraceBufs::alloc_zeroed(&mut g, device, &plan, t))
+            .collect();
+        let proof = logup_zerocheck_gpu_ir(&mut g, &mut transcript, &plan, &bufs, device);
+
+        let summary = proof.descriptors.array_summary();
+        assert!(!summary.is_empty(), "fixture emitted no descriptor arrays");
+        for (buf, name, filled, total) in &summary {
+            assert!(
+                g.input_bufs().contains(buf),
+                "descriptor array `{name}` ({buf:?}) is not a registered graph input, \
+                 so nothing forces `DescriptorPlan::bind` to fill it"
+            );
+            assert_eq!(
+                filled, total,
+                "descriptor array `{name}` ({buf:?}) has {filled}/{total} elements filled; \
+                 an unfilled element decodes to the pool base, not to null"
+            );
+        }
+        // Every registered input must be one of ours: an input nobody binds
+        // makes `run` fail.
+        for b in g.input_bufs() {
+            assert!(
+                summary.iter().any(|(buf, ..)| buf == b),
+                "graph input `{}` ({b:?}) is not a descriptor array; \
+                 `DescriptorPlan::bind` would leave it unbound",
+                buf_name(&g, *b),
+            );
+        }
+    }
+
+    /// R6 step 3: one `MainMatrixDesc` array per `(round, trace)`, shared by
     /// the zerocheck and logup families, and never crossed between AIRs.
     ///
     /// The fixture is deliberately *asymmetric*: trace 0 has constraints
@@ -3570,7 +3867,7 @@ mod zerocheck_ir_tests {
     /// index goes wrong — and it goes wrong silently, by handing one AIR's
     /// folded main matrices to a different AIR's evaluator.
     #[test]
-    fn main_matrix_ptrs_shared_per_trace_across_families() {
+    fn main_matrix_descs_shared_per_trace_across_families() {
         let device = DeviceType::Cuda(0);
         let mut plan = synthetic_plan(
             /* num_traces */ 3, /* l_skip */ 1, /* n_max */ 2,
@@ -3583,7 +3880,7 @@ mod zerocheck_ir_tests {
         let bufs: Vec<TraceBufs> = (0..plan.num_traces())
             .map(|t| TraceBufs::alloc_zeroed(&mut g, device, &plan, t))
             .collect();
-        let _ = logup_zerocheck_gpu_ir(&mut g, &mut transcript, &plan, &bufs, device);
+        let proof = logup_zerocheck_gpu_ir(&mut g, &mut transcript, &plan, &bufs, device);
 
         // --- one array per (round, trace), not per (round, family, trace)
         let mut got: Vec<String> = g
@@ -3603,23 +3900,23 @@ mod zerocheck_ir_tests {
              zerocheck and logup families are still each emitting their own"
         );
 
-        // --- and one element materializer per (round, trace, main matrix)
-        let materializers = g
-            .nodes
+        // --- and one filled element per (round, trace, main matrix)
+        let elems: usize = proof
+            .descriptors
+            .array_summary()
             .iter()
-            .filter(|n| {
-                matches!(n, GraphNode::BlackboxKernel(k) if k.name == "materialize_main_matrix_ptr")
-            })
-            .count();
+            .filter(|(_, name, ..)| name.ends_with("_main_desc"))
+            .map(|(_, _, filled, _)| *filled)
+            .sum();
         let per_round: usize = plan
             .traces
             .iter()
             .map(|tp| tp.mats.len() - usize::from(tp.has_preprocessed))
             .sum();
         assert_eq!(
-            materializers,
+            elems,
             plan.n_max * per_round,
-            "duplicated `MainMatrixPtrs` element writes"
+            "duplicated `MainMatrixDesc` element writes"
         );
 
         // --- no cross-AIR: each evaluator declares exactly its own traces'
@@ -3674,24 +3971,66 @@ mod zerocheck_ir_tests {
         assert!(checked > 0, "fixture emitted no batched evaluator nodes");
     }
 
-    /// T5: a graph-materialized ctx element must equal the eager builder's
-    /// struct field for field.
+    /// Compile `g`, hand it a pool we own, bind `descs`, run.
     ///
-    /// The oracle is `ZerocheckMleBatchBuilder::new` / `LogupMleBatchBuilder::new`
-    /// (`batch_mle.rs:158-201, 297-353`): the same field map, but built from
-    /// the graph's own pool addresses instead of host-allocated
-    /// `DeviceBuffer`s. Comparing typed fields (pointers as `usize`) rather
-    /// than `memcmp` keeps ABI padding out of the assertion; a second replay
-    /// then checks the *complete* bytes are stable, which is what catches
-    /// unwritten padding.
+    /// Returns the exe and the pool base. This is the R6 call order, and the
+    /// order is load-bearing — see [`DescriptorPlan::bind`].
+    fn compile_bind_run(
+        g: GraphBuilder,
+        descs: &DescriptorPlan,
+        ctx: &GpuDeviceCtx,
+    ) -> (crypto_compiler::graph_exe::GraphExe, *const u8) {
+        let mut exe = GraphCompiler::new()
+            .device(DeviceType::Cuda(0))
+            .scheduler(SchedulerMode::ListV1 {
+                params: ListSchedulerV1::default(),
+            })
+            .compile(g)
+            .expect("graph compile");
+        let pool = DescriptorPlan::alloc_pool(&exe, ctx);
+        descs.bind(&mut exe, ctx, pool).expect("descriptor bind");
+        exe.run(ctx).expect("graph run");
+        ctx.stream.synchronize().unwrap();
+        let base = descs.pool_base().get();
+        (exe, base)
+    }
+
+    /// Read `n` bytes straight from a device address.
+    fn peek(addr: *const u8, n: usize, ctx: &GpuDeviceCtx) -> Vec<u8> {
+        assert!(!addr.is_null(), "null decoded descriptor pointer");
+        let view = unsafe { DeviceBuffer::<u8>::from_raw_parts(addr as *mut u8, n) };
+        let host = view.to_host_on(ctx).expect("D2H");
+        forget(view);
+        host
+    }
+
+    /// R6: the offset-decoded descriptor must address exactly what the pointer
+    /// path it replaces addressed — and the offsets it stores must be the ones
+    /// the runtime itself resolves against.
+    ///
+    /// Two assertions per pointer field, both against primary sources:
+    ///
+    /// 1. **Decode equivalence.** The eager encoding of the same field is `BaseOff::from_ptr(addr)`
+    ///    against a null base (`batch_mle.rs:178-183`). This test builds it and asserts
+    ///    `eager.resolve(null) == pool.resolve(base)` — i.e. the two encodings decode to the same
+    ///    byte, which is what "identical to the pointer path it replaces" means at the ABI level.
+    /// 2. **The A6 §6.5 must-verify.** `base + plan().offsets[b]` must equal the address the
+    ///    runtime's own `resolve_ptr` produces (`graph_exe.rs:1674-1688`), observed through
+    ///    `GraphExe::get_output`, which is the only public caller of it. This is what would catch a
+    ///    recompile or replan between reading `plan()` and running.
+    ///
+    /// What it does *not* cover: it cannot catch a `plan()`/`resolve_ptr`
+    /// divergence for a buffer that is **not** registered as an output, since
+    /// `get_output` is the only window onto `resolve_ptr`. Every buffer a
+    /// descriptor points at is registered as an output here, so the coverage
+    /// is complete for the fields under test — but a future field pointing at
+    /// an unpinnable buffer would be unchecked.
     ///
     /// Two records are covered, exactly the branches the eager builders have:
     /// preprocessed present / absent, and `buffer_size` nonzero / zero (the
     /// null-`d_intermediates` branch, `batch_mle.rs:164-176`).
     #[test]
-    fn ctx_materializers_match_eager_field_by_field() {
-        // The materializers write through the private C++ ctx definitions;
-        // fail loudly if the Rust mirrors have drifted in size.
+    fn descriptors_decode_like_the_eager_pointer_path() {
         crate::cuda::logup_zerocheck::assert_ctx_abi_matches_cuda();
 
         let ctx = test_ctx();
@@ -3708,8 +4047,9 @@ mod zerocheck_ir_tests {
             let num_interactions = 6usize;
 
             let mut g = GraphBuilder::new();
+            let mut descs = DescriptorPlan::new();
 
-            // --- source buffers (every one of them becomes a graph edge)
+            // --- source buffers
             let selectors = add_ef_buf(&mut g, device, "sel", 3 * height);
             g.insert_memset(selectors, 0);
             let public = add_f_buf(&mut g, device, "public", 8);
@@ -3746,18 +4086,13 @@ mod zerocheck_ir_tests {
                 b
             });
 
-            // --- the `MainMatrixPtrs<EF>` descriptor array, built on device
+            // --- the `MainMatrixDesc` array: a graph input, host-computed
             let main_desc =
-                add_typed_buf::<MainMatrixPtrs<EF>>(&mut g, device, "main_desc", mains.len());
-            g.insert_memset(main_desc, 0);
+                add_typed_buf::<MainMatrixDesc>(&mut g, device, "main_desc", mains.len());
+            let main_id =
+                descs.add_array::<MainMatrixDesc>(&mut g, main_desc, "main_desc", mains.len());
             for (i, (&b, &w)) in mains.iter().zip(main_widths.iter()).enumerate() {
-                let _ = materialize_main_matrix_ptr_ir(
-                    &mut g,
-                    main_desc,
-                    i as u32,
-                    DevicePtrArg::buf(b),
-                    w,
-                );
+                let _ = descs.set_main_matrix_desc(main_id, i, DevicePtrArg::buf(b), w);
             }
 
             let eval_ctx = EvalCoreCtxArgs {
@@ -3777,7 +4112,7 @@ mod zerocheck_ir_tests {
 
             // --- two-element ctx arrays: element 1 exercises `idx != 0`.
             let zc_ctxs = add_typed_buf::<ZerocheckCtx>(&mut g, device, "zc_ctxs", 2);
-            g.insert_memset(zc_ctxs, 0);
+            let zc_id = descs.add_array::<ZerocheckCtx>(&mut g, zc_ctxs, "zc_ctxs", 2);
             let zc_args = ZerocheckCtxArgs {
                 eval_ctx,
                 d_intermediates,
@@ -3789,10 +4124,10 @@ mod zerocheck_ir_tests {
                 used_nodes_len,
                 buffer_size,
             };
-            let _ = materialize_zerocheck_ctx_ir(&mut g, zc_ctxs, 1, zc_args);
+            let _ = descs.set_zerocheck_ctx(zc_id, 1, zc_args);
 
             let lg_ctxs = add_typed_buf::<LogupCtx>(&mut g, device, "lg_ctxs", 2);
-            g.insert_memset(lg_ctxs, 0);
+            let lg_id = descs.add_array::<LogupCtx>(&mut g, lg_ctxs, "lg_ctxs", 2);
             let lg_args = LogupCtxArgs {
                 eval_ctx,
                 d_intermediates,
@@ -3807,12 +4142,28 @@ mod zerocheck_ir_tests {
                 used_nodes_len,
                 buffer_size,
             };
-            let _ = materialize_logup_ctx_ir(&mut g, lg_ctxs, 1, lg_args);
+            let _ = descs.set_logup_ctx(lg_id, 1, lg_args);
 
-            // --- compile + run
+            // A graph input must be read by *some* node
+            // (`GraphExe`'s interface check), which in the real phase is the
+            // evaluator. Here it is a no-op stand-in that declares the same
+            // three arrays.
+            let consumed = add_f_buf(&mut g, device, "consumed", 1);
+            g.insert_blackbox_kernel(
+                "desc_consumer",
+                [main_desc, zc_ctxs, lg_ctxs].into_iter(),
+                [consumed].into_iter(),
+                [false, false, false].into_iter(),
+                |_, _, _| {},
+            );
+            g.register_output(consumed);
+
+            // Everything a descriptor points at is registered as an output, so
+            // `resolve_ptr` is observable for it. The descriptor arrays
+            // themselves cannot be: they are graph *inputs*, and an output
+            // must be written by a node (`graph_ir.rs:1062-1065`).
             let mut tracked = vec![
                 selectors, public, eq_xi, challenges, eq_3bs, rules, used_nodes, pair_idxs,
-                main_desc, zc_ctxs, lg_ctxs,
             ];
             tracked.extend(mains.iter().copied());
             tracked.extend(prep);
@@ -3820,263 +4171,232 @@ mod zerocheck_ir_tests {
             for &b in &tracked {
                 g.register_output(b);
             }
-            let mut exe = GraphCompiler::new()
-                .device(device)
-                .scheduler(SchedulerMode::ListV1 {
-                    params: ListSchedulerV1::default(),
-                })
-                .compile(g)
-                .expect("graph compile");
-            exe.run(&ctx).expect("graph run");
-            ctx.stream.synchronize().unwrap();
 
-            let out_idx = |exe: &crypto_compiler::graph_exe::GraphExe, b: BufId| {
+            let (mut exe, base) = compile_bind_run(g, &descs, &ctx);
+
+            let out_idx = |b: BufId| {
                 (0..exe.num_outputs())
                     .find(|&i| exe.output_buf_id(i) == b)
                     .unwrap_or_else(|| panic!("buf {b:?} not registered as an output"))
             };
-            let addr = |exe: &crypto_compiler::graph_exe::GraphExe, b: BufId| {
-                exe.get_output(out_idx(exe, b)).as_raw_ptr() as usize
+            // The runtime's own `resolve_ptr`, via its only public caller.
+            let runtime_addr = |b: BufId| exe.get_output(out_idx(b)).as_raw_ptr() as *const u8;
+            // `base + plan().offsets[b]` — what the descriptors encoded.
+            let planned_addr = |b: BufId| {
+                let off = exe.plan().offsets[b.0].expect("pool slot");
+                (base as usize).wrapping_add(off as usize) as *const u8
             };
-            let bytes = |exe: &crypto_compiler::graph_exe::GraphExe, b: BufId| {
-                exe.get_output(out_idx(exe, b))
-                    .to_host_on(&ctx)
-                    .expect("D2H")
+            // A descriptor array's own bytes: it is an input, so read the pool
+            // slot directly.
+            let desc_bytes = |b: BufId, n: usize| peek(planned_addr(b), n, &ctx);
+
+            // --- A6 §6.5 must-verify, for every buffer under test.
+            for &b in &tracked {
+                assert_eq!(
+                    planned_addr(b),
+                    runtime_addr(b),
+                    "case {case}: `plan().offsets[{b:?}]` disagrees with the address \
+                     `resolve_ptr` produces at run time; every descriptor encoded against \
+                     the plan is pointing at the wrong buffer"
+                );
+            }
+
+            // --- decode equivalence, field by field.
+            //
+            // `pool` is what the graph uploaded; `eager` is what
+            // `batch_mle.rs` would have uploaded for the same addresses.
+            // Both must decode to the same device byte.
+            let check = |what: &str, pool: BaseOff, want: *const u8| {
+                let eager = if want.is_null() {
+                    BaseOff::NULL
+                } else {
+                    BaseOff::from_ptr(want)
+                };
+                assert_eq!(
+                    pool.resolve(base),
+                    want,
+                    "case {case}: {what}: pool-encoded {pool:?} decodes to {:?}, want {want:?}",
+                    pool.resolve(base),
+                );
+                assert_eq!(
+                    eager.resolve(std::ptr::null()),
+                    pool.resolve(base),
+                    "case {case}: {what}: the eager encoding {eager:?} and the pool encoding \
+                     {pool:?} decode to different addresses"
+                );
             };
 
-            // --- MainMatrixPtrs array, element by element
-            let desc_bytes = bytes(&exe, main_desc);
+            let main_bytes = desc_bytes(main_desc, mains.len() * size_of::<MainMatrixDesc>());
             for (i, (&b, &w)) in mains.iter().zip(main_widths.iter()).enumerate() {
-                let got: MainMatrixPtrs<EF> = unsafe {
-                    (desc_bytes.as_ptr() as *const MainMatrixPtrs<EF>)
+                let got: MainMatrixDesc = unsafe {
+                    (main_bytes.as_ptr() as *const MainMatrixDesc)
                         .add(i)
                         .read_unaligned()
                 };
-                assert_eq!(
-                    got.data as usize,
-                    addr(&exe, b),
-                    "case {case}: main_desc[{i}].data"
-                );
+                check(&format!("main_desc[{i}].data"), got.data, runtime_addr(b));
                 assert_eq!(got.air_width, w, "case {case}: main_desc[{i}].air_width");
             }
 
-            let prep_addr = prep.map(|b| addr(&exe, b)).unwrap_or(0);
-            let inter_addr = intermediates.map(|b| addr(&exe, b)).unwrap_or(0);
+            let prep_addr = prep.map(runtime_addr).unwrap_or(std::ptr::null());
+            let inter_addr = intermediates.map(runtime_addr).unwrap_or(std::ptr::null());
 
-            // --- ZerocheckCtx, field by field (the eager field map is the
-            //     oracle: `batch_mle.rs:178-196`).
-            let zc_bytes = bytes(&exe, zc_ctxs);
-            let got: ZerocheckCtx = unsafe {
-                (zc_bytes.as_ptr() as *const ZerocheckCtx)
+            let zc_raw = desc_bytes(zc_ctxs, 2 * size_of::<ZerocheckCtx>());
+            let zc: ZerocheckCtx = unsafe {
+                (zc_raw.as_ptr() as *const ZerocheckCtx)
                     .add(1)
                     .read_unaligned()
             };
-            assert_eq!(
-                got.eval_ctx.d_selectors as usize,
-                addr(&exe, selectors),
-                "case {case}: zc.eval_ctx.d_selectors"
+            check(
+                "zc.d_selectors",
+                zc.eval_ctx.d_selectors,
+                runtime_addr(selectors),
+            );
+            check(
+                "zc.d_preprocessed.data",
+                zc.eval_ctx.d_preprocessed.data,
+                prep_addr,
             );
             assert_eq!(
-                got.eval_ctx.d_preprocessed.data as usize, prep_addr,
-                "case {case}: zc.eval_ctx.d_preprocessed.data"
+                zc.eval_ctx.d_preprocessed.air_width, prep_width,
+                "case {case}: zc.d_preprocessed.air_width"
             );
+            // `main_desc` is a graph input, so `resolve_ptr` is not observable
+            // for it (see this test's doc comment); `planned_addr` is the best
+            // available reference.
+            check("zc.d_main", zc.eval_ctx.d_main, planned_addr(main_desc));
+            check("zc.d_public", zc.eval_ctx.d_public, runtime_addr(public));
+            check("zc.d_intermediates", zc.d_intermediates, inter_addr);
+            check("zc.d_eq_xi", zc.d_eq_xi, runtime_addr(eq_xi));
+            check("zc.d_rules", zc.d_rules, runtime_addr(rules));
+            check("zc.d_used_nodes", zc.d_used_nodes, runtime_addr(used_nodes));
+            assert_eq!(zc.num_y, num_y as u32, "case {case}: zc.num_y");
+            assert_eq!(zc.rules_len, rules_len, "case {case}: zc.rules_len");
             assert_eq!(
-                got.eval_ctx.d_preprocessed.air_width, prep_width,
-                "case {case}: zc.eval_ctx.d_preprocessed.air_width"
-            );
-            assert_eq!(
-                got.eval_ctx.d_main as usize,
-                addr(&exe, main_desc),
-                "case {case}: zc.eval_ctx.d_main"
-            );
-            assert_eq!(
-                got.eval_ctx.d_public as usize,
-                addr(&exe, public),
-                "case {case}: zc.eval_ctx.d_public"
-            );
-            assert_eq!(
-                got.d_intermediates as usize, inter_addr,
-                "case {case}: zc.d_intermediates"
-            );
-            assert_eq!(got.num_y, num_y as u32, "case {case}: zc.num_y");
-            assert_eq!(
-                got.d_eq_xi as usize,
-                addr(&exe, eq_xi),
-                "case {case}: zc.d_eq_xi"
-            );
-            assert_eq!(
-                got.d_rules as usize,
-                addr(&exe, rules),
-                "case {case}: zc.d_rules"
-            );
-            assert_eq!(got.rules_len, rules_len, "case {case}: zc.rules_len");
-            assert_eq!(
-                got.d_used_nodes as usize,
-                addr(&exe, used_nodes),
-                "case {case}: zc.d_used_nodes"
-            );
-            assert_eq!(
-                got.used_nodes_len, used_nodes_len,
+                zc.used_nodes_len, used_nodes_len,
                 "case {case}: zc.used_nodes_len"
             );
-            assert_eq!(got.buffer_size, buffer_size, "case {case}: zc.buffer_size");
+            assert_eq!(zc.buffer_size, buffer_size, "case {case}: zc.buffer_size");
 
-            // Element 0 was only memset: proves `idx` is honoured.
+            // Element 0 was never `set`: it stays all-zero, proving `idx` is
+            // honoured. Note this is *not* the null encoding — offset 0 is a
+            // valid pool offset, which is exactly why `BaseOff::NULL` is
+            // `u64::MAX`.
             let zc0: ZerocheckCtx =
-                unsafe { (zc_bytes.as_ptr() as *const ZerocheckCtx).read_unaligned() };
+                unsafe { (zc_raw.as_ptr() as *const ZerocheckCtx).read_unaligned() };
             assert_eq!(
-                zc0.eval_ctx.d_selectors as usize, 0,
+                zc0.eval_ctx.d_selectors,
+                BaseOff::from_offset(0),
                 "case {case}: zc_ctxs[0] must be untouched"
             );
 
-            // --- LogupCtx, field by field (`batch_mle.rs:317-347`).
-            let lg_bytes = bytes(&exe, lg_ctxs);
-            let got: LogupCtx = unsafe {
-                (lg_bytes.as_ptr() as *const LogupCtx)
-                    .add(1)
-                    .read_unaligned()
-            };
-            assert_eq!(
-                got.eval_ctx.d_selectors as usize,
-                addr(&exe, selectors),
-                "case {case}: lg.eval_ctx.d_selectors"
+            let lg_raw = desc_bytes(lg_ctxs, 2 * size_of::<LogupCtx>());
+            let lg: LogupCtx =
+                unsafe { (lg_raw.as_ptr() as *const LogupCtx).add(1).read_unaligned() };
+            check(
+                "lg.d_selectors",
+                lg.eval_ctx.d_selectors,
+                runtime_addr(selectors),
+            );
+            check(
+                "lg.d_preprocessed.data",
+                lg.eval_ctx.d_preprocessed.data,
+                prep_addr,
             );
             assert_eq!(
-                got.eval_ctx.d_preprocessed.data as usize, prep_addr,
-                "case {case}: lg.eval_ctx.d_preprocessed.data"
+                lg.eval_ctx.d_preprocessed.air_width, prep_width,
+                "case {case}: lg.d_preprocessed.air_width"
             );
+            check("lg.d_main", lg.eval_ctx.d_main, planned_addr(main_desc));
+            check("lg.d_public", lg.eval_ctx.d_public, runtime_addr(public));
+            check("lg.d_intermediates", lg.d_intermediates, inter_addr);
+            check("lg.d_eq_xi", lg.d_eq_xi, runtime_addr(eq_xi));
+            check("lg.d_challenges", lg.d_challenges, runtime_addr(challenges));
+            check("lg.d_eq_3bs", lg.d_eq_3bs, runtime_addr(eq_3bs));
+            check("lg.d_rules", lg.d_rules, runtime_addr(rules));
+            check("lg.d_used_nodes", lg.d_used_nodes, runtime_addr(used_nodes));
+            check("lg.d_pair_idxs", lg.d_pair_idxs, runtime_addr(pair_idxs));
+            assert_eq!(lg.num_y, num_y as u32, "case {case}: lg.num_y");
+            assert_eq!(lg.rules_len, rules_len, "case {case}: lg.rules_len");
             assert_eq!(
-                got.eval_ctx.d_preprocessed.air_width, prep_width,
-                "case {case}: lg.eval_ctx.d_preprocessed.air_width"
-            );
-            assert_eq!(
-                got.eval_ctx.d_main as usize,
-                addr(&exe, main_desc),
-                "case {case}: lg.eval_ctx.d_main"
-            );
-            assert_eq!(
-                got.eval_ctx.d_public as usize,
-                addr(&exe, public),
-                "case {case}: lg.eval_ctx.d_public"
-            );
-            assert_eq!(
-                got.d_intermediates as usize, inter_addr,
-                "case {case}: lg.d_intermediates"
-            );
-            assert_eq!(got.num_y, num_y as u32, "case {case}: lg.num_y");
-            assert_eq!(
-                got.d_eq_xi as usize,
-                addr(&exe, eq_xi),
-                "case {case}: lg.d_eq_xi"
-            );
-            assert_eq!(
-                got.d_challenges as usize,
-                addr(&exe, challenges),
-                "case {case}: lg.d_challenges"
-            );
-            assert_eq!(
-                got.d_eq_3bs as usize,
-                addr(&exe, eq_3bs),
-                "case {case}: lg.d_eq_3bs"
-            );
-            assert_eq!(
-                got.d_rules as usize,
-                addr(&exe, rules),
-                "case {case}: lg.d_rules"
-            );
-            assert_eq!(got.rules_len, rules_len, "case {case}: lg.rules_len");
-            assert_eq!(
-                got.d_used_nodes as usize,
-                addr(&exe, used_nodes),
-                "case {case}: lg.d_used_nodes"
-            );
-            assert_eq!(
-                got.d_pair_idxs as usize,
-                addr(&exe, pair_idxs),
-                "case {case}: lg.d_pair_idxs"
-            );
-            assert_eq!(
-                got.used_nodes_len, used_nodes_len,
+                lg.used_nodes_len, used_nodes_len,
                 "case {case}: lg.used_nodes_len"
             );
-            assert_eq!(got.buffer_size, buffer_size, "case {case}: lg.buffer_size");
+            assert_eq!(lg.buffer_size, buffer_size, "case {case}: lg.buffer_size");
 
-            // --- replay: the same compiled graph, no rebinding. Pool
-            //     addresses are stable, so the *complete* bytes — padding
-            //     included — must be identical.
+            // --- replay: same exe, no rebind. Pool addresses are stable, so
+            //     the *complete* descriptor bytes — padding included — must be
+            //     identical. This is the capture-stability contract.
+            let zc_addr = planned_addr(zc_ctxs);
+            let lg_addr = planned_addr(lg_ctxs);
+            let md_addr = planned_addr(main_desc);
             exe.run(&ctx).expect("graph replay");
             ctx.stream.synchronize().unwrap();
             assert_eq!(
-                bytes(&exe, zc_ctxs),
-                zc_bytes,
+                peek(zc_addr, zc_raw.len(), &ctx),
+                zc_raw,
                 "case {case}: ZerocheckCtx bytes not stable across replay"
             );
             assert_eq!(
-                bytes(&exe, lg_ctxs),
-                lg_bytes,
+                peek(lg_addr, lg_raw.len(), &ctx),
+                lg_raw,
                 "case {case}: LogupCtx bytes not stable across replay"
             );
             assert_eq!(
-                bytes(&exe, main_desc),
-                desc_bytes,
-                "case {case}: MainMatrixPtrs bytes not stable across replay"
+                peek(md_addr, main_bytes.len(), &ctx),
+                main_bytes,
+                "case {case}: MainMatrixDesc bytes not stable across replay"
             );
         }
     }
 
-    /// R4 step 2: the materialized pointers must still address live,
-    /// correct bytes when the pool packer is *allowed* to reuse slots.
+    /// R6 step 2: the encoded offsets must still address live, correct bytes
+    /// when the pool packer is *allowed* to reuse slots.
     ///
-    /// `ctx_materializers_match_eager_field_by_field` above cannot check
+    /// `descriptors_decode_like_the_eager_pointer_path` above cannot check
     /// this. It registers every pointed-to buffer as a graph output, and
     /// `GraphCompiler` pins inputs ∪ outputs (`graph_exe.rs:634-644`), which
-    /// forces `death[b] = n` for all of them (`planner/heuristic.rs:184-185`)
-    /// — no slot can ever be reused, which is precisely the configuration in
-    /// which an under-declared `ctx_reads` is harmless. It proves the field
-    /// map; it proves nothing about liveness.
+    /// forces `death[b] = n` for all of them — no slot can ever be reused,
+    /// which is precisely the configuration in which an under-declared
+    /// `ctx_reads` is harmless. It proves the field map; it proves nothing
+    /// about liveness.
     ///
-    /// Here only the three ctx arrays are pinned, every pointed-to buffer is
-    /// left packable, and the packer is given a reason to reuse: a `dummy`
-    /// buffer larger than the whole rest of the pool, alive across the
-    /// evaluator. Because `to_place` is sorted largest-first
-    /// (`heuristic.rs:190`), `dummy` is placed at offset 0, and any buffer
-    /// whose lifetime does *not* overlap it lands inside its range.
+    /// Here only the three descriptor arrays are pinned (automatically — they
+    /// are graph inputs), every pointed-to buffer is left packable, and the
+    /// packer is given a reason to reuse: a `dummy` buffer larger than the
+    /// whole rest of the pool, alive across the evaluator.
     ///
     /// The node order is a deterministic sandwich, forced by data edges:
     ///
     /// ```text
-    ///   ctx materializers -> dummy_gate (fills dummy 0x5c) -> eval -> dummy_sink
+    ///   seed memsets -> dummy_gate (fills dummy 0x5c) -> eval -> dummy_sink
     /// ```
     ///
-    /// `dummy_gate` reads the ctx arrays (so it cannot precede the
-    /// materializers) and writes `gate`, which the evaluator declares (so it
-    /// cannot follow the evaluator). It is `dummy`'s sole writer — the graph
-    /// IR is SSA, and `verify_graph` rejects a second one — so it both opens
-    /// `dummy`'s lifetime and issues the clobbering fill. Therefore:
+    /// `dummy_gate` reads the ctx arrays and writes `gate`, which the
+    /// evaluator declares (so it cannot follow the evaluator). It is `dummy`'s
+    /// sole writer — the graph IR is SSA, and `verify_graph` rejects a second
+    /// one — so it both opens `dummy`'s lifetime and issues the clobbering
+    /// fill. Therefore:
     ///
     /// * **declared correctly** — `selectors` &c. are read by the evaluator, so they die after
     ///   `dummy` is born, their lifetimes overlap, and the packer must give them disjoint slots.
     ///   The bytes survive.
-    /// * **under-declared** — they die at the ctx materializer, *before* `dummy` is born, so the
-    ///   packer puts them inside `dummy` and the memset overwrites the bytes the ctx pointers
-    ///   address.
+    /// * **under-declared** — nothing reads them at all: they die at their seeding memset, before
+    ///   `dummy` is born, so the packer puts them inside `dummy` and the fill overwrites the bytes
+    ///   the encoded offsets address.
     ///
-    /// Red-green: drop one buffer from `ctx_reads` below and this test
-    /// fails on that buffer's byte pattern. Demonstrated on R4: removing
-    /// `selectors` puts it at pool offset 0, inside `dummy`, and the probe
-    /// reads `0x5c` instead of `0x11`.
-    // TODO(cc-ir,R4): the teeth depend on planner behaviour this test does
-    //   not assert — largest-first placement (`heuristic.rs:190`) putting
-    //   `dummy` at offset 0, and the sandwich order actually being chosen.
-    // WHY: neither is observable from `GraphExe`; the pool base and the
-    //   per-buffer offsets of unpinned buffers are private, and pinning them
-    //   to read them back is exactly what destroys the property under test.
+    /// Red-green: uncomment the `ctx_reads.retain` line below and this test
+    /// fails on `selectors`' byte pattern.
+    // TODO(cc-ir,R6): the teeth depend on planner behaviour this test does
+    //   not assert — largest-first placement putting `dummy` at offset 0, and
+    //   the sandwich order actually being chosen.
+    // WHY: the per-buffer offsets of *unpinned* buffers are readable from
+    //   `plan()` now, but asserting a specific packing would nail the test to
+    //   one scheduler.
     // RISK: a future scheduler or packer change could make this test pass
-    //   *vacuously* — green, but no longer able to fail. It would not go
-    //   red, so nothing would flag it. Re-arm the commented `ctx_reads`
-    //   line below after any planner change and confirm it still fails.
+    //   *vacuously* — green, but no longer able to fail. Re-arm the commented
+    //   `ctx_reads` line after any planner change and confirm it still fails.
     #[test]
-    fn ctx_pointers_survive_pool_reuse() {
+    fn descriptor_offsets_survive_pool_reuse() {
         crate::cuda::logup_zerocheck::assert_ctx_abi_matches_cuda();
 
         let ctx = test_ctx();
@@ -4094,10 +4414,11 @@ mod zerocheck_ir_tests {
         let buffer_size = 4u32;
 
         let mut g = GraphBuilder::new();
+        let mut descs = DescriptorPlan::new();
 
-        // Every source buffer carries a distinct byte pattern, so a byte
-        // read back through a ctx pointer identifies which buffer's storage
-        // the pointer actually landed on.
+        // Every source buffer carries a distinct byte pattern, so a byte read
+        // back through a decoded offset identifies which buffer's storage the
+        // offset actually landed on.
         let mut seeded: Vec<(&str, BufId, usize, u8)> = Vec::new();
         let seed = |g: &mut GraphBuilder,
                     seeded: &mut Vec<(&'static str, BufId, usize, u8)>,
@@ -4184,23 +4505,17 @@ mod zerocheck_ir_tests {
             0xCC,
         );
 
-        // The declared read set, derived from the materializers themselves
-        // (R4 step 1) — this vector is the thing under test.
+        // The declared read set, derived from the descriptor writers
+        // themselves (R6 step 1) — this vector is the thing under test.
         let mut ctx_reads: Vec<BufId> = Vec::new();
 
-        let main_desc =
-            add_typed_buf::<MainMatrixPtrs<EF>>(&mut g, device, "main_desc", mains.len());
-        g.insert_memset(main_desc, 0);
+        let main_desc = add_typed_buf::<MainMatrixDesc>(&mut g, device, "main_desc", mains.len());
+        let main_id =
+            descs.add_array::<MainMatrixDesc>(&mut g, main_desc, "main_desc", mains.len());
         for (i, (&b, &w)) in mains.iter().zip(main_widths.iter()).enumerate() {
             extend_reads(
                 &mut ctx_reads,
-                materialize_main_matrix_ptr_ir(
-                    &mut g,
-                    main_desc,
-                    i as u32,
-                    DevicePtrArg::buf(b),
-                    w,
-                ),
+                descs.set_main_matrix_desc(main_id, i, DevicePtrArg::buf(b), w),
             );
         }
 
@@ -4213,12 +4528,11 @@ mod zerocheck_ir_tests {
         };
 
         let zc_ctxs = add_typed_buf::<ZerocheckCtx>(&mut g, device, "zc_ctxs", 1);
-        g.insert_memset(zc_ctxs, 0);
+        let zc_id = descs.add_array::<ZerocheckCtx>(&mut g, zc_ctxs, "zc_ctxs", 1);
         extend_reads(
             &mut ctx_reads,
-            materialize_zerocheck_ctx_ir(
-                &mut g,
-                zc_ctxs,
+            descs.set_zerocheck_ctx(
+                zc_id,
                 0,
                 ZerocheckCtxArgs {
                     eval_ctx,
@@ -4235,12 +4549,11 @@ mod zerocheck_ir_tests {
         );
 
         let lg_ctxs = add_typed_buf::<LogupCtx>(&mut g, device, "lg_ctxs", 1);
-        g.insert_memset(lg_ctxs, 0);
+        let lg_id = descs.add_array::<LogupCtx>(&mut g, lg_ctxs, "lg_ctxs", 1);
         extend_reads(
             &mut ctx_reads,
-            materialize_logup_ctx_ir(
-                &mut g,
-                lg_ctxs,
+            descs.set_logup_ctx(
+                lg_id,
                 0,
                 LogupCtxArgs {
                     eval_ctx,
@@ -4267,11 +4580,6 @@ mod zerocheck_ir_tests {
         //     pool and stays alive across the evaluator.
         let dummy = add_f_buf(&mut g, device, "dummy", 1 << 18);
         let gate = add_f_buf(&mut g, device, "gate", 1);
-        // Ordered after the ctx materializers (it reads their outputs) and
-        // before the evaluator (which reads `gate`). It is `dummy`'s only
-        // writer — the graph IR is SSA, one writer per buffer — so
-        // `birth[dummy]` lands in that window, and the fill it issues is the
-        // clobber: whatever shares `dummy`'s slot loses its bytes here.
         let dummy_bytes = (1usize << 18) * f;
         g.insert_blackbox_kernel(
             "dummy_gate",
@@ -4308,88 +4616,71 @@ mod zerocheck_ir_tests {
             |_, _, _| {},
         );
 
-        // Only the ctx arrays are pinned (plus `sink`, pure scaffolding —
-        // it keeps `dummy_sink` out of DCE's reach, and it is not a buffer
-        // any ctx pointer addresses). Everything the pointers *do* address
-        // is left packable.
-        for b in [zc_ctxs, lg_ctxs, main_desc, sink] {
-            g.register_output(b);
-        }
-        let mut exe = GraphCompiler::new()
-            .device(device)
-            .scheduler(SchedulerMode::ListV1 {
-                params: ListSchedulerV1::default(),
-            })
-            .compile(g)
-            .expect("graph compile");
-        exe.run(&ctx).expect("graph run");
-        ctx.stream.synchronize().unwrap();
+        // `sink` is pure scaffolding — it keeps `dummy_sink` out of DCE's
+        // reach, and it is not a buffer any descriptor addresses. The three
+        // descriptor arrays are pinned automatically, as graph inputs.
+        g.register_output(sink);
 
-        let out_idx = |b: BufId| {
-            (0..exe.num_outputs())
-                .find(|&i| exe.output_buf_id(i) == b)
-                .unwrap_or_else(|| panic!("buf {b:?} not registered as an output"))
-        };
-        let bytes = |b: BufId| exe.get_output(out_idx(b)).to_host_on(&ctx).expect("D2H");
-        // Read `n` bytes straight from a device address the graph produced.
-        let peek = |addr: usize, n: usize| -> Vec<u8> {
-            assert_ne!(addr, 0, "null ctx pointer");
-            let view = unsafe { DeviceBuffer::<u8>::from_raw_parts(addr as *mut u8, n) };
-            let host = view.to_host_on(&ctx).expect("D2H");
-            forget(view);
-            host
+        let (exe, base) = compile_bind_run(g, &descs, &ctx);
+        let planned_addr = |b: BufId| {
+            let off = exe.plan().offsets[b.0].expect("pool slot");
+            (base as usize).wrapping_add(off as usize) as *const u8
         };
 
-        let zc_bytes = bytes(zc_ctxs);
-        let lg_bytes = bytes(lg_ctxs);
-        let desc_bytes = bytes(main_desc);
-        let zc: ZerocheckCtx =
-            unsafe { (zc_bytes.as_ptr() as *const ZerocheckCtx).read_unaligned() };
-        let lg: LogupCtx = unsafe { (lg_bytes.as_ptr() as *const LogupCtx).read_unaligned() };
+        let zc_raw = peek(planned_addr(zc_ctxs), size_of::<ZerocheckCtx>(), &ctx);
+        let lg_raw = peek(planned_addr(lg_ctxs), size_of::<LogupCtx>(), &ctx);
+        let desc_raw = peek(
+            planned_addr(main_desc),
+            mains.len() * size_of::<MainMatrixDesc>(),
+            &ctx,
+        );
+        let zc: ZerocheckCtx = unsafe { (zc_raw.as_ptr() as *const ZerocheckCtx).read_unaligned() };
+        let lg: LogupCtx = unsafe { (lg_raw.as_ptr() as *const LogupCtx).read_unaligned() };
 
         // Every pointer field, paired with the buffer it must address.
-        let mut probes: Vec<(&str, usize)> = vec![
-            ("selectors", zc.eval_ctx.d_selectors as usize),
-            ("selectors", lg.eval_ctx.d_selectors as usize),
-            ("prep", zc.eval_ctx.d_preprocessed.data as usize),
-            ("prep", lg.eval_ctx.d_preprocessed.data as usize),
-            ("public", zc.eval_ctx.d_public as usize),
-            ("public", lg.eval_ctx.d_public as usize),
-            ("inter", zc.d_intermediates as usize),
-            ("inter", lg.d_intermediates as usize),
-            ("eq_xi", zc.d_eq_xi as usize),
-            ("eq_xi", lg.d_eq_xi as usize),
-            ("rules", zc.d_rules as usize),
-            ("rules", lg.d_rules as usize),
-            ("used_nodes", zc.d_used_nodes as usize),
-            ("used_nodes", lg.d_used_nodes as usize),
-            ("challenges", lg.d_challenges as usize),
-            ("eq_3bs", lg.d_eq_3bs as usize),
-            ("pair_idxs", lg.d_pair_idxs as usize),
+        let mut probes: Vec<(&str, BaseOff)> = vec![
+            ("selectors", zc.eval_ctx.d_selectors),
+            ("selectors", lg.eval_ctx.d_selectors),
+            ("prep", zc.eval_ctx.d_preprocessed.data),
+            ("prep", lg.eval_ctx.d_preprocessed.data),
+            ("public", zc.eval_ctx.d_public),
+            ("public", lg.eval_ctx.d_public),
+            ("inter", zc.d_intermediates),
+            ("inter", lg.d_intermediates),
+            ("eq_xi", zc.d_eq_xi),
+            ("eq_xi", lg.d_eq_xi),
+            ("rules", zc.d_rules),
+            ("rules", lg.d_rules),
+            ("used_nodes", zc.d_used_nodes),
+            ("used_nodes", lg.d_used_nodes),
+            ("challenges", lg.d_challenges),
+            ("eq_3bs", lg.d_eq_3bs),
+            ("pair_idxs", lg.d_pair_idxs),
         ];
-        // …reached through the second pointer level, too.
-        assert_eq!(zc.eval_ctx.d_main as usize, lg.eval_ctx.d_main as usize);
+        // …reached through the second descriptor level, too.
+        assert_eq!(zc.eval_ctx.d_main, lg.eval_ctx.d_main);
         for i in 0..mains.len() {
-            let got: MainMatrixPtrs<EF> = unsafe {
-                (desc_bytes.as_ptr() as *const MainMatrixPtrs<EF>)
+            let got: MainMatrixDesc = unsafe {
+                (desc_raw.as_ptr() as *const MainMatrixDesc)
                     .add(i)
                     .read_unaligned()
             };
-            probes.push((if i == 0 { "main0" } else { "main1" }, got.data as usize));
+            probes.push((if i == 0 { "main0" } else { "main1" }, got.data));
         }
 
-        for (label, addr) in probes {
+        for (label, off) in probes {
             let &(_, _, n, pat) = seeded
                 .iter()
                 .find(|(name, ..)| *name == label)
                 .expect("seeded buffer");
-            let got = peek(addr, n);
+            let addr = off.resolve(base);
+            let got = peek(addr, n, &ctx);
             assert!(
                 got.iter().all(|&b| b == pat),
-                "`{label}` at {addr:#x} does not hold its own bytes any more \
-                 (expected all {pat:#04x}, first mismatch at index {}, value {:#04x}). \
-                 The pool packer reused its slot, which means the evaluator's \
-                 declared `ctx_reads` is missing it.",
+                "`{label}` at {addr:?} ({off:?} + base) does not hold its own bytes any \
+                 more (expected all {pat:#04x}, first mismatch at index {}, value {:#04x}). \
+                 The pool packer reused its slot, which means the evaluator's declared \
+                 `ctx_reads` is missing it.",
                 got.iter().position(|&b| b != pat).unwrap(),
                 got.iter().find(|&&b| b != pat).unwrap(),
             );
@@ -4598,6 +4889,73 @@ mod zerocheck_ir_tests {
             .compile(g)
             .expect("phase graph compile");
         assert!(exe.num_outputs() > 0, "phase graph produced no outputs");
+    }
+
+    /// R6 at phase scale: the whole logup-zerocheck graph binds, and every
+    /// offset it encoded lands inside the pool we handed the exe.
+    ///
+    /// This is the end-to-end shape of the contract — compile, own the pool,
+    /// bind, and then check that `base + off` is in `[base, base + peak)` for
+    /// every graph-owned descriptor field. An offset that escaped the pool
+    /// would mean the encoding and the plan disagree.
+    ///
+    /// It deliberately does **not** `run`: the phase graph's `block_ctxs` and
+    /// rule streams are zeroed placeholders in this fixture, so the batched
+    /// evaluators would interpret garbage. What is under test here is the
+    /// binding, not the arithmetic — the arithmetic oracle is
+    /// `tests::test_monomial_vs_dag_equivalence`'s rebased differential.
+    #[test]
+    fn phase_graph_binds_and_encodes_inside_the_pool() {
+        let ctx = test_ctx();
+        let device = DeviceType::Cuda(0);
+        let plan = synthetic_plan(
+            /* num_traces */ 3, /* l_skip */ 2, /* n_max */ 3,
+        );
+
+        let mut g = GraphBuilder::new();
+        let mut transcript = DuplexSpongeGpuIR::new(&mut g, device);
+        let bufs: Vec<TraceBufs> = (0..plan.num_traces())
+            .map(|t| TraceBufs::alloc_zeroed(&mut g, device, &plan, t))
+            .collect();
+        let proof = logup_zerocheck_gpu_ir(&mut g, &mut transcript, &plan, &bufs, device);
+        let descs = proof.descriptors.clone();
+
+        let mut exe = GraphCompiler::new()
+            .device(device)
+            .scheduler(SchedulerMode::ListV1 {
+                params: ListSchedulerV1::default(),
+            })
+            .compile(g)
+            .expect("phase graph compile");
+        let pool = DescriptorPlan::alloc_pool(&exe, &ctx);
+        descs.bind(&mut exe, &ctx, pool).expect("descriptor bind");
+
+        let base = descs.pool_base().get() as usize;
+        let peak = exe.scratch_bytes();
+        assert!(peak > 0, "empty pool");
+
+        let mut fields = 0usize;
+        for (buf, name, filled, total) in descs.array_summary() {
+            assert_eq!(filled, total, "`{name}` ({buf:?}) is not fully filled");
+            let off = exe.plan().offsets[buf.0].expect("descriptor array pool slot");
+            assert!(
+                (off as usize) < peak,
+                "`{name}` ({buf:?}) sits at pool offset {off}, past the {peak}-byte pool"
+            );
+            // Every graph-owned field of every element must land in the pool.
+            for b in descs.referenced_bufs(buf) {
+                let boff = exe.plan().offsets[b.0].expect("referenced buffer pool slot");
+                let addr = base.wrapping_add(boff as usize);
+                assert!(
+                    (base..base + peak).contains(&addr),
+                    "`{name}` references {b:?} at {addr:#x}, outside the pool \
+                     [{base:#x}, {:#x})",
+                    base + peak
+                );
+                fields += 1;
+            }
+        }
+        assert!(fields > 0, "no descriptor fields were checked");
     }
 
     /// The phase graph must chain onto a live transcript, not restart it.

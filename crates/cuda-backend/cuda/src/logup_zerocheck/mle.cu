@@ -15,12 +15,23 @@
 
 namespace logup_zerocheck_mle {
 
+// The single-AIR `mle.cu` entry points are reached only from the eager prover
+// (`mle_round.rs` <- `batch_mle.rs`'s `batch.len() == 1` fast path); the
+// graph-IR mirror uses the batched entry points in `batch_mle.cu`. They
+// therefore decode the base+offset descriptor ABI (`base_off.cuh`) against the
+// eager base, which is null -- i.e. the stored offset *is* the absolute device
+// address.
+//
+// TODO(cc-ir): if these ever join the graph, they need a real `pool_base`
+//   kernel argument like the batched launchers took.
+static constexpr const uint8_t *MLE_EAGER_BASE = nullptr;
+
 __device__ __forceinline__ FpExt evaluate_mle_entry(
     const SourceInfo &src,
     uint32_t row,
     const FpExt *__restrict__ d_selectors,
-    const MainMatrixPtrs<FpExt> d_preprocessed,
-    const MainMatrixPtrs<FpExt> *__restrict__ d_main,
+    const MainMatrixDesc d_preprocessed,
+    const MainMatrixDesc *__restrict__ d_main,
     const Fp *__restrict__ d_public,
     const FpExt *__restrict__ inter_buffer,
     uint32_t buffer_stride,
@@ -29,16 +40,17 @@ __device__ __forceinline__ FpExt evaluate_mle_entry(
 ) {
     switch (src.type) {
     case ENTRY_PREPROCESSED: {
+        const auto prep = resolve_main_matrix<FpExt>(d_preprocessed, MLE_EAGER_BASE);
 #ifdef CUDA_DEBUG
-        assert(d_preprocessed.data);
+        assert(prep.data);
 #endif
-        const auto stride = height * d_preprocessed.air_width;
-        const FpExt *__restrict__ matrix = d_preprocessed.data + stride * src.offset;
+        const auto stride = height * prep.air_width;
+        const FpExt *__restrict__ matrix = prep.data + stride * src.offset;
         const FpExt *__restrict__ column = matrix + height * src.index;
         return column[row];
     }
     case ENTRY_MAIN: {
-        auto main_ptr = d_main[src.part];
+        auto main_ptr = resolve_main_matrix<FpExt>(d_main[src.part], MLE_EAGER_BASE);
         const auto stride = height * main_ptr.air_width;
         const FpExt *__restrict__ matrix = main_ptr.data + stride * src.offset;
         const FpExt *__restrict__ column = matrix + height * src.index;
@@ -85,8 +97,8 @@ __global__ void zerocheck_mle_kernel(
     FpExt *__restrict__ tmp_sums_buffer,
     const FpExt *__restrict__ d_eq_xi,
     const FpExt *__restrict__ d_selectors,
-    const MainMatrixPtrs<FpExt> d_preprocessed,
-    const MainMatrixPtrs<FpExt> *__restrict__ d_main,
+    const MainMatrixDesc d_preprocessed,
+    const MainMatrixDesc *__restrict__ d_main,
     const FpExt *__restrict__ d_lambda_pows,
     const Fp *__restrict__ d_public,
     const Rule *__restrict__ d_rules,
@@ -193,8 +205,8 @@ __global__ void logup_mle_kernel(
     FracExt *__restrict__ tmp_sums_buffer,
     const FpExt *__restrict__ d_eq_xi,
     const FpExt *__restrict__ d_selectors,
-    const MainMatrixPtrs<FpExt> d_preprocessed,
-    const MainMatrixPtrs<FpExt> *__restrict__ d_main,
+    const MainMatrixDesc d_preprocessed,
+    const MainMatrixDesc *__restrict__ d_main,
     const FpExt *__restrict__ d_challenges,
     const FpExt *__restrict__ d_eq_3bs,
     const Fp *__restrict__ d_public,
@@ -360,8 +372,8 @@ extern "C" int _zerocheck_eval_mle(
     FpExt *output,
     const FpExt *eq_xi,
     const FpExt *selectors,
-    const MainMatrixPtrs<FpExt> preprocessed,
-    const MainMatrixPtrs<FpExt> *main,
+    const MainMatrixDesc preprocessed,
+    const MainMatrixDesc *main,
     const FpExt *lambda_pows,
     const Fp *public_values,
     const Rule *rules,
@@ -426,8 +438,8 @@ extern "C" int _logup_eval_mle(
     FracExt *output,
     const FpExt *eq_xi,
     const FpExt *selectors,
-    const MainMatrixPtrs<FpExt> preprocessed,
-    const MainMatrixPtrs<FpExt> *main,
+    const MainMatrixDesc preprocessed,
+    const MainMatrixDesc *main,
     const FpExt *challenges,
     const FpExt *eq_3bs,
     const Fp *public_values,

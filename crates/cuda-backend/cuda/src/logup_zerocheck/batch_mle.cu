@@ -14,8 +14,25 @@
 
 namespace logup_zerocheck_mle {
 
+// The two batched DAG-interpreter context structs, in the base+offset ABI:
+// every device pointer is a `BaseOff` into the pool whose base the launcher
+// receives (`base_off.cuh`). Each has a decoded `*RT` twin so the kernel bodies
+// below work on ordinary pointers.
+
 struct ZerocheckCtx {
     EvalCoreCtx eval_ctx;
+    BaseOff d_intermediates;
+    uint32_t num_y;
+    BaseOff d_eq_xi;
+    BaseOff d_rules;
+    size_t rules_len;
+    BaseOff d_used_nodes;
+    size_t used_nodes_len;
+    uint32_t buffer_size;
+};
+
+struct ZerocheckCtxRT {
+    EvalCoreRT eval_ctx;
     FpExt *__restrict__ d_intermediates;
     uint32_t num_y;
     const FpExt *__restrict__ d_eq_xi;
@@ -26,8 +43,38 @@ struct ZerocheckCtx {
     uint32_t buffer_size;
 };
 
+__device__ __forceinline__ ZerocheckCtxRT
+resolve_zerocheck_ctx(const ZerocheckCtx &c, const uint8_t *base) {
+    return ZerocheckCtxRT{
+        resolve_eval_core(c.eval_ctx, base),
+        base_off_ptr<FpExt>(base, c.d_intermediates),
+        c.num_y,
+        base_off_ptr<const FpExt>(base, c.d_eq_xi),
+        base_off_ptr<const Rule>(base, c.d_rules),
+        c.rules_len,
+        base_off_ptr<const size_t>(base, c.d_used_nodes),
+        c.used_nodes_len,
+        c.buffer_size
+    };
+}
+
 struct LogupCtx {
     EvalCoreCtx eval_ctx;
+    BaseOff d_intermediates;
+    uint32_t num_y;
+    BaseOff d_eq_xi;
+    BaseOff d_challenges;
+    BaseOff d_eq_3bs;
+    BaseOff d_rules;
+    size_t rules_len;
+    BaseOff d_used_nodes;
+    BaseOff d_pair_idxs;
+    size_t used_nodes_len;
+    uint32_t buffer_size;
+};
+
+struct LogupCtxRT {
+    EvalCoreRT eval_ctx;
     FpExt *__restrict__ d_intermediates;
     uint32_t num_y;
     const FpExt *__restrict__ d_eq_xi;
@@ -41,14 +88,32 @@ struct LogupCtx {
     uint32_t buffer_size;
 };
 
+__device__ __forceinline__ LogupCtxRT resolve_logup_ctx(const LogupCtx &c, const uint8_t *base) {
+    return LogupCtxRT{
+        resolve_eval_core(c.eval_ctx, base),
+        base_off_ptr<FpExt>(base, c.d_intermediates),
+        c.num_y,
+        base_off_ptr<const FpExt>(base, c.d_eq_xi),
+        base_off_ptr<const FpExt>(base, c.d_challenges),
+        base_off_ptr<const FpExt>(base, c.d_eq_3bs),
+        base_off_ptr<const Rule>(base, c.d_rules),
+        c.rules_len,
+        base_off_ptr<const size_t>(base, c.d_used_nodes),
+        base_off_ptr<const uint32_t>(base, c.d_pair_idxs),
+        c.used_nodes_len,
+        c.buffer_size
+    };
+}
+
 // Local context for device use only
 struct EvalCtx {
     const FpExt *__restrict__ d_selectors;
     const MainMatrixPtrs<FpExt> d_preprocessed;
-    const MainMatrixPtrs<FpExt> *__restrict__ d_main;
+    const MainMatrixDesc *__restrict__ d_main;
     const Fp *__restrict__ d_public;
     FpExt *__restrict__ d_intermediates;
     uint32_t height;
+    const uint8_t *base;
 };
 
 __device__ __forceinline__ FpExt evaluate_mle_entry(
@@ -69,7 +134,7 @@ __device__ __forceinline__ FpExt evaluate_mle_entry(
         return column[row];
     }
     case ENTRY_MAIN: {
-        auto main_ptr = ctx.d_main[src.part];
+        auto main_ptr = resolve_main_matrix<FpExt>(ctx.d_main[src.part], ctx.base);
         const auto stride = ctx.height * main_ptr.air_width;
         const FpExt *__restrict__ matrix = main_ptr.data + stride * src.offset;
         const FpExt *__restrict__ column = matrix + ctx.height * src.index;
@@ -112,6 +177,7 @@ __global__ void zerocheck_batch_mle_kernel(
     FpExt *__restrict__ tmp_sums_buffer,
     const BlockCtx *__restrict__ d_block_ctxs,
     const ZerocheckCtx *__restrict__ d_zc_ctxs,
+    const uint8_t *__restrict__ pool_base,
     const FpExt *__restrict__ d_lambda_pows,
     size_t lambda_len
 ) {
@@ -119,7 +185,7 @@ __global__ void zerocheck_batch_mle_kernel(
     FpExt *shared = (FpExt *)smem;
 
     BlockCtx block_ctx = d_block_ctxs[blockIdx.x];
-    ZerocheckCtx zc_ctx = d_zc_ctxs[block_ctx.air_idx];
+    ZerocheckCtxRT zc_ctx = resolve_zerocheck_ctx(d_zc_ctxs[block_ctx.air_idx], pool_base);
 
     uint32_t num_x = gridDim.y;
     uint32_t x_int = blockIdx.y;
@@ -147,7 +213,8 @@ __global__ void zerocheck_batch_mle_kernel(
             zc_ctx.eval_ctx.d_main,
             zc_ctx.eval_ctx.d_public,
             intermediates,
-            height
+            height,
+            zc_ctx.eval_ctx.base
         };
         uint32_t lambda_idx = 0;
 
@@ -208,13 +275,14 @@ __global__ void zerocheck_batch_mle_kernel(
 __global__ void logup_batch_mle_kernel(
     FracExt *__restrict__ tmp_sums_buffer,
     const BlockCtx *__restrict__ d_block_ctxs,
-    const LogupCtx *__restrict__ d_logup_ctxs
+    const LogupCtx *__restrict__ d_logup_ctxs,
+    const uint8_t *__restrict__ pool_base
 ) {
     extern __shared__ char smem[];
     FpExt *shared = reinterpret_cast<FpExt *>(smem);
 
     BlockCtx block_ctx = d_block_ctxs[blockIdx.x];
-    LogupCtx logup_ctx = d_logup_ctxs[block_ctx.air_idx];
+    LogupCtxRT logup_ctx = resolve_logup_ctx(d_logup_ctxs[block_ctx.air_idx], pool_base);
 
     uint32_t num_x = gridDim.y;
     uint32_t x_int = blockIdx.y;
@@ -245,7 +313,8 @@ __global__ void logup_batch_mle_kernel(
             logup_ctx.eval_ctx.d_main,
             logup_ctx.eval_ctx.d_public,
             intermediates,
-            height
+            height,
+            logup_ctx.eval_ctx.base
         };
         size_t rules_evaluated = 0;
 
@@ -380,6 +449,7 @@ extern "C" int _zerocheck_batch_eval_mle(
     FpExt *output,
     const BlockCtx *block_ctxs,
     const ZerocheckCtx *zc_ctxs,
+    const uint8_t *pool_base,
     const uint32_t *air_block_offsets, // size = num_airs + 1, grouped by air_idx
     const FpExt *lambda_pows,
     size_t lambda_len,
@@ -397,7 +467,7 @@ extern "C" int _zerocheck_batch_eval_mle(
     size_t shmem_bytes = div_ceil(block.x, WARP_SIZE) * sizeof(FpExt);
 
     zerocheck_batch_mle_kernel<<<grid, block, shmem_bytes, stream>>>(
-        tmp_sums_buffer, block_ctxs, zc_ctxs, lambda_pows, lambda_len
+        tmp_sums_buffer, block_ctxs, zc_ctxs, pool_base, lambda_pows, lambda_len
     );
     int err = CHECK_KERNEL();
     if (err != 0)
@@ -421,6 +491,7 @@ extern "C" int _logup_batch_eval_mle(
     FracExt *output,
     const BlockCtx *block_ctxs,
     const LogupCtx *logup_ctxs,
+    const uint8_t *pool_base,
     const uint32_t *air_block_offsets, // size = num_airs + 1, grouped by air_idx
     uint32_t num_blocks,
     uint32_t num_x,
@@ -435,7 +506,9 @@ extern "C" int _logup_batch_eval_mle(
     dim3 block(threads_per_block);
     size_t shmem_bytes = div_ceil(block.x, WARP_SIZE) * sizeof(FpExt);
 
-    logup_batch_mle_kernel<<<grid, block, shmem_bytes, stream>>>(tmp_sums_buffer, block_ctxs, logup_ctxs);
+    logup_batch_mle_kernel<<<grid, block, shmem_bytes, stream>>>(
+        tmp_sums_buffer, block_ctxs, logup_ctxs, pool_base
+    );
     int err = CHECK_KERNEL();
     if (err != 0)
         return err;
@@ -457,224 +530,9 @@ extern "C" int _logup_batch_eval_mle(
     return CHECK_KERNEL();
 }
 
-// ============================================================================
-// CTX MATERIALIZERS (graph-IR)
-// ============================================================================
-//
-// The eager path assembles `MainMatrixPtrs<FpExt>` / `ZerocheckCtx` / `LogupCtx`
-// on the *host* and uploads them (`batch_mle.rs:158-201`). That hides every
-// embedded device pointer from the graph-IR planner: a struct full of raw
-// addresses is an opaque leaf, so alias analysis through it is impossible.
-//
-// These launchers write one element of each array *on the device* from
-// explicitly-typed pointer arguments, so each pointer stays a real graph edge
-// (a `BufId` resolved at invocation time) instead of a stale host-baked
-// address. Every field of every struct is covered; the eager builders are the
-// field-by-field oracle.
-//
-// Each kernel zeroes the destination element first so ABI padding is
-// deterministic across replays, then assigns field by field.
-//
-// `EvalCoreCtx::d_preprocessed` is a `const` data member, so the containing
-// object's constness is stripped with `const_cast` before writing it. The
-// destination is a plain (non-const) device object, so this is well-defined.
-
-__global__ void materialize_main_matrix_ptr_kernel(
-    MainMatrixPtrs<FpExt> *__restrict__ out,
-    uint32_t idx,
-    const FpExt *data,
-    uint32_t air_width
-) {
-    MainMatrixPtrs<FpExt> &o = out[idx];
-    memset(&o, 0, sizeof(MainMatrixPtrs<FpExt>));
-    o.data = data;
-    o.air_width = air_width;
-}
-
-extern "C" int _materialize_main_matrix_ptr(
-    MainMatrixPtrs<FpExt> *out,
-    uint32_t idx,
-    const FpExt *data,
-    uint32_t air_width,
-    cudaStream_t stream
-) {
-    materialize_main_matrix_ptr_kernel<<<1, 1, 0, stream>>>(out, idx, data, air_width);
-    return CHECK_KERNEL();
-}
-
-__device__ __forceinline__ void write_eval_core_ctx(
-    EvalCoreCtx &o,
-    const FpExt *d_selectors,
-    const FpExt *d_preprocessed_data,
-    uint32_t preprocessed_air_width,
-    const MainMatrixPtrs<FpExt> *d_main,
-    const Fp *d_public
-) {
-    o.d_selectors = d_selectors;
-    // `d_preprocessed` is a const member of `EvalCoreCtx`; the object itself
-    // is mutable device memory, so stripping the member's constness is legal.
-    MainMatrixPtrs<FpExt> &prep = const_cast<MainMatrixPtrs<FpExt> &>(o.d_preprocessed);
-    prep.data = d_preprocessed_data;
-    prep.air_width = preprocessed_air_width;
-    o.d_main = d_main;
-    o.d_public = d_public;
-}
-
-__global__ void materialize_zerocheck_ctx_kernel(
-    ZerocheckCtx *__restrict__ out,
-    uint32_t idx,
-    const FpExt *d_selectors,
-    const FpExt *d_preprocessed_data,
-    uint32_t preprocessed_air_width,
-    const MainMatrixPtrs<FpExt> *d_main,
-    const Fp *d_public,
-    FpExt *d_intermediates,
-    uint32_t num_y,
-    const FpExt *d_eq_xi,
-    const Rule *d_rules,
-    size_t rules_len,
-    const size_t *d_used_nodes,
-    size_t used_nodes_len,
-    uint32_t buffer_size
-) {
-    ZerocheckCtx &o = out[idx];
-    memset(&o, 0, sizeof(ZerocheckCtx));
-    write_eval_core_ctx(
-        o.eval_ctx, d_selectors, d_preprocessed_data, preprocessed_air_width, d_main, d_public
-    );
-    o.d_intermediates = d_intermediates;
-    o.num_y = num_y;
-    o.d_eq_xi = d_eq_xi;
-    o.d_rules = d_rules;
-    o.rules_len = rules_len;
-    o.d_used_nodes = d_used_nodes;
-    o.used_nodes_len = used_nodes_len;
-    o.buffer_size = buffer_size;
-}
-
-extern "C" int _materialize_zerocheck_ctx(
-    ZerocheckCtx *out,
-    uint32_t idx,
-    const FpExt *d_selectors,
-    const FpExt *d_preprocessed_data,
-    uint32_t preprocessed_air_width,
-    const MainMatrixPtrs<FpExt> *d_main,
-    const Fp *d_public,
-    FpExt *d_intermediates,
-    uint32_t num_y,
-    const FpExt *d_eq_xi,
-    const Rule *d_rules,
-    size_t rules_len,
-    const size_t *d_used_nodes,
-    size_t used_nodes_len,
-    uint32_t buffer_size,
-    cudaStream_t stream
-) {
-    materialize_zerocheck_ctx_kernel<<<1, 1, 0, stream>>>(
-        out,
-        idx,
-        d_selectors,
-        d_preprocessed_data,
-        preprocessed_air_width,
-        d_main,
-        d_public,
-        d_intermediates,
-        num_y,
-        d_eq_xi,
-        d_rules,
-        rules_len,
-        d_used_nodes,
-        used_nodes_len,
-        buffer_size
-    );
-    return CHECK_KERNEL();
-}
-
-__global__ void materialize_logup_ctx_kernel(
-    LogupCtx *__restrict__ out,
-    uint32_t idx,
-    const FpExt *d_selectors,
-    const FpExt *d_preprocessed_data,
-    uint32_t preprocessed_air_width,
-    const MainMatrixPtrs<FpExt> *d_main,
-    const Fp *d_public,
-    FpExt *d_intermediates,
-    uint32_t num_y,
-    const FpExt *d_eq_xi,
-    const FpExt *d_challenges,
-    const FpExt *d_eq_3bs,
-    const Rule *d_rules,
-    size_t rules_len,
-    const size_t *d_used_nodes,
-    const uint32_t *d_pair_idxs,
-    size_t used_nodes_len,
-    uint32_t buffer_size
-) {
-    LogupCtx &o = out[idx];
-    memset(&o, 0, sizeof(LogupCtx));
-    write_eval_core_ctx(
-        o.eval_ctx, d_selectors, d_preprocessed_data, preprocessed_air_width, d_main, d_public
-    );
-    o.d_intermediates = d_intermediates;
-    o.num_y = num_y;
-    o.d_eq_xi = d_eq_xi;
-    o.d_challenges = d_challenges;
-    o.d_eq_3bs = d_eq_3bs;
-    o.d_rules = d_rules;
-    o.rules_len = rules_len;
-    o.d_used_nodes = d_used_nodes;
-    o.d_pair_idxs = d_pair_idxs;
-    o.used_nodes_len = used_nodes_len;
-    o.buffer_size = buffer_size;
-}
-
-extern "C" int _materialize_logup_ctx(
-    LogupCtx *out,
-    uint32_t idx,
-    const FpExt *d_selectors,
-    const FpExt *d_preprocessed_data,
-    uint32_t preprocessed_air_width,
-    const MainMatrixPtrs<FpExt> *d_main,
-    const Fp *d_public,
-    FpExt *d_intermediates,
-    uint32_t num_y,
-    const FpExt *d_eq_xi,
-    const FpExt *d_challenges,
-    const FpExt *d_eq_3bs,
-    const Rule *d_rules,
-    size_t rules_len,
-    const size_t *d_used_nodes,
-    const uint32_t *d_pair_idxs,
-    size_t used_nodes_len,
-    uint32_t buffer_size,
-    cudaStream_t stream
-) {
-    materialize_logup_ctx_kernel<<<1, 1, 0, stream>>>(
-        out,
-        idx,
-        d_selectors,
-        d_preprocessed_data,
-        preprocessed_air_width,
-        d_main,
-        d_public,
-        d_intermediates,
-        num_y,
-        d_eq_xi,
-        d_challenges,
-        d_eq_3bs,
-        d_rules,
-        rules_len,
-        d_used_nodes,
-        d_pair_idxs,
-        used_nodes_len,
-        buffer_size
-    );
-    return CHECK_KERNEL();
-}
-
 // Byte sizes of the batched ctx ABI, so the Rust mirrors in
 // `src/cuda/logup_zerocheck.rs` can be static-asserted against the C++ truth.
-extern "C" size_t _main_matrix_ptrs_ext_size() { return sizeof(MainMatrixPtrs<FpExt>); }
+extern "C" size_t _main_matrix_desc_size() { return sizeof(MainMatrixDesc); }
 extern "C" size_t _eval_core_ctx_size() { return sizeof(EvalCoreCtx); }
 extern "C" size_t _zerocheck_ctx_size() { return sizeof(ZerocheckCtx); }
 extern "C" size_t _logup_ctx_size() { return sizeof(LogupCtx); }
