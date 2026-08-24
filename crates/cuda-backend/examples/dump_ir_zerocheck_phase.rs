@@ -23,9 +23,9 @@
 use std::path::PathBuf;
 
 use crypto_compiler::{
-    graph_exe::GraphCompiler,
+    graph_compiler::GraphCompiler,
     graph_ir::{DeviceType, GraphBuilder},
-    planner::SchedulerMode,
+    planner::{ListSchedulerV1, SchedulerMode},
     runtime::Verbosity,
 };
 use openvm_cuda_backend::{
@@ -97,7 +97,9 @@ fn main() {
 
     let compiler = GraphCompiler::new()
         .device(device)
-        .scheduler(SchedulerMode::Heuristic)
+        .scheduler(SchedulerMode::ListV1 {
+            params: ListSchedulerV1::default(),
+        })
         .dump_dir(dump_dir.clone())
         .verbosity(Verbosity::Verbose);
     let exe = match compiler.compile(g) {

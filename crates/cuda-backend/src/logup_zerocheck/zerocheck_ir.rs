@@ -81,7 +81,7 @@ use openvm_cuda_common::d_buffer::DeviceBuffer;
 use openvm_stark_backend::prover::fractional_sumcheck_gkr::Frac;
 use p3_field::PrimeCharacteristicRing;
 
-use super::fractional_ir::{add_ef_buf, ef_const_ext_scalar_buf};
+use super::fractional_ir_utils::{add_ef_buf, ef_const_ext_scalar_buf};
 use crate::{
     cuda::{
         logup_zerocheck::{
@@ -108,7 +108,7 @@ use crate::{
 // Buffer allocation helpers.
 //
 // `add_ef_buf` / `add_ext_scalar_buf` / `ef_const_ext_scalar_buf` are reused
-// from `super::fractional_ir` rather than duplicated.
+// from `super::fractional_ir_utils` rather than duplicated.
 
 /// Byte size of a base-field element.
 pub(crate) const F_BYTES: usize = size_of::<F>();
@@ -124,6 +124,7 @@ pub fn add_f_buf(g: &mut GraphBuilder, device: DeviceType, name: &str, n: usize)
         name: Some(name.to_string()),
         device_type: device,
         size: Quast::cst((n.max(1) * F_BYTES) as i64),
+        concrete_size: n.max(1) * F_BYTES,
         elem_size: F_BYTES,
     })
 }
@@ -134,6 +135,7 @@ pub fn add_frac_buf(g: &mut GraphBuilder, device: DeviceType, name: &str, n: usi
         name: Some(name.to_string()),
         device_type: device,
         size: Quast::cst((n.max(1) * FRAC_EF_BYTES) as i64),
+        concrete_size: n.max(1) * FRAC_EF_BYTES,
         elem_size: FRAC_EF_BYTES,
     })
 }
@@ -146,6 +148,7 @@ pub fn add_typed_buf<T>(g: &mut GraphBuilder, device: DeviceType, name: &str, n:
         name: Some(name.to_string()),
         device_type: device,
         size: Quast::cst((n.max(1) * size_of::<T>()) as i64),
+        concrete_size: n.max(1) * size_of::<T>(),
         elem_size: size_of::<T>(),
     })
 }
@@ -429,23 +432,22 @@ pub fn zerocheck_ntt_eval_constraints_ir(
         bufs.public_values,
         bufs.rules,
         bufs.used_nodes,
-        bufs.intermediates,
     ];
     let has_prep = bufs.preprocessed.is_some();
     if let Some(prep) = bufs.preprocessed {
         inputs.push(prep);
     }
-    // `intermediates` is scratch the kernel writes; flag it as modified so
-    // the planner sequences it like the write it is.
-    let modifies: Vec<bool> = inputs
-        .iter()
-        .enumerate()
-        .map(|(i, _)| i == 7)
-        .collect::<Vec<_>>();
+    // `intermediates` is pure scratch: the kernel writes it and reads back
+    // only its own writes, so no value flows *in*. It is therefore declared
+    // as a node **output**, not a carried input — same treatment the
+    // fractional mirror gives `tmp_block_sums` (`fractional_ir.rs:399, 436`).
+    // Declaring it carried would make it a read of an unproduced buffer,
+    // which the fusion pass rejects with `TakeGraphError::ReadBeforeWrite`.
+    let modifies: Vec<bool> = vec![false; inputs.len()];
     g.insert_blackbox_kernel(
         "zerocheck_ntt_eval_constraints",
         inputs.into_iter(),
-        [bufs.tmp_sums, bufs.out].into_iter(),
+        [bufs.tmp_sums, bufs.out, bufs.intermediates].into_iter(),
         modifies.into_iter(),
         move |inputs, outputs, stream| unsafe {
             let mut tmp =
@@ -467,9 +469,9 @@ pub fn zerocheck_ntt_eval_constraints_ir(
                 shape.used_nodes_len,
             );
             let mut intermediates =
-                DeviceBuffer::<F>::from_raw_parts(inputs[7] as *mut F, shape.intermediates_len);
+                DeviceBuffer::<F>::from_raw_parts(outputs[2] as *mut F, shape.intermediates_len);
             let prep_ptr = if has_prep {
-                inputs[8] as *const F
+                inputs[7] as *const F
             } else {
                 std::ptr::null()
             };
@@ -577,17 +579,18 @@ pub fn logup_bary_eval_interactions_round0_ir(
         bufs.numer_weights,
         bufs.denom_weights,
         bufs.rules,
-        bufs.intermediates,
     ];
     let has_prep = bufs.preprocessed.is_some();
     if let Some(prep) = bufs.preprocessed {
         inputs.push(prep);
     }
-    let modifies: Vec<bool> = (0..inputs.len()).map(|i| i == 7).collect();
+    // `intermediates` is a node output, not a carried input — see the note
+    // in [`zerocheck_ntt_eval_constraints_ir`].
+    let modifies: Vec<bool> = vec![false; inputs.len()];
     g.insert_blackbox_kernel(
         "logup_bary_eval_interactions_round0",
         inputs.into_iter(),
-        [bufs.tmp_sums, bufs.out].into_iter(),
+        [bufs.tmp_sums, bufs.out, bufs.intermediates].into_iter(),
         modifies.into_iter(),
         move |inputs, outputs, stream| unsafe {
             let mut tmp = DeviceBuffer::<Frac<EF>>::from_raw_parts(
@@ -612,9 +615,9 @@ pub fn logup_bary_eval_interactions_round0_ir(
             let rules =
                 DeviceBuffer::<u128>::from_raw_parts(inputs[6] as *mut u128, shape.rules_len);
             let mut intermediates =
-                DeviceBuffer::<F>::from_raw_parts(inputs[7] as *mut F, shape.intermediates_len);
+                DeviceBuffer::<F>::from_raw_parts(outputs[2] as *mut F, shape.intermediates_len);
             let prep_ptr = if has_prep {
-                inputs[8] as *const F
+                inputs[7] as *const F
             } else {
                 std::ptr::null()
             };
@@ -2240,8 +2243,8 @@ where
         //   wastes memory, so the bound is deliberately generous. A real port
         //   must call the sizing helpers.
         let scratch = (num_x as usize) * (num_cosets_zc as usize) * skip_domain;
-        // `zc_tmp` is a node output and `zc_inter` a carried (written) input:
-        // the kernel is their sole producer, so neither may also be memset.
+        // `zc_tmp` and `zc_inter` are both node outputs: the kernel is their
+        // sole producer, so neither may also be memset.
         let zc_tmp = add_ef_buf(g, device, &format!("t{t}_r0_zc_tmp"), scratch.max(1));
         let zc_inter = add_f_buf(
             g,
@@ -3384,9 +3387,9 @@ pub fn synthetic_plan(num_traces: usize, l_skip: usize, n_max: usize) -> Zeroche
 #[cfg(test)]
 mod zerocheck_ir_tests {
     use crypto_compiler::{
-        graph_exe::GraphCompiler,
+        graph_compiler::GraphCompiler,
         graph_ir::{DeviceType, GraphBuilder, GraphNode},
-        planner::SchedulerMode,
+        planner::{ListSchedulerV1, SchedulerMode},
     };
     use openvm_cuda_common::{
         common::get_device,
@@ -3424,7 +3427,9 @@ mod zerocheck_ir_tests {
         }
         let mut exe = GraphCompiler::new()
             .device(DeviceType::Cuda(0))
-            .scheduler(SchedulerMode::Heuristic)
+            .scheduler(SchedulerMode::ListV1 {
+                params: ListSchedulerV1::default(),
+            })
             .compile(g)
             .expect("graph compile");
         exe.run(ctx).expect("graph run");
@@ -3817,7 +3822,9 @@ mod zerocheck_ir_tests {
             }
             let mut exe = GraphCompiler::new()
                 .device(device)
-                .scheduler(SchedulerMode::Heuristic)
+                .scheduler(SchedulerMode::ListV1 {
+                    params: ListSchedulerV1::default(),
+                })
                 .compile(g)
                 .expect("graph compile");
             exe.run(&ctx).expect("graph run");
@@ -4310,7 +4317,9 @@ mod zerocheck_ir_tests {
         }
         let mut exe = GraphCompiler::new()
             .device(device)
-            .scheduler(SchedulerMode::Heuristic)
+            .scheduler(SchedulerMode::ListV1 {
+                params: ListSchedulerV1::default(),
+            })
             .compile(g)
             .expect("graph compile");
         exe.run(&ctx).expect("graph run");
@@ -4583,7 +4592,9 @@ mod zerocheck_ir_tests {
 
         let exe = GraphCompiler::new()
             .device(device)
-            .scheduler(SchedulerMode::Heuristic)
+            .scheduler(SchedulerMode::ListV1 {
+                params: ListSchedulerV1::default(),
+            })
             .compile(g)
             .expect("phase graph compile");
         assert!(exe.num_outputs() > 0, "phase graph produced no outputs");
@@ -4614,7 +4625,9 @@ mod zerocheck_ir_tests {
         let _ = logup_zerocheck_gpu_ir(&mut g, &mut transcript, &plan, &bufs, device);
         GraphCompiler::new()
             .device(device)
-            .scheduler(SchedulerMode::Heuristic)
+            .scheduler(SchedulerMode::ListV1 {
+                params: ListSchedulerV1::default(),
+            })
             .compile(g)
             .expect("seeded phase graph compile");
     }

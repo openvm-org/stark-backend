@@ -82,6 +82,7 @@ fn add_typed_buf<T>(g: &mut GraphBuilder, device: DeviceType, name: &str, n: usi
         name: Some(name.to_string()),
         device_type: device,
         size: Quast::cst((n * elem_size) as i64),
+        concrete_size: n * elem_size,
         elem_size,
     })
 }
@@ -283,7 +284,7 @@ pub fn batch_ntt_small_frac_ext_ir(
 
 #[cfg(test)]
 mod poly_graph_ir_tests {
-    use crypto_compiler::{graph_exe::GraphCompiler, graph_ir::ConstBuf};
+    use crypto_compiler::{graph_compiler::GraphCompiler, graph_ir::ConstBuf};
     use openvm_cuda_common::{
         common::get_device,
         stream::{CudaStream, GpuDeviceCtx, StreamGuard},
