@@ -91,6 +91,10 @@ impl VpmmConfig {
 /// Allocation record for the VPMM path.
 pub(super) struct VpmmRecord {
     size: usize,
+    /// The stream that must order this allocation's **release**, which is the
+    /// allocating stream only until a handoff moves it. `free_internal` hands
+    /// this stream to `free_region_insert`, so it is the stream the freed
+    /// region's reuse event is recorded on.
     stream: StreamGuard,
 }
 
@@ -366,6 +370,30 @@ impl VirtualMemoryPool {
         self.free_region_insert(ptr, size, &record.stream);
 
         Ok((size, record.stream))
+    }
+
+    /// Changes the stream that must order a **live** allocation's release.
+    ///
+    /// Returns the previous `StreamGuard`, which the caller must drop AFTER
+    /// releasing the memory manager lock.
+    ///
+    /// `free_regions` is deliberately left alone: the allocation is still live,
+    /// so no free region describes it yet. The handoff takes effect at
+    /// `free_internal`, which passes this stream to `free_region_insert` and so
+    /// records the region's reuse event on it. `find_best_fit` phase 1b and the
+    /// defragmentation path both gate cross-stream reuse on that event.
+    pub(super) fn rebind_release_stream(
+        &mut self,
+        ptr: *mut c_void,
+        target: &StreamGuard,
+    ) -> Result<StreamGuard, MemoryError> {
+        let ptr = ptr as CUdeviceptr;
+        let record = self
+            .malloc_regions
+            .get_mut(&ptr)
+            .ok_or(MemoryError::InvalidPointer)?;
+
+        Ok(std::mem::replace(&mut record.stream, target.clone()))
     }
 
     // ========================================================================
@@ -764,6 +792,27 @@ impl VirtualMemoryPool {
     /// Returns the total physical memory currently mapped in this pool (in bytes).
     pub(super) fn memory_usage(&self) -> usize {
         self.active_pages.len() * self.page_size
+    }
+
+    /// The release stream recorded for a live allocation, for tests that assert
+    /// a handoff actually changed the record rather than trusting that it did.
+    #[cfg(test)]
+    pub(super) fn release_stream_of(&self, ptr: *mut c_void) -> Option<StreamGuard> {
+        self.malloc_regions
+            .get(&(ptr as CUdeviceptr))
+            .map(|record| record.stream.clone())
+    }
+
+    /// The release stream and reuse event recorded for a free region. Cross-stream
+    /// reuse is gated on that event, so tests assert on it directly.
+    #[cfg(test)]
+    pub(super) fn free_region_release(
+        &self,
+        ptr: *mut c_void,
+    ) -> Option<(StreamGuard, Arc<CudaEvent>)> {
+        self.free_regions
+            .get(&(ptr as CUdeviceptr))
+            .map(|region| (region.stream.clone(), region.event.clone()))
     }
 }
 

@@ -45,6 +45,14 @@ fn init() {
 /// Allocation record for the small-allocation path (`cudaMallocAsync`).
 struct AllocRecord {
     size: usize,
+    /// The stream that must order this allocation's **release**, which is the
+    /// allocating stream only until a handoff moves it.
+    ///
+    /// Release ordering is what makes reuse safe: `cudaFreeAsync` is enqueued on
+    /// this stream, so the allocation only becomes reusable after the work
+    /// already queued on it. When a buffer is produced on one stream and then
+    /// consumed on another, the consumer's stream is the one that must carry the
+    /// free — see [`rebind_release_stream`].
     stream: StreamGuard,
 }
 
@@ -132,6 +140,31 @@ impl MemoryManager {
             Ok(guard)
         }
     }
+
+    /// Two-stage release-stream handoff, mirroring [`Self::d_free_under_lock`]:
+    /// resolves the record under the lock and returns the previous
+    /// `StreamGuard`, which the caller must drop AFTER releasing the lock.
+    ///
+    /// No event is recorded here. The previous stream is already complete, and
+    /// the event that matters is the one the eventual free records on `target`.
+    ///
+    /// # Safety
+    /// - `ptr` must be a live device pointer previously returned by this manager.
+    /// - All work on the allocation's current release stream must be complete.
+    /// - The caller must hold the `MEMORY_MANAGER` lock before calling this method.
+    unsafe fn rebind_release_stream_under_lock(
+        &mut self,
+        ptr: *mut c_void,
+        target: &StreamGuard,
+    ) -> Result<StreamGuard, MemoryError> {
+        let nn = NonNull::new(ptr).ok_or(MemoryError::NullPointer)?;
+
+        if let Some(record) = self.allocated_ptrs.get_mut(&nn) {
+            Ok(std::mem::replace(&mut record.stream, target.clone()))
+        } else {
+            self.pool.rebind_release_stream(ptr, target)
+        }
+    }
 }
 
 impl Drop for MemoryManager {
@@ -169,6 +202,46 @@ pub unsafe fn d_free(ptr: *mut c_void) -> Result<(), MemoryError> {
     drop(manager);
     drop(guard);
     Ok(())
+}
+
+/// Moves the stream that must order `ptr`'s release onto `target`.
+///
+/// This is metadata only: nothing is enqueued and no event is recorded. The
+/// effect appears at the eventual free, which then enqueues `cudaFreeAsync` (or
+/// records the VPMM free-region event) on `target` — behind whatever `target`
+/// has already queued against the allocation. Another stream may therefore only
+/// reuse the memory once that work has completed.
+///
+/// # Safety
+/// - `ptr` must be a live device pointer previously returned by this manager.
+/// - All work on the allocation's current release stream must already be complete, because nothing
+///   here orders the two streams against each other.
+/// - The caller must be the allocation's sole owner: any alias that goes on using it from a third
+///   stream is no longer covered by the release ordering.
+pub(crate) unsafe fn rebind_release_stream(
+    ptr: *mut c_void,
+    target: &StreamGuard,
+) -> Result<(), MemoryError> {
+    let manager = MEMORY_MANAGER.get().unwrap();
+    let mut manager = manager.lock().map_err(|_| MemoryError::LockError)?;
+    let previous = manager.rebind_release_stream_under_lock(ptr, target)?;
+    drop(manager);
+    drop(previous);
+    Ok(())
+}
+
+/// The release stream recorded for a small (`cudaMallocAsync`) allocation.
+///
+/// Test-only: the same assertion for the VPMM path lives on the pool itself.
+#[cfg(test)]
+pub(super) fn small_alloc_release_stream(ptr: *mut c_void) -> Option<StreamGuard> {
+    let manager = MEMORY_MANAGER.get().unwrap();
+    let manager = manager.lock().unwrap();
+    let nn = NonNull::new(ptr)?;
+    manager
+        .allocated_ptrs
+        .get(&nn)
+        .map(|record| record.stream.clone())
 }
 
 #[derive(Debug, Clone)]

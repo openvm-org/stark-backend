@@ -7,8 +7,8 @@ use std::{
 
 use crate::{
     copy::cuda_memcpy_on,
-    error::{check, CudaError, MemCopyError},
-    memory_manager::{d_free, d_malloc_on},
+    error::{check, CudaError, MemCopyError, MemoryError},
+    memory_manager::{d_free, d_malloc_on, rebind_release_stream},
     stream::{cudaStream_t, GpuDeviceCtx},
 };
 
@@ -95,6 +95,44 @@ impl<T> DeviceBuffer<T> {
             #[cfg(feature = "debug-cuda-stream")]
             alloc_stream: device_ctx.stream.as_raw(),
         }
+    }
+
+    /// Hands release ordering for this buffer to `target`'s stream.
+    ///
+    /// Until this is called, the buffer's eventual free is enqueued on the
+    /// stream that allocated it. A buffer produced on one stream and then read
+    /// on another therefore becomes reusable by a *third* stream as soon as the
+    /// producer's queue drains — which says nothing about whether the consumer
+    /// has finished reading. Adopting the consumer's stream moves the free (and,
+    /// on the VPMM path, the free region's reuse event) behind the reads already
+    /// queued there, so reuse can only happen after them.
+    ///
+    /// This is host-side metadata only: nothing is enqueued on either stream and
+    /// no event is recorded, so it neither synchronizes nor orders the two
+    /// streams against each other. That ordering must already hold — hence
+    /// `after_sync`.
+    ///
+    /// # Safety
+    /// - All work on the buffer's current release stream must be **complete**, not merely enqueued.
+    /// - The caller must be the buffer's **sole owner**. Aliases that keep using it on other
+    ///   streams are not covered by the new release ordering.
+    /// - No alias may be handed to another stream afterwards.
+    /// - All subsequent use and the release itself are ordered on `target` until another explicit
+    ///   handoff moves them again.
+    pub unsafe fn adopt_release_stream_after_sync(
+        &mut self,
+        target: &GpuDeviceCtx,
+    ) -> Result<(), MemoryError> {
+        if self.ptr.is_null() {
+            // A null buffer owns no allocation, so there is no release to order.
+            return Ok(());
+        }
+        rebind_release_stream(self.ptr as *mut c_void, &target.stream)?;
+        #[cfg(feature = "debug-cuda-stream")]
+        {
+            self.alloc_stream = target.stream.as_raw();
+        }
+        Ok(())
     }
 
     /// Fills the buffer with zeros on an explicit stream.
@@ -308,10 +346,14 @@ impl<T> Drop for DeviceBuffer<T> {
                 self.len,
                 size_of::<T>()
             );
-            // d_free enqueues cudaFreeAsync on the stream that originally
-            // allocated this buffer (stored in the memory manager's record).
-            // This is correct even when Drop runs on a different thread —
-            // CUDA handles cross-thread stream operations safely.
+            // d_free enqueues the release on the buffer's recorded *release*
+            // stream — the allocating stream unless
+            // `adopt_release_stream_after_sync` moved it. Reuse by another
+            // stream is ordered after that release, so the record has to name
+            // the stream that last reads this buffer, not merely the one that
+            // allocated it. Which thread runs Drop is a separate question and
+            // not the one this ordering answers: CUDA handles cross-thread
+            // stream operations safely on its own.
             unsafe {
                 d_free(self.ptr as *mut c_void).expect("GPU free failed");
             }
