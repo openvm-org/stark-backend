@@ -268,9 +268,9 @@ impl<'a> ZerocheckMonomialBatch<'a> {
 }
 
 // Constants for par-y kernel
-const THREADS_PER_BLOCK_PAR_Y: u32 = 128;
-const DEFAULT_MAX_MONOMIALS_PER_THREAD: u32 = 64;
-const WAVES_TARGET: u32 = 4;
+pub(super) const THREADS_PER_BLOCK_PAR_Y: u32 = 128;
+pub(super) const DEFAULT_MAX_MONOMIALS_PER_THREAD: u32 = 64;
+pub(super) const WAVES_TARGET: u32 = 4;
 
 /// Batch evaluator for monomial-based zerocheck MLE evaluation, parallelizing over y_int.
 ///

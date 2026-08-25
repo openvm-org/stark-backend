@@ -88,6 +88,16 @@ pub trait FiatShamirTranscriptGraphIR {
     /// Squeeze one `EF` value (four basis coefficients) into a fresh
     /// `[1, D_EF]`-shaped buffer.
     fn sample_ext(&mut self, g: &mut GraphBuilder) -> BufId;
+
+    /// The buffer holding the sponge state **as of now**, without advancing
+    /// the transcript.
+    ///
+    /// A phase driver needs this to name the tail of its Fiat-Shamir chain:
+    /// registering it as a graph output is what stops DCE from deleting every
+    /// transcript node. Squeezing one extra value would do the same job but
+    /// would also advance the sponge one step past the eager phase, so the
+    /// two transcripts would no longer agree.
+    fn state_buf(&self) -> BufId;
 }
 
 /// Every kernel module a `DuplexSpongeGpuIR` may need over its lifetime,
@@ -349,6 +359,12 @@ impl DuplexSpongeGpuIR {
 }
 
 impl FiatShamirTranscriptGraphIR for DuplexSpongeGpuIR {
+    fn state_buf(&self) -> BufId {
+        // Inherent method of the same name (`Self::state_buf`); the trait
+        // method just re-exports it to generic drivers.
+        DuplexSpongeGpuIR::state_buf(self)
+    }
+
     fn observe(&mut self, g: &mut GraphBuilder, value_buf: BufId) {
         let permute = self.observe_triggers_perm();
         let new_state_buf = alloc_state_buf(

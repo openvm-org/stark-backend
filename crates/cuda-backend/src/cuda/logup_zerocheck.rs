@@ -93,6 +93,23 @@ impl MainMatrixDesc {
         }
     }
 
+    /// The round-0 encoding of one main matrix.
+    ///
+    /// Round 0 addresses a main matrix column-major with stride `height`
+    /// (`cuda/include/dag_entry.cuh`, `ENTRY_MAIN`) and never reads
+    /// `air_width`. The field is left `0` rather than filled with a width whose
+    /// meaning here would differ from the batched evaluators' *padded* AIR
+    /// width — see [`zerocheck_ntt_eval_constraints`].
+    ///
+    /// Generic over the element type because round-0 main matrices are base
+    /// field ([`F`]) while the batched ones are extension field ([`EF`]).
+    pub fn round0<T>(data: *const T) -> Self {
+        Self {
+            data: BaseOff::from_ptr(data),
+            air_width: 0,
+        }
+    }
+
     /// The "no preprocessed trace" encoding (`batch_mle.rs`'s null branch).
     pub const ABSENT: Self = MainMatrixDesc {
         data: BaseOff::NULL,
@@ -557,7 +574,8 @@ extern "C" {
         output: *mut Frac<EF>,
         selectors_cube: *const F,
         preprocessed: *const F,
-        main_parts: *const *const F,
+        main_descs: *const MainMatrixDesc,
+        pool_base: *const u8,
         eq_cube: *const EF,
         public_values: *const F,
         numer_weights: *const EF,
@@ -598,7 +616,8 @@ extern "C" {
         output: *mut EF,
         selectors_cube: *const F,
         preprocessed: *const F,
-        main_parts: *const *const F,
+        main_descs: *const MainMatrixDesc,
+        pool_base: *const u8,
         eq_cube: *const EF,
         d_lambda_pows: *const EF,
         public_values: *const F,
@@ -730,6 +749,13 @@ extern "C" {
     pub fn _eval_core_ctx_size() -> usize;
     pub fn _zerocheck_ctx_size() -> usize;
     pub fn _logup_ctx_size() -> usize;
+
+    /// Field offsets and the null sentinel of the base+offset ABI, which the
+    /// round-0 entry points decode against.
+    pub fn _base_off_size() -> usize;
+    pub fn _base_off_null() -> u64;
+    pub fn _main_matrix_desc_data_offset() -> usize;
+    pub fn _main_matrix_desc_air_width_offset() -> usize;
 
     fn _zerocheck_monomial_batched(
         tmp_sums: *mut EF,
@@ -1587,13 +1613,23 @@ pub unsafe fn frac_add_alpha(
 ///   runtime calculated based on `buffer_size`.
 /// - `eq_cube` must be a pointer to device buffer with at least `num_x` elements representing
 ///   evaluations on hypercube.
+/// - `main_descs` must point to a device array of at least `n_main_parts` [`MainMatrixDesc`], where
+///   `n_main_parts` is one past the largest `part` index any `ENTRY_MAIN` rule reads. Each
+///   descriptor's `data` is a [`BaseOff`] decoded against `pool_base` — the base+offset ABI of
+///   `cuda/include/base_off.cuh`. The eager path passes absolute addresses with `pool_base =
+///   std::ptr::null()`; the graph-IR path passes pool offsets with the exe's pool base.
+///   [`BaseOff::NULL`] is the only "absent" encoding — offset `0` is a valid pool offset.
+/// - Round 0 does **not** read `MainMatrixDesc::air_width`: it strides a main matrix column-major
+///   by `height` (`cuda/include/dag_entry.cuh`, `ENTRY_MAIN`). The field is carried only so this
+///   table has the same layout as the batched evaluators' descriptor arrays.
 #[allow(clippy::too_many_arguments)]
 pub unsafe fn zerocheck_ntt_eval_constraints(
     tmp_sums_buffer: &mut DeviceBuffer<EF>,
     output: &mut DeviceBuffer<EF>,
     selectors_cube: &DeviceBuffer<F>,
     preprocessed: *const F,
-    main_ptrs: &DeviceBuffer<*const F>,
+    main_descs: *const MainMatrixDesc,
+    pool_base: *const u8,
     eq_cube: *const EF,
     lambda_pows: &DeviceBuffer<EF>,
     public_values: &DeviceBuffer<F>,
@@ -1614,7 +1650,8 @@ pub unsafe fn zerocheck_ntt_eval_constraints(
         output.as_mut_ptr(),
         selectors_cube.as_ptr(),
         preprocessed,
-        main_ptrs.as_ptr(),
+        main_descs,
+        pool_base,
         eq_cube,
         lambda_pows.as_ptr(),
         public_values.as_ptr(),
@@ -1642,13 +1679,23 @@ pub unsafe fn zerocheck_ntt_eval_constraints(
 /// - `eq_cube` must be a pointer to device buffer with at least `num_x` elements representing
 ///   evaluations on hypercube.
 /// - `output` will not be written to by this function. Only `tmp_sums_buffer` is written.
+/// - `main_descs` must point to a device array of at least `n_main_parts` [`MainMatrixDesc`], where
+///   `n_main_parts` is one past the largest `part` index any `ENTRY_MAIN` rule reads. Each
+///   descriptor's `data` is a [`BaseOff`] decoded against `pool_base` — the base+offset ABI of
+///   `cuda/include/base_off.cuh`. The eager path passes absolute addresses with `pool_base =
+///   std::ptr::null()`; the graph-IR path passes pool offsets with the exe's pool base.
+///   [`BaseOff::NULL`] is the only "absent" encoding — offset `0` is a valid pool offset.
+/// - Round 0 does **not** read `MainMatrixDesc::air_width`: it strides a main matrix column-major
+///   by `height` (`cuda/include/dag_entry.cuh`, `ENTRY_MAIN`). The field is carried only so this
+///   table has the same layout as the batched evaluators' descriptor arrays.
 #[allow(clippy::too_many_arguments)]
 pub unsafe fn logup_bary_eval_interactions_round0(
     tmp_sums_buffer: &mut DeviceBuffer<Frac<EF>>,
     output: &mut DeviceBuffer<Frac<EF>>,
     selectors_cube: &DeviceBuffer<F>,
     preprocessed: *const F,
-    main_ptrs: &DeviceBuffer<*const F>,
+    main_descs: *const MainMatrixDesc,
+    pool_base: *const u8,
     eq_cube: *const EF,
     public_values: &DeviceBuffer<F>,
     numer_weights: &DeviceBuffer<EF>,
@@ -1670,7 +1717,8 @@ pub unsafe fn logup_bary_eval_interactions_round0(
         output.as_mut_ptr(),
         selectors_cube.as_ptr(),
         preprocessed,
-        main_ptrs.as_ptr(),
+        main_descs,
+        pool_base,
         eq_cube,
         public_values.as_ptr(),
         numer_weights.as_ptr(),
@@ -2099,9 +2147,47 @@ pub fn assert_ctx_abi_matches_cuda() {
             "BaseOff must be exactly the `uint64_t` the CUDA ABI stores"
         );
         assert_eq!(
+            std::mem::size_of::<BaseOff>(),
+            _base_off_size(),
+            "BaseOff layout drift vs CUDA"
+        );
+        // The absent encoding. `0` cannot serve as the sentinel — it is a valid
+        // pool offset (the first packed buffer lives there) — so a drift here
+        // would make every offset-0 descriptor decode to `nullptr`.
+        assert_eq!(
+            BaseOff::NULL.0,
+            _base_off_null(),
+            "BASE_OFF_NULL drift vs CUDA"
+        );
+        assert_ne!(
+            BaseOff::NULL,
+            BaseOff::from_offset(0),
+            "offset 0 must not be the absent encoding"
+        );
+        assert_eq!(
             std::mem::size_of::<MainMatrixDesc>(),
             _main_matrix_desc_size(),
             "MainMatrixDesc layout drift vs CUDA"
+        );
+        // The round-0 entry points (`_zerocheck_ntt_eval_constraints`,
+        // `_logup_bary_eval_interactions_round0`) index a `MainMatrixDesc`
+        // array on device and decode `.data` against `pool_base`. Field-order
+        // drift there mis-addresses every main matrix instead of failing to
+        // compile, so pin the offsets, not just the size.
+        assert_eq!(
+            std::mem::offset_of!(MainMatrixDesc, data),
+            _main_matrix_desc_data_offset(),
+            "MainMatrixDesc::data offset drift vs CUDA"
+        );
+        assert_eq!(
+            std::mem::offset_of!(MainMatrixDesc, data),
+            0,
+            "MainMatrixDesc::data must be the first field"
+        );
+        assert_eq!(
+            std::mem::offset_of!(MainMatrixDesc, air_width),
+            _main_matrix_desc_air_width_offset(),
+            "MainMatrixDesc::air_width offset drift vs CUDA"
         );
         assert_eq!(
             std::mem::size_of::<EvalCoreCtx>(),
@@ -2118,5 +2204,464 @@ pub fn assert_ctx_abi_matches_cuda() {
             _logup_ctx_size(),
             "LogupCtx layout drift vs CUDA"
         );
+    }
+}
+
+// ===========================================================================
+// Tests.
+// ===========================================================================
+
+/// Differential tests for the round-0 evaluators' base+offset main-matrix ABI.
+///
+/// The two round-0 entry points used to take a bare `*const *const F` pointer
+/// table. They now take a [`MainMatrixDesc`] array plus a `pool_base`, decoded
+/// with `base_off_ptr` (`cuda/include/base_off.cuh`). These tests pin the two
+/// properties that move depends on:
+///
+/// 1. The *eager* encoding — absolute addresses against a null `pool_base` — is byte-identical in
+///    effect to the raw pointer table it replaced, and equals the *pool* encoding (offsets against
+///    a real base) on the same bytes. That equality is the differential oracle for the graph-IR
+///    path.
+/// 2. Offset `0` is a live offset, not the absent encoding. Part 0 sits at pool offset 0 in every
+///    pool-encoded run here, so a regression that treated `0` as `nullptr` would fault or produce
+///    garbage rather than pass quietly.
+#[cfg(test)]
+mod round0_base_off_tests {
+    use openvm_cuda_common::{
+        common::get_device,
+        copy::{MemCopyD2H, MemCopyH2D},
+        d_buffer::DeviceBuffer,
+        stream::{CudaStream, GpuDeviceCtx, StreamGuard},
+    };
+    use openvm_stark_backend::{
+        air_builders::symbolic::{
+            symbolic_variable::{Entry, SymbolicVariable},
+            SymbolicExpressionDag, SymbolicExpressionNode,
+        },
+        prover::fractional_sumcheck_gkr::Frac,
+    };
+    use p3_field::{PrimeCharacteristicRing, TwoAdicField};
+    use p3_util::log2_ceil_usize;
+    use rand::{rngs::StdRng, Rng, SeedableRng};
+
+    use super::{
+        _logup_r0_intermediates_buffer_size, _logup_r0_temp_sums_buffer_size,
+        _zerocheck_r0_intermediates_buffer_size, _zerocheck_r0_temp_sums_buffer_size,
+        logup_bary_eval_interactions_round0, zerocheck_ntt_eval_constraints, BaseOff,
+        MainMatrixDesc, EF, F,
+    };
+    use crate::logup_zerocheck::rules::{codec::Codec, SymbolicRulesGpu};
+
+    /// Columns per main part. Part 0 is read at column 0 and column 2, part 1
+    /// at column 1, so a wrong descriptor for *either* part changes the result.
+    const PART0_WIDTH: usize = 3;
+    const PART1_WIDTH: usize = 2;
+    const NUM_PARTS: usize = 2;
+    const MAX_TEMP_BYTES: usize = 1 << 30;
+
+    fn test_ctx() -> GpuDeviceCtx {
+        GpuDeviceCtx {
+            device_id: get_device().unwrap() as u32,
+            stream: StreamGuard::new(CudaStream::new_non_blocking().unwrap()),
+        }
+    }
+
+    fn rand_f(rng: &mut StdRng) -> F {
+        F::from_u32(rng.random_range(1..1 << 20))
+    }
+
+    /// A DAG whose only leaves are `ENTRY_MAIN` reads:
+    /// `main[0][0] * main[1][1]` and `(that) + main[0][2].next()`.
+    fn main_only_dag() -> SymbolicExpressionDag<F> {
+        let var = |part_index: usize, offset: usize, index: usize| {
+            SymbolicExpressionNode::Variable(SymbolicVariable::new(
+                Entry::Main { part_index, offset },
+                index,
+            ))
+        };
+        SymbolicExpressionDag {
+            nodes: vec![
+                var(0, 0, 0),
+                var(1, 0, 1),
+                SymbolicExpressionNode::Mul {
+                    left_idx: 0,
+                    right_idx: 1,
+                    degree_multiple: 2,
+                },
+                // A rotated read, so `SourceInfo::offset` is exercised too.
+                var(0, 1, 2),
+                SymbolicExpressionNode::Add {
+                    left_idx: 2,
+                    right_idx: 3,
+                    degree_multiple: 2,
+                },
+            ],
+            // Must stay sorted: `SymbolicRulesGpu::new` debug-asserts it.
+            constraint_idx: vec![2, 4],
+        }
+    }
+
+    /// How to encode the main-matrix table for one run.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum MainEncoding {
+        /// The eager encoding, and the reference arm of every assertion here:
+        /// `BaseOff::from_ptr` stores the absolute device address and the
+        /// launcher gets a null `pool_base`, so `base_off_ptr` returns exactly
+        /// the pointer the old `*const *const F` table held. This arm *is* the
+        /// pointer path.
+        Absolute,
+        /// The graph encoding: byte offsets into a pool, decoded against the
+        /// pool's real base. Part 0 is deliberately at offset `0`.
+        PoolOffsets,
+        /// [`Self::PoolOffsets`] with exactly one descriptor element moved by
+        /// exactly one `F`. The read stays inside the pool (part 1's base
+        /// shifts *down*), so this is a wrong answer, not a fault.
+        PoolOffsetsSabotaged,
+    }
+
+    /// The descriptor array and matching `pool_base` for one encoding.
+    fn main_table(
+        enc: MainEncoding,
+        pool: &DeviceBuffer<F>,
+        height: usize,
+    ) -> (Vec<MainMatrixDesc>, *const u8) {
+        let part1_elems = PART0_WIDTH * height;
+        let part1_bytes = (part1_elems * size_of::<F>()) as u64;
+        let desc = |off: u64| MainMatrixDesc {
+            data: BaseOff::from_offset(off),
+            air_width: 0,
+        };
+        match enc {
+            MainEncoding::Absolute => {
+                let descs = vec![
+                    MainMatrixDesc::round0(pool.as_ptr()),
+                    MainMatrixDesc::round0(unsafe { pool.as_ptr().add(part1_elems) }),
+                ];
+                // The equivalence this arm stands for: decoding against a null
+                // base reproduces the raw pointer the old table held.
+                assert_eq!(
+                    descs[0].data.resolve(std::ptr::null()),
+                    pool.as_ptr() as *const u8,
+                    "eager encoding must decode to the original pointer"
+                );
+                (descs, std::ptr::null())
+            }
+            MainEncoding::PoolOffsets => {
+                (vec![desc(0), desc(part1_bytes)], pool.as_ptr() as *const u8)
+            }
+            MainEncoding::PoolOffsetsSabotaged => (
+                vec![desc(0), desc(part1_bytes - size_of::<F>() as u64)],
+                pool.as_ptr() as *const u8,
+            ),
+        }
+    }
+
+    /// Shapes and read-only inputs shared by every run of one configuration.
+    struct Fixture {
+        ctx: GpuDeviceCtx,
+        num_x: u32,
+        skip_domain: u32,
+        height: u32,
+        num_cosets: u32,
+        g_shift: F,
+        /// Both main parts packed back to back, part 0 first at offset 0.
+        pool: DeviceBuffer<F>,
+        selectors: DeviceBuffer<F>,
+        eq_cube: DeviceBuffer<EF>,
+        public_values: DeviceBuffer<F>,
+    }
+
+    impl Fixture {
+        fn new(num_x: u32, skip_domain: u32, num_cosets: u32, seed: u64) -> Self {
+            let ctx = test_ctx();
+            let mut rng = StdRng::seed_from_u64(seed);
+            let height = num_x * skip_domain;
+            let pool_len = (PART0_WIDTH + PART1_WIDTH) * height as usize;
+            let host_pool = (0..pool_len).map(|_| rand_f(&mut rng)).collect::<Vec<_>>();
+            let host_sels = (0..3 * num_x as usize)
+                .map(|_| rand_f(&mut rng))
+                .collect::<Vec<_>>();
+            let host_eq = (0..num_x as usize)
+                .map(|_| rng.random::<EF>())
+                .collect::<Vec<_>>();
+            let host_pub = (0..4).map(|_| rand_f(&mut rng)).collect::<Vec<_>>();
+
+            // Mirrors `logup_zerocheck/mod.rs`: the round-0 coset generator is
+            // the two-adic root of the large domain `constraint_deg << l_skip`.
+            let l_skip = skip_domain.ilog2() as usize;
+            let constraint_deg = num_cosets as usize + 1;
+            let g_shift = F::two_adic_generator(log2_ceil_usize(constraint_deg << l_skip));
+
+            Self {
+                pool: host_pool.to_device_on(&ctx).unwrap(),
+                selectors: host_sels.to_device_on(&ctx).unwrap(),
+                eq_cube: host_eq.to_device_on(&ctx).unwrap(),
+                public_values: host_pub.to_device_on(&ctx).unwrap(),
+                ctx,
+                num_x,
+                skip_domain,
+                height,
+                num_cosets,
+                g_shift,
+            }
+        }
+
+        fn out_len(&self) -> usize {
+            (self.num_cosets * self.skip_domain) as usize
+        }
+    }
+
+    /// One `zerocheck_ntt_eval_constraints` run; returns the `output` buffer.
+    fn run_zerocheck(fx: &Fixture, enc: MainEncoding) -> Vec<EF> {
+        let dag = main_only_dag();
+        let rules = SymbolicRulesGpu::new(&dag, false);
+        // Same construction as `pkey.rs`: rule index per accumulated node.
+        let used_nodes = dag
+            .constraint_idx
+            .iter()
+            .map(|i| rules.dag_idx_to_rule_idx[i])
+            .collect::<Vec<_>>();
+        let encoded = rules.rules.iter().map(|r| r.encode()).collect::<Vec<_>>();
+        let d_rules = encoded.to_device_on(&fx.ctx).unwrap();
+        let d_used_nodes = used_nodes.to_device_on(&fx.ctx).unwrap();
+        let buffer_size: u32 = rules.buffer_size.try_into().unwrap();
+
+        let mut rng = StdRng::seed_from_u64(0x1A_B0DA);
+        let lambda = (0..used_nodes.len())
+            .map(|_| rng.random::<EF>())
+            .collect::<Vec<_>>();
+        let d_lambda = lambda.to_device_on(&fx.ctx).unwrap();
+
+        let inter_cap = unsafe {
+            _zerocheck_r0_intermediates_buffer_size(
+                buffer_size,
+                fx.skip_domain,
+                fx.num_x,
+                fx.num_cosets,
+                MAX_TEMP_BYTES,
+            )
+        };
+        let mut intermediates = if inter_cap > 0 {
+            DeviceBuffer::<F>::with_capacity_on(inter_cap, &fx.ctx)
+        } else {
+            DeviceBuffer::<F>::new()
+        };
+        let tmp_cap = unsafe {
+            _zerocheck_r0_temp_sums_buffer_size(
+                buffer_size,
+                fx.skip_domain,
+                fx.num_x,
+                fx.num_cosets,
+                MAX_TEMP_BYTES,
+            )
+        };
+        let mut tmp = DeviceBuffer::<EF>::with_capacity_on(tmp_cap, &fx.ctx);
+        let mut out = DeviceBuffer::<EF>::with_capacity_on(fx.out_len(), &fx.ctx);
+
+        let (descs, pool_base) = main_table(enc, &fx.pool, fx.height as usize);
+        assert_eq!(descs.len(), NUM_PARTS);
+        let d_descs = descs.to_device_on(&fx.ctx).unwrap();
+
+        unsafe {
+            zerocheck_ntt_eval_constraints(
+                &mut tmp,
+                &mut out,
+                &fx.selectors,
+                std::ptr::null(), // no preprocessed trace
+                d_descs.as_ptr(),
+                pool_base,
+                fx.eq_cube.as_ptr(),
+                &d_lambda,
+                &fx.public_values,
+                &d_rules,
+                &d_used_nodes,
+                buffer_size,
+                &mut intermediates,
+                fx.skip_domain,
+                fx.num_x,
+                fx.height,
+                fx.num_cosets,
+                fx.g_shift,
+                MAX_TEMP_BYTES,
+                fx.ctx.stream.as_raw(),
+            )
+            .expect("zerocheck round-0 launch");
+        }
+        out.to_host_on(&fx.ctx).unwrap()
+    }
+
+    /// One `logup_bary_eval_interactions_round0` run; returns `output`.
+    fn run_logup(fx: &Fixture, enc: MainEncoding) -> Vec<Frac<EF>> {
+        let dag = main_only_dag();
+        // `true` matches the logup round-0 path in `logup_zerocheck/round0.rs`.
+        let rules = SymbolicRulesGpu::new(&dag, true);
+        let encoded = rules.rules.iter().map(|r| r.encode()).collect::<Vec<_>>();
+        let d_rules = encoded.to_device_on(&fx.ctx).unwrap();
+        let buffer_size: u32 = rules.buffer_size.try_into().unwrap();
+
+        // The kernel indexes both weight vectors by rule index. Their *values*
+        // are irrelevant to this test — only that both arms see the same ones.
+        let mut rng = StdRng::seed_from_u64(0xBEEF_0FF5);
+        let numer = (0..rules.rules.len())
+            .map(|_| rng.random::<EF>())
+            .collect::<Vec<_>>();
+        let denom = (0..rules.rules.len())
+            .map(|_| rng.random::<EF>())
+            .collect::<Vec<_>>();
+        let denom_sum_init = rng.random::<EF>();
+        let d_numer = numer.to_device_on(&fx.ctx).unwrap();
+        let d_denom = denom.to_device_on(&fx.ctx).unwrap();
+
+        let inter_cap = unsafe {
+            _logup_r0_intermediates_buffer_size(
+                buffer_size,
+                fx.skip_domain,
+                fx.num_x,
+                fx.num_cosets,
+                MAX_TEMP_BYTES,
+            )
+        };
+        let mut intermediates = if inter_cap > 0 {
+            DeviceBuffer::<F>::with_capacity_on(inter_cap, &fx.ctx)
+        } else {
+            DeviceBuffer::<F>::new()
+        };
+        let tmp_cap = unsafe {
+            _logup_r0_temp_sums_buffer_size(
+                buffer_size,
+                fx.skip_domain,
+                fx.num_x,
+                fx.num_cosets,
+                MAX_TEMP_BYTES,
+            )
+        };
+        let mut tmp = DeviceBuffer::<Frac<EF>>::with_capacity_on(tmp_cap, &fx.ctx);
+        let mut out = DeviceBuffer::<Frac<EF>>::with_capacity_on(fx.out_len(), &fx.ctx);
+
+        let (descs, pool_base) = main_table(enc, &fx.pool, fx.height as usize);
+        let d_descs = descs.to_device_on(&fx.ctx).unwrap();
+
+        unsafe {
+            logup_bary_eval_interactions_round0(
+                &mut tmp,
+                &mut out,
+                &fx.selectors,
+                std::ptr::null(), // no preprocessed trace
+                d_descs.as_ptr(),
+                pool_base,
+                fx.eq_cube.as_ptr(),
+                &fx.public_values,
+                &d_numer,
+                &d_denom,
+                denom_sum_init,
+                &d_rules,
+                buffer_size,
+                &mut intermediates,
+                fx.skip_domain,
+                fx.num_x,
+                fx.height,
+                fx.num_cosets,
+                fx.g_shift,
+                MAX_TEMP_BYTES,
+                fx.ctx.stream.as_raw(),
+            )
+            .expect("logup round-0 launch");
+        }
+        out.to_host_on(&fx.ctx).unwrap()
+    }
+
+    fn bytes_of<T>(v: &[T]) -> &[u8] {
+        unsafe { std::slice::from_raw_parts(v.as_ptr() as *const u8, std::mem::size_of_val(v)) }
+    }
+
+    /// `(num_x, skip_domain, num_cosets)` for the two dispatch modes the
+    /// round-0 launchers pick between: `num_x * skip_domain < 32768` takes the
+    /// coset-parallel kernel, otherwise lockstep
+    /// (`logup_zerocheck/round0.rs`, `ROUND0_COSET_PARALLEL_THRESHOLD`).
+    const CONFIGS: [(u32, u32, u32); 2] = [
+        (8, 4, 2),    // coset-parallel
+        (8192, 4, 2), // lockstep
+    ];
+
+    /// The pool encoding must reproduce the eager encoding byte for byte, for
+    /// both round-0 evaluators and both dispatch modes.
+    #[test]
+    fn round0_pool_offsets_match_absolute_addresses() {
+        for (num_x, skip_domain, num_cosets) in CONFIGS {
+            let fx = Fixture::new(num_x, skip_domain, num_cosets, 0x5EED_0A81);
+            let label = format!("num_x={num_x} skip_domain={skip_domain}");
+
+            let zc_abs = run_zerocheck(&fx, MainEncoding::Absolute);
+            let zc_pool = run_zerocheck(&fx, MainEncoding::PoolOffsets);
+            assert_eq!(
+                bytes_of(&zc_abs),
+                bytes_of(&zc_pool),
+                "zerocheck round-0: pool offsets diverge from absolute addresses ({label})"
+            );
+
+            let lg_abs = run_logup(&fx, MainEncoding::Absolute);
+            let lg_pool = run_logup(&fx, MainEncoding::PoolOffsets);
+            assert_eq!(
+                bytes_of(&lg_abs),
+                bytes_of(&lg_pool),
+                "logup round-0: pool offsets diverge from absolute addresses ({label})"
+            );
+
+            // The oracle only has teeth if the outputs are not trivially zero
+            // (a null main table would give exactly that).
+            assert!(
+                bytes_of(&zc_abs).iter().any(|b| *b != 0),
+                "zerocheck round-0 output is all zero — the table was not read ({label})"
+            );
+            assert!(
+                bytes_of(&lg_abs).iter().any(|b| *b != 0),
+                "logup round-0 output is all zero — the table was not read ({label})"
+            );
+        }
+    }
+
+    /// Sabotage: move exactly one descriptor element by exactly one `F`. Both
+    /// evaluators must produce a different answer — otherwise the equality
+    /// above proves nothing about the descriptors actually being dereferenced.
+    #[test]
+    fn round0_one_element_descriptor_sabotage_changes_output() {
+        let (num_x, skip_domain, num_cosets) = CONFIGS[0];
+        let fx = Fixture::new(num_x, skip_domain, num_cosets, 0x5EED_0A81);
+
+        let zc_good = run_zerocheck(&fx, MainEncoding::PoolOffsets);
+        let zc_bad = run_zerocheck(&fx, MainEncoding::PoolOffsetsSabotaged);
+        assert_ne!(
+            bytes_of(&zc_good),
+            bytes_of(&zc_bad),
+            "zerocheck round-0 ignored a one-element descriptor perturbation"
+        );
+
+        let lg_good = run_logup(&fx, MainEncoding::PoolOffsets);
+        let lg_bad = run_logup(&fx, MainEncoding::PoolOffsetsSabotaged);
+        assert_ne!(
+            bytes_of(&lg_good),
+            bytes_of(&lg_bad),
+            "logup round-0 ignored a one-element descriptor perturbation"
+        );
+    }
+
+    /// `BASE_OFF_NULL` is the only absent encoding; offset `0` is a live
+    /// offset. Both round-0 pool runs above put part 0 at offset `0`, so this
+    /// is the host-side statement of what those runs depend on.
+    #[test]
+    fn base_off_zero_is_a_live_offset() {
+        assert_ne!(BaseOff::from_offset(0), BaseOff::NULL);
+        assert_eq!(
+            BaseOff::from_offset(0).resolve(0x1000 as *const u8),
+            0x1000 as *const u8
+        );
+        assert!(BaseOff::NULL.resolve(0x1000 as *const u8).is_null());
+        // A null matrix pointer is the absent encoding, not offset 0.
+        assert_eq!(
+            MainMatrixDesc::round0(std::ptr::null::<F>()).data,
+            BaseOff::NULL
+        );
+        // And the CUDA side agrees on all of the above.
+        super::assert_ctx_abi_matches_cuda();
     }
 }

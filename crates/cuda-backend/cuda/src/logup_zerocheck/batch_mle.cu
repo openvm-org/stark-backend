@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <stdio.h>
@@ -536,5 +537,17 @@ extern "C" size_t _main_matrix_desc_size() { return sizeof(MainMatrixDesc); }
 extern "C" size_t _eval_core_ctx_size() { return sizeof(EvalCoreCtx); }
 extern "C" size_t _zerocheck_ctx_size() { return sizeof(ZerocheckCtx); }
 extern "C" size_t _logup_ctx_size() { return sizeof(LogupCtx); }
+
+// Field offsets and the null sentinel of the base+offset ABI. These are what
+// the round-0 entry points decode against (`_zerocheck_ntt_eval_constraints`,
+// `_logup_bary_eval_interactions_round0` take a `MainMatrixDesc *` + a
+// `pool_base`), so a silent layout drift there would mis-address every main
+// matrix rather than fail to compile.
+extern "C" size_t _base_off_size() { return sizeof(BaseOff); }
+extern "C" uint64_t _base_off_null() { return BASE_OFF_NULL; }
+extern "C" size_t _main_matrix_desc_data_offset() { return offsetof(MainMatrixDesc, data); }
+extern "C" size_t _main_matrix_desc_air_width_offset() {
+    return offsetof(MainMatrixDesc, air_width);
+}
 
 } // namespace logup_zerocheck_mle

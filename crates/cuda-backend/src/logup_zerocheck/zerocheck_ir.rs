@@ -66,11 +66,27 @@
 //! graph input by [`DescriptorPlan::bind`]. See the "base+offset descriptor
 //! ABI (R6)" section below.
 //!
+//! The same mechanism now covers three more tables that used to be
+//! `insert_memset(_, 0)` — i.e. handed to a kernel as nulls and zeros:
+//! the round-0 main-matrix array (a `MainMatrixDesc` array since S1.2a),
+//! `batch_fold_mle`'s `input_matrices` / `output_matrices`, and the stage-D
+//! `interpolate_columns` column table. The latter two are bare `T*` tables in
+//! CUDA rather than `BaseOff` structs, so they use
+//! [`DescriptorPlan::set_ptr`], which encodes the absolute
+//! `pool_base + offset` at bind time through the same writer that derives the
+//! read set.
+//!
 //! Still host-assembled, and therefore still opaque: the three *monomial* ctx
-//! structs (`MonomialAirCtx`, `LogupMonomialCommonCtx`, `LogupMonomialCtx`),
-//! the round-0 `*const F` main-pointer table, and the stage-D
-//! `interpolate_columns` column-pointer table. Each is the same shape of hole
-//! and the same shape of fix.
+//! structs (`MonomialAirCtx`, `LogupMonomialCommonCtx`, `LogupMonomialCtx`).
+//!
+//! # Graph inputs (S1.1)
+//!
+//! Every keygen- and challenge-derived buffer the phase reads is a
+//! **registered graph input** recorded in a [`PhaseInputBinder`], not a
+//! zeroed buffer. Only the selector cube is filled at build time (it is a
+//! pure function of the plan); the rest must be supplied before `run`, and a
+//! missing one is a hard error naming the buffer instead of a silent
+//! all-zero prove.
 
 use std::{
     mem::{forget, size_of},
@@ -88,7 +104,10 @@ use openvm_cuda_common::d_buffer::DeviceBuffer;
 use openvm_stark_backend::prover::fractional_sumcheck_gkr::Frac;
 use p3_field::PrimeCharacteristicRing;
 
-use super::fractional_ir_utils::{add_ef_buf, ef_const_ext_scalar_buf};
+use super::{
+    batch_mle_monomial::{DEFAULT_MAX_MONOMIALS_PER_THREAD, THREADS_PER_BLOCK_PAR_Y, WAVES_TARGET},
+    fractional_ir_utils::{add_ef_buf, ef_const_ext_scalar_buf},
+};
 use crate::{
     cuda::{
         logup_zerocheck::{
@@ -169,6 +188,33 @@ pub fn ef_slice_const_buf(
     let bytes: Vec<u8> = unsafe {
         std::slice::from_raw_parts(xs.as_ptr() as *const u8, std::mem::size_of_val(xs)).to_vec()
     };
+    g.insert_const(buf, ConstBuf::HostBuf(bytes));
+    buf
+}
+
+/// Stage a slice of POD values as a read-only const buffer.
+///
+/// Used for the *shape* halves of the `batch_fold_mle` control tables
+/// (`widths`, `log_output_heights`): those are pure functions of the plan, so
+/// unlike the pointer halves they need no bind-time encoding at all.
+///
+/// # Safety-relevant contract
+///
+/// `T` must be `Copy` and free of padding-sensitive invariants — the bytes are
+/// reinterpreted verbatim and uploaded. Every call site here uses `u32` / `u8`.
+pub fn typed_slice_const_buf<T: Copy>(
+    g: &mut GraphBuilder,
+    device: DeviceType,
+    name: &str,
+    xs: &[T],
+) -> BufId {
+    let buf = add_typed_buf::<T>(g, device, name, xs.len());
+    let mut bytes: Vec<u8> = unsafe {
+        std::slice::from_raw_parts(xs.as_ptr() as *const u8, std::mem::size_of_val(xs)).to_vec()
+    };
+    // `add_typed_buf` rounds an empty table up to one element; the const's
+    // byte length must match the buffer's or the runtime rejects the stage.
+    bytes.resize(xs.len().max(1) * size_of::<T>(), 0);
     g.insert_const(buf, ConstBuf::HostBuf(bytes));
     buf
 }
@@ -373,7 +419,7 @@ pub struct Round0ZcShape {
 }
 
 /// Buffers for one `zerocheck_ntt_eval_constraints` launch.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct Round0ZcBufs {
     pub tmp_sums: BufId,
     pub out: BufId,
@@ -381,13 +427,21 @@ pub struct Round0ZcBufs {
     pub selectors_cube: BufId,
     /// `*const F` into the preprocessed matrix; `None` for AIRs without one.
     pub preprocessed: Option<BufId>,
-    /// Table of `*const F` main-matrix pointers.
+    /// `MainMatrixDesc` descriptor array over the main matrices, on the same
+    /// base+offset ABI stage D uses (S1.2a).
     pub main_ptrs: BufId,
+    /// The pool base the kernel decodes every [`BaseOff`] against.
+    pub pool_base: PoolBase,
     pub eq_cube: BufId,
     pub lambda_pows: BufId,
     pub public_values: BufId,
     pub rules: BufId,
     pub used_nodes: BufId,
+    /// The matrices [`Self::main_ptrs`] points at. The planner cannot see
+    /// through a descriptor array, so they are declared here — the list comes
+    /// from the writer itself (`DescriptorPlan::set_main_matrix_desc`), not
+    /// from retyping it at the call site.
+    pub main_reads: Vec<BufId>,
 }
 
 /// Insert the round-0 constraint evaluator (`round0.rs:127` ← `mod.rs:841`).
@@ -413,17 +467,11 @@ pub struct Round0ZcBufs {
 /// (`_zerocheck_ntt_eval_constraints_main` +
 /// `_logup_zerocheck_final_reduce_block_sums`, with this symbol kept as a
 /// two-line compatibility composition).
-// TODO(cc-ir,T5): `main_ptrs` is a `*const F` pointer table assembled on the
-//   host (`mod.rs:826-832`), the round-0 analogue of the ctx hole T5 closed
-//   for stage D.
-// WHY: R6 scoped the base+offset descriptor ABI for `MainMatrixDesc` /
-//   `ZerocheckCtx` / `LogupCtx`; the round-0 table is a bare `*const F[]`
-//   with a different ABI and was not in scope.
-// RISK: the planner cannot see through the table to the matrices it points
-//   at, so the individual `mats` buffers must be bound explicitly by the
-//   caller (as `interpolate_columns_ir` does) or the ordering is unstated.
-//   The fix is a `MainMatrixDesc`-shaped `*const F` table on the same
-//   base+offset ABI, filled by [`DescriptorPlan`].
+/// `main_ptrs` is a `MainMatrixDesc` descriptor array on the base+offset ABI
+/// (S1.2a), filled by [`DescriptorPlan::set_main_matrix_desc`] — the same
+/// mechanism stage D uses. The planner still cannot see *through* the table,
+/// so the caller declares the pointed-to matrices as explicit extra inputs;
+/// [`DescriptorPlan::referenced_bufs`] is what derives that list.
 pub fn zerocheck_ntt_eval_constraints_ir(
     g: &mut GraphBuilder,
     bufs: Round0ZcBufs,
@@ -442,6 +490,9 @@ pub fn zerocheck_ntt_eval_constraints_ir(
     if let Some(prep) = bufs.preprocessed {
         inputs.push(prep);
     }
+    // Appended LAST and deduplicated: the closure addresses `preprocessed` by
+    // the fixed index 7, so nothing may be inserted ahead of it.
+    extend_reads(&mut inputs, bufs.main_reads.iter().copied());
     // `intermediates` is pure scratch: the kernel writes it and reads back
     // only its own writes, so no value flows *in*. It is therefore declared
     // as a node **output**, not a carried input — same treatment the
@@ -449,6 +500,7 @@ pub fn zerocheck_ntt_eval_constraints_ir(
     // Declaring it carried would make it a read of an unproduced buffer,
     // which the fusion pass rejects with `TakeGraphError::ReadBeforeWrite`.
     let modifies: Vec<bool> = vec![false; inputs.len()];
+    let pool_base = bufs.pool_base.clone();
     g.insert_blackbox_kernel(
         "zerocheck_ntt_eval_constraints",
         inputs.into_iter(),
@@ -459,10 +511,6 @@ pub fn zerocheck_ntt_eval_constraints_ir(
                 DeviceBuffer::<EF>::from_raw_parts(outputs[0] as *mut EF, shape.tmp_sums_len);
             let mut out = DeviceBuffer::<EF>::from_raw_parts(outputs[1] as *mut EF, shape.out_len);
             let sels = DeviceBuffer::<F>::from_raw_parts(inputs[0] as *mut F, shape.sels_len);
-            let main_ptrs = DeviceBuffer::<*const F>::from_raw_parts(
-                inputs[1] as *mut *const F,
-                shape.main_ptrs_len,
-            );
             let lambda_pows =
                 DeviceBuffer::<EF>::from_raw_parts(inputs[3] as *mut EF, shape.lambda_pows_len);
             let public =
@@ -485,7 +533,8 @@ pub fn zerocheck_ntt_eval_constraints_ir(
                 &mut out,
                 &sels,
                 prep_ptr,
-                &main_ptrs,
+                inputs[1] as *const MainMatrixDesc,
+                pool_base.get(),
                 inputs[2] as *const EF,
                 &lambda_pows,
                 &public,
@@ -505,7 +554,6 @@ pub fn zerocheck_ntt_eval_constraints_ir(
             forget(tmp);
             forget(out);
             forget(sels);
-            forget(main_ptrs);
             forget(lambda_pows);
             forget(public);
             forget(rules);
@@ -538,19 +586,24 @@ pub struct Round0LogupShape {
 }
 
 /// Buffers for one `logup_bary_eval_interactions_round0` launch.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct Round0LogupBufs {
     pub tmp_sums: BufId,
     pub out: BufId,
     pub intermediates: BufId,
     pub selectors_cube: BufId,
     pub preprocessed: Option<BufId>,
+    /// `MainMatrixDesc` descriptor array; see [`Round0ZcBufs::main_ptrs`].
     pub main_ptrs: BufId,
+    /// The pool base the kernel decodes every [`BaseOff`] against.
+    pub pool_base: PoolBase,
     pub eq_cube: BufId,
     pub public_values: BufId,
     pub numer_weights: BufId,
     pub denom_weights: BufId,
     pub rules: BufId,
+    /// See [`Round0ZcBufs::main_reads`].
+    pub main_reads: Vec<BufId>,
 }
 
 /// Insert the round-0 interaction evaluator (`round0.rs:282` ← `mod.rs:896`).
@@ -568,9 +621,7 @@ pub struct Round0LogupBufs {
 //   (`cuda/logup_zerocheck.rs:476`); adding one is the `template <bool DEV_CH>`
 //   pattern the author used six times in `gkr.cu` at `b566fed5`.
 // RISK: blocks a device-resident challenge chain, not correctness.
-//   `alpha_logup`/`beta_logup` are host values in the eager path too. The
-//   host-assembled `main_ptrs` table carries the same T5-shaped hole noted on
-//   [`zerocheck_ntt_eval_constraints_ir`].
+//   `alpha_logup`/`beta_logup` are host values in the eager path too.
 pub fn logup_bary_eval_interactions_round0_ir(
     g: &mut GraphBuilder,
     bufs: Round0LogupBufs,
@@ -589,9 +640,13 @@ pub fn logup_bary_eval_interactions_round0_ir(
     if let Some(prep) = bufs.preprocessed {
         inputs.push(prep);
     }
+    // Appended LAST and deduplicated: the closure addresses `preprocessed` by
+    // the fixed index 7, so nothing may be inserted ahead of it.
+    extend_reads(&mut inputs, bufs.main_reads.iter().copied());
     // `intermediates` is a node output, not a carried input — see the note
     // in [`zerocheck_ntt_eval_constraints_ir`].
     let modifies: Vec<bool> = vec![false; inputs.len()];
+    let pool_base = bufs.pool_base.clone();
     g.insert_blackbox_kernel(
         "logup_bary_eval_interactions_round0",
         inputs.into_iter(),
@@ -607,10 +662,6 @@ pub fn logup_bary_eval_interactions_round0_ir(
                 shape.out_len,
             );
             let sels = DeviceBuffer::<F>::from_raw_parts(inputs[0] as *mut F, shape.sels_len);
-            let main_ptrs = DeviceBuffer::<*const F>::from_raw_parts(
-                inputs[1] as *mut *const F,
-                shape.main_ptrs_len,
-            );
             let public =
                 DeviceBuffer::<F>::from_raw_parts(inputs[3] as *mut F, shape.public_len.max(1));
             let numer =
@@ -631,7 +682,8 @@ pub fn logup_bary_eval_interactions_round0_ir(
                 &mut out,
                 &sels,
                 prep_ptr,
-                &main_ptrs,
+                inputs[1] as *const MainMatrixDesc,
+                pool_base.get(),
                 inputs[2] as *const EF,
                 &public,
                 &numer,
@@ -652,7 +704,6 @@ pub fn logup_bary_eval_interactions_round0_ir(
             forget(tmp);
             forget(out);
             forget(sels);
-            forget(main_ptrs);
             forget(public);
             forget(numer);
             forget(denom);
@@ -937,6 +988,14 @@ impl PoolBase {
 /// set, because both come from the same call.
 trait OffSink {
     fn off(&mut self, arg: DevicePtrArg) -> BaseOff;
+
+    /// The **raw device address** of `arg`, for the pointer tables whose ABI
+    /// is a bare `T*` rather than a [`BaseOff`] (`batch_fold_mle`'s
+    /// `input_matrices` / `output_matrices`, `interpolate_columns`' column
+    /// table). Same collect-at-build / encode-at-bind contract as
+    /// [`Self::off`]: the `BufId` still flows into the read set, so a table
+    /// entry cannot reach the device without its buffer being declared.
+    fn addr(&mut self, arg: DevicePtrArg) -> u64;
 }
 
 /// Build-time [`OffSink`]: collects the graph buffers a descriptor references.
@@ -955,6 +1014,11 @@ impl OffSink for ReadCollector {
         // Never reaches the device: `bind` re-runs the same writer with
         // [`OffEncoder`].
         BaseOff::NULL
+    }
+
+    fn addr(&mut self, arg: DevicePtrArg) -> u64 {
+        let _ = self.off(arg);
+        0
     }
 }
 
@@ -979,15 +1043,32 @@ impl OffSink for OffEncoder<'_> {
                 BaseOff::from_offset((addr as u64).wrapping_sub(self.base))
             }
             DevicePtrArg::Graph { buf, byte_offset } => {
-                let off = self.offsets[buf.0].unwrap_or_else(|| {
-                    panic!(
-                        "buffer {buf:?} has no pool slot on the plan's device; a descriptor \
-                         field cannot be encoded against the pool base"
-                    )
-                });
-                BaseOff::from_offset(off + byte_offset as u64)
+                BaseOff::from_offset(self.pool_offset(buf) + byte_offset as u64)
             }
         }
+    }
+
+    fn addr(&mut self, arg: DevicePtrArg) -> u64 {
+        match arg {
+            // The eager path's "absent" encoding is a literal null pointer.
+            DevicePtrArg::Static(0) => 0,
+            // Not in the pool: the address is already absolute.
+            DevicePtrArg::Static(addr) => addr as u64,
+            DevicePtrArg::Graph { buf, byte_offset } => {
+                self.base + self.pool_offset(buf) + byte_offset as u64
+            }
+        }
+    }
+}
+
+impl OffEncoder<'_> {
+    fn pool_offset(&self, buf: BufId) -> u64 {
+        self.offsets[buf.0].unwrap_or_else(|| {
+            panic!(
+                "buffer {buf:?} has no pool slot on the plan's device; a descriptor \
+                 field cannot be encoded against the pool base"
+            )
+        })
     }
 }
 
@@ -1121,9 +1202,18 @@ fn write_logup_ctx<S: OffSink>(s: &mut S, a: &LogupCtxArgs) -> LogupCtx {
 /// at bind time.
 #[derive(Clone, Debug)]
 enum DescElem {
-    MainMatrix { data: DevicePtrArg, air_width: u32 },
+    MainMatrix {
+        data: DevicePtrArg,
+        air_width: u32,
+    },
     Zerocheck(Box<ZerocheckCtxArgs>),
     Logup(Box<LogupCtxArgs>),
+    /// One entry of a bare `T*` pointer table (no [`BaseOff`] indirection):
+    /// `batch_fold_mle`'s `input_matrices` / `output_matrices`
+    /// (`cuda/src/sumcheck.cu:209-210`) and `interpolate_columns`' column
+    /// table (`mod.rs:1196-1199`). Encodes to the 8-byte absolute device
+    /// address.
+    RawPtr(DevicePtrArg),
 }
 
 impl DescElem {
@@ -1139,6 +1229,7 @@ impl DescElem {
             }
             DescElem::Zerocheck(a) => bytes_of(&write_zerocheck_ctx(sink, a)),
             DescElem::Logup(a) => bytes_of(&write_logup_ctx(sink, a)),
+            DescElem::RawPtr(data) => bytes_of(&sink.addr(*data)),
         }
     }
 }
@@ -1246,6 +1337,30 @@ impl DescriptorPlan {
         args: ZerocheckCtxArgs,
     ) -> Vec<BufId> {
         self.set(arr, idx, DescElem::Zerocheck(Box::new(args)))
+    }
+
+    /// Register `buf` as a `len`-entry table of bare device pointers.
+    ///
+    /// Unlike the three `*Ctx` arrays this is not a `BaseOff` struct — the
+    /// consuming kernels (`batch_fold_mle`, `interpolate_columns`) take a
+    /// plain `T*const*`, so each entry encodes to the absolute address
+    /// `pool_base + offset`. Everything else — registration as a graph input,
+    /// the "forgotten `bind` is a hard error" guarantee, and the read-set
+    /// derivation — is identical.
+    pub fn add_ptr_array(
+        &mut self,
+        g: &mut GraphBuilder,
+        buf: BufId,
+        name: &str,
+        len: usize,
+    ) -> DescArrayId {
+        self.add_array::<*const u8>(g, buf, name, len)
+    }
+
+    /// Record `out[idx]` of a bare pointer table.
+    #[must_use = "the declared reads must reach the consuming node's inputs"]
+    pub fn set_ptr(&mut self, arr: DescArrayId, idx: usize, data: DevicePtrArg) -> Vec<BufId> {
+        self.set(arr, idx, DescElem::RawPtr(data))
     }
 
     /// Record `out[idx]` of a `LogupCtx` array.
@@ -1916,6 +2031,89 @@ pub fn batch_fold_mle_ir(
     );
 }
 
+/// The `interpolate_columns` column table (`mod.rs:1196-1203`), as a
+/// bind-time-filled descriptor array.
+///
+/// One pointer **per column**, in the eager order — **selectors first, then
+/// every matrix in plan order** — and within a matrix `buffer + col * height`
+/// with `height = 2 * num_y` (the pre-fold height, `mod.rs:1199-1200`).
+///
+/// The order is the whole point of factoring this out. The consuming node's
+/// `srcs` list is only a dependency declaration, so it may be in any order;
+/// the *table* may not. Sharing one builder between the phase driver and
+/// `interpolate_columns_ir_column_table_matches_eager` is what keeps the
+/// driver's order under test.
+///
+/// Returns `(table, the buffers the table points at)`.
+fn emit_column_table(
+    g: &mut GraphBuilder,
+    descs: &mut DescriptorPlan,
+    device: DeviceType,
+    name: &str,
+    sels: BufId,
+    mats: &[(BufId, usize)],
+    num_y: usize,
+) -> (BufId, Vec<BufId>) {
+    let num_columns = 3 + mats.iter().map(|&(_, w)| w).sum::<usize>();
+    let table = add_typed_buf::<*const EF>(g, device, name, num_columns);
+    let arr = descs.add_ptr_array(g, table, name, num_columns);
+    let height = 2 * num_y;
+    let mut reads: Vec<BufId> = Vec::new();
+    let mut cols: Vec<(BufId, usize)> = (0..3).map(|c| (sels, c)).collect();
+    for &(b, w) in mats {
+        cols.extend((0..w).map(|c| (b, c)));
+    }
+    assert_eq!(
+        cols.len(),
+        num_columns,
+        "column table `{name}` under-filled"
+    );
+    for (k, (b, col)) in cols.into_iter().enumerate() {
+        extend_reads(
+            &mut reads,
+            descs.set_ptr(arr, k, DevicePtrArg::at(b, col * height * size_of::<EF>())),
+        );
+    }
+    (table, reads)
+}
+
+/// The `(input_matrices, output_matrices)` pointer tables one
+/// [`batch_fold_mle_ir`] launch dereferences (`cuda/src/sumcheck.cu:209-210`),
+/// as bind-time-filled descriptor arrays.
+///
+/// These were `insert_memset(_, 0)` before, which is the worst failure shape
+/// available here: `fold_mle` reads `width = widths[mat_idx]` and returns for
+/// every thread once `output_height * width == 0`
+/// (`cuda/include/sumcheck.cuh:306-309`), so a zeroed control table makes the
+/// kernel a **silent no-op** — no null is dereferenced, nothing errors, and
+/// the `dsts` keep whatever the pool slot held.
+fn fold_ptr_tables(
+    g: &mut GraphBuilder,
+    descs: &mut DescriptorPlan,
+    device: DeviceType,
+    name: &str,
+    srcs: &[BufId],
+    dsts: &[BufId],
+) -> (BufId, BufId) {
+    assert_eq!(srcs.len(), dsts.len(), "one output matrix per input matrix");
+    let n = srcs.len();
+    let in_ptrs = add_typed_buf::<*const EF>(g, device, &format!("{name}_in"), n);
+    let out_ptrs = add_typed_buf::<*mut EF>(g, device, &format!("{name}_out"), n);
+    let in_arr = descs.add_ptr_array(g, in_ptrs, &format!("{name}_in"), n);
+    let out_arr = descs.add_ptr_array(g, out_ptrs, &format!("{name}_out"), n);
+    for (k, (&s, &d)) in srcs.iter().zip(dsts.iter()).enumerate() {
+        // Every buffer these tables point at is already an explicit input
+        // (`srcs`) or output (`dsts`) of the node, so the read sets the
+        // writers derive are covered by construction. Asserting it here is
+        // what keeps that true if either list is ever edited.
+        let r_in = descs.set_ptr(in_arr, k, DevicePtrArg::buf(s));
+        let r_out = descs.set_ptr(out_arr, k, DevicePtrArg::buf(d));
+        assert_eq!(r_in, vec![s], "fold input table entry {k} escaped `srcs`");
+        assert_eq!(r_out, vec![d], "fold output table entry {k} escaped `dsts`");
+    }
+    (in_ptrs, out_ptrs)
+}
+
 // ===========================================================================
 // Phase plan — the host-side shape descriptor.
 //
@@ -2039,6 +2237,13 @@ pub struct ZerocheckPhasePlan {
     pub threads_per_block: u32,
     /// `sm_count`-derived block count for the batched launchers.
     pub num_blocks: u32,
+    /// `device.sm_count()` (`device.rs:63`) — an input to the monomial
+    /// par-Y `chunk_size` auto-tune, which is a device property and therefore
+    /// **not** keygen-static.
+    pub sm_count: u32,
+    /// `max_monomials_per_thread` as the eager caller passes it
+    /// (`None` there means [`DEFAULT_MAX_MONOMIALS_PER_THREAD`]).
+    pub max_monomials_per_thread: u32,
 }
 
 impl ZerocheckPhasePlan {
@@ -2049,6 +2254,57 @@ impl ZerocheckPhasePlan {
     /// `s_deg = constraint_degree + 1` (`mod.rs:268`).
     pub fn s_deg(&self) -> usize {
         self.constraint_degree + 1
+    }
+
+    /// `num_y` for trace `t` at `round`, matching the eager `TraceCtx`.
+    ///
+    /// Early traces (`round <= n_lift`) get `1 << (n_lift - round)`
+    /// (`mod.rs:1198-1199`); late traces (`round == n_lift + 1`) evaluate at
+    /// `num_y = 1` (`mod.rs:1169`).
+    pub fn round_num_y(&self, t: usize, round: usize) -> u32 {
+        let n_lift = self.traces[t].n_lift();
+        if round <= n_lift {
+            1u32 << (n_lift - round)
+        } else {
+            1
+        }
+    }
+
+    /// The par-Y monomial `chunk_size` the eager path auto-tunes for a batch.
+    ///
+    /// Line-for-line replica of `ZerocheckMonomialParYBatch::new`'s occupancy
+    /// loop (`batch_mle_monomial.rs:344-372`): halve `chunk_size` from
+    /// `max_monomials_per_thread` down until the batch reaches
+    /// `sm_count * WAVES_TARGET` blocks, floored at 1.
+    ///
+    /// Reproducible at graph-build time because every input is either a plan
+    /// shape or a device property — but `sm_count` *is* a device property, so
+    /// the plan carrying it must be built per-prove, never cached per-key.
+    pub fn monomial_chunk_size(&self, traces: &[usize], round: usize, num_x: u32) -> u32 {
+        let per_air: Vec<(u32, u32)> = traces
+            .iter()
+            .map(|&t| {
+                let y_blocks = self.round_num_y(t, round).div_ceil(THREADS_PER_BLOCK_PAR_Y);
+                (y_blocks, self.traces[t].num_monomials as u32)
+            })
+            .collect();
+        let target_blocks = self.sm_count * WAVES_TARGET;
+        let mut chunk_size = self.max_monomials_per_thread.max(1);
+        loop {
+            let total_blocks: u32 = per_air
+                .iter()
+                .map(|&(y_blocks, num_mono)| y_blocks * num_mono.div_ceil(chunk_size))
+                .sum();
+            // `saturating_mul` where the eager path multiplies plainly: the
+            // two agree for every reachable shape (an overflow needs
+            // `total_blocks >= 2^32 / num_x`), and this cannot panic in a
+            // debug build mid-graph-build.
+            if total_blocks.saturating_mul(num_x) >= target_blocks || chunk_size <= 1 {
+                break;
+            }
+            chunk_size = (chunk_size / 2).max(1);
+        }
+        chunk_size
     }
 
     /// Distinct `n_lift` values, ascending — one `eq_xi` tree is built per
@@ -2062,15 +2318,263 @@ impl ZerocheckPhasePlan {
 }
 
 // ===========================================================================
+// Graph inputs — the bytes the phase graph is fed (S1.1).
+// ===========================================================================
+
+/// Where one graph input's bytes come from at bind time.
+#[derive(Clone, Debug)]
+pub enum InputSource {
+    /// Host bytes, staged to device by [`PhaseInputBinder::bind`].
+    Host(Vec<u8>),
+    /// Bytes that already live on the device — a keygen table on
+    /// `DeviceMultiStarkProvingKey`, a trace matrix on `ProvingContext`.
+    ///
+    /// # Safety contract
+    ///
+    /// The allocation must be at least `len` bytes and must stay alive across
+    /// the [`PhaseInputBinder::bind`] call. `bind` performs a D2D copy into
+    /// the graph's pool slot and never retains the pointer.
+    Device { ptr: *const u8, len: usize },
+}
+
+/// One registered graph input and the bytes that fill it.
+#[derive(Clone, Debug)]
+struct InputEntry {
+    buf: BufId,
+    name: String,
+    /// `None` until a producer supplies the bytes. [`PhaseInputBinder::bind`]
+    /// refuses to run with any entry still `None`.
+    src: Option<InputSource>,
+}
+
+/// Every non-descriptor graph input of a zerocheck phase graph, paired with
+/// its byte source.
+///
+/// # Why this exists
+///
+/// Before S1.1 these buffers were `insert_memset(_, 0)`: the graph built,
+/// compiled and *ran*, computing on zeros. Registering them as inputs instead
+/// makes a missing binding a hard error at `GraphExe::run`
+/// (`graph_exe.rs:719-723`) rather than a silent all-zero prove.
+///
+/// # The trap this API is shaped around
+///
+/// `graph_ir.rs:1050-1053` claims inputs may not be written by any node and
+/// that this is validated at compile time. **It is not.** The real check
+/// (`graph_compiler.rs:1236-1266`) verifies existence, device, no double
+/// registration and at-least-one-reader, and explicitly *permits* an input to
+/// be written in place (`:1256-1260`). So a `register_input` left next to its
+/// old `insert_memset` compiles clean and the memset node silently zeroes the
+/// bound bytes at run time. Every registration below therefore *replaces* its
+/// memset; none supplements it. The reverse mistake is caught loudly — a
+/// buffer read but never written and not a registered input is rejected
+/// (`graph_compiler.rs:1298-1304`) — which is why the safe edit order is
+/// delete-then-register.
+#[derive(Clone, Debug, Default)]
+pub struct PhaseInputBinder {
+    entries: Vec<InputEntry>,
+}
+
+impl PhaseInputBinder {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Register `buf` as a graph input whose bytes are still unknown.
+    pub fn register(&mut self, g: &mut GraphBuilder, buf: BufId, name: &str) -> BufId {
+        g.register_input(buf);
+        self.entries.push(InputEntry {
+            buf,
+            name: name.to_string(),
+            src: None,
+        });
+        buf
+    }
+
+    /// Register `buf` and immediately supply host bytes for it — for the
+    /// inputs that are a pure function of the plan (the selector cube).
+    pub fn register_host<T: Copy>(
+        &mut self,
+        g: &mut GraphBuilder,
+        buf: BufId,
+        name: &str,
+        xs: &[T],
+    ) -> BufId {
+        self.register(g, buf, name);
+        self.set_host(buf, xs);
+        buf
+    }
+
+    /// Supply host bytes for an already-registered input.
+    ///
+    /// # Panics
+    ///
+    /// If `buf` was never registered here.
+    pub fn set_host<T: Copy>(&mut self, buf: BufId, xs: &[T]) {
+        let bytes: Vec<u8> = unsafe {
+            std::slice::from_raw_parts(xs.as_ptr() as *const u8, std::mem::size_of_val(xs)).to_vec()
+        };
+        self.entry_mut(buf).src = Some(InputSource::Host(bytes));
+    }
+
+    /// Supply device-resident bytes for an already-registered input.
+    ///
+    /// # Safety
+    ///
+    /// See [`InputSource::Device`]: the allocation must outlive [`Self::bind`].
+    pub unsafe fn set_device_raw(&mut self, buf: BufId, ptr: *const u8, len: usize) {
+        self.entry_mut(buf).src = Some(InputSource::Device { ptr, len });
+    }
+
+    /// Supply the bytes of an existing [`DeviceBuffer`] for an input.
+    pub fn set_device<T>(&mut self, buf: BufId, src: &DeviceBuffer<T>) {
+        let len = src.len() * size_of::<T>();
+        unsafe { self.set_device_raw(buf, src.as_ptr() as *const u8, len) }
+    }
+
+    /// Fill every still-unbound input with zeros.
+    ///
+    /// This is the **explicit** form of what `insert_memset` used to do
+    /// implicitly. It exists for the shape tests and
+    /// `examples/dump_ir_zerocheck_phase.rs`, which build and compile the
+    /// graph without a proving key. Calling it makes the resulting run compute
+    /// on zeros — deliberately, and at a named call site.
+    pub fn zero_fill_unbound(&mut self, exe: &crypto_compiler::graph_exe::GraphExe) {
+        for e in self.entries.iter_mut().filter(|e| e.src.is_none()) {
+            let n = (0..exe.num_inputs())
+                .find(|&i| exe.input_buf_id(i) == e.buf)
+                .map(|i| exe.input_size(i))
+                .unwrap_or(0);
+            e.src = Some(InputSource::Host(vec![0u8; n]));
+        }
+    }
+
+    /// Names of the inputs that still have no byte source.
+    pub fn unbound(&self) -> Vec<&str> {
+        self.entries
+            .iter()
+            .filter(|e| e.src.is_none())
+            .map(|e| e.name.as_str())
+            .collect()
+    }
+
+    /// `(BufId, name)` for every input registered here, in registration order.
+    pub fn manifest(&self) -> Vec<(BufId, String)> {
+        self.entries
+            .iter()
+            .map(|e| (e.buf, e.name.clone()))
+            .collect()
+    }
+
+    /// Upload every input into its pool slot. Returns the number filled.
+    ///
+    /// Call **after** [`DescriptorPlan::bind`] (which installs the pool) and
+    /// before `GraphExe::run`.
+    ///
+    /// Fails rather than silently zeroing if any input is unbound, and fails
+    /// if an input's planned size disagrees with the bytes supplied.
+    pub fn bind(
+        &self,
+        exe: &mut crypto_compiler::graph_exe::GraphExe,
+        ctx: &openvm_cuda_common::stream::GpuDeviceCtx,
+    ) -> Result<usize, crypto_compiler::CompileError> {
+        use openvm_cuda_common::copy::MemCopyH2D;
+
+        let missing = self.unbound();
+        if !missing.is_empty() {
+            return Err(crypto_compiler::CompileError::Runtime(format!(
+                "phase graph has {} unbound input(s): {}",
+                missing.len(),
+                missing.join(", ")
+            )));
+        }
+        let mut filled = 0usize;
+        for e in &self.entries {
+            let i = (0..exe.num_inputs())
+                .find(|&i| exe.input_buf_id(i) == e.buf)
+                .ok_or_else(|| {
+                    crypto_compiler::CompileError::Runtime(format!(
+                        "input `{}` ({:?}) is not a registered graph input",
+                        e.name, e.buf
+                    ))
+                })?;
+            let need = exe.input_size(i);
+            match e.src.as_ref().expect("checked above") {
+                InputSource::Host(bytes) => {
+                    if bytes.len() != need {
+                        return Err(crypto_compiler::CompileError::Runtime(format!(
+                            "input `{}` is {need} bytes in the plan, {} supplied",
+                            e.name,
+                            bytes.len()
+                        )));
+                    }
+                    let staged = bytes.to_device_on(ctx).map_err(|err| {
+                        crypto_compiler::CompileError::Runtime(format!(
+                            "staging input `{}`: {err}",
+                            e.name
+                        ))
+                    })?;
+                    exe.set_input(ctx, i, &staged)?;
+                }
+                InputSource::Device { ptr, len } => {
+                    if *len < need {
+                        return Err(crypto_compiler::CompileError::Runtime(format!(
+                            "input `{}` is {need} bytes in the plan, device source is {len}",
+                            e.name
+                        )));
+                    }
+                    // SAFETY: the caller's contract on `InputSource::Device`.
+                    // `set_input` only reads through the view; `forget` keeps
+                    // it from freeing memory it does not own.
+                    let view = unsafe { DeviceBuffer::<u8>::from_raw_parts(*ptr as *mut u8, *len) };
+                    let r = exe.set_input(ctx, i, &view);
+                    forget(view);
+                    r?;
+                }
+            }
+            filled += 1;
+        }
+        Ok(filled)
+    }
+
+    fn entry_mut(&mut self, buf: BufId) -> &mut InputEntry {
+        self.entries
+            .iter_mut()
+            .find(|e| e.buf == buf)
+            .unwrap_or_else(|| panic!("{buf:?} is not a registered phase input"))
+    }
+}
+
+/// The `3 * 2^n_lift` base-field selector cube for a trace, exactly as the
+/// eager path builds it (`mod.rs:788-796`): `is_first` at row 0,
+/// `is_transition` over `[height, 2*height - 1)`, `is_last` at the last row of
+/// the third column.
+///
+/// This is a pure function of `n_lift`, so it is one of the few phase inputs
+/// the graph builder can fill without a proving key.
+pub fn selector_cube_host(n_lift: usize) -> Vec<F> {
+    let height = 1usize << n_lift;
+    let mut cols = vec![F::ZERO; 3 * height];
+    cols[0] = F::ONE;
+    for c in cols.iter_mut().take(2 * height - 1).skip(height) {
+        *c = F::ONE;
+    }
+    cols[3 * height - 1] = F::ONE;
+    cols
+}
+
+// ===========================================================================
 // Per-trace device inputs.
 // ===========================================================================
 
 /// The `BufId`s of one trace's device-resident inputs.
 ///
-/// A caller that has run keygen supplies these as const buffers holding the
-/// real bytes; [`TraceBufs::alloc_zeroed`] allocates and zeroes them, which
-/// is enough to *build and compile* the graph (used by
-/// `examples/dump_ir_zerocheck_phase.rs` and by the shape tests).
+/// [`TraceBufs::alloc_inputs`] allocates them and registers each as a graph
+/// *input* (S1.1), recording it in a [`PhaseInputBinder`]. Building and
+/// compiling the graph needs nothing more; **running** it needs every input
+/// bound, which is a hard error at `GraphExe::run` if one is missed
+/// (`graph_exe.rs:719-723`) rather than the silent all-zero prove the old
+/// `insert_memset` produced.
 #[derive(Clone, Debug)]
 pub struct TraceBufs {
     /// `3 * 2^n_lift` base-field selector cube (`mod.rs:769-782`).
@@ -2100,21 +2604,44 @@ pub struct TraceBufs {
 }
 
 impl TraceBufs {
-    /// Allocate every buffer a trace needs and zero it.
-    // TODO(cc-ir): zeroed inputs make the graph buildable and compilable
-    //   without a proving key, but running it produces garbage.
-    // WHY: the real bytes come from keygen + trace generation
-    //   (`DeviceMultiStarkProvingKey`, `ProvingContext`), which the graph
-    //   builder deliberately does not depend on — mirroring
-    //   `fractional_sumcheck_gpu_irv2`, which takes `leaves: BufId` and
-    //   knows nothing about where the leaves came from.
-    // RISK: none for graph-build / compile / dump. A `from_proving_ctx`
-    //   bridge is the next piece of work; see the report.
-    pub fn alloc_zeroed(
+    /// Allocate every buffer a trace needs and **register it as a graph
+    /// input** (S1.1).
+    ///
+    /// Every buffer here used to be `insert_memset(_, 0)`, which made the
+    /// graph runnable on zeros. They are now registered inputs recorded in
+    /// `inputs`, so the bytes must be supplied before `run` — see
+    /// [`PhaseInputBinder`] for the trap that shapes this API and for
+    /// `zero_fill_unbound`, the explicit form of the old behaviour.
+    ///
+    /// Only [`Self::selectors_cube`] is filled here, because it is the one
+    /// input that is a pure function of the plan ([`selector_cube_host`]).
+    /// Everything else must be supplied by the caller with
+    /// [`PhaseInputBinder::set_host`] / [`PhaseInputBinder::set_device`].
+    ///
+    /// A buffer is registered **only if some node will read it** — a
+    /// registered input with no reader is rejected outright
+    /// (`graph_compiler.rs:1236-1266`), and the eager path emits no logup
+    /// launch for a trace without interactions (nor a constraint launch for
+    /// one without constraints). Left unregistered such a buffer is simply
+    /// unreferenced; if one turns out to be read after all, the compiler
+    /// rejects it loudly (`graph_compiler.rs:1298-1304`) rather than running
+    /// it as zeros.
+    // TODO(cc-ir): the remaining per-trace inputs have no producer in this
+    //   crate yet — the caller must `set_host` / `set_device` them.
+    // WHY: the eager bytes are assembled inside `LogupZerocheckGpu`'s
+    //   prove-time state (`mod.rs:462-527`), not on `pk` alone:
+    //   `eq_3bs` / `numer_weights` / `denom_weights` are challenge-derived
+    //   (`mod.rs:677-707`, `logup_combinations`), so a `pk`-only bridge
+    //   cannot fill them.
+    // RISK: a caller that forgets one now gets a hard error naming the buffer
+    //   (`PhaseInputBinder::bind`), not a silent all-zero prove. That is the
+    //   whole point of the change; the extraction itself is still to write.
+    pub fn alloc_inputs(
         g: &mut GraphBuilder,
         device: DeviceType,
         plan: &ZerocheckPhasePlan,
         t: usize,
+        inputs: &mut PhaseInputBinder,
     ) -> Self {
         let tp = &plan.traces[t];
         let n_lift = tp.n_lift();
@@ -2122,15 +2649,32 @@ impl TraceBufs {
         let num_x0 = (1usize << plan.l_skip).max(1);
 
         let selectors_cube = add_f_buf(g, device, &format!("t{t}_sels_cube"), 3 * cube);
-        g.insert_memset(selectors_cube, 0);
+        inputs.register_host(
+            g,
+            selectors_cube,
+            &format!("t{t}_sels_cube"),
+            &selector_cube_host(n_lift),
+        );
         // Folded selectors are `3 * num_x` EFs (is_first / is_last /
         // is_transition). No memset: `fold_selectors_round0` is their producer,
         // and the graph is SSA — one writer per buffer.
         let selectors_folded = add_ef_buf(g, device, &format!("t{t}_sels_folded"), 3 * cube);
 
+        // S1.2a: the round-0 evaluators now take a `MainMatrixDesc` array on
+        // the base+offset ABI, not a bare `*const F` table. It is a
+        // *descriptor input* — registered and filled by
+        // [`DescriptorPlan::bind`] in the driver — so it must NOT be memset
+        // here. (`graph_compiler.rs:1256-1260` permits an input to be written
+        // in place, so a leftover memset would compile clean and silently
+        // zero the descriptors.)
         let n_main = tp.mats.len() - usize::from(tp.has_preprocessed);
-        let main_ptrs = add_typed_buf::<*const F>(g, device, &format!("t{t}_main_ptrs"), n_main);
-        g.insert_memset(main_ptrs, 0);
+        let main_ptrs =
+            add_typed_buf::<MainMatrixDesc>(g, device, &format!("t{t}_main_ptrs"), n_main);
+
+        // Which evaluator families this trace reaches decides which of its
+        // inputs are read at all. See the note on this function.
+        let zc = tp.has_constraints;
+        let lg = tp.has_interactions;
 
         let public_values = add_f_buf(
             g,
@@ -2138,46 +2682,60 @@ impl TraceBufs {
             &format!("t{t}_public"),
             tp.num_public_values.max(1),
         );
-        g.insert_memset(public_values, 0);
+        if zc || lg {
+            inputs.register(g, public_values, &format!("t{t}_public"));
+        }
 
         let zc_rules =
             add_typed_buf::<u128>(g, device, &format!("t{t}_zc_rules"), tp.zc_rules_len.max(1));
-        g.insert_memset(zc_rules, 0);
+        if zc {
+            inputs.register(g, zc_rules, &format!("t{t}_zc_rules"));
+        }
         let zc_used_nodes = add_typed_buf::<usize>(
             g,
             device,
             &format!("t{t}_zc_used_nodes"),
             tp.zc_used_nodes_len.max(1),
         );
-        g.insert_memset(zc_used_nodes, 0);
+        if zc {
+            inputs.register(g, zc_used_nodes, &format!("t{t}_zc_used_nodes"));
+        }
         let logup_rules = add_typed_buf::<u128>(
             g,
             device,
             &format!("t{t}_logup_rules"),
             tp.logup_rules_len.max(1),
         );
-        g.insert_memset(logup_rules, 0);
+        if lg {
+            inputs.register(g, logup_rules, &format!("t{t}_logup_rules"));
+        }
         let logup_used_nodes = add_typed_buf::<usize>(
             g,
             device,
             &format!("t{t}_logup_used_nodes"),
             tp.logup_used_nodes_len.max(1),
         );
-        g.insert_memset(logup_used_nodes, 0);
+        if lg {
+            inputs.register(g, logup_used_nodes, &format!("t{t}_logup_used_nodes"));
+        }
         let logup_pair_idxs = add_typed_buf::<u32>(
             g,
             device,
             &format!("t{t}_logup_pair_idxs"),
             tp.logup_used_nodes_len.max(1),
         );
-        g.insert_memset(logup_pair_idxs, 0);
+        if lg {
+            inputs.register(g, logup_pair_idxs, &format!("t{t}_logup_pair_idxs"));
+        }
         let eq_3bs = add_ef_buf(
             g,
             device,
             &format!("t{t}_eq_3bs"),
             tp.num_interactions.max(1),
         );
-        g.insert_memset(eq_3bs, 0);
+        if lg {
+            inputs.register(g, eq_3bs, &format!("t{t}_eq_3bs"));
+        }
 
         let numer_weights = add_ef_buf(
             g,
@@ -2185,14 +2743,18 @@ impl TraceBufs {
             &format!("t{t}_numer_w"),
             tp.num_interactions.max(1),
         );
-        g.insert_memset(numer_weights, 0);
+        if lg {
+            inputs.register(g, numer_weights, &format!("t{t}_numer_w"));
+        }
         let denom_weights = add_ef_buf(
             g,
             device,
             &format!("t{t}_denom_w"),
             tp.num_interactions.max(1),
         );
-        g.insert_memset(denom_weights, 0);
+        if lg {
+            inputs.register(g, denom_weights, &format!("t{t}_denom_w"));
+        }
 
         let preprocessed = tp.has_preprocessed.then(|| {
             let b = add_f_buf(
@@ -2201,7 +2763,9 @@ impl TraceBufs {
                 &format!("t{t}_prep"),
                 tp.mats[0].width * tp.mats[0].height,
             );
-            g.insert_memset(b, 0);
+            if zc || lg {
+                inputs.register(g, b, &format!("t{t}_prep"));
+            }
             b
         });
 
@@ -2209,7 +2773,7 @@ impl TraceBufs {
         let mut folded_mats = Vec::with_capacity(tp.mats.len());
         for (i, m) in tp.mats.iter().enumerate() {
             let b = add_f_buf(g, device, &format!("t{t}_mat{i}"), m.width * m.height);
-            g.insert_memset(b, 0);
+            inputs.register(g, b, &format!("t{t}_mat{i}"));
             mats.push(b);
             // Round 0 folds `height` rows down to `max(height >> l_skip, 1)`
             // and doubles the width when the AIR needs its rotation
@@ -2306,6 +2870,7 @@ pub fn logup_zerocheck_gpu_ir<TS>(
     plan: &ZerocheckPhasePlan,
     bufs: &[TraceBufs],
     device: DeviceType,
+    inputs: &mut PhaseInputBinder,
 ) -> ZerocheckPhaseProofIR
 where
     TS: FiatShamirTranscriptGraphIR,
@@ -2352,22 +2917,18 @@ where
             lambda_combinations.push(None);
             continue;
         }
-        // TODO(cc-ir): the monomial headers / variable stream / lambda-term
-        //   stream are keygen-static device buffers we do not carry in
-        //   `TraceBufs`, so they are allocated (zeroed) here.
-        // WHY: they live on `pk.per_air[..].zerocheck_monomials`, which the
-        //   builder deliberately does not depend on (see `TraceBufs`).
-        // RISK: same as `TraceBufs::alloc_zeroed` — build/compile only.
+        // Keygen-static streams on `pk.per_air[..].other_data.zerocheck_monomials`;
+        // registered as inputs (S1.1) so a missing bind is a hard error.
         let headers =
             add_typed_buf::<MonomialHeader>(g, device, &format!("t{t}_mono_hdr"), tp.num_monomials);
-        g.insert_memset(headers, 0);
+        inputs.register(g, headers, &format!("t{t}_mono_hdr"));
         let terms = add_typed_buf::<LambdaTerm<F>>(
             g,
             device,
             &format!("t{t}_lambda_terms"),
             tp.num_monomials,
         );
-        g.insert_memset(terms, 0);
+        inputs.register(g, terms, &format!("t{t}_lambda_terms"));
         let out = add_ef_buf(g, device, &format!("t{t}_lambda_comb"), tp.num_monomials);
         precompute_lambda_combinations_ir(
             g,
@@ -2386,18 +2947,33 @@ where
     // `eq_3b_per_trace` is host-computed (`mod.rs:677-707`, an
     // `O(num_interactions · (n_logup − n_lift))` `EF` loop) and uploaded; it
     // enters the graph as a zeroed buffer for the same reason as above.
+    // Registered only if something will read them. Unlike the old
+    // `insert_memset`, a *registered input with no reader* is rejected
+    // (`graph_compiler.rs:1236-1266`), so a plan whose traces have no
+    // interactions must not register these. Left unregistered they are simply
+    // unreferenced buffers; if one turns out to be read after all, the
+    // compiler rejects it loudly (`graph_compiler.rs:1298-1304`) rather than
+    // running on zeros — which is the direction we want to fail in.
+    let any_logup_monomials = plan
+        .traces
+        .iter()
+        .any(|tp| tp.has_interactions && tp.num_monomials > 0);
+    let any_logup = plan.traces.iter().any(|tp| tp.has_interactions);
+
     let beta_pows = add_ef_buf(g, device, "beta_pows", plan.lambda_pows.len().max(1));
-    g.insert_memset(beta_pows, 0);
+    if any_logup_monomials {
+        inputs.register(g, beta_pows, "beta_pows");
+    }
     // `LogupCtx::d_challenges` — the interaction challenge vector the DAG
     // interpreter reads through `ENTRY_CHALLENGE` (`batch_mle.cu:224`).
-    // TODO(cc-ir): allocated zeroed like the other keygen/challenge inputs.
-    // WHY: the eager builder receives it as a raw `*const EF` from the
-    //   caller (`batch_mle.rs:271`); it is not part of `TraceBufs`.
-    // RISK: build/compile only, same as `TraceBufs::alloc_zeroed`. It is a
-    //   *shared* buffer across traces, so it must stay one `BufId` — every
-    //   `LogupCtx` points at the same allocation.
+    // Registered as one graph input (S1.1). It is a *shared* buffer across
+    // traces, so it must stay one `BufId` — every `LogupCtx` points at the
+    // same allocation. The eager builder receives it as a raw `*const EF`
+    // from the caller (`batch_mle.rs:271`).
     let logup_challenges = add_ef_buf(g, device, "logup_challenges", plan.lambda_pows.len().max(1));
-    g.insert_memset(logup_challenges, 0);
+    if any_logup {
+        inputs.register(g, logup_challenges, "logup_challenges");
+    }
     let mut logup_combinations: Vec<Option<(BufId, BufId)>> = vec![None; num_traces];
     for (t, tp) in plan.traces.iter().enumerate() {
         if !tp.has_interactions || tp.num_monomials == 0 {
@@ -2405,14 +2981,14 @@ where
         }
         let headers =
             add_typed_buf::<MonomialHeader>(g, device, &format!("t{t}_ia_hdr"), tp.num_monomials);
-        g.insert_memset(headers, 0);
+        inputs.register(g, headers, &format!("t{t}_ia_hdr"));
         let terms = add_typed_buf::<InteractionMonomialTerm<F>>(
             g,
             device,
             &format!("t{t}_ia_terms"),
             tp.num_monomials,
         );
-        g.insert_memset(terms, 0);
+        inputs.register(g, terms, &format!("t{t}_ia_terms"));
         // Same `eq_3bs` the stage-D `LogupCtx` points at — one buffer, one
         // `BufId`, so the planner sees the shared read.
         let eq_3bs = bufs[t].eq_3bs;
@@ -2469,8 +3045,12 @@ where
     // C.4 — per-trace round-0 evaluators (`mod.rs:841`, `mod.rs:896`).
     let mut round0_zc_evals = Vec::with_capacity(num_traces);
     let mut round0_logup_evals = Vec::with_capacity(num_traces);
-    for (t, tp) in plan.traces.iter().enumerate() {
+    for t in 0..num_traces {
         let tb = &bufs[t];
+        // One descriptor array per trace, shared by both round-0 evaluators
+        // (they read the same matrices).
+        let main_reads = emit_round0_main_descs(g, &mut descs, plan, bufs, t);
+        let tp = &plan.traces[t];
         let n_lift = tp.n_lift();
         let num_x = 1u32 << n_lift;
         let height = tp.mats.last().map(|m| m.height).unwrap_or(1) as u32;
@@ -2516,11 +3096,13 @@ where
                     selectors_cube: tb.selectors_cube,
                     preprocessed: tb.preprocessed,
                     main_ptrs: tb.main_ptrs,
+                    pool_base: descs.pool_base().clone(),
                     eq_cube,
                     lambda_pows,
                     public_values: tb.public_values,
                     rules: tb.zc_rules,
                     used_nodes: tb.zc_used_nodes,
+                    main_reads: main_reads.clone(),
                 },
                 Round0ZcShape {
                     rules_len: tp.zc_rules_len.max(1),
@@ -2569,11 +3151,13 @@ where
                     selectors_cube: tb.selectors_cube,
                     preprocessed: tb.preprocessed,
                     main_ptrs: tb.main_ptrs,
+                    pool_base: descs.pool_base().clone(),
                     eq_cube,
                     public_values: tb.public_values,
                     numer_weights: tb.numer_weights,
                     denom_weights: tb.denom_weights,
                     rules: tb.logup_rules,
+                    main_reads: main_reads.clone(),
                 },
                 Round0LogupShape {
                     rules_len: tp.logup_rules_len.max(1),
@@ -2745,30 +3329,34 @@ where
                 + (0..tp.mats.len())
                     .map(|i| tp.folded_width(i))
                     .sum::<usize>();
-            let columns =
-                add_typed_buf::<*const EF>(g, device, &format!("t{t}_r{round}_cols"), num_columns);
-            // TODO(cc-ir,T5): the column pointer table is still assembled
-            //   host-side from the *current* folded buffers
-            //   (`mod.rs:1189-1199`) — the ctx-pointer hole R6 closed for
-            //   `ZerocheckCtx` / `LogupCtx`, in its last remaining form here.
-            // WHY: `interpolate_columns` takes a bare `*const EF[]` table,
-            //   not one of the three structs R6 converted; the fix is a
-            //   `BaseOff` column table filled by [`DescriptorPlan`].
-            // RISK: the planner cannot see through this table to
-            //   `cur_mats[t]` / `cur_sels[t]`, so those are listed as
-            //   explicit extra inputs of the node below to keep the ordering
-            //   honest. Correct, but the table's contents are unwritten (the
-            //   memset below leaves it null), so this node cannot RUN until
-            //   the descriptor writer lands.
-            g.insert_memset(columns, 0);
+            let mats: Vec<(BufId, usize)> = (0..tp.mats.len())
+                .map(|i| (cur_mats[t][i], tp.folded_width(i)))
+                .collect();
+            let (columns, col_reads) = emit_column_table(
+                g,
+                &mut descs,
+                device,
+                &format!("t{t}_r{round}_cols"),
+                cur_sels[t],
+                &mats,
+                num_y,
+            );
             let interpolated = add_ef_buf(
                 g,
                 device,
                 &format!("t{t}_r{round}_interp"),
                 sp_deg * num_y * num_columns,
             );
-            let mut srcs = cur_mats[t].clone();
-            srcs.push(cur_sels[t]);
+            // Selectors first, matrices after — same order as the table, so
+            // the declared reads and the dereference closure agree.
+            let mut srcs = vec![cur_sels[t]];
+            srcs.extend_from_slice(&cur_mats[t]);
+            for b in &col_reads {
+                assert!(
+                    srcs.contains(b),
+                    "column table entry points at {b:?}, which the node does not declare"
+                );
+            }
             interpolate_columns_ir(
                 g,
                 interpolated,
@@ -2785,6 +3373,35 @@ where
         // D.2 — the batched evaluators. One launch per family per round,
         // matching the eager path's "gather then dispatch" shape
         // (`mod.rs:1281-1424`).
+        //
+        // TODO(cc-ir,S1.4-a): late traces must be launched SEPARATELY at
+        //   `num_x = 1`, not merged into the early batch at
+        //   `num_x = constraint_degree`.
+        // WHY: `early` and `late` are concatenated below and the whole batch
+        //   goes out at `num_x = plan.constraint_degree`
+        //   (`emit_zerocheck_round_eval`, `emit_logup_round_eval`). The eager
+        //   path evaluates a late trace (`round == n_lift + 1`) in its own
+        //   launch at `num_x = 1` — `LogupMonomialBatch..evaluate(1)`
+        //   (`mod.rs:1309-1311`) and `ZerocheckMonomialBatch..evaluate(1)`
+        //   (`mod.rs:1333-1335`) — because a late trace contributes ONE
+        //   scalar to `tilde`, not `constraint_degree` head evaluations.
+        // RISK: WRONG ANSWER, not just wrong performance, for every round in
+        //   which some trace is late (i.e. every round past the shortest
+        //   trace's `n_lift`). The fix is a second launch per family with
+        //   `num_x = 1` and its own `BatchEvalShape`; it also widens
+        //   `ZerocheckPhaseProofIR::round_evals` to carry two outputs per
+        //   family per round, which is why it is not a one-line change.
+        //
+        // TODO(cc-ir,S1.4-b): `norm_factor` is implemented nowhere.
+        // WHY: for a trace with `n < 0` (shorter than the skip domain,
+        //   `TracePlan::n` is `isize` and documented as possibly negative)
+        //   the eager path scales the logup NUMERATOR ONLY by
+        //   `F::from_usize(1 << -n).inverse()` (`mod.rs:1135-1136`), applied
+        //   at `mod.rs:1314` and consumed in `batch_mle.rs:575-583, 660-669`.
+        //   `grep -n norm_factor zerocheck_ir.rs` returns nothing.
+        // RISK: WRONG ANSWER for any AIR shorter than `2^l_skip`. Harmless
+        //   for `synthetic_plan` (every trace has `n = n_max >= 0`), which is
+        //   exactly why no existing test catches it.
         let zc_traces: Vec<usize> = early
             .iter()
             .chain(late.iter())
@@ -2916,17 +3533,12 @@ where
         }
         if !fold_mats.is_empty() {
             let n = fold_mats.len();
-            let in_ptrs = add_typed_buf::<*const EF>(g, device, &format!("r{round}_fold_in"), n);
-            let out_ptrs = add_typed_buf::<*mut EF>(g, device, &format!("r{round}_fold_out"), n);
-            let widths = add_typed_buf::<u32>(g, device, &format!("r{round}_fold_w"), n);
-            let logh = add_typed_buf::<u8>(g, device, &format!("r{round}_fold_logh"), n);
-            for b in [in_ptrs, out_ptrs, widths, logh] {
-                g.insert_memset(b, 0);
-            }
             let mut max_cells = 0u32;
             let mut new_mats: Vec<(usize, usize, BufId)> = Vec::with_capacity(n);
             let mut srcs: Vec<BufId> = Vec::with_capacity(n);
             let mut dsts: Vec<BufId> = Vec::with_capacity(n);
+            let mut widths_host: Vec<u32> = Vec::with_capacity(n);
+            let mut logh_host: Vec<u8> = Vec::with_capacity(n);
             for &(t, i) in &fold_mats {
                 let tp = &plan.traces[t];
                 let out_h = 1usize << (tp.n_lift() - round);
@@ -2941,7 +3553,22 @@ where
                 srcs.push(cur_mats[t][i]);
                 dsts.push(nb);
                 new_mats.push((t, i, nb));
+                // `(width, log2(output_height))` exactly as the eager
+                // `multiunzip` builds them (`mod.rs:1520-1533`).
+                widths_host.push(w as u32);
+                logh_host.push(out_h.ilog2() as u8);
             }
+            let (in_ptrs, out_ptrs) = fold_ptr_tables(
+                g,
+                &mut descs,
+                device,
+                &format!("r{round}_fold"),
+                &srcs,
+                &dsts,
+            );
+            let widths =
+                typed_slice_const_buf(g, device, &format!("r{round}_fold_w"), &widths_host);
+            let logh = typed_slice_const_buf(g, device, &format!("r{round}_fold_logh"), &logh_host);
             batch_fold_mle_ir(
                 g, in_ptrs, out_ptrs, widths, logh, &srcs, &dsts, n as u16, max_cells, r_round,
             );
@@ -2950,32 +3577,45 @@ where
             }
         }
         // Selector fold (`mod.rs:1585`).
-        {
-            let n = plan.traces.len();
-            let in_ptrs = add_typed_buf::<*const EF>(g, device, &format!("r{round}_sfold_in"), n);
-            let out_ptrs = add_typed_buf::<*mut EF>(g, device, &format!("r{round}_sfold_out"), n);
-            let widths = add_typed_buf::<u32>(g, device, &format!("r{round}_sfold_w"), n);
-            let logh = add_typed_buf::<u8>(g, device, &format!("r{round}_sfold_logh"), n);
-            for b in [in_ptrs, out_ptrs, widths, logh] {
-                g.insert_memset(b, 0);
-            }
+        //
+        // Only traces whose selector cube still has `height > 1` are folded:
+        // the eager `batch_fold` takes `partition_point(|m| m.height() > 1)`
+        // and passes the rest through untouched (`mod.rs:1519, 1562`). Here
+        // that predicate is `round <= n_lift`. Folding an exhausted trace
+        // would read `input[1]` out of a height-1 buffer.
+        let sfold_traces: Vec<usize> = (0..plan.traces.len())
+            .filter(|&t| round <= plan.traces[t].n_lift())
+            .collect();
+        if !sfold_traces.is_empty() {
+            let n = sfold_traces.len();
             let mut max_cells = 0u32;
             let mut new_sels = Vec::with_capacity(n);
             let mut srcs: Vec<BufId> = Vec::with_capacity(n);
             let mut dsts: Vec<BufId> = Vec::with_capacity(n);
-            for (t, tp) in plan.traces.iter().enumerate() {
-                let out_h = 1usize << tp.n_lift().saturating_sub(round);
+            let mut widths_host: Vec<u32> = Vec::with_capacity(n);
+            let mut logh_host: Vec<u8> = Vec::with_capacity(n);
+            for &t in &sfold_traces {
+                let out_h = 1usize << (plan.traces[t].n_lift() - round);
                 max_cells = max_cells.max((out_h * 3) as u32);
-                let nb = add_ef_buf(
-                    g,
-                    device,
-                    &format!("t{t}_sels_r{round}"),
-                    (out_h * 3).max(1),
-                );
+                let nb = add_ef_buf(g, device, &format!("t{t}_sels_r{round}"), out_h * 3);
                 srcs.push(cur_sels[t]);
                 dsts.push(nb);
                 new_sels.push((t, nb));
+                widths_host.push(3);
+                logh_host.push(out_h.ilog2() as u8);
             }
+            let (in_ptrs, out_ptrs) = fold_ptr_tables(
+                g,
+                &mut descs,
+                device,
+                &format!("r{round}_sfold"),
+                &srcs,
+                &dsts,
+            );
+            let widths =
+                typed_slice_const_buf(g, device, &format!("r{round}_sfold_w"), &widths_host);
+            let logh =
+                typed_slice_const_buf(g, device, &format!("r{round}_sfold_logh"), &logh_host);
             batch_fold_mle_ir(
                 g, in_ptrs, out_ptrs, widths, logh, &srcs, &dsts, n as u16, max_cells, r_round,
             );
@@ -3121,6 +3761,42 @@ fn emit_main_matrix_ptrs(
         );
     }
     (arr, reads)
+}
+
+/// Fill a trace's round-0 `MainMatrixDesc` array (S1.2a).
+///
+/// The eager table is the AIR's `[cached…, common_main]` in order, skipping
+/// the preprocessed matrix (`mod.rs:826-832`); `TracePlan::mats` is
+/// `preprocessed?, cached*, common_main`, so the descriptors start at
+/// `has_preprocessed as usize`.
+///
+/// `air_width` is written as **0**, matching `MainMatrixDesc::round0`
+/// (`cuda/logup_zerocheck.rs:96-111`): round 0 addresses a main matrix
+/// column-major with stride `height` (`dag_entry.cuh`, `ENTRY_MAIN`) and never
+/// reads the field, and the batched evaluators' `air_width` means the *padded*
+/// AIR width, which is not what `TracePlan::mats[i].width` holds. Writing the
+/// plan width here would agree with nothing and would only look correct.
+fn emit_round0_main_descs(
+    g: &mut GraphBuilder,
+    descs: &mut DescriptorPlan,
+    plan: &ZerocheckPhasePlan,
+    bufs: &[TraceBufs],
+    t: usize,
+) -> Vec<BufId> {
+    let tp = &plan.traces[t];
+    let first_main = usize::from(tp.has_preprocessed);
+    let n_main = tp.mats.len() - first_main;
+    let name = format!("t{t}_main_ptrs");
+    let id = descs.add_array::<MainMatrixDesc>(g, bufs[t].main_ptrs, &name, n_main.max(1));
+    let mut reads = Vec::with_capacity(n_main);
+    for i in 0..n_main {
+        let m = first_main + i;
+        extend_reads(
+            &mut reads,
+            descs.set_main_matrix_desc(id, i, DevicePtrArg::buf(bufs[t].mats[m]), 0),
+        );
+    }
+    reads
 }
 
 /// One `MainMatrixDesc` array per `(round, trace)`, shared by
@@ -3367,14 +4043,10 @@ fn emit_zerocheck_round_eval(
         tmp_sums_len: (plan.num_blocks.max(num_airs) as usize) * (num_x as usize),
         out_len: (num_airs as usize) * (num_x as usize),
         lambda_pows_len: plan.lambda_pows.len(),
-        // TODO(cc-ir): `chunk_size` is auto-tuned by a host loop
-        //   (`batch_mle_monomial.rs:356-370`) that measures occupancy.
-        // WHY: the loop needs the launcher's block count and shared-memory
-        //   budget; reproducing it here would duplicate that logic.
-        // RISK: a wrong `chunk_size` changes performance, not results — the
-        //   kernel loops over `y` in chunks either way. `1` is the safe
-        //   floor.
-        chunk_size: 1,
+        // Same occupancy auto-tune the eager path runs
+        // (`batch_mle_monomial.rs:344-372`); see
+        // [`ZerocheckPhasePlan::monomial_chunk_size`].
+        chunk_size: plan.monomial_chunk_size(traces, round, num_x),
     };
     let kind = plan.traces[traces[0]].eval_kind;
     let tag = format!("zc_r{round}");
@@ -3417,6 +4089,7 @@ fn emit_zerocheck_round_eval(
 
 /// Emit the round's logup evaluator for `traces`, returning its output
 /// buffer.
+#[allow(clippy::too_many_arguments)]
 fn emit_logup_round_eval(
     g: &mut GraphBuilder,
     device: DeviceType,
@@ -3437,7 +4110,7 @@ fn emit_logup_round_eval(
         tmp_sums_len: (plan.num_blocks.max(num_airs) as usize) * (num_x as usize),
         out_len: (num_airs as usize) * (num_x as usize),
         lambda_pows_len: plan.lambda_pows.len(),
-        chunk_size: 1,
+        chunk_size: plan.monomial_chunk_size(traces, round, num_x),
     };
     let use_monomial = plan.traces[traces[0]].eval_kind != RoundEvalKind::Dag;
     let tag = format!("lg_r{round}");
@@ -3521,6 +4194,7 @@ fn emit_logup_round_eval(
 /// For the two DAG kinds the ctx array is registered as a *graph input* and
 /// its bytes are computed on the host by [`DescriptorPlan::bind`]; the
 /// monomial placeholder array is still memset to zero.
+#[allow(clippy::too_many_arguments)]
 fn alloc_eval_bufs(
     g: &mut GraphBuilder,
     device: DeviceType,
@@ -3596,20 +4270,16 @@ fn alloc_eval_bufs(
 }
 
 /// The transcript's current state buffer.
-// TODO(cc-ir): `FiatShamirTranscriptGraphIR` has no `state_buf` accessor, so
-//   the phase driver samples one extra `[1, D_EF]` buffer to name the tail of
-//   the sponge chain.
-// WHY: `DuplexSpongeGpuIR::state_buf` is inherent, not part of the trait
-//   (`sponge_graph_ir.rs:180`), and the driver is generic over `TS`.
-// RISK: the extra `sample_ext` ADVANCES the transcript one squeeze past the
-//   eager phase. Callers that continue the Fiat-Shamir stream after this
-//   phase must account for it — or the trait should grow `state_buf`, which
-//   is the right fix and is IMPL-A's file to change.
+///
+/// Reads [`FiatShamirTranscriptGraphIR::state_buf`] — it does **not** squeeze.
+/// The earlier stand-in sampled one extra `[1, D_EF]` value to name the tail
+/// of the sponge chain, which advanced the graph transcript one squeeze past
+/// the eager phase and made the two states disagree.
 fn transcript_state_of<TS: FiatShamirTranscriptGraphIR>(
-    g: &mut GraphBuilder,
+    _g: &mut GraphBuilder,
     transcript: &mut TS,
 ) -> BufId {
-    transcript.sample_ext(g)
+    transcript.state_buf()
 }
 
 /// Build a minimal but structurally faithful plan: `num_traces` AIRs, all
@@ -3663,6 +4333,10 @@ pub fn synthetic_plan(num_traces: usize, l_skip: usize, n_max: usize) -> Zeroche
         opening_claims: (0..2 * num_traces).map(ef).collect(),
         threads_per_block: 128,
         num_blocks: 32,
+        // A plausible mid-range SM count; the synthetic plan is a shape
+        // fixture, not a device query.
+        sm_count: 128,
+        max_monomials_per_thread: DEFAULT_MAX_MONOMIALS_PER_THREAD,
     }
 }
 
@@ -3729,6 +4403,503 @@ mod zerocheck_ir_tests {
             .collect()
     }
 
+    /// S1.1 — every registered graph input has a producer, and an unbound
+    /// one is a *loud* failure.
+    ///
+    /// Two properties, both of which the old `insert_memset` world lacked:
+    ///
+    /// 1. Every `GraphExe` input is accounted for by either the descriptor plan or the
+    ///    [`PhaseInputBinder`] manifest. A buffer registered without a binder entry would slip
+    ///    through as zeros.
+    /// 2. `PhaseInputBinder::bind` refuses, naming the buffers, rather than filling them with
+    ///    zeros.
+    #[test]
+    fn phase_graph_every_input_is_accounted_for() {
+        let device = DeviceType::Cuda(0);
+        let plan = synthetic_plan(
+            /* num_traces */ 2, /* l_skip */ 2, /* n_max */ 3,
+        );
+
+        let mut g = GraphBuilder::new();
+        let mut transcript = DuplexSpongeGpuIR::new(&mut g, device);
+        let mut inputs = PhaseInputBinder::new();
+        let bufs: Vec<TraceBufs> = (0..plan.num_traces())
+            .map(|t| TraceBufs::alloc_inputs(&mut g, device, &plan, t, &mut inputs))
+            .collect();
+        let proof =
+            logup_zerocheck_gpu_ir(&mut g, &mut transcript, &plan, &bufs, device, &mut inputs);
+
+        let exe = GraphCompiler::new()
+            .device(device)
+            .scheduler(SchedulerMode::ListV1 {
+                params: ListSchedulerV1::default(),
+            })
+            .compile(g)
+            .expect("phase graph compile");
+
+        let desc_bufs: Vec<BufId> = proof
+            .descriptors
+            .array_summary()
+            .iter()
+            .map(|(b, ..)| *b)
+            .collect();
+        let manifest: Vec<BufId> = inputs.manifest().iter().map(|(b, _)| *b).collect();
+        assert!(!manifest.is_empty(), "no phase inputs were registered");
+
+        for i in 0..exe.num_inputs() {
+            let b = exe.input_buf_id(i);
+            assert!(
+                desc_bufs.contains(&b) || manifest.contains(&b),
+                "graph input {b:?} is in neither the descriptor plan nor the input manifest — \
+                 it would run as whatever the pool slot held"
+            );
+        }
+
+        // The selector cube is the one input the plan alone determines, so it
+        // is bound already; everything else is not.
+        let unbound = inputs.unbound();
+        assert!(
+            !unbound.is_empty(),
+            "expected the keygen/challenge inputs to be unbound in this fixture"
+        );
+        assert!(
+            !unbound.iter().any(|n| n.ends_with("_sels_cube")),
+            "the selector cube is plan-derived and must be pre-filled, got {unbound:?}"
+        );
+    }
+
+    /// S1.1 guard — a trace that skips a family must not register that
+    /// family's inputs.
+    ///
+    /// Registered inputs carry an obligation the old `insert_memset` did not:
+    /// `graph_compiler.rs:1236-1266` rejects an input **no node reads**. The
+    /// eager path emits no logup launch for a trace without interactions and
+    /// no constraint launch for one without constraints, so blanket-registering
+    /// `t{t}_logup_rules` / `t{t}_zc_rules` would make such a plan fail to
+    /// compile at all. `synthetic_plan` gives every trace both families, so
+    /// this fixture is the only thing that covers the guard.
+    #[test]
+    fn phase_graph_compiles_when_a_trace_skips_a_family() {
+        let device = DeviceType::Cuda(0);
+        let mut plan = synthetic_plan(
+            /* num_traces */ 3, /* l_skip */ 1, /* n_max */ 2,
+        );
+        plan.traces[0].has_interactions = false;
+        plan.traces[2].has_constraints = false;
+
+        let mut g = GraphBuilder::new();
+        let mut transcript = DuplexSpongeGpuIR::new(&mut g, device);
+        let mut inputs = PhaseInputBinder::new();
+        let bufs: Vec<TraceBufs> = (0..plan.num_traces())
+            .map(|t| TraceBufs::alloc_inputs(&mut g, device, &plan, t, &mut inputs))
+            .collect();
+        let _ = logup_zerocheck_gpu_ir(&mut g, &mut transcript, &plan, &bufs, device, &mut inputs);
+
+        let names: Vec<String> = inputs.manifest().into_iter().map(|(_, n)| n).collect();
+        assert!(
+            !names.iter().any(|n| n == "t0_logup_rules"),
+            "trace 0 has no interactions, so its logup rule stream is never read"
+        );
+        assert!(
+            !names.iter().any(|n| n == "t2_zc_rules"),
+            "trace 2 has no constraints, so its constraint rule stream is never read"
+        );
+        assert!(names.iter().any(|n| n == "t0_zc_rules"));
+        assert!(names.iter().any(|n| n == "t2_logup_rules"));
+
+        // The real assertion: the compiler accepts it.
+        GraphCompiler::new()
+            .device(device)
+            .scheduler(SchedulerMode::ListV1 {
+                params: ListSchedulerV1::default(),
+            })
+            .compile(g)
+            .expect("asymmetric phase graph must compile");
+    }
+
+    /// S1.2(b) — the `interpolate_columns` column table, graph vs eager, on
+    /// raw device bytes.
+    ///
+    /// The table was `insert_memset(_, 0)`, i.e. a table of null pointers, so
+    /// this node could not run at all. Filling it is only half the fix; the
+    /// other half is **order**. The eager table is
+    /// `iter::once(sels).chain(mats)` (`mod.rs:1196-1203`) while the mirror's
+    /// `srcs` dependency list is matrices-then-selectors, and copying that
+    /// order into the table interpolates the wrong columns while erroring
+    /// nowhere.
+    ///
+    /// The reference below builds its pointer vector *independently*, in the
+    /// eager order, and the graph side goes through [`emit_column_table`] —
+    /// the same builder the phase driver uses. Ragged widths and per-buffer
+    /// distinguishable data mean a permuted table cannot pass.
+    ///
+    /// The `sabotage` leg perturbs one element of the selector buffer, which
+    /// only the first three columns read: if the comparison were vacuous, or
+    /// if the table skipped the selectors, it would not show up.
+    #[test]
+    fn interpolate_columns_ir_column_table_matches_eager() {
+        let ctx = test_ctx();
+        let stream = ctx.stream.as_raw();
+        let device = DeviceType::Cuda(0);
+
+        let s_deg = 3usize;
+        let num_y = 8usize;
+        let height = 2 * num_y;
+        let mat_widths = [2usize, 5, 1];
+        let num_columns = 3 + mat_widths.iter().sum::<usize>();
+
+        for sabotage in [false, true] {
+            let mut rng = StdRng::seed_from_u64(0xC01D_5EED);
+            let mut sels: Vec<EF> = (0..3 * height).map(|_| rng.random::<EF>()).collect();
+            let mats: Vec<Vec<EF>> = mat_widths
+                .iter()
+                .map(|&w| (0..w * height).map(|_| rng.random::<EF>()).collect())
+                .collect();
+            if sabotage {
+                sels[height + 3] += EF::ONE;
+            }
+
+            // --- eager reference, on the UNsabotaged selectors, with its own
+            // independently built column vector.
+            let mut ref_sels = sels.clone();
+            if sabotage {
+                ref_sels[height + 3] -= EF::ONE;
+            }
+            let d_sels: DeviceBuffer<EF> = ref_sels.as_slice().to_device_on(&ctx).unwrap();
+            let d_mats: Vec<DeviceBuffer<EF>> = mats
+                .iter()
+                .map(|m| m.as_slice().to_device_on(&ctx).unwrap())
+                .collect();
+            let mut columns_h: Vec<*const EF> = Vec::with_capacity(num_columns);
+            for col in 0..3 {
+                columns_h.push(unsafe { d_sels.as_ptr().add(col * height) });
+            }
+            for (d, &w) in d_mats.iter().zip(mat_widths.iter()) {
+                for col in 0..w {
+                    columns_h.push(unsafe { d.as_ptr().add(col * height) });
+                }
+            }
+            let d_interp: DeviceBuffer<EF> =
+                DeviceBuffer::with_capacity_on(s_deg * num_y * num_columns, &ctx);
+            unsafe {
+                interpolate_columns_gpu(
+                    &d_interp,
+                    &columns_h.as_slice().to_device_on(&ctx).unwrap(),
+                    s_deg,
+                    num_y,
+                    stream,
+                )
+                .expect("interpolate_columns_gpu");
+            }
+            ctx.stream.synchronize().unwrap();
+            let want: Vec<EF> = d_interp.to_host_on(&ctx).unwrap();
+
+            // --- graph side, through the driver's own table builder.
+            let mut g = GraphBuilder::new();
+            let mut descs = DescriptorPlan::new();
+            let sels_buf = ef_slice_const_buf(&mut g, device, "sels", &sels);
+            let mat_bufs: Vec<(BufId, usize)> = mats
+                .iter()
+                .zip(mat_widths.iter())
+                .enumerate()
+                .map(|(i, (m, &w))| (ef_slice_const_buf(&mut g, device, &format!("m{i}"), m), w))
+                .collect();
+            let (columns, col_reads) = emit_column_table(
+                &mut g, &mut descs, device, "cols", sels_buf, &mat_bufs, num_y,
+            );
+            let mut srcs = vec![sels_buf];
+            srcs.extend(mat_bufs.iter().map(|&(b, _)| b));
+            for b in &col_reads {
+                assert!(srcs.contains(b), "table points at an undeclared buffer");
+            }
+            let interpolated = add_ef_buf(&mut g, device, "interp", s_deg * num_y * num_columns);
+            interpolate_columns_ir(
+                &mut g,
+                interpolated,
+                s_deg * num_y * num_columns,
+                columns,
+                &srcs,
+                num_columns,
+                s_deg,
+                num_y,
+            );
+            let got = run_graph_with_descs(g, &descs, &[interpolated], &ctx).remove(0);
+
+            if sabotage {
+                assert_ne!(
+                    &got[..],
+                    ef_bytes(&want),
+                    "SABOTAGE LEG IS BLIND: perturbing one selector element did not change \
+                     the interpolation — the selector columns are not in the table"
+                );
+            } else {
+                assert_eq!(
+                    &got[..],
+                    ef_bytes(&want),
+                    "interpolate_columns column table mismatch (order or contents)"
+                );
+            }
+        }
+    }
+
+    /// S0.1 — reading the transcript's tail must not *advance* it.
+    ///
+    /// `transcript_state_of` used to `sample_ext`, which squeezed one extra
+    /// `EF` purely to have a `BufId` to register as the phase output. That
+    /// desynchronized the graph transcript from the eager one by one squeeze,
+    /// so every downstream Fiat-Shamir value would differ. Written against
+    /// that version this test fails on both assertions.
+    #[test]
+    fn transcript_state_of_does_not_advance_the_sponge() {
+        let device = DeviceType::Cuda(0);
+        let mut g = GraphBuilder::new();
+        let mut ts = DuplexSpongeGpuIR::new(&mut g, device);
+
+        // Advance to a non-trivial position first, so a stray squeeze would
+        // have somewhere to move to.
+        for i in 0..5 {
+            let b =
+                ef_const_ext_scalar_buf(&mut g, device, &format!("v{i}"), EF::from_usize(i + 1));
+            ts.observe_ext(&mut g, b);
+        }
+        let _ = ts.sample_ext(&mut g);
+
+        let pos_before = ts.position();
+        let nodes_before = g.nodes.len();
+        let st = transcript_state_of(&mut g, &mut ts);
+
+        assert_eq!(
+            ts.position(),
+            pos_before,
+            "reading the transcript tail advanced the sponge position"
+        );
+        assert_eq!(
+            g.nodes.len(),
+            nodes_before,
+            "reading the transcript tail emitted a graph node"
+        );
+        assert_eq!(
+            st,
+            FiatShamirTranscriptGraphIR::state_buf(&ts),
+            "the phase's transcript output is not the sponge's state buffer"
+        );
+    }
+
+    /// S0.2 — the plan reproduces the eager par-Y `chunk_size` auto-tune.
+    ///
+    /// Hand-evaluated against `batch_mle_monomial.rs:344-372` rather than
+    /// against a second copy of the loop, so the test would catch the loop
+    /// being transcribed wrongly (a re-implementation compared against itself
+    /// cannot).
+    #[test]
+    fn monomial_chunk_size_matches_eager_autotune() {
+        let mut plan = synthetic_plan(
+            /* num_traces */ 2, /* l_skip */ 1, /* n_max */ 6,
+        );
+        plan.max_monomials_per_thread = DEFAULT_MAX_MONOMIALS_PER_THREAD; // 64
+
+        // round 1, n_lift = 6 => num_y = 32 => y_blocks = ceil(32/128) = 1 per AIR.
+        // num_monomials = 8 (synthetic_plan), so with chunk_size = 64 each AIR
+        // contributes 1 * ceil(8/64) = 1 block => total_blocks = 2.
+        //
+        // sm_count = 1 => target 4; 2 * num_x(=3) = 6 >= 4 on the first pass.
+        plan.sm_count = 1;
+        assert_eq!(plan.monomial_chunk_size(&[0, 1], 1, 3), 64);
+
+        // sm_count = 64 => target 256. Halving: 64,32,16,8 all give
+        // ceil(8/c) = 1 => total 2 * 3 = 6 < 256. At c = 4, ceil(8/4) = 2 =>
+        // total 4 * 3 = 12; c = 2 => 4 blocks/AIR => 8 * 3 = 24; c = 1 =>
+        // 8 blocks/AIR => 16 * 3 = 48, still < 256, and the loop stops at the
+        // `chunk_size <= 1` floor.
+        plan.sm_count = 64;
+        assert_eq!(plan.monomial_chunk_size(&[0, 1], 1, 3), 1);
+
+        // A late trace evaluates at num_y = 1 (`mod.rs:1169`), so y_blocks is
+        // still 1 and the tune is unchanged — but `round_num_y` must say 1,
+        // not `1 << (n_lift - round)` on an underflowing subtraction.
+        assert_eq!(plan.round_num_y(0, 7), 1);
+        assert_eq!(plan.round_num_y(0, 1), 32);
+
+        // The floor and the ceiling are both respected for every shape.
+        for sm in [1u32, 8, 128, 1024] {
+            plan.sm_count = sm;
+            let c = plan.monomial_chunk_size(&[0, 1], 1, 3);
+            assert!(
+                (1..=DEFAULT_MAX_MONOMIALS_PER_THREAD).contains(&c),
+                "chunk_size {c} out of range for sm_count {sm}"
+            );
+            assert!(c.is_power_of_two(), "chunk_size {c} is not a halving step");
+        }
+    }
+
+    /// Like [`run_graph_read_bufs`], but installs a pool and binds `descs`
+    /// first — required for any graph whose nodes dereference a descriptor
+    /// array.
+    fn run_graph_with_descs(
+        mut g: GraphBuilder,
+        descs: &DescriptorPlan,
+        bufs: &[BufId],
+        ctx: &GpuDeviceCtx,
+    ) -> Vec<Vec<u8>> {
+        for &b in bufs {
+            g.register_output(b);
+        }
+        let mut exe = GraphCompiler::new()
+            .device(DeviceType::Cuda(0))
+            .scheduler(SchedulerMode::ListV1 {
+                params: ListSchedulerV1::default(),
+            })
+            .compile(g)
+            .expect("graph compile");
+        let pool = DescriptorPlan::alloc_pool(&exe, ctx);
+        descs.bind(&mut exe, ctx, pool).expect("descriptor bind");
+        exe.run(ctx).expect("graph run");
+        bufs.iter()
+            .map(|&bid| {
+                let idx = (0..exe.num_outputs())
+                    .find(|&i| exe.output_buf_id(i) == bid)
+                    .expect("output buf");
+                exe.get_output(idx).to_host_on(ctx).expect("D2H")
+            })
+            .collect()
+    }
+
+    /// S1.2(c) — `batch_fold_mle`'s four control tables, graph vs eager, on
+    /// raw device bytes.
+    ///
+    /// # Why this test exists
+    ///
+    /// `in_ptrs` / `out_ptrs` / `widths` / `log_output_heights` used to be
+    /// `insert_memset(_, 0)`, which is the *silent* failure: `fold_mle` reads
+    /// `width = widths[mat_idx]` and returns for every thread once
+    /// `output_height * width == 0` (`cuda/include/sumcheck.cuh:306-309`), so
+    /// the kernel was a no-op, nothing errored, and the destination buffers
+    /// kept whatever the pool slot held. Written against the memset version
+    /// this test fails; against the descriptor version it passes.
+    ///
+    /// The `sabotage` leg is the oracle's teeth: perturbing **one** element of
+    /// one input matrix must change the compared bytes. Without it, a
+    /// zero-vs-zero comparison would pass vacuously — which is exactly the
+    /// failure mode the memset produced.
+    #[test]
+    fn batch_fold_mle_ir_ptr_tables_match_eager() {
+        let ctx = test_ctx();
+        let stream = ctx.stream.as_raw();
+        let device = DeviceType::Cuda(0);
+
+        // (log_height, width) per matrix — deliberately ragged, so a table
+        // filled in the wrong order or with the wrong widths cannot pass.
+        let shapes = [(4usize, 3usize), (5, 2), (3, 5), (6, 1)];
+
+        for sabotage in [false, true] {
+            let mut rng = StdRng::seed_from_u64(0x3A17_F01D);
+            let r_val: EF = rng.random::<EF>();
+            let mut mats: Vec<Vec<EF>> = shapes
+                .iter()
+                .map(|&(lh, w)| {
+                    (0..(1usize << lh) * w)
+                        .map(|_| rng.random::<EF>())
+                        .collect()
+                })
+                .collect();
+            if sabotage {
+                // One element, one matrix. Everything else is identical.
+                mats[2][7] += EF::ONE;
+            }
+
+            // --- eager reference (always on the UNsabotaged data)
+            let mut reference = mats.clone();
+            if sabotage {
+                reference[2][7] -= EF::ONE;
+            }
+            let d_ins: Vec<DeviceBuffer<EF>> = reference
+                .iter()
+                .map(|m| m.as_slice().to_device_on(&ctx).unwrap())
+                .collect();
+            let d_outs: Vec<DeviceBuffer<EF>> = shapes
+                .iter()
+                .map(|&(lh, w)| {
+                    DeviceBuffer::<EF>::with_capacity_on((1usize << (lh - 1)) * w, &ctx)
+                })
+                .collect();
+            let in_ptrs_h: Vec<*const EF> = d_ins.iter().map(|b| b.as_ptr()).collect();
+            let out_ptrs_h: Vec<*mut EF> = d_outs.iter().map(|b| b.as_mut_ptr()).collect();
+            let widths_h: Vec<u32> = shapes.iter().map(|&(_, w)| w as u32).collect();
+            let logh_h: Vec<u8> = shapes.iter().map(|&(lh, _)| (lh - 1) as u8).collect();
+            let max_cells = shapes
+                .iter()
+                .map(|&(lh, w)| ((1usize << (lh - 1)) * w) as u32)
+                .max()
+                .unwrap();
+            unsafe {
+                batch_fold_mle(
+                    &in_ptrs_h.as_slice().to_device_on(&ctx).unwrap(),
+                    &out_ptrs_h.as_slice().to_device_on(&ctx).unwrap(),
+                    &widths_h.as_slice().to_device_on(&ctx).unwrap(),
+                    shapes.len() as u16,
+                    &logh_h.as_slice().to_device_on(&ctx).unwrap(),
+                    max_cells,
+                    r_val,
+                    stream,
+                )
+                .expect("batch_fold_mle");
+            }
+            ctx.stream.synchronize().unwrap();
+            let want: Vec<Vec<EF>> = d_outs.iter().map(|b| b.to_host_on(&ctx).unwrap()).collect();
+
+            // --- graph side, on `mats` (sabotaged on the second pass)
+            let mut g = GraphBuilder::new();
+            let mut descs = DescriptorPlan::new();
+            let srcs: Vec<BufId> = mats
+                .iter()
+                .enumerate()
+                .map(|(i, m)| ef_slice_const_buf(&mut g, device, &format!("src{i}"), m))
+                .collect();
+            let dsts: Vec<BufId> = shapes
+                .iter()
+                .enumerate()
+                .map(|(i, &(lh, w))| {
+                    add_ef_buf(&mut g, device, &format!("dst{i}"), (1usize << (lh - 1)) * w)
+                })
+                .collect();
+            let (in_ptrs, out_ptrs) =
+                fold_ptr_tables(&mut g, &mut descs, device, "t", &srcs, &dsts);
+            let widths = typed_slice_const_buf(&mut g, device, "w", &widths_h);
+            let logh = typed_slice_const_buf(&mut g, device, "lh", &logh_h);
+            batch_fold_mle_ir(
+                &mut g,
+                in_ptrs,
+                out_ptrs,
+                widths,
+                logh,
+                &srcs,
+                &dsts,
+                shapes.len() as u16,
+                max_cells,
+                r_val,
+            );
+            let got = run_graph_with_descs(g, &descs, &dsts, &ctx);
+
+            for (i, (g_bytes, w)) in got.iter().zip(want.iter()).enumerate() {
+                let want_bytes = ef_bytes(w);
+                if sabotage && i == 2 {
+                    assert_ne!(
+                        &g_bytes[..],
+                        want_bytes,
+                        "SABOTAGE LEG IS BLIND: perturbing one element of matrix 2 did not \
+                         change the folded bytes — the oracle has no teeth"
+                    );
+                } else {
+                    assert_eq!(
+                        &g_bytes[..],
+                        want_bytes,
+                        "batch_fold_mle_ir mismatch on matrix {i} (sabotage={sabotage})"
+                    );
+                }
+            }
+        }
+    }
+
     /// The blackbox nodes that dereference a ctx array — every batched
     /// evaluator in stage D.
     const EVAL_NODE_NAMES: [&str; 5] = [
@@ -3770,10 +4941,12 @@ mod zerocheck_ir_tests {
 
         let mut g = GraphBuilder::new();
         let mut transcript = DuplexSpongeGpuIR::new(&mut g, device);
+        let mut inputs = PhaseInputBinder::new();
         let bufs: Vec<TraceBufs> = (0..plan.num_traces())
-            .map(|t| TraceBufs::alloc_zeroed(&mut g, device, &plan, t))
+            .map(|t| TraceBufs::alloc_inputs(&mut g, device, &plan, t, &mut inputs))
             .collect();
-        let proof = logup_zerocheck_gpu_ir(&mut g, &mut transcript, &plan, &bufs, device);
+        let proof =
+            logup_zerocheck_gpu_ir(&mut g, &mut transcript, &plan, &bufs, device, &mut inputs);
 
         let mut evaluators = 0usize;
         let mut widest = 0usize;
@@ -3826,10 +4999,12 @@ mod zerocheck_ir_tests {
 
         let mut g = GraphBuilder::new();
         let mut transcript = DuplexSpongeGpuIR::new(&mut g, device);
+        let mut inputs = PhaseInputBinder::new();
         let bufs: Vec<TraceBufs> = (0..plan.num_traces())
-            .map(|t| TraceBufs::alloc_zeroed(&mut g, device, &plan, t))
+            .map(|t| TraceBufs::alloc_inputs(&mut g, device, &plan, t, &mut inputs))
             .collect();
-        let proof = logup_zerocheck_gpu_ir(&mut g, &mut transcript, &plan, &bufs, device);
+        let proof =
+            logup_zerocheck_gpu_ir(&mut g, &mut transcript, &plan, &bufs, device, &mut inputs);
 
         let summary = proof.descriptors.array_summary();
         assert!(!summary.is_empty(), "fixture emitted no descriptor arrays");
@@ -3845,13 +5020,16 @@ mod zerocheck_ir_tests {
                  an unfilled element decodes to the pool base, not to null"
             );
         }
-        // Every registered input must be one of ours: an input nobody binds
-        // makes `run` fail.
+        // Every registered input must have a producer. Since S1.1 there are
+        // two kinds: descriptor arrays, filled by `DescriptorPlan::bind`, and
+        // the keygen/challenge buffers, filled by `PhaseInputBinder::bind`.
+        // An input in neither would reach `run` unbound.
+        let manifest: Vec<BufId> = inputs.manifest().iter().map(|(b, _)| *b).collect();
         for b in g.input_bufs() {
             assert!(
-                summary.iter().any(|(buf, ..)| buf == b),
-                "graph input `{}` ({b:?}) is not a descriptor array; \
-                 `DescriptorPlan::bind` would leave it unbound",
+                summary.iter().any(|(buf, ..)| buf == b) || manifest.contains(b),
+                "graph input `{}` ({b:?}) is in neither the descriptor plan nor the \
+                 `PhaseInputBinder` manifest, so nothing would bind it",
                 buf_name(&g, *b),
             );
         }
@@ -3877,10 +5055,12 @@ mod zerocheck_ir_tests {
 
         let mut g = GraphBuilder::new();
         let mut transcript = DuplexSpongeGpuIR::new(&mut g, device);
+        let mut inputs = PhaseInputBinder::new();
         let bufs: Vec<TraceBufs> = (0..plan.num_traces())
-            .map(|t| TraceBufs::alloc_zeroed(&mut g, device, &plan, t))
+            .map(|t| TraceBufs::alloc_inputs(&mut g, device, &plan, t, &mut inputs))
             .collect();
-        let proof = logup_zerocheck_gpu_ir(&mut g, &mut transcript, &plan, &bufs, device);
+        let proof =
+            logup_zerocheck_gpu_ir(&mut g, &mut transcript, &plan, &bufs, device, &mut inputs);
 
         // --- one array per (round, trace), not per (round, family, trace)
         let mut got: Vec<String> = g
@@ -4857,8 +6037,8 @@ mod zerocheck_ir_tests {
     /// The acceptance bar: the whole phase builds as a graph and the graph
     /// compiles to a `GraphExe`.
     ///
-    /// This does **not** run the graph — its inputs are zeroed
-    /// (`TraceBufs::alloc_zeroed`), so the outputs would be meaningless. It
+    /// This does **not** run the graph — its inputs are registered but
+    /// unbound (`TraceBufs::alloc_inputs`), so `run` would refuse. It
     /// asserts the thing the port is for: `logup_zerocheck_gpu_ir` emits a
     /// well-formed graph for a realistic phase shape and `GraphCompiler`
     /// accepts it.
@@ -4871,10 +6051,12 @@ mod zerocheck_ir_tests {
 
         let mut g = GraphBuilder::new();
         let mut transcript = DuplexSpongeGpuIR::new(&mut g, device);
+        let mut inputs = PhaseInputBinder::new();
         let bufs: Vec<TraceBufs> = (0..plan.num_traces())
-            .map(|t| TraceBufs::alloc_zeroed(&mut g, device, &plan, t))
+            .map(|t| TraceBufs::alloc_inputs(&mut g, device, &plan, t, &mut inputs))
             .collect();
-        let proof = logup_zerocheck_gpu_ir(&mut g, &mut transcript, &plan, &bufs, device);
+        let proof =
+            logup_zerocheck_gpu_ir(&mut g, &mut transcript, &plan, &bufs, device, &mut inputs);
 
         assert_eq!(proof.round0_zc_evals.len(), plan.num_traces());
         assert_eq!(proof.round0_logup_evals.len(), plan.num_traces());
@@ -4914,10 +6096,12 @@ mod zerocheck_ir_tests {
 
         let mut g = GraphBuilder::new();
         let mut transcript = DuplexSpongeGpuIR::new(&mut g, device);
+        let mut inputs = PhaseInputBinder::new();
         let bufs: Vec<TraceBufs> = (0..plan.num_traces())
-            .map(|t| TraceBufs::alloc_zeroed(&mut g, device, &plan, t))
+            .map(|t| TraceBufs::alloc_inputs(&mut g, device, &plan, t, &mut inputs))
             .collect();
-        let proof = logup_zerocheck_gpu_ir(&mut g, &mut transcript, &plan, &bufs, device);
+        let proof =
+            logup_zerocheck_gpu_ir(&mut g, &mut transcript, &plan, &bufs, device, &mut inputs);
         let descs = proof.descriptors.clone();
 
         let mut exe = GraphCompiler::new()
@@ -4977,10 +6161,11 @@ mod zerocheck_ir_tests {
 
         let mut g = GraphBuilder::new();
         let mut transcript = DuplexSpongeGpuIR::from_live(&mut g, device, &snap);
+        let mut inputs = PhaseInputBinder::new();
         let bufs: Vec<TraceBufs> = (0..plan.num_traces())
-            .map(|t| TraceBufs::alloc_zeroed(&mut g, device, &plan, t))
+            .map(|t| TraceBufs::alloc_inputs(&mut g, device, &plan, t, &mut inputs))
             .collect();
-        let _ = logup_zerocheck_gpu_ir(&mut g, &mut transcript, &plan, &bufs, device);
+        let _ = logup_zerocheck_gpu_ir(&mut g, &mut transcript, &plan, &bufs, device, &mut inputs);
         GraphCompiler::new()
             .device(device)
             .scheduler(SchedulerMode::ListV1 {

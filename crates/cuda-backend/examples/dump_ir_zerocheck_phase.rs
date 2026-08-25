@@ -17,7 +17,8 @@
 //! shape (defaults: 3 traces, `l_skip = 2`, `n_max = 4`).
 //!
 //! The graph is built with **zeroed** trace inputs
-//! (`TraceBufs::alloc_zeroed`), so it is not run here — running it needs a
+//! (`TraceBufs::alloc_inputs`, unbound), so it is not run here — running it
+//! needs a
 //! real proving key and trace. Building and compiling it is the point.
 
 use std::path::PathBuf;
@@ -29,7 +30,9 @@ use crypto_compiler::{
     runtime::Verbosity,
 };
 use openvm_cuda_backend::{
-    logup_zerocheck::zerocheck_ir::{logup_zerocheck_gpu_ir, synthetic_plan, TraceBufs},
+    logup_zerocheck::zerocheck_ir::{
+        logup_zerocheck_gpu_ir, synthetic_plan, PhaseInputBinder, TraceBufs,
+    },
     sponge_graph_ir::DuplexSpongeGpuIR,
 };
 
@@ -67,11 +70,12 @@ fn main() {
     // phase graph chains onto the Fiat-Shamir stream stages A/B left behind.
     let mut transcript = DuplexSpongeGpuIR::new(&mut g, device);
 
+    let mut inputs = PhaseInputBinder::new();
     let bufs: Vec<TraceBufs> = (0..plan.num_traces())
-        .map(|t| TraceBufs::alloc_zeroed(&mut g, device, &plan, t))
+        .map(|t| TraceBufs::alloc_inputs(&mut g, device, &plan, t, &mut inputs))
         .collect();
 
-    let proof = logup_zerocheck_gpu_ir(&mut g, &mut transcript, &plan, &bufs, device);
+    let proof = logup_zerocheck_gpu_ir(&mut g, &mut transcript, &plan, &bufs, device, &mut inputs);
     println!(
         "graph built: {} round-0 zerocheck evals, {} round-0 logup evals, {} MLE rounds, {} traces of openings",
         proof.round0_zc_evals.len(),

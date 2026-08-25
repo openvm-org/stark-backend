@@ -839,12 +839,20 @@ impl<'a, HS: GpuHashScheme> LogupZerocheckGpu<'a, HS> {
             assert!(!xi.is_empty(), "xi vector must not be empty");
 
             let height = air_ctx.common_main.height();
-            let mut main_parts = Vec::with_capacity(air_ctx.cached_mains.len() + 1);
+            // The round-0 main-matrix table, in the base+offset ABI
+            // (`cuda/include/base_off.cuh`): an array of descriptors holding byte
+            // offsets, decoded at use against the `pool_base` the launcher takes.
+            // The eager path encodes absolute addresses against a null base, so the
+            // decoded pointer is bit-identical to the raw pointer table this
+            // replaces. See [`MainMatrixDesc::round0`] for why `air_width` is 0.
+            let mut main_descs = Vec::with_capacity(air_ctx.cached_mains.len() + 1);
             for committed in &air_ctx.cached_mains {
-                main_parts.push(committed.trace.buffer().as_ptr());
+                main_descs.push(MainMatrixDesc::round0(committed.trace.buffer().as_ptr()));
             }
-            main_parts.push(air_ctx.common_main.buffer().as_ptr());
-            let d_main_parts = main_parts.to_device_on(&self.device_ctx)?;
+            main_descs.push(MainMatrixDesc::round0(
+                air_ctx.common_main.buffer().as_ptr(),
+            ));
+            let d_main_descs = main_descs.to_device_on(&self.device_ctx)?;
 
             let n_lift = n.max(0) as usize;
             let eq_xi_tree = &self.eq_xis[&n_lift];
@@ -856,7 +864,7 @@ impl<'a, HS: GpuHashScheme> LogupZerocheckGpu<'a, HS> {
             let sum_buffer = evaluate_round0_constraints_gpu(
                 single_pk,
                 selectors_cube.buffer(),
-                &d_main_parts,
+                &d_main_descs,
                 public_values,
                 eq_xi_tree.get_ptr(n_lift),
                 d_lambda_pows,
@@ -912,7 +920,7 @@ impl<'a, HS: GpuHashScheme> LogupZerocheckGpu<'a, HS> {
                 single_pk,
                 &single_air_constraints,
                 selectors_cube.buffer(),
-                &d_main_parts,
+                &d_main_descs,
                 public_values,
                 eq_xi_tree.get_ptr(n_lift),
                 &self.beta_pows,
