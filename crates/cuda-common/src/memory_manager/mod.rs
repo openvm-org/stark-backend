@@ -2,7 +2,10 @@ use std::{
     collections::HashMap,
     ffi::c_void,
     ptr::NonNull,
-    sync::{Mutex, OnceLock},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Mutex, OnceLock,
+    },
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -28,6 +31,20 @@ extern "C" {
 }
 
 static MEMORY_MANAGER: OnceLock<Mutex<MemoryManager>> = OnceLock::new();
+
+/// Number of release-stream handoffs performed since process start.
+///
+/// Observability only — nothing branches on it. It exists so a caller in another
+/// crate can assert that a code path it does not own actually performed the
+/// handoff. Without it, deleting the production call site is invisible to every
+/// test: the allocator's own tests call the operation directly and stay green.
+static RELEASE_STREAM_HANDOFFS: AtomicU64 = AtomicU64::new(0);
+
+/// Reads [`RELEASE_STREAM_HANDOFFS`]. Monotonic; compare two samples around the
+/// work under test rather than expecting an absolute value.
+pub fn release_stream_handoffs() -> u64 {
+    RELEASE_STREAM_HANDOFFS.load(Ordering::Relaxed)
+}
 
 pub fn device_memory_used() -> usize {
     let mut free = 0usize;
@@ -227,6 +244,8 @@ pub(crate) unsafe fn rebind_release_stream(
     let previous = manager.rebind_release_stream_under_lock(ptr, target)?;
     drop(manager);
     drop(previous);
+    // After the record is committed, so a failed handoff is never counted.
+    RELEASE_STREAM_HANDOFFS.fetch_add(1, Ordering::Relaxed);
     Ok(())
 }
 
