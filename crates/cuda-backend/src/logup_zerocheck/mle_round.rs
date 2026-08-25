@@ -6,7 +6,7 @@ use crate::{
     cuda::logup_zerocheck::{
         _logup_mle_intermediates_buffer_size, _logup_mle_temp_sums_buffer_size,
         _zerocheck_mle_intermediates_buffer_size, _zerocheck_mle_temp_sums_buffer_size,
-        logup_eval_mle, zerocheck_eval_mle, MainMatrixDesc,
+        logup_eval_mle, zerocheck_eval_mle, MainMatrixPtrs,
     },
     error::KernelError,
     prelude::{EF, F},
@@ -32,8 +32,8 @@ fn validate_mle_num_x(num_x: u32) -> Result<(), KernelError> {
 pub fn evaluate_mle_constraints_gpu(
     eq_xi_ptr: *const EF,
     sels_ptr: *const EF,
-    prep_ptr: MainMatrixDesc,
-    d_main_ptrs: &DeviceBuffer<MainMatrixDesc>,
+    prep_ptr: MainMatrixPtrs<EF>,
+    d_main_ptrs: &DeviceBuffer<MainMatrixPtrs<EF>>,
     public_ptr: *const F,
     lambda_pows: &DeviceBuffer<EF>,
     rules: &ConstraintOnlyRules<ZEROCHECK_BUFFER_VARS>,
@@ -91,8 +91,8 @@ pub fn evaluate_mle_constraints_gpu(
 pub fn evaluate_mle_interactions_gpu(
     eq_xi_ptr: *const EF,
     sels_ptr: *const EF,
-    prep_ptr: MainMatrixDesc,
-    d_main_ptrs: &DeviceBuffer<MainMatrixDesc>,
+    prep_ptr: MainMatrixPtrs<EF>,
+    d_main_ptrs: &DeviceBuffer<MainMatrixPtrs<EF>>,
     public_ptr: *const F,
     challenges_ptr: *const EF,
     eq_3bs_ptr: *const EF,

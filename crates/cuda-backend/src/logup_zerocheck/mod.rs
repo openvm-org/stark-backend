@@ -47,7 +47,9 @@ use tracing::{debug, info, info_span, instrument};
 use crate::{
     base::DeviceMatrix,
     cuda::{
-        logup_zerocheck::{fold_selectors_round0, interpolate_columns_gpu, MainMatrixDesc},
+        logup_zerocheck::{
+            fold_selectors_round0, interpolate_columns_gpu, MainMatrixDesc, MainMatrixPtrs,
+        },
         sumcheck::batch_fold_mle,
     },
     data_transporter::transport_matrix_d2h_col_major,
@@ -1152,20 +1154,18 @@ impl<'a, HS: GpuHashScheme> LogupZerocheckGpu<'a, HS> {
                 if round == n_lift + 1 {
                     // A.1: evaluate directly at (num_x=1, num_y=1)
                     let prep_ptr = if has_preprocessed {
-                        MainMatrixDesc::from_ptr(
-                            mats[0].buffer().as_ptr(),
-                            air_width_for_mat(need_rot, mats[0].width()),
-                        )
+                        MainMatrixPtrs {
+                            data: mats[0].buffer().as_ptr(),
+                            air_width: air_width_for_mat(need_rot, mats[0].width()),
+                        }
                     } else {
-                        MainMatrixDesc::ABSENT
+                        MainMatrixPtrs::ABSENT
                     };
-                    let main_ptrs: Vec<MainMatrixDesc> = mats[first_main_idx..]
+                    let main_ptrs: Vec<MainMatrixPtrs<EF>> = mats[first_main_idx..]
                         .iter()
-                        .map(|m| {
-                            MainMatrixDesc::from_ptr(
-                                m.buffer().as_ptr(),
-                                air_width_for_mat(need_rot, m.width()),
-                            )
+                        .map(|m| MainMatrixPtrs {
+                            data: m.buffer().as_ptr(),
+                            air_width: air_width_for_mat(need_rot, m.width()),
                         })
                         .collect_vec();
                     let main_ptrs_dev = main_ptrs.to_device_on(&self.device_ctx)?;
@@ -1244,29 +1244,29 @@ impl<'a, HS: GpuHashScheme> LogupZerocheckGpu<'a, HS> {
                     .wrapping_add(widths_so_far * interpolated_height);
                 widths_so_far += 3;
                 let prep_ptr = if has_preprocessed {
-                    MainMatrixDesc::from_ptr(
-                        interpolated
+                    MainMatrixPtrs {
+                        data: interpolated
                             .buffer()
                             .as_ptr()
                             .wrapping_add(widths_so_far * interpolated_height),
-                        air_width_for_mat(need_rot, mats[0].width()),
-                    )
+                        air_width: air_width_for_mat(need_rot, mats[0].width()),
+                    }
                 } else {
-                    MainMatrixDesc::ABSENT
+                    MainMatrixPtrs::ABSENT
                 };
                 if has_preprocessed {
                     widths_so_far += mats[0].width();
                 }
-                let main_ptrs: Vec<MainMatrixDesc> = mats[first_main_idx..]
+                let main_ptrs: Vec<MainMatrixPtrs<EF>> = mats[first_main_idx..]
                     .iter()
                     .map(|m| {
-                        let main_ptr = MainMatrixDesc::from_ptr(
-                            interpolated
+                        let main_ptr = MainMatrixPtrs {
+                            data: interpolated
                                 .buffer()
                                 .as_ptr()
                                 .wrapping_add(widths_so_far * interpolated_height),
-                            air_width_for_mat(need_rot, m.width()),
-                        );
+                            air_width: air_width_for_mat(need_rot, m.width()),
+                        };
                         widths_so_far += m.width();
                         main_ptr
                     })

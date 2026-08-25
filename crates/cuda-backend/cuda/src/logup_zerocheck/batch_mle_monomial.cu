@@ -10,8 +10,9 @@
 
 namespace logup_zerocheck_mle {
 
+template <typename MainT>
 __device__ __forceinline__ FpExt
-eval_variable(PackedVar var, uint32_t row, const EvalCoreRT &ctx, uint32_t height) {
+eval_variable(PackedVar var, uint32_t row, const EvalCoreRTT<MainT> &ctx, uint32_t height) {
     uint8_t entry_type = var.entry_type();
     uint8_t offset = var.offset();
 
@@ -51,6 +52,19 @@ struct MonomialAirCtx {
     uint32_t num_monomials;
     EvalCoreCtx eval_ctx;
     const FpExt *__restrict__ d_eq_xi;
+    uint32_t num_y;
+};
+
+/// The raw-pointer twin, for the eager prover. Only `eval_ctx` differs: every
+/// other field was already a raw pointer. See `eval_ctx.cuh`'s note on
+/// `EvalCoreCtxRaw` for why the eager path is kept off the base+offset decode.
+struct MonomialAirCtxRaw {
+    const MonomialHeader *d_headers;
+    const PackedVar *d_variables;
+    const FpExt *d_lambda_combinations;
+    uint32_t num_monomials;
+    EvalCoreCtxRaw eval_ctx;
+    const FpExt *d_eq_xi;
     uint32_t num_y;
 };
 
@@ -99,10 +113,11 @@ extern "C" int _precompute_lambda_combinations(
 // BATCHED KERNEL (multiple AIRs in single launch)
 // ============================================================================
 
+template <typename AirCtxT>
 __global__ void zerocheck_monomial_kernel(
     FpExt *__restrict__ tmp_sums,
     const BlockCtx *__restrict__ block_ctxs,
-    const MonomialAirCtx *__restrict__ air_ctxs,
+    const AirCtxT *__restrict__ air_ctxs,
     const uint8_t *__restrict__ pool_base,
     uint32_t threads_per_block
 ) {
@@ -110,8 +125,8 @@ __global__ void zerocheck_monomial_kernel(
     FpExt *shared = (FpExt *)smem;
 
     BlockCtx bctx = block_ctxs[blockIdx.x];
-    MonomialAirCtx actx = air_ctxs[bctx.air_idx];
-    EvalCoreRT eval_ctx = resolve_eval_core(actx.eval_ctx, pool_base);
+    AirCtxT actx = air_ctxs[bctx.air_idx];
+    auto eval_ctx = resolve_eval_core(actx.eval_ctx, pool_base);
 
     uint32_t num_x = gridDim.y;
     uint32_t x_int = blockIdx.y;
@@ -152,11 +167,12 @@ __global__ void zerocheck_monomial_kernel(
     }
 }
 
-extern "C" int _zerocheck_monomial_batched(
+template <typename AirCtxT>
+static int zerocheck_monomial_batched_impl(
     FpExt *tmp_sums,
     FpExt *output,
     const BlockCtx *block_ctxs,
-    const MonomialAirCtx *air_ctxs,
+    const AirCtxT *air_ctxs,
     const uint8_t *pool_base,
     const uint32_t *air_block_offsets,
     uint32_t num_blocks,
@@ -200,10 +216,11 @@ extern "C" int _zerocheck_monomial_batched(
 // PAR-Y KERNEL (parallelizes over y_int, tiles monomials)
 // ============================================================================
 
+template <typename AirCtxT>
 __global__ void zerocheck_monomial_par_y_kernel(
     FpExt *__restrict__ tmp_sums,
     const BlockCtx *__restrict__ block_ctxs,
-    const MonomialAirCtx *__restrict__ air_ctxs,
+    const AirCtxT *__restrict__ air_ctxs,
     const uint8_t *__restrict__ pool_base,
     uint32_t threads_per_block,
     uint32_t chunk_size // monomials per mono_chunk
@@ -212,8 +229,8 @@ __global__ void zerocheck_monomial_par_y_kernel(
     FpExt *shared = (FpExt *)smem;
 
     BlockCtx bctx = block_ctxs[blockIdx.x];
-    MonomialAirCtx actx = air_ctxs[bctx.air_idx];
-    EvalCoreRT eval_ctx = resolve_eval_core(actx.eval_ctx, pool_base);
+    AirCtxT actx = air_ctxs[bctx.air_idx];
+    auto eval_ctx = resolve_eval_core(actx.eval_ctx, pool_base);
 
     uint32_t num_x = gridDim.y;
     uint32_t x_int = blockIdx.y;
@@ -262,11 +279,12 @@ __global__ void zerocheck_monomial_par_y_kernel(
     }
 }
 
-extern "C" int _zerocheck_monomial_par_y_batched(
+template <typename AirCtxT>
+static int zerocheck_monomial_par_y_batched_impl(
     FpExt *tmp_sums,
     FpExt *output,
     const BlockCtx *block_ctxs,
-    const MonomialAirCtx *air_ctxs,
+    const AirCtxT *air_ctxs,
     const uint8_t *pool_base,
     const uint32_t *air_block_offsets,
     uint32_t num_blocks,
@@ -381,6 +399,15 @@ struct LogupMonomialCommonCtx {
     uint32_t mono_blocks;
 };
 
+/// The raw-pointer twin -- see [`MonomialAirCtxRaw`].
+struct LogupMonomialCommonCtxRaw {
+    EvalCoreCtxRaw eval_ctx;
+    const FpExt *d_eq_xi;
+    FpExt bus_term_sum;
+    uint32_t num_y;
+    uint32_t mono_blocks;
+};
+
 struct LogupMonomialCtx {
     const MonomialHeader *__restrict__ d_headers;
     const PackedVar *__restrict__ d_variables;
@@ -397,11 +424,11 @@ struct LogupMonomialCtx {
 // Template parameter IS_DENOM:
 //   - false: numerator kernel, writes to tmp_sums[...].p
 //   - true: denominator kernel, writes to tmp_sums[...].q and adds bus_term_sum when mono_block == 0
-template <bool IS_DENOM>
+template <bool IS_DENOM, typename CommonCtxT>
 __global__ void logup_monomial_kernel(
     FracExt *__restrict__ tmp_sums,
     const BlockCtx *__restrict__ block_ctxs,
-    const LogupMonomialCommonCtx *__restrict__ common_ctxs,
+    const CommonCtxT *__restrict__ common_ctxs,
     const LogupMonomialCtx *__restrict__ ctxs,
     const uint8_t *__restrict__ pool_base
 ) {
@@ -409,9 +436,9 @@ __global__ void logup_monomial_kernel(
     FpExt *shared = (FpExt *)smem;
 
     BlockCtx bctx = block_ctxs[blockIdx.x];
-    LogupMonomialCommonCtx common_ctx = common_ctxs[bctx.air_idx];
+    CommonCtxT common_ctx = common_ctxs[bctx.air_idx];
     LogupMonomialCtx ctx = ctxs[bctx.air_idx];
-    EvalCoreRT eval_ctx = resolve_eval_core(common_ctx.eval_ctx, pool_base);
+    auto eval_ctx = resolve_eval_core(common_ctx.eval_ctx, pool_base);
 
     uint32_t num_x = gridDim.y;
     uint32_t x_int = blockIdx.y;
@@ -451,11 +478,12 @@ __global__ void logup_monomial_kernel(
     }
 }
 
-extern "C" int _logup_monomial_batched(
+template <typename CommonCtxT>
+static int logup_monomial_batched_impl(
     FracExt *tmp_sums,
     FracExt *output,
     const BlockCtx *block_ctxs,
-    const LogupMonomialCommonCtx *common_ctxs,
+    const CommonCtxT *common_ctxs,
     const LogupMonomialCtx *numer_ctxs,
     const LogupMonomialCtx *denom_ctxs,
     const uint8_t *pool_base,
@@ -505,6 +533,195 @@ extern "C" int _logup_monomial_batched(
     );
 
     return CHECK_KERNEL();
+}
+
+
+// ----------------------------------------------------------------------------
+// Entry points.
+//
+// `_*`      -- graph-IR: base+offset contexts plus a real pool base.
+// `_*_raw`  -- eager: raw-pointer contexts, no pool base, no null sentinel.
+//
+// Same kernels, same evaluator; only the context decode differs. Keeping the
+// eager path off `base_off_ptr` is what makes it an independent oracle for the
+// base+offset ABI -- see `eval_ctx.cuh`'s note on `EvalCoreCtxRaw`.
+// ----------------------------------------------------------------------------
+
+extern "C" int _zerocheck_monomial_batched(
+    FpExt *tmp_sums,
+    FpExt *output,
+    const BlockCtx *block_ctxs,
+    const MonomialAirCtx *air_ctxs,
+    const uint8_t *pool_base,
+    const uint32_t *air_block_offsets,
+    uint32_t num_blocks,
+    uint32_t num_x,
+    uint32_t num_airs,
+    uint32_t threads_per_block,
+    cudaStream_t stream
+) {
+    return zerocheck_monomial_batched_impl(
+        tmp_sums,
+        output,
+        block_ctxs,
+        air_ctxs,
+        pool_base,
+        air_block_offsets,
+        num_blocks,
+        num_x,
+        num_airs,
+        threads_per_block,
+        stream
+    );
+}
+
+extern "C" int _zerocheck_monomial_batched_raw(
+    FpExt *tmp_sums,
+    FpExt *output,
+    const BlockCtx *block_ctxs,
+    const MonomialAirCtxRaw *air_ctxs,
+    const uint32_t *air_block_offsets,
+    uint32_t num_blocks,
+    uint32_t num_x,
+    uint32_t num_airs,
+    uint32_t threads_per_block,
+    cudaStream_t stream
+) {
+    return zerocheck_monomial_batched_impl(
+        tmp_sums,
+        output,
+        block_ctxs,
+        air_ctxs,
+        /*pool_base=*/nullptr,
+        air_block_offsets,
+        num_blocks,
+        num_x,
+        num_airs,
+        threads_per_block,
+        stream
+    );
+}
+
+extern "C" int _zerocheck_monomial_par_y_batched(
+    FpExt *tmp_sums,
+    FpExt *output,
+    const BlockCtx *block_ctxs,
+    const MonomialAirCtx *air_ctxs,
+    const uint8_t *pool_base,
+    const uint32_t *air_block_offsets,
+    uint32_t num_blocks,
+    uint32_t num_x,
+    uint32_t num_airs,
+    uint32_t chunk_size,
+    uint32_t threads_per_block,
+    cudaStream_t stream
+) {
+    return zerocheck_monomial_par_y_batched_impl(
+        tmp_sums,
+        output,
+        block_ctxs,
+        air_ctxs,
+        pool_base,
+        air_block_offsets,
+        num_blocks,
+        num_x,
+        num_airs,
+        chunk_size,
+        threads_per_block,
+        stream
+    );
+}
+
+extern "C" int _zerocheck_monomial_par_y_batched_raw(
+    FpExt *tmp_sums,
+    FpExt *output,
+    const BlockCtx *block_ctxs,
+    const MonomialAirCtxRaw *air_ctxs,
+    const uint32_t *air_block_offsets,
+    uint32_t num_blocks,
+    uint32_t num_x,
+    uint32_t num_airs,
+    uint32_t chunk_size,
+    uint32_t threads_per_block,
+    cudaStream_t stream
+) {
+    return zerocheck_monomial_par_y_batched_impl(
+        tmp_sums,
+        output,
+        block_ctxs,
+        air_ctxs,
+        /*pool_base=*/nullptr,
+        air_block_offsets,
+        num_blocks,
+        num_x,
+        num_airs,
+        chunk_size,
+        threads_per_block,
+        stream
+    );
+}
+
+extern "C" int _logup_monomial_batched(
+    FracExt *tmp_sums,
+    FracExt *output,
+    const BlockCtx *block_ctxs,
+    const LogupMonomialCommonCtx *common_ctxs,
+    const LogupMonomialCtx *numer_ctxs,
+    const LogupMonomialCtx *denom_ctxs,
+    const uint8_t *pool_base,
+    const uint32_t *air_block_offsets,
+    uint32_t num_blocks,
+    uint32_t num_x,
+    uint32_t num_airs,
+    uint32_t threads_per_block,
+    cudaStream_t stream
+) {
+    return logup_monomial_batched_impl(
+        tmp_sums,
+        output,
+        block_ctxs,
+        common_ctxs,
+        numer_ctxs,
+        denom_ctxs,
+        pool_base,
+        air_block_offsets,
+        num_blocks,
+        num_x,
+        num_airs,
+        threads_per_block,
+        stream
+    );
+}
+
+extern "C" int _logup_monomial_batched_raw(
+    FracExt *tmp_sums,
+    FracExt *output,
+    const BlockCtx *block_ctxs,
+    const LogupMonomialCommonCtxRaw *common_ctxs,
+    const LogupMonomialCtx *numer_ctxs,
+    const LogupMonomialCtx *denom_ctxs,
+    const uint32_t *air_block_offsets,
+    uint32_t num_blocks,
+    uint32_t num_x,
+    uint32_t num_airs,
+    uint32_t threads_per_block,
+    cudaStream_t stream
+) {
+    return logup_monomial_batched_impl(
+        tmp_sums,
+        output,
+        block_ctxs,
+        common_ctxs,
+        numer_ctxs,
+        denom_ctxs,
+        /*pool_base=*/nullptr,
+        air_block_offsets,
+        num_blocks,
+        num_x,
+        num_airs,
+        threads_per_block,
+        stream
+    );
 }
 
 } // namespace logup_zerocheck_mle

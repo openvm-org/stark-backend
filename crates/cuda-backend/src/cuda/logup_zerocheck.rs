@@ -20,6 +20,42 @@ use crate::{
 ///
 /// [`Self::NULL`] is the "absent" encoding. Offset `0` cannot serve as the
 /// sentinel: it is a valid pool offset — the first packed buffer lives there.
+///
+/// # Exactly what is on this ABI, and what is not
+///
+/// The conversion is **not** universal, and the boundary is load-bearing for
+/// anyone reasoning about which pointers the graph compiler can see through.
+///
+/// On the base+offset ABI (every device-pointer field is a [`BaseOff`]):
+///
+/// * [`MainMatrixDesc`] — `data`
+/// * [`EvalCoreCtx`] — `d_selectors`, `d_preprocessed.data`, `d_main`, `d_public`
+/// * [`ZerocheckCtx`] — `d_intermediates`, `d_eq_xi`, `d_rules`, `d_used_nodes`
+/// * [`LogupCtx`] — `d_intermediates`, `d_eq_xi`, `d_challenges`, `d_eq_3bs`, `d_rules`,
+///   `d_used_nodes`, `d_pair_idxs`
+///
+/// Still raw device pointers, on the *graph* path too:
+///
+/// * [`MonomialAirCtx`] — `d_headers`, `d_variables`, `d_lambda_combinations`, `d_eq_xi` (its
+///   nested `eval_ctx` **is** converted)
+/// * [`LogupMonomialCommonCtx`] — `d_eq_xi` (nested `eval_ctx` converted)
+/// * [`LogupMonomialCtx`] — `d_headers`, `d_variables`, `d_combinations` (all three)
+/// * [`GkrInputCtx`] — all nine pointer fields
+/// * The bare `T *const *` tables whose kernel ABI is a pointer table rather than a descriptor
+///   struct: `batch_fold_mle`'s `input_matrices` / `output_matrices` and `interpolate_columns`'
+///   column table. The graph path fills these with absolute addresses computed as `pool_base +
+///   offset` after compile (`DescElem::RawPtr` in `logup_zerocheck/zerocheck_ir.rs`) — host-known
+///   and stable, but not a `BaseOff` the kernel decodes.
+///
+/// The monomial and GKR fields above are keygen-static tables, so they are not
+/// graph buffers today and there is nothing for an offset to be relative to.
+/// Converting them is only worthwhile once they become graph inputs.
+///
+/// # The eager path is not on this ABI at all
+///
+/// See [`MainMatrixPtrs`]: the eager prover keeps the original raw-pointer
+/// context structs and its own entry points, so it stays an independent
+/// reference for the encoding above.
 #[repr(transparent)]
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct BaseOff(pub u64);
@@ -68,6 +104,38 @@ impl std::fmt::Debug for BaseOff {
             write!(f, "BaseOff({:#x})", self.0)
         }
     }
+}
+
+/// One matrix's **raw device pointer** plus its padded AIR width. Mirrors
+/// `MainMatrixPtrs<T>` in `cuda/include/matrix.cuh`.
+///
+/// This is the original, pre-base+offset ABI, and it is still the ABI of the
+/// single-AIR `mle.cu` entry points (`zerocheck_eval_mle` / `logup_eval_mle`),
+/// which only the eager prover reaches.
+///
+/// # Why it was kept
+///
+/// Every equality test in the graph-IR port compares a graph result against an
+/// eager one. If the eager path also encoded [`BaseOff`] and decoded it with
+/// `base_off_ptr`, it would stop being an independent reference for the ABI it
+/// is being used to check: a wrong null sentinel, or a Rust/C++ layout drift
+/// in [`MainMatrixDesc`], would make both sides identically wrong and every
+/// such test would still pass. Keeping one raw-pointer path means those defect
+/// classes show up as a graph-vs-eager mismatch.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct MainMatrixPtrs<T> {
+    pub data: *const T,
+    pub air_width: u32,
+}
+
+impl<T> MainMatrixPtrs<T> {
+    /// The "no preprocessed trace" encoding: a genuine null pointer, not a
+    /// sentinel value that has to be recognised.
+    pub const ABSENT: Self = MainMatrixPtrs {
+        data: std::ptr::null(),
+        air_width: 0,
+    };
 }
 
 /// One matrix's device base address — as a [`BaseOff`] — plus its padded AIR
@@ -182,6 +250,55 @@ pub struct LogupCtx {
     pub buffer_size: u32,
 }
 
+/// The raw-pointer twin of [`EvalCoreCtx`] — the ORIGINAL, pre-base+offset ABI.
+/// Mirrors `EvalCoreCtxRaw` in `cuda/include/eval_ctx.cuh`.
+///
+/// See [`MainMatrixPtrs`] for why a raw path is kept: the eager prover has to
+/// stay an independent reference for the base+offset ABI it is used to check.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct EvalCoreCtxRaw {
+    pub d_selectors: *const EF,
+    pub d_preprocessed: MainMatrixPtrs<EF>,
+    pub d_main: *const MainMatrixPtrs<EF>,
+    pub d_public: *const F,
+}
+
+/// The raw-pointer twin of [`ZerocheckCtx`]. Mirrors `ZerocheckCtxRaw` in
+/// `cuda/src/logup_zerocheck/batch_mle.cu`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct ZerocheckCtxRaw {
+    pub eval_ctx: EvalCoreCtxRaw,
+    pub d_intermediates: *mut EF,
+    pub num_y: u32,
+    pub d_eq_xi: *const EF,
+    pub d_rules: *const std::ffi::c_void,
+    pub rules_len: usize,
+    pub d_used_nodes: *const usize,
+    pub used_nodes_len: usize,
+    pub buffer_size: u32,
+}
+
+/// The raw-pointer twin of [`LogupCtx`]. Mirrors `LogupCtxRaw` in
+/// `cuda/src/logup_zerocheck/batch_mle.cu`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct LogupCtxRaw {
+    pub eval_ctx: EvalCoreCtxRaw,
+    pub d_intermediates: *mut EF,
+    pub num_y: u32,
+    pub d_eq_xi: *const EF,
+    pub d_challenges: *const EF,
+    pub d_eq_3bs: *const EF,
+    pub d_rules: *const std::ffi::c_void,
+    pub rules_len: usize,
+    pub d_used_nodes: *const usize,
+    pub d_pair_idxs: *const u32,
+    pub used_nodes_len: usize,
+    pub buffer_size: u32,
+}
+
 /// Common per-AIR context for batched logup monomial evaluation.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
@@ -189,6 +306,33 @@ pub struct LogupMonomialCommonCtx {
     pub eval_ctx: EvalCoreCtx,
     pub d_eq_xi: *const EF,
     pub bus_term_sum: EF, // Precomputed sum_i(beta[message_len_i] * (bus_idx[i]+1) * eq_3bs[i])
+    pub num_y: u32,
+    pub mono_blocks: u32,
+}
+
+/// The raw-pointer twin of [`MonomialAirCtx`] — the eager ABI. Only
+/// `eval_ctx` differs; the other fields were already raw pointers. Mirrors
+/// `MonomialAirCtxRaw` in `cuda/src/logup_zerocheck/batch_mle_monomial.cu`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct MonomialAirCtxRaw {
+    pub d_headers: *const MonomialHeader,
+    pub d_variables: *const PackedVar,
+    pub d_lambda_combinations: *const EF,
+    pub num_monomials: u32,
+    pub eval_ctx: EvalCoreCtxRaw,
+    pub d_eq_xi: *const EF,
+    pub num_y: u32,
+}
+
+/// The raw-pointer twin of [`LogupMonomialCommonCtx`] — see
+/// [`MonomialAirCtxRaw`].
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct LogupMonomialCommonCtxRaw {
+    pub eval_ctx: EvalCoreCtxRaw,
+    pub d_eq_xi: *const EF,
+    pub bus_term_sum: EF,
     pub num_y: u32,
     pub mono_blocks: u32,
 }
@@ -660,8 +804,8 @@ extern "C" {
         output: *mut EF,
         eq_xi: *const EF,
         selectors: *const EF,
-        preprocessed: MainMatrixDesc,
-        main: *const MainMatrixDesc,
+        preprocessed: MainMatrixPtrs<EF>,
+        main: *const MainMatrixPtrs<EF>,
         lambda_pows: *const EF,
         public_values: *const F,
         rules: *const std::ffi::c_void,
@@ -684,8 +828,8 @@ extern "C" {
         output: *mut Frac<EF>,
         eq_xi: *const EF,
         selectors: *const EF,
-        preprocessed: MainMatrixDesc,
-        main: *const MainMatrixDesc,
+        preprocessed: MainMatrixPtrs<EF>,
+        main: *const MainMatrixPtrs<EF>,
         challenges: *const EF,
         eq_3bs: *const EF,
         public_values: *const F,
@@ -743,6 +887,37 @@ extern "C" {
         stream: cudaStream_t,
     ) -> i32;
 
+    /// The eager, raw-pointer entry points. Same evaluator, different context
+    /// ABI: no [`BaseOff`], no pool base, no null sentinel. See
+    /// [`MainMatrixPtrs`] for why this path is kept separate.
+    fn _zerocheck_batch_eval_mle_raw(
+        tmp_sums_buffer: *mut EF,
+        output: *mut EF,
+        block_ctxs: *const BlockCtx,
+        zc_ctxs: *const ZerocheckCtxRaw,
+        air_block_offsets: *const u32,
+        lambda_pows: *const EF,
+        lambda_len: usize,
+        num_blocks: u32,
+        num_x: u32,
+        num_airs: u32,
+        threads_per_block: u32,
+        stream: cudaStream_t,
+    ) -> i32;
+
+    fn _logup_batch_eval_mle_raw(
+        tmp_sums_buffer: *mut Frac<EF>,
+        output: *mut Frac<EF>,
+        block_ctxs: *const BlockCtx,
+        logup_ctxs: *const LogupCtxRaw,
+        air_block_offsets: *const u32,
+        num_blocks: u32,
+        num_x: u32,
+        num_airs: u32,
+        threads_per_block: u32,
+        stream: cudaStream_t,
+    ) -> i32;
+
     /// `sizeof` of the C++ ctx ABI, for the layout static-asserts in
     /// [`assert_ctx_abi_matches_cuda`].
     pub fn _main_matrix_desc_size() -> usize;
@@ -756,6 +931,13 @@ extern "C" {
     pub fn _base_off_null() -> u64;
     pub fn _main_matrix_desc_data_offset() -> usize;
     pub fn _main_matrix_desc_air_width_offset() -> usize;
+
+    /// `sizeof` of the raw-pointer (eager) ctx ABI — a second ABI, so a
+    /// second guard.
+    pub fn _main_matrix_ptrs_size() -> usize;
+    pub fn _eval_core_ctx_raw_size() -> usize;
+    pub fn _zerocheck_ctx_raw_size() -> usize;
+    pub fn _logup_ctx_raw_size() -> usize;
 
     fn _zerocheck_monomial_batched(
         tmp_sums: *mut EF,
@@ -823,6 +1005,49 @@ extern "C" {
         numer_ctxs: *const LogupMonomialCtx,
         denom_ctxs: *const LogupMonomialCtx,
         pool_base: *const u8,
+        air_block_offsets: *const u32,
+        num_blocks: u32,
+        num_x: u32,
+        num_airs: u32,
+        threads_per_block: u32,
+        stream: cudaStream_t,
+    ) -> i32;
+
+    /// The eager, raw-pointer monomial entry points.
+    fn _zerocheck_monomial_batched_raw(
+        tmp_sums: *mut EF,
+        output: *mut EF,
+        block_ctxs: *const BlockCtx,
+        air_ctxs: *const MonomialAirCtxRaw,
+        air_block_offsets: *const u32,
+        num_blocks: u32,
+        num_x: u32,
+        num_airs: u32,
+        threads_per_block: u32,
+        stream: cudaStream_t,
+    ) -> i32;
+
+    fn _zerocheck_monomial_par_y_batched_raw(
+        tmp_sums: *mut EF,
+        output: *mut EF,
+        block_ctxs: *const BlockCtx,
+        air_ctxs: *const MonomialAirCtxRaw,
+        air_block_offsets: *const u32,
+        num_blocks: u32,
+        num_x: u32,
+        num_airs: u32,
+        chunk_size: u32,
+        threads_per_block: u32,
+        stream: cudaStream_t,
+    ) -> i32;
+
+    fn _logup_monomial_batched_raw(
+        tmp_sums: *mut Frac<EF>,
+        output: *mut Frac<EF>,
+        block_ctxs: *const BlockCtx,
+        common_ctxs: *const LogupMonomialCommonCtxRaw,
+        numer_ctxs: *const LogupMonomialCtx,
+        denom_ctxs: *const LogupMonomialCtx,
         air_block_offsets: *const u32,
         num_blocks: u32,
         num_x: u32,
@@ -1622,6 +1847,24 @@ pub unsafe fn frac_add_alpha(
 /// - Round 0 does **not** read `MainMatrixDesc::air_width`: it strides a main matrix column-major
 ///   by `height` (`cuda/include/dag_entry.cuh`, `ENTRY_MAIN`). The field is carried only so this
 ///   table has the same layout as the batched evaluators' descriptor arrays.
+// TODO(cc-ir): the round-0 entry points are the one evaluator family where
+//   eager and graph still share the base+offset decoder — there is no
+//   `_raw` twin here as there now is for the single-AIR, batched-DAG and
+//   monomial families (`MainMatrixPtrs`).
+// WHY: round 0 dispatches through `DISPATCH_BOOL_PAIR` /
+//   `launch_zerocheck_coset_parallel<bool, bool>` / `dispatch_zerocheck`
+//   (`cuda/src/logup_zerocheck/zerocheck_round0.cu:680-750`), so a raw variant
+//   means threading a third template parameter through that whole macro
+//   dispatch — much larger and riskier than the two flat launchers the other
+//   families use, and not something to land unrehearsed.
+// RISK: for round 0 only, a defect in the *shared* parts of the ABI — the
+//   `BASE_OFF_NULL` sentinel, or a Rust/C++ layout drift in `MainMatrixDesc` —
+//   is applied identically to eager and graph and no equality test can see it.
+//   Partly mitigated: `assert_ctx_abi_matches_cuda` pins `MainMatrixDesc`'s
+//   size *and* both field offsets against the C++ truth, and pins the sentinel
+//   against `_base_off_null()`, so both defect classes have a direct guard
+//   even without an independent oracle. What stays uncovered is a decode bug
+//   that those size/offset/sentinel asserts do not express.
 #[allow(clippy::too_many_arguments)]
 pub unsafe fn zerocheck_ntt_eval_constraints(
     tmp_sums_buffer: &mut DeviceBuffer<EF>,
@@ -1745,8 +1988,8 @@ pub unsafe fn zerocheck_eval_mle(
     output: &mut DeviceBuffer<EF>,
     eq_xi: *const EF,
     selectors: *const EF,
-    preprocessed: MainMatrixDesc,
-    main_ptrs: *const MainMatrixDesc,
+    preprocessed: MainMatrixPtrs<EF>,
+    main_ptrs: *const MainMatrixPtrs<EF>,
     lambda_pows: *const EF,
     lambda_len: usize,
     public_values: *const F,
@@ -1822,8 +2065,8 @@ pub unsafe fn logup_eval_mle(
     output: &mut DeviceBuffer<Frac<EF>>,
     eq_xi: *const EF,
     selectors: *const EF,
-    preprocessed: MainMatrixDesc,
-    main_ptrs: *const MainMatrixDesc,
+    preprocessed: MainMatrixPtrs<EF>,
+    main_ptrs: *const MainMatrixPtrs<EF>,
     challenges: *const EF,
     eq_3bs: *const EF,
     public_values: *const F,
@@ -1879,6 +2122,156 @@ pub unsafe fn logup_batch_eval_mle(
         block_ctxs.as_ptr(),
         logup_ctxs.as_ptr(),
         pool_base,
+        air_block_offsets.as_ptr(),
+        num_blocks,
+        num_x,
+        num_airs,
+        threads_per_block,
+        stream,
+    ))
+}
+
+/// The eager batched zerocheck evaluator: raw-pointer contexts, no pool base.
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn zerocheck_batch_eval_mle_raw(
+    tmp_sums_buffer: &mut DeviceBuffer<EF>,
+    output: &mut DeviceBuffer<EF>,
+    block_ctxs: &DeviceBuffer<BlockCtx>,
+    zc_ctxs: &DeviceBuffer<ZerocheckCtxRaw>,
+    air_block_offsets: &DeviceBuffer<u32>,
+    lambda_pows: &DeviceBuffer<EF>,
+    lambda_len: usize,
+    num_blocks: u32,
+    num_x: u32,
+    num_airs: u32,
+    threads_per_block: u32,
+    stream: cudaStream_t,
+) -> Result<(), CudaError> {
+    CudaError::from_result(_zerocheck_batch_eval_mle_raw(
+        tmp_sums_buffer.as_mut_ptr(),
+        output.as_mut_ptr(),
+        block_ctxs.as_ptr(),
+        zc_ctxs.as_ptr(),
+        air_block_offsets.as_ptr(),
+        lambda_pows.as_ptr(),
+        lambda_len,
+        num_blocks,
+        num_x,
+        num_airs,
+        threads_per_block,
+        stream,
+    ))
+}
+
+/// The eager batched logup evaluator: raw-pointer contexts, no pool base.
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn logup_batch_eval_mle_raw(
+    tmp_sums_buffer: &mut DeviceBuffer<Frac<EF>>,
+    output: &mut DeviceBuffer<Frac<EF>>,
+    block_ctxs: &DeviceBuffer<BlockCtx>,
+    logup_ctxs: &DeviceBuffer<LogupCtxRaw>,
+    air_block_offsets: &DeviceBuffer<u32>,
+    num_blocks: u32,
+    num_x: u32,
+    num_airs: u32,
+    threads_per_block: u32,
+    stream: cudaStream_t,
+) -> Result<(), CudaError> {
+    CudaError::from_result(_logup_batch_eval_mle_raw(
+        tmp_sums_buffer.as_mut_ptr(),
+        output.as_mut_ptr(),
+        block_ctxs.as_ptr(),
+        logup_ctxs.as_ptr(),
+        air_block_offsets.as_ptr(),
+        num_blocks,
+        num_x,
+        num_airs,
+        threads_per_block,
+        stream,
+    ))
+}
+
+/// The eager batched monomial evaluator: raw-pointer contexts, no pool base.
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn zerocheck_monomial_batched_raw(
+    tmp_sums: &mut DeviceBuffer<EF>,
+    output: &mut DeviceBuffer<EF>,
+    block_ctxs: &DeviceBuffer<BlockCtx>,
+    air_ctxs: &DeviceBuffer<MonomialAirCtxRaw>,
+    air_block_offsets: &DeviceBuffer<u32>,
+    num_blocks: u32,
+    num_x: u32,
+    num_airs: u32,
+    threads_per_block: u32,
+    stream: cudaStream_t,
+) -> Result<(), CudaError> {
+    CudaError::from_result(_zerocheck_monomial_batched_raw(
+        tmp_sums.as_mut_ptr(),
+        output.as_mut_ptr(),
+        block_ctxs.as_ptr(),
+        air_ctxs.as_ptr(),
+        air_block_offsets.as_ptr(),
+        num_blocks,
+        num_x,
+        num_airs,
+        threads_per_block,
+        stream,
+    ))
+}
+
+/// The eager par-y batched monomial evaluator: raw-pointer contexts.
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn zerocheck_monomial_par_y_batched_raw(
+    tmp_sums: &mut DeviceBuffer<EF>,
+    output: &mut DeviceBuffer<EF>,
+    block_ctxs: &DeviceBuffer<BlockCtx>,
+    air_ctxs: &DeviceBuffer<MonomialAirCtxRaw>,
+    air_block_offsets: &DeviceBuffer<u32>,
+    num_blocks: u32,
+    num_x: u32,
+    num_airs: u32,
+    chunk_size: u32,
+    threads_per_block: u32,
+    stream: cudaStream_t,
+) -> Result<(), CudaError> {
+    CudaError::from_result(_zerocheck_monomial_par_y_batched_raw(
+        tmp_sums.as_mut_ptr(),
+        output.as_mut_ptr(),
+        block_ctxs.as_ptr(),
+        air_ctxs.as_ptr(),
+        air_block_offsets.as_ptr(),
+        num_blocks,
+        num_x,
+        num_airs,
+        chunk_size,
+        threads_per_block,
+        stream,
+    ))
+}
+
+/// The eager batched logup-monomial evaluator: raw-pointer contexts.
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn logup_monomial_batched_raw(
+    tmp_sums: &mut DeviceBuffer<Frac<EF>>,
+    output: &mut DeviceBuffer<Frac<EF>>,
+    block_ctxs: &DeviceBuffer<BlockCtx>,
+    common_ctxs: &DeviceBuffer<LogupMonomialCommonCtxRaw>,
+    numer_ctxs: &DeviceBuffer<LogupMonomialCtx>,
+    denom_ctxs: &DeviceBuffer<LogupMonomialCtx>,
+    air_block_offsets: &DeviceBuffer<u32>,
+    num_blocks: u32,
+    num_x: u32,
+    num_airs: u32,
+    threads_per_block: u32,
+    stream: cudaStream_t,
+) -> Result<(), CudaError> {
+    CudaError::from_result(_logup_monomial_batched_raw(
+        tmp_sums.as_mut_ptr(),
+        output.as_mut_ptr(),
+        block_ctxs.as_ptr(),
+        common_ctxs.as_ptr(),
+        numer_ctxs.as_ptr(),
+        denom_ctxs.as_ptr(),
         air_block_offsets.as_ptr(),
         num_blocks,
         num_x,
@@ -2203,6 +2596,31 @@ pub fn assert_ctx_abi_matches_cuda() {
             std::mem::size_of::<LogupCtx>(),
             _logup_ctx_size(),
             "LogupCtx layout drift vs CUDA"
+        );
+
+        // The raw-pointer (eager) ABI. It is a *separate* ABI from the one
+        // above — that separation is what makes eager an independent oracle
+        // (see [`MainMatrixPtrs`]) — so it needs its own guard rather than
+        // inheriting the base+offset one.
+        assert_eq!(
+            std::mem::size_of::<MainMatrixPtrs<EF>>(),
+            _main_matrix_ptrs_size(),
+            "MainMatrixPtrs<EF> layout drift vs CUDA"
+        );
+        assert_eq!(
+            std::mem::size_of::<EvalCoreCtxRaw>(),
+            _eval_core_ctx_raw_size(),
+            "EvalCoreCtxRaw layout drift vs CUDA"
+        );
+        assert_eq!(
+            std::mem::size_of::<ZerocheckCtxRaw>(),
+            _zerocheck_ctx_raw_size(),
+            "ZerocheckCtxRaw layout drift vs CUDA"
+        );
+        assert_eq!(
+            std::mem::size_of::<LogupCtxRaw>(),
+            _logup_ctx_raw_size(),
+            "LogupCtxRaw layout drift vs CUDA"
         );
     }
 }

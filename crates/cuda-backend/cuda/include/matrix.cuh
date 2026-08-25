@@ -29,3 +29,17 @@ __host__ __device__ __forceinline__ MainMatrixPtrs<T>
 resolve_main_matrix(const MainMatrixDesc &d, const uint8_t *base) {
     return MainMatrixPtrs<T>{base_off_ptr<const T>(base, d.data), d.air_width};
 }
+
+/// The raw-pointer (eager) form needs no decoding at all: it already holds the
+/// pointer, there is no base and no sentinel to interpret.
+///
+/// This overload is what lets one kernel body serve both ABIs while keeping the
+/// eager path *off* `base_off_ptr`. That independence is the point: every
+/// equality test in the graph-IR port compares a graph result against an eager
+/// one, so a sentinel or layout defect in the base+offset ABI must be able to
+/// show up as a mismatch instead of being applied identically to both sides.
+template <typename T>
+__host__ __device__ __forceinline__ MainMatrixPtrs<T>
+resolve_main_matrix(const MainMatrixPtrs<T> &d, const uint8_t * /*base*/) {
+    return d;
+}

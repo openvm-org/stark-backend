@@ -1335,19 +1335,29 @@ mod tests {
             .compile(g)
             .expect("graph compile");
 
-        // Bind the observe inputs once — identical for both runs.
-        for i in 0..exe.num_inputs() {
-            let bid = exe.input_buf_id(i);
-            if bid == seed_buf {
-                continue;
+        // Upload the observe inputs. The bytes are identical for both runs,
+        // but this must still happen before **each** run: graph inputs are
+        // not preserved across an execution (`crates/compiler/notes.md:46-52`)
+        // — the scheduler may hand an input's slot to another buffer once its
+        // last consumer has run, and ListV2 (the shipped `SchedulerConfig`
+        // default) does exactly that (`planner/list_v2.rs:371-401`). Binding
+        // once and replaying happened to work here only because
+        // `GraphCompiler`'s `SchedulerMode::default()` is ListV1, which pins
+        // inputs through the schedule.
+        let upload_observes = |exe: &mut GraphExe| {
+            for i in 0..exe.num_inputs() {
+                let bid = exe.input_buf_id(i);
+                if bid == seed_buf {
+                    continue;
+                }
+                let (_, bytes) = observe_bufs
+                    .iter()
+                    .find(|(b, _)| *b == bid)
+                    .expect("input buf not found");
+                let dbuf = bytes.as_slice().to_device_on(&ctx).expect("H2D");
+                exe.set_input(&ctx, i, &dbuf).expect("set_input");
             }
-            let (_, bytes) = observe_bufs
-                .iter()
-                .find(|(b, _)| *b == bid)
-                .expect("input buf not found");
-            let dbuf = bytes.as_slice().to_device_on(&ctx).expect("H2D");
-            exe.set_input(&ctx, i, &dbuf).expect("set_input");
-        }
+        };
 
         fn collect(exe: &GraphExe, ctx: &GpuDeviceCtx, sample_bufs: &[(BufId, usize)]) -> Vec<F> {
             let mut out = Vec::new();
@@ -1364,12 +1374,15 @@ mod tests {
         }
 
         // Run 1: seed A.
+        upload_observes(&mut exe);
         bind_sponge_seed(&mut exe, &ctx, seed_buf, &snap_a).expect("bind A");
         exe.run(&ctx).expect("run A");
         let got_a = collect(&exe, &ctx, &sample_bufs);
         assert_eq!(got_a, want_a, "run A: seeded graph did not match oracle A");
 
-        // Run 2: SAME compiled exe, re-seeded with B. No recompile.
+        // Run 2: SAME compiled exe, re-seeded with B. No recompile — but
+        // every input is re-uploaded, seed and observes alike.
+        upload_observes(&mut exe);
         bind_sponge_seed(&mut exe, &ctx, seed_buf, &snap_b).expect("bind B");
         exe.run(&ctx).expect("run B");
         let got_b = collect(&exe, &ctx, &sample_bufs);
@@ -1685,6 +1698,13 @@ mod tests {
 
         // Warm each op once so first-launch driver work (module loads,
         // cubin JITs, CUDA graph capture) doesn't pollute the profile.
+        //
+        // The profiled run below deliberately does not re-upload inputs. That
+        // breaks the input-preservation rule (`crates/compiler/notes.md:46-52`)
+        // and would be a correctness bug anywhere else, but this harness
+        // measures kernel time only — it asserts nothing about the values —
+        // and re-uploading inside the profiler window would add H2D traffic to
+        // the measurement.
         for (_op, exe) in &mut runners {
             exe.run(&ctx).expect("warmup run");
         }

@@ -89,7 +89,7 @@
 //! all-zero prove.
 
 use std::{
-    mem::{forget, size_of},
+    mem::{forget, offset_of, size_of},
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc,
@@ -713,21 +713,51 @@ pub fn logup_bary_eval_interactions_round0_ir(
     );
 }
 
+/// Where a [`fold_ple_from_evals_ir`] node writes.
+///
+/// Round 0 folds a `need_rot` matrix with **two** launches into **one**
+/// doubled-width buffer: the plain fold writes `[0, num_x*width)`, the
+/// rotated fold writes `[num_x*width, 2*num_x*width)` (`fold_ple.rs:38, 50`).
+///
+/// The graph is SSA, so the obvious spelling of the second launch is a fresh
+/// `BufId` aliased to the first — and that spelling is **wrong**. The author's
+/// rule is explicit: an in-place mutation must retain one `BufId`, because the
+/// memory scheduler cannot infer that renamed IDs are one allocation
+/// (`crates/compiler/notes.md:37-44`). `GraphBuilder::alias_bufs` only records
+/// a parent id (`graph_ir.rs:1021-1048`); `plan_memory` never reads the alias
+/// table (`graph_compiler.rs:594-639`), so the two ids get **different pool
+/// offsets** under every shipped scheduler. The lower half then lands in one
+/// allocation, the upper half in another, and every later round reads a
+/// half-written buffer.
+///
+/// So the second launch is expressed the only way the compiler understands:
+/// [`Self::InPlace`] — the destination is carried in as an input with
+/// `modifies = true`, the node declares no fresh output, and the closure takes
+/// its destination pointer from the input slice (the runtime passes carried
+/// mutations there, `graph_exe.rs:1045-1057`). `access_from_node` then sees
+/// the buffer in both the read and the write set, which is the definition of
+/// a mutation, and the ATG inserts the ordering edge from the plain fold.
+#[derive(Clone, Copy, Debug)]
+pub enum FoldPleDst {
+    /// A fresh buffer this launch is the sole producer of: declared as the
+    /// node's output.
+    Fresh(BufId),
+    /// An existing buffer this launch overwrites part of: declared as a
+    /// carried input (`modifies = true`), never as a renamed output.
+    InPlace(BufId),
+}
+
 /// Insert a `fold_ple_from_evals` node (`fold_ple.rs:95` ← `mod.rs:977/991/1004`).
 ///
-/// The rotated fold writes the *second half of the same buffer* the plain
-/// fold wrote the first half of (`fold_ple.rs:38, 50`). The graph is SSA, so
-/// that is expressed as a rename: the rotated launch declares a fresh `dst`
-/// aliased (`GraphBuilder::alias_bufs`) to the plain fold's output, takes the
-/// plain output as `carry_in` — a read, so the halves stay ordered — and
-/// writes at `dst_offset`.
+/// `dst_offset` is an `EF` element offset into `dst`'s buffer; see
+/// [`FoldPleDst`] for why the rotated launch must be [`FoldPleDst::InPlace`]
+/// and not a fresh aliased id.
 #[allow(clippy::too_many_arguments)]
 pub fn fold_ple_from_evals_ir(
     g: &mut GraphBuilder,
     input_matrix: BufId,
     input_len: usize,
-    carry_in: Option<BufId>,
-    dst: BufId,
+    dst: FoldPleDst,
     dst_offset: usize,
     omega_skip_pows: BufId,
     skip_domain: usize,
@@ -739,10 +769,26 @@ pub fn fold_ple_from_evals_ir(
     rotate: bool,
 ) {
     let mut inputs = vec![input_matrix, omega_skip_pows, inv_lagrange_denoms];
-    if let Some(prev) = carry_in {
-        inputs.push(prev);
-    }
-    let modifies: Vec<bool> = inputs.iter().map(|_| false).collect();
+    let mut modifies = vec![false, false, false];
+    // `None` ⇒ the destination is `outputs[0]`; `Some(i)` ⇒ it is the carried
+    // input `inputs[i]`, because the runtime hands carried mutations to the
+    // closure in the *input* slice (`graph_exe.rs:1045-1057`).
+    let carried_dst = match dst {
+        FoldPleDst::Fresh(_) => None,
+        FoldPleDst::InPlace(b) => {
+            assert!(
+                !inputs.contains(&b),
+                "fold_ple_from_evals_ir: in-place destination {b:?} is already an input"
+            );
+            inputs.push(b);
+            modifies.push(true);
+            Some(inputs.len() - 1)
+        }
+    };
+    let outputs: Vec<BufId> = match dst {
+        FoldPleDst::Fresh(b) => vec![b],
+        FoldPleDst::InPlace(_) => vec![],
+    };
     g.insert_blackbox_kernel(
         if rotate {
             "fold_ple_from_evals<rot>"
@@ -750,10 +796,14 @@ pub fn fold_ple_from_evals_ir(
             "fold_ple_from_evals"
         },
         inputs.into_iter(),
-        std::iter::once(dst),
+        outputs.into_iter(),
         modifies.into_iter(),
         move |inputs, outputs, stream| unsafe {
-            let out_ptr = (outputs[0] as *mut EF).add(dst_offset);
+            let dst_base = match carried_dst {
+                Some(i) => inputs[i],
+                None => outputs[0],
+            };
+            let out_ptr = (dst_base as *mut EF).add(dst_offset);
             let mat = DeviceBuffer::<F>::from_raw_parts(inputs[0] as *mut F, input_len);
             let omega = DeviceBuffer::<F>::from_raw_parts(inputs[1] as *mut F, skip_domain);
             let denoms = DeviceBuffer::<EF>::from_raw_parts(inputs[2] as *mut EF, skip_domain);
@@ -1216,20 +1266,154 @@ enum DescElem {
     RawPtr(DevicePtrArg),
 }
 
+// ---------------------------------------------------------------------------
+// ABI serialization.
+//
+// Field-wise, into a zero-filled buffer of the struct's exact `size_of`.
+//
+// The obvious alternative — `slice::from_raw_parts(v as *const T as *const u8,
+// size_of::<T>())` — is wrong twice over. Every one of these `#[repr(C)]`
+// structs has padding: `MainMatrixDesc` is a `u64` followed by a `u32` at
+// align 8, so four trailing bytes; `ZerocheckCtx` and `LogupCtx` add interior
+// padding around their `u32`s. Rust never initializes padding, so reading it
+// as `u8` is an uninitialized read (undefined behaviour), and the bytes it
+// yields are not a function of the descriptor's fields. That second half is
+// what makes it a *test* problem and not only a soundness one: almost every
+// oracle in this module compares encoded descriptor bytes for equality
+// (`descriptors_decode_like_the_eager_pointer_path`'s replay leg compares
+// them literally, padding included), and a byte that can differ run to run
+// silently weakens all of them.
+//
+// Writing field by field at `offset_of!` positions fixes both: no byte of the
+// source value is ever read except through a named field, and every byte of
+// the output is either a field or a deterministic zero.
+
+/// A zero-filled ABI image of one `#[repr(C)]` struct.
+struct AbiBytes(Vec<u8>);
+
+impl AbiBytes {
+    fn new<T>() -> Self {
+        AbiBytes(vec![0u8; size_of::<T>()])
+    }
+
+    /// Place one scalar field at its `offset_of!` position.
+    ///
+    /// `V` must be a type with no padding of its own — an integer, or a
+    /// `#[repr(transparent)]` newtype over one. Every call below passes
+    /// `u64` / `u32` / `usize`.
+    fn put<V: Copy>(&mut self, at: usize, v: V) {
+        let n = size_of::<V>();
+        assert!(
+            at + n <= self.0.len(),
+            "ABI field at {at}..{} overflows a {}-byte image",
+            at + n,
+            self.0.len()
+        );
+        // SAFETY: `v` is a fully initialized `V` with no padding, the
+        // destination range was bounds-checked above, and `Vec<u8>` has
+        // alignment 1 so an unaligned byte copy is well-defined.
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                &v as *const V as *const u8,
+                self.0.as_mut_ptr().add(at),
+                n,
+            );
+        }
+    }
+
+    /// Place a nested struct's image at its `offset_of!` position.
+    fn put_nested(&mut self, at: usize, sub: AbiBytes) {
+        assert!(
+            at + sub.0.len() <= self.0.len(),
+            "nested ABI field at {at}..{} overflows a {}-byte image",
+            at + sub.0.len(),
+            self.0.len()
+        );
+        self.0[at..at + sub.0.len()].copy_from_slice(&sub.0);
+    }
+
+    fn into_vec(self) -> Vec<u8> {
+        self.0
+    }
+}
+
+fn encode_main_matrix_desc(d: &MainMatrixDesc) -> AbiBytes {
+    let mut b = AbiBytes::new::<MainMatrixDesc>();
+    b.put(offset_of!(MainMatrixDesc, data), d.data.0);
+    b.put(offset_of!(MainMatrixDesc, air_width), d.air_width);
+    b
+}
+
+fn encode_eval_core_ctx(c: &EvalCoreCtx) -> AbiBytes {
+    let mut b = AbiBytes::new::<EvalCoreCtx>();
+    b.put(offset_of!(EvalCoreCtx, d_selectors), c.d_selectors.0);
+    b.put_nested(
+        offset_of!(EvalCoreCtx, d_preprocessed),
+        encode_main_matrix_desc(&c.d_preprocessed),
+    );
+    b.put(offset_of!(EvalCoreCtx, d_main), c.d_main.0);
+    b.put(offset_of!(EvalCoreCtx, d_public), c.d_public.0);
+    b
+}
+
+fn encode_zerocheck_ctx(c: &ZerocheckCtx) -> AbiBytes {
+    let mut b = AbiBytes::new::<ZerocheckCtx>();
+    b.put_nested(
+        offset_of!(ZerocheckCtx, eval_ctx),
+        encode_eval_core_ctx(&c.eval_ctx),
+    );
+    b.put(
+        offset_of!(ZerocheckCtx, d_intermediates),
+        c.d_intermediates.0,
+    );
+    b.put(offset_of!(ZerocheckCtx, num_y), c.num_y);
+    b.put(offset_of!(ZerocheckCtx, d_eq_xi), c.d_eq_xi.0);
+    b.put(offset_of!(ZerocheckCtx, d_rules), c.d_rules.0);
+    b.put(offset_of!(ZerocheckCtx, rules_len), c.rules_len);
+    b.put(offset_of!(ZerocheckCtx, d_used_nodes), c.d_used_nodes.0);
+    b.put(offset_of!(ZerocheckCtx, used_nodes_len), c.used_nodes_len);
+    b.put(offset_of!(ZerocheckCtx, buffer_size), c.buffer_size);
+    b
+}
+
+fn encode_logup_ctx(c: &LogupCtx) -> AbiBytes {
+    let mut b = AbiBytes::new::<LogupCtx>();
+    b.put_nested(
+        offset_of!(LogupCtx, eval_ctx),
+        encode_eval_core_ctx(&c.eval_ctx),
+    );
+    b.put(offset_of!(LogupCtx, d_intermediates), c.d_intermediates.0);
+    b.put(offset_of!(LogupCtx, num_y), c.num_y);
+    b.put(offset_of!(LogupCtx, d_eq_xi), c.d_eq_xi.0);
+    b.put(offset_of!(LogupCtx, d_challenges), c.d_challenges.0);
+    b.put(offset_of!(LogupCtx, d_eq_3bs), c.d_eq_3bs.0);
+    b.put(offset_of!(LogupCtx, d_rules), c.d_rules.0);
+    b.put(offset_of!(LogupCtx, rules_len), c.rules_len);
+    b.put(offset_of!(LogupCtx, d_used_nodes), c.d_used_nodes.0);
+    b.put(offset_of!(LogupCtx, d_pair_idxs), c.d_pair_idxs.0);
+    b.put(offset_of!(LogupCtx, used_nodes_len), c.used_nodes_len);
+    b.put(offset_of!(LogupCtx, buffer_size), c.buffer_size);
+    b
+}
+
 impl DescElem {
     /// Run this element's writer against `sink`, returning its raw ABI bytes.
+    ///
+    /// The bytes are built field by field (see [`AbiBytes`]); no padding byte
+    /// of the constructed struct is ever read, so the encoding is a pure
+    /// function of the descriptor's fields.
     fn encode<S: OffSink>(&self, sink: &mut S) -> Vec<u8> {
-        fn bytes_of<T>(v: &T) -> Vec<u8> {
-            unsafe { std::slice::from_raw_parts(v as *const T as *const u8, size_of::<T>()) }
-                .to_vec()
-        }
         match self {
             DescElem::MainMatrix { data, air_width } => {
-                bytes_of(&write_main_matrix_desc(sink, *data, *air_width))
+                encode_main_matrix_desc(&write_main_matrix_desc(sink, *data, *air_width)).into_vec()
             }
-            DescElem::Zerocheck(a) => bytes_of(&write_zerocheck_ctx(sink, a)),
-            DescElem::Logup(a) => bytes_of(&write_logup_ctx(sink, a)),
-            DescElem::RawPtr(data) => bytes_of(&sink.addr(*data)),
+            DescElem::Zerocheck(a) => {
+                encode_zerocheck_ctx(&write_zerocheck_ctx(sink, a)).into_vec()
+            }
+            DescElem::Logup(a) => encode_logup_ctx(&write_logup_ctx(sink, a)).into_vec(),
+            // A bare `u64` has no padding, but it still goes through the same
+            // explicit path rather than a whole-struct byte view.
+            DescElem::RawPtr(data) => sink.addr(*data).to_ne_bytes().to_vec(),
         }
     }
 }
@@ -1447,33 +1631,73 @@ impl DescriptorPlan {
             .collect()
     }
 
-    /// Hand `pool` to `exe`, publish its base, and upload every descriptor
-    /// array.
+    /// Hand `pool` to `exe` and publish its base. **One-shot per exe.**
     ///
-    /// This is the whole R6 contract in one place, and the ordering inside it
-    /// is load-bearing:
+    /// The ordering inside is load-bearing:
     ///
     /// 1. `set_scratch` must precede the first `set_input`/`run`, because the pool is what gives
     ///    every buffer its stable address (`graph_exe.rs:565-572` rejects a late call);
-    /// 2. the offsets are read from `exe.plan()` *after* the exe exists and are never re-read — the
-    ///    graph must not be recompiled or replanned between here and `run`, which is guaranteed by
-    ///    taking `&mut GraphExe` and by `plan()` being immutable on it;
-    /// 3. the base is published before any launch, so every evaluator closure sees it.
+    /// 2. the base is published before any launch, so every evaluator closure sees it.
     ///
     /// `pool` must be at least `exe.scratch_bytes()` long; use
-    /// [`Self::alloc_pool`].
-    pub fn bind(
+    /// [`Self::alloc_pool`]. Calling this twice on one exe is an error —
+    /// `set_scratch` rejects a pool that is already installed. The repeatable
+    /// half is [`Self::upload`].
+    pub fn install_pool(
         &self,
         exe: &mut crypto_compiler::graph_exe::GraphExe,
-        ctx: &openvm_cuda_common::stream::GpuDeviceCtx,
         pool: DeviceBuffer<u8>,
     ) -> Result<(), crypto_compiler::CompileError> {
-        use openvm_cuda_common::copy::MemCopyH2D;
-
         let base = pool.as_mut_raw_ptr() as *const u8;
         exe.set_scratch(pool)?;
         self.base.publish(base);
+        Ok(())
+    }
 
+    /// Encode every descriptor array against the installed pool and upload it
+    /// into its input slot. **Call before every `run` / `launch_graph`.**
+    ///
+    /// # Why this is not one-shot
+    ///
+    /// Graph inputs are *not* preserved across an execution — the compiler
+    /// reuses their slots to save memory, and the author's rule is explicit
+    /// that the inputs must be set for every launch
+    /// (`crates/compiler/notes.md:46-52`). ListV1 happens to pin graph inputs
+    /// and outputs through the schedule (`planner/list_v1.rs:638-655,
+    /// 789-795`), which is why a single upload appeared to work; ListV2 —
+    /// which is what `SchedulerConfig::default()` ships
+    /// (`graph_compiler_config.rs:129-147`) — gives an input birth 0 but
+    /// infinite death only to *outputs* (`planner/list_v2.rs:371-401`), so a
+    /// descriptor array's slot is free for reuse after its last first-run
+    /// consumer.
+    ///
+    /// The failure that causes is not a benign stale read. The decoder adds
+    /// whatever 64-bit value now occupies the slot to the pool base
+    /// (`cuda/include/base_off.cuh:34-54`), so a replay that skipped the
+    /// upload reads either wrong in-pool data or an invalid device address.
+    ///
+    /// The upstream remedy the note suggests — "declare it as a graph output"
+    /// — is unavailable here: interface validation rejects an id registered in
+    /// both lists and requires every output to have a writer
+    /// (`graph_compiler.rs:1278-1293`), and a descriptor array has no
+    /// in-graph writer.
+    ///
+    /// The offsets are re-read from `exe.plan()` on every call. They are
+    /// constant for the exe's lifetime (`plan()` is immutable and the pool is
+    /// never reallocated), so re-encoding produces identical bytes — which is
+    /// exactly what makes a CUDA-graph replay legal.
+    pub fn upload(
+        &self,
+        exe: &mut crypto_compiler::graph_exe::GraphExe,
+        ctx: &openvm_cuda_common::stream::GpuDeviceCtx,
+    ) -> Result<(), crypto_compiler::CompileError> {
+        use openvm_cuda_common::copy::MemCopyH2D;
+
+        let base = self.base.get();
+        assert!(
+            !base.is_null(),
+            "DescriptorPlan::upload before install_pool: the pool base is not published yet"
+        );
         let encoded = self.encode_all(&exe.plan().offsets, base as usize as u64);
         for (buf, bytes) in encoded {
             let i = (0..exe.num_inputs())
@@ -1494,6 +1718,22 @@ impl DescriptorPlan {
             exe.set_input(ctx, i, &staged)?;
         }
         Ok(())
+    }
+
+    /// [`Self::install_pool`] followed by [`Self::upload`] — the first-run
+    /// convenience form.
+    ///
+    /// This is **not** enough on its own for a second execution: call
+    /// [`Self::upload`] again (together with [`PhaseInputBinder::bind`])
+    /// before every subsequent `run`. See [`Self::upload`] for why.
+    pub fn bind(
+        &self,
+        exe: &mut crypto_compiler::graph_exe::GraphExe,
+        ctx: &openvm_cuda_common::stream::GpuDeviceCtx,
+        pool: DeviceBuffer<u8>,
+    ) -> Result<(), crypto_compiler::CompileError> {
+        self.install_pool(exe, pool)?;
+        self.upload(exe, ctx)
     }
 
     /// Allocate a pool of exactly the size the plan needs.
@@ -2468,8 +2708,13 @@ impl PhaseInputBinder {
 
     /// Upload every input into its pool slot. Returns the number filled.
     ///
-    /// Call **after** [`DescriptorPlan::bind`] (which installs the pool) and
-    /// before `GraphExe::run`.
+    /// Call **after** [`DescriptorPlan::install_pool`] and **before every**
+    /// `GraphExe::run` — not once. Graph inputs are not preserved across an
+    /// execution (`crates/compiler/notes.md:46-52`): ListV1 pins them through
+    /// the schedule, but ListV2 — the shipped `SchedulerConfig` default — is
+    /// free to reuse an input's slot once its last consumer has run
+    /// (`planner/list_v2.rs:371-401`). This method is already idempotent and
+    /// re-runnable; nothing in it is one-shot.
     ///
     /// Fails rather than silently zeroing if any input is unbound, and fails
     /// if an input's planned size disagrees with the bytes supplied.
@@ -3233,8 +3478,7 @@ where
                 g,
                 tb.mats[i],
                 m.width * m.height,
-                None,
-                tb.folded_mats[i],
+                FoldPleDst::Fresh(tb.folded_mats[i]),
                 0,
                 omega_skip_pows,
                 skip_domain,
@@ -3245,23 +3489,17 @@ where
                 num_x as u32,
                 false,
             );
-            let mut newest = tb.folded_mats[i];
             if tp.need_rot {
-                // Second launch writes the upper half of the *same* buffer
-                // (`fold_ple.rs:38, 50`) — an SSA rename over the same slot.
-                let rot = add_ef_buf(
-                    g,
-                    device,
-                    &format!("t{t}_mat{i}_folded_rot"),
-                    num_x * tp.folded_width(i),
-                );
-                g.alias_bufs(rot, tb.folded_mats[i]);
+                // The second launch writes the upper half of the *same*
+                // doubled-width buffer (`fold_ple.rs:38, 50`). It keeps the
+                // first launch's `BufId` and declares it a carried mutation —
+                // never a fresh aliased id, which the memory scheduler would
+                // place at a different pool offset. See [`FoldPleDst`].
                 fold_ple_from_evals_ir(
                     g,
                     tb.mats[i],
                     m.width * m.height,
-                    Some(tb.folded_mats[i]),
-                    rot,
+                    FoldPleDst::InPlace(tb.folded_mats[i]),
                     num_x * m.width,
                     omega_skip_pows,
                     skip_domain,
@@ -3272,9 +3510,10 @@ where
                     num_x as u32,
                     true,
                 );
-                newest = rot;
             }
-            folded.push(newest);
+            // One allocation holds both halves, so the freshest name after
+            // round 0 is the same id the plain fold produced.
+            folded.push(tb.folded_mats[i]);
         }
         folded_after_r0.push(folded);
         // `fold_selectors_round0` (`mod.rs:1044`).
@@ -4349,7 +4588,7 @@ mod zerocheck_ir_tests {
     use crypto_compiler::{
         graph_compiler::GraphCompiler,
         graph_ir::{DeviceType, GraphBuilder, GraphNode},
-        planner::{ListSchedulerV1, SchedulerMode},
+        planner::{ListSchedulerV1, ListSchedulerV2, SchedulerMode},
     };
     use openvm_cuda_common::{
         common::get_device,
@@ -4375,9 +4614,36 @@ mod zerocheck_ir_tests {
         unsafe { std::slice::from_raw_parts(xs.as_ptr() as *const u8, std::mem::size_of_val(xs)) }
     }
 
+    /// The in-tree default: ListV1 pins every graph input and output through
+    /// the schedule (`planner/list_v1.rs:638-655, 789-795`).
+    fn scheduler_v1() -> SchedulerMode {
+        SchedulerMode::ListV1 {
+            params: ListSchedulerV1::default(),
+        }
+    }
+
+    /// The shipped `SchedulerConfig::default()` (`graph_compiler_config.rs:129-147`).
+    ///
+    /// ListV2 gives inputs birth 0 but infinite death only to *outputs*
+    /// (`planner/list_v2.rs:371-401`), so an input slot may be reused after
+    /// its last first-run consumer. Any test that claims a property holds
+    /// "under the shipped default" has to run here too.
+    fn scheduler_v2() -> SchedulerMode {
+        SchedulerMode::ListV2 {
+            params: ListSchedulerV2::default(),
+        }
+    }
+
     /// Compile a graph with no runtime inputs, run it, and read back the
-    /// given buffers as raw bytes.
-    fn run_graph_read_bufs(
+    /// given buffers as raw bytes. ListV1 — see [`run_graph_read_bufs_with`]
+    /// to pick the scheduler.
+    fn run_graph_read_bufs(g: GraphBuilder, bufs: &[BufId], ctx: &GpuDeviceCtx) -> Vec<Vec<u8>> {
+        run_graph_read_bufs_with(scheduler_v1(), g, bufs, ctx)
+    }
+
+    /// [`run_graph_read_bufs`] under an explicit scheduler.
+    fn run_graph_read_bufs_with(
+        mode: SchedulerMode,
         mut g: GraphBuilder,
         bufs: &[BufId],
         ctx: &GpuDeviceCtx,
@@ -4387,9 +4653,7 @@ mod zerocheck_ir_tests {
         }
         let mut exe = GraphCompiler::new()
             .device(DeviceType::Cuda(0))
-            .scheduler(SchedulerMode::ListV1 {
-                params: ListSchedulerV1::default(),
-            })
+            .scheduler(mode)
             .compile(g)
             .expect("graph compile");
         exe.run(ctx).expect("graph run");
@@ -5503,12 +5767,18 @@ mod zerocheck_ir_tests {
             );
             assert_eq!(lg.buffer_size, buffer_size, "case {case}: lg.buffer_size");
 
-            // --- replay: same exe, no rebind. Pool addresses are stable, so
-            //     the *complete* descriptor bytes — padding included — must be
-            //     identical. This is the capture-stability contract.
+            // --- replay: same exe, same pool, descriptors re-uploaded.
+            //     Pool addresses are stable, so re-encoding produces the same
+            //     bytes at the same addresses — the capture-stability
+            //     contract. The re-upload is not optional bookkeeping: graph
+            //     inputs are not preserved across an execution
+            //     (`crates/compiler/notes.md:46-52`), so a replay that skipped
+            //     it would be reading whatever the planner put in those slots.
+            //     See [`DescriptorPlan::upload`].
             let zc_addr = planned_addr(zc_ctxs);
             let lg_addr = planned_addr(lg_ctxs);
             let md_addr = planned_addr(main_desc);
+            descs.upload(&mut exe, &ctx).expect("descriptor re-upload");
             exe.run(&ctx).expect("graph replay");
             ctx.stream.synchronize().unwrap();
             assert_eq!(
@@ -5921,8 +6191,7 @@ mod zerocheck_ir_tests {
                 &mut g,
                 mat_buf,
                 height * width,
-                None,
-                out_buf,
+                FoldPleDst::Fresh(out_buf),
                 0,
                 omega_buf,
                 skip_domain,
@@ -5944,6 +6213,534 @@ mod zerocheck_ir_tests {
                 ef_bytes(&want),
                 "fold_ple_from_evals_ir mismatch (l_skip={l_skip}, log_height={log_height}, width={width})"
             );
+        }
+    }
+
+    /// A fixed set of descriptor elements covering all four `DescElem`
+    /// variants, with every field distinct so a swapped or dropped field
+    /// cannot pass unnoticed.
+    fn descriptor_fixture() -> Vec<(&'static str, DescElem)> {
+        let core = |k: usize| EvalCoreCtxArgs {
+            d_selectors: DevicePtrArg::Static(0x1_0000 + k),
+            d_preprocessed_data: DevicePtrArg::Static(0x2_0000 + k),
+            preprocessed_air_width: 7 + k as u32,
+            d_main: DevicePtrArg::Static(0x3_0000 + k),
+            d_public: DevicePtrArg::Static(0x4_0000 + k),
+        };
+        vec![
+            (
+                "MainMatrixDesc",
+                DescElem::MainMatrix {
+                    data: DevicePtrArg::Static(0xDEAD_0000),
+                    air_width: 0x1234_5678,
+                },
+            ),
+            (
+                "MainMatrixDesc/absent",
+                DescElem::MainMatrix {
+                    data: DevicePtrArg::NULL,
+                    air_width: 0,
+                },
+            ),
+            (
+                "ZerocheckCtx",
+                DescElem::Zerocheck(Box::new(ZerocheckCtxArgs {
+                    eval_ctx: core(1),
+                    d_intermediates: DevicePtrArg::Static(0x5_0000),
+                    num_y: 0x0BAD_F00D,
+                    d_eq_xi: DevicePtrArg::Static(0x6_0000),
+                    d_rules: DevicePtrArg::Static(0x7_0000),
+                    rules_len: 0x1122_3344,
+                    d_used_nodes: DevicePtrArg::Static(0x8_0000),
+                    used_nodes_len: 0x5566_7788,
+                    buffer_size: 0x99AA_BBCC,
+                })),
+            ),
+            (
+                "LogupCtx",
+                DescElem::Logup(Box::new(LogupCtxArgs {
+                    eval_ctx: core(2),
+                    d_intermediates: DevicePtrArg::Static(0x9_0000),
+                    num_y: 0x0FEE_1DAD,
+                    d_eq_xi: DevicePtrArg::Static(0xA_0000),
+                    d_challenges: DevicePtrArg::Static(0xB_0000),
+                    d_eq_3bs: DevicePtrArg::Static(0xC_0000),
+                    d_rules: DevicePtrArg::Static(0xD_0000),
+                    rules_len: 0x0102_0304,
+                    d_used_nodes: DevicePtrArg::Static(0xE_0000),
+                    d_pair_idxs: DevicePtrArg::Static(0xF_0000),
+                    used_nodes_len: 0x0506_0708,
+                    buffer_size: 0x090A_0B0C,
+                })),
+            ),
+            (
+                "RawPtr",
+                DescElem::RawPtr(DevicePtrArg::Static(0x1234_5678)),
+            ),
+        ]
+    }
+
+    /// Dirty a few KiB of stack with a recognisable pattern, so that any
+    /// *uninitialized* byte a subsequent encode reads is likely to come back
+    /// as `0xA5` rather than as an incidental zero.
+    #[inline(never)]
+    fn poison_stack() -> u8 {
+        let mut buf = [0xA5u8; 8192];
+        // Defeat const-propagation; the array must really be written.
+        buf[(buf.len() - 1) & 0x1FFF] = 0xA5;
+        std::hint::black_box(&buf);
+        buf[4096]
+    }
+
+    /// S2 — a descriptor array must be **re-uploaded before every run**.
+    ///
+    /// # The rule and the violation
+    ///
+    /// `crates/compiler/notes.md:46-52` is explicit: graph inputs are not
+    /// preserved across an execution, so they must be set for every launch.
+    /// The pre-fix `DescriptorPlan` uploaded its arrays exactly once, inside
+    /// `bind`, and offered no way to do it again: `bind` starts with
+    /// `set_scratch`, which rejects an exe that already owns a pool
+    /// (`graph_exe.rs:565-572`). A second execution therefore read whatever
+    /// the planner had since put in those slots — and the decoder adds that
+    /// value to the pool base (`cuda/include/base_off.cuh:34-54`), so the
+    /// consequence is wrong in-pool data or an invalid device address, not a
+    /// benign stale read.
+    ///
+    /// Two legs:
+    ///
+    /// 1. **The hazard is real**, not theoretical. ListV1 pins graph inputs and outputs through the
+    ///    schedule (`planner/list_v1.rs:638-655, 789-795`); ListV2 — what
+    ///    `SchedulerConfig::default()` ships (`graph_compiler_config.rs:129-147`) — gives an input
+    ///    birth 0 but infinite death only to outputs (`planner/list_v2.rs:371-401`). On the fixture
+    ///    below ListV2 really does hand the descriptor input's slot to a later buffer and ListV1
+    ///    really does not.
+    /// 2. **The remedy works and the old API could not express it.** Clobbering the descriptor slot
+    ///    between runs — exactly what leg 1 shows the planner is allowed to do — corrupts the next
+    ///    run's read; `DescriptorPlan::upload` restores it byte for byte; and a second `bind`, the
+    ///    only tool the pre-fix API had, fails.
+    #[test]
+    fn descriptor_inputs_must_be_reuploaded_before_every_run() {
+        let ctx = test_ctx();
+        let device = DeviceType::Cuda(0);
+
+        // ---- leg 1: does the planner reuse a registered input's slot?
+        //
+        // One descriptor-array input, then a chain of same-sized buffers. The
+        // descriptor references only a `Static` address, so no other graph
+        // buffer competes for the pool.
+        let reuses_input_slot = |mode: SchedulerMode| {
+            let mut g = GraphBuilder::new();
+            let mut descs = DescriptorPlan::new();
+            let db = add_typed_buf::<MainMatrixDesc>(&mut g, device, "descs", 1);
+            let id = descs.add_array::<MainMatrixDesc>(&mut g, db, "descs", 1);
+            let _ = descs.set_main_matrix_desc(id, 0, DevicePtrArg::Static(0x1234_0000), 3);
+            let mut prev = db;
+            let mut chain = vec![];
+            for k in 0..8 {
+                let b = add_typed_buf::<MainMatrixDesc>(&mut g, device, &format!("s{k}"), 1);
+                g.insert_memcpy(prev, b);
+                chain.push(b);
+                prev = b;
+            }
+            g.register_output(prev);
+            let exe = GraphCompiler::new()
+                .device(DeviceType::Cuda(0))
+                .scheduler(mode)
+                .compile(g)
+                .expect("compile");
+            let offs = &exe.plan().offsets;
+            let desc_off = offs[db.0].expect("descriptor input has no pool slot");
+            chain
+                .iter()
+                .filter(|b| **b != prev)
+                .any(|b| offs[b.0] == Some(desc_off))
+        };
+        assert!(
+            !reuses_input_slot(scheduler_v1()),
+            "ListV1 is documented to pin graph inputs through the schedule; if it now reuses \
+             their slots, every one-shot upload in this crate is unsound under it too"
+        );
+        assert!(
+            reuses_input_slot(scheduler_v2()),
+            "ListV2 did not reuse the descriptor input's slot on this fixture, so leg 2's \
+             clobber is no longer modelling something the planner actually does. Re-derive the \
+             fixture before trusting the one-shot-upload argument."
+        );
+
+        // ---- leg 2: the remedy, on a graph whose output *is* the descriptor
+        //      slot's runtime contents.
+        let mut g = GraphBuilder::new();
+        let mut descs = DescriptorPlan::new();
+        let db = add_typed_buf::<MainMatrixDesc>(&mut g, device, "descs", 1);
+        let id = descs.add_array::<MainMatrixDesc>(&mut g, db, "descs", 1);
+        let _ = descs.set_main_matrix_desc(id, 0, DevicePtrArg::Static(0x1234_0000), 3);
+        let obs = add_typed_buf::<MainMatrixDesc>(&mut g, device, "obs", 1);
+        g.insert_memcpy(db, obs);
+        g.register_output(obs);
+        let mut exe = GraphCompiler::new()
+            .device(DeviceType::Cuda(0))
+            .scheduler(scheduler_v2())
+            .compile(g)
+            .expect("compile");
+        let pool = DescriptorPlan::alloc_pool(&exe, &ctx);
+        descs.install_pool(&mut exe, pool).expect("install pool");
+        descs.upload(&mut exe, &ctx).expect("first upload");
+        let oi = (0..exe.num_outputs())
+            .find(|&i| exe.output_buf_id(i) == obs)
+            .expect("obs output");
+        let desc_bytes = size_of::<MainMatrixDesc>();
+        let base = descs.pool_base().get();
+        let desc_addr = (base as usize)
+            .wrapping_add(exe.plan().offsets[db.0].expect("pool slot") as usize)
+            as *mut u8;
+
+        exe.run(&ctx).expect("run 1");
+        ctx.stream.synchronize().unwrap();
+        let out1 = exe.get_output(oi).to_host_on(&ctx).expect("D2H");
+        assert!(
+            out1.iter().any(|&b| b != 0xEE),
+            "setup: the encoded descriptor must not already look like the clobber pattern"
+        );
+
+        // The planner is allowed to have put something else here between runs
+        // (leg 1). Model that.
+        unsafe {
+            cudaMemsetAsync(desc_addr as *mut _, 0xEE, desc_bytes, ctx.stream.as_raw());
+        }
+        ctx.stream.synchronize().unwrap();
+
+        // Replay with no re-upload: the run reads the clobbered bytes. This is
+        // the failure the one-shot `bind` shipped.
+        exe.run(&ctx).expect("run 2");
+        ctx.stream.synchronize().unwrap();
+        let out2 = exe.get_output(oi).to_host_on(&ctx).expect("D2H");
+        assert_eq!(
+            out2,
+            vec![0xEEu8; desc_bytes],
+            "a replay without re-upload must be observably reading the overwritten slot; if it \
+             is not, this test no longer demonstrates anything"
+        );
+
+        // The pre-fix API's only recourse — call `bind` again — cannot work.
+        let pool2 = DescriptorPlan::alloc_pool(&exe, &ctx);
+        assert!(
+            descs.bind(&mut exe, &ctx, pool2).is_err(),
+            "`bind` must stay one-shot: `set_scratch` rejects an exe that already owns a pool. \
+             That is exactly why the repeatable half had to be split out."
+        );
+
+        // The remedy.
+        descs.upload(&mut exe, &ctx).expect("re-upload");
+        exe.run(&ctx).expect("run 3");
+        ctx.stream.synchronize().unwrap();
+        let out3 = exe.get_output(oi).to_host_on(&ctx).expect("D2H");
+        assert_eq!(
+            out3, out1,
+            "after `upload` the replay must reproduce the first run byte for byte"
+        );
+    }
+
+    /// R6/S2 — the same logical descriptor must encode to identical bytes
+    /// every time, and every byte of the image must be either a named field
+    /// or a zero.
+    ///
+    /// # The defect this locks out
+    ///
+    /// `DescElem::encode` used to build the `#[repr(C)]` value and then take
+    /// `slice::from_raw_parts(v as *const T as *const u8, size_of::<T>())`.
+    /// Every one of these structs has padding — `MainMatrixDesc` is a `u64`
+    /// plus a `u32` at align 8, so four trailing bytes; `ZerocheckCtx` and
+    /// `LogupCtx` add interior padding around their `u32`s — and Rust does not
+    /// initialize padding. That read is undefined behaviour, and, more
+    /// practically for this branch, it makes the encoded bytes not a function
+    /// of the descriptor's fields. Every byte-equality oracle here compares
+    /// encoded descriptor bytes; a byte that can differ run to run silently
+    /// weakens all of them, including the replay leg of
+    /// `descriptors_decode_like_the_eager_pointer_path`, which compares the
+    /// *complete* image, padding included.
+    ///
+    /// No device is needed: `DevicePtrArg::Static` never consults the plan.
+    #[test]
+    fn descriptor_encoding_is_byte_deterministic() {
+        let offsets: Vec<Option<u64>> = vec![];
+        let encode = |elem: &DescElem| {
+            let mut enc = OffEncoder {
+                offsets: &offsets,
+                base: 0,
+            };
+            elem.encode(&mut enc)
+        };
+
+        for (name, elem) in descriptor_fixture() {
+            let first = encode(&elem);
+            for round in 0..8 {
+                std::hint::black_box(poison_stack());
+                let again = encode(&elem);
+                assert_eq!(
+                    first, again,
+                    "`{name}` encoded to different bytes on round {round}; the encoding must be \
+                     a pure function of the descriptor's fields"
+                );
+            }
+        }
+
+        // Every byte outside a named field must be a deterministic zero.
+        let padding_free = |name: &str, bytes: &[u8], fields: &[(usize, usize)]| {
+            let mut covered = vec![false; bytes.len()];
+            for &(at, n) in fields {
+                assert!(
+                    at + n <= bytes.len(),
+                    "`{name}`: field {at}..{} is out of range",
+                    at + n
+                );
+                covered[at..at + n].fill(true);
+            }
+            for (i, (&b, &c)) in bytes.iter().zip(covered.iter()).enumerate() {
+                if !c {
+                    assert_eq!(
+                        b, 0,
+                        "`{name}`: padding byte {i} is {b:#04x}, not zero — the encoder is \
+                         reading uninitialized memory"
+                    );
+                }
+            }
+            // Sanity: the fixture must actually exercise padding somewhere.
+            covered.iter().filter(|c| !**c).count()
+        };
+
+        let mm_fields = [
+            (offset_of!(MainMatrixDesc, data), size_of::<BaseOff>()),
+            (offset_of!(MainMatrixDesc, air_width), size_of::<u32>()),
+        ];
+        let pad = padding_free(
+            "MainMatrixDesc",
+            &encode(&descriptor_fixture()[0].1),
+            &mm_fields,
+        );
+        assert!(
+            pad > 0,
+            "MainMatrixDesc was expected to carry trailing padding; if the layout changed, this \
+             test no longer proves anything"
+        );
+
+        let core_fields = |at: usize| {
+            vec![
+                (
+                    at + offset_of!(EvalCoreCtx, d_selectors),
+                    size_of::<BaseOff>(),
+                ),
+                (
+                    at + offset_of!(EvalCoreCtx, d_preprocessed) + mm_fields[0].0,
+                    mm_fields[0].1,
+                ),
+                (
+                    at + offset_of!(EvalCoreCtx, d_preprocessed) + mm_fields[1].0,
+                    mm_fields[1].1,
+                ),
+                (at + offset_of!(EvalCoreCtx, d_main), size_of::<BaseOff>()),
+                (at + offset_of!(EvalCoreCtx, d_public), size_of::<BaseOff>()),
+            ]
+        };
+
+        let mut zc_fields = core_fields(offset_of!(ZerocheckCtx, eval_ctx));
+        zc_fields.extend([
+            (
+                offset_of!(ZerocheckCtx, d_intermediates),
+                size_of::<BaseOff>(),
+            ),
+            (offset_of!(ZerocheckCtx, num_y), size_of::<u32>()),
+            (offset_of!(ZerocheckCtx, d_eq_xi), size_of::<BaseOff>()),
+            (offset_of!(ZerocheckCtx, d_rules), size_of::<BaseOff>()),
+            (offset_of!(ZerocheckCtx, rules_len), size_of::<usize>()),
+            (offset_of!(ZerocheckCtx, d_used_nodes), size_of::<BaseOff>()),
+            (offset_of!(ZerocheckCtx, used_nodes_len), size_of::<usize>()),
+            (offset_of!(ZerocheckCtx, buffer_size), size_of::<u32>()),
+        ]);
+        let pad = padding_free(
+            "ZerocheckCtx",
+            &encode(&descriptor_fixture()[2].1),
+            &zc_fields,
+        );
+        assert!(pad > 0, "ZerocheckCtx was expected to carry padding");
+
+        let mut lg_fields = core_fields(offset_of!(LogupCtx, eval_ctx));
+        lg_fields.extend([
+            (offset_of!(LogupCtx, d_intermediates), size_of::<BaseOff>()),
+            (offset_of!(LogupCtx, num_y), size_of::<u32>()),
+            (offset_of!(LogupCtx, d_eq_xi), size_of::<BaseOff>()),
+            (offset_of!(LogupCtx, d_challenges), size_of::<BaseOff>()),
+            (offset_of!(LogupCtx, d_eq_3bs), size_of::<BaseOff>()),
+            (offset_of!(LogupCtx, d_rules), size_of::<BaseOff>()),
+            (offset_of!(LogupCtx, rules_len), size_of::<usize>()),
+            (offset_of!(LogupCtx, d_used_nodes), size_of::<BaseOff>()),
+            (offset_of!(LogupCtx, d_pair_idxs), size_of::<BaseOff>()),
+            (offset_of!(LogupCtx, used_nodes_len), size_of::<usize>()),
+            (offset_of!(LogupCtx, buffer_size), size_of::<u32>()),
+        ]);
+        let pad = padding_free("LogupCtx", &encode(&descriptor_fixture()[3].1), &lg_fields);
+        assert!(pad > 0, "LogupCtx was expected to carry padding");
+    }
+
+    /// Round 0's **rotated** fold: both halves must land in ONE allocation.
+    ///
+    /// # The defect this locks out
+    ///
+    /// A `need_rot` matrix is folded by two launches into one doubled-width
+    /// buffer (`fold_ple.rs:24-57`). Spelling the second launch as a fresh
+    /// `BufId` + [`GraphBuilder::alias_bufs`] compiles and runs, and is
+    /// silently wrong: `alias_bufs` only records a parent id
+    /// (`graph_ir.rs:1021-1048`) and `plan_memory` never reads the alias table
+    /// (`graph_compiler.rs:594-639`), so the planner hands the two ids
+    /// *different* pool offsets. The lower half is then written into one
+    /// allocation and the upper half into another, and every later round reads
+    /// a buffer whose lower half no launch ever wrote.
+    ///
+    /// Three properties, in increasing strength:
+    ///
+    /// 1. the builder introduces no buffer rename at all (`g.aliases` is empty of `Some`), so the
+    ///    forbidden spelling cannot creep back in;
+    /// 2. the rotated node declares the fold destination as a **carried mutation** and no fresh
+    ///    output — the only form the scheduler treats as one allocation (`notes.md:37-44`);
+    /// 3. the full doubled-width buffer is byte-identical to the eager two-launch result, under
+    ///    both shipped schedulers. Property 3 is what actually fails if 1 or 2 regress: the aliased
+    ///    spelling leaves `[0, num_x*width)` of the read-back buffer holding whatever the pool slot
+    ///    happened to contain.
+    #[test]
+    fn fold_ple_rotate_ir_writes_one_allocation() {
+        let ctx = test_ctx();
+        let stream = ctx.stream.as_raw();
+        let device = DeviceType::Cuda(0);
+
+        for (l_skip, log_height, width) in [(2usize, 5usize, 3usize), (3, 7, 4)] {
+            let mut rng = StdRng::seed_from_u64(0xF01D_0A7Au64.wrapping_add(width as u64));
+            let skip_domain = 1usize << l_skip;
+            let height = 1usize << log_height;
+            let num_x = height / skip_domain;
+            // The `need_rot` shape: one buffer, `2 * width` columns.
+            let out_len = num_x * 2 * width;
+
+            let mat: Vec<F> = (0..height * width).map(|_| rng.random::<F>()).collect();
+            let omega: Vec<F> = (0..skip_domain).map(|_| rng.random::<F>()).collect();
+            let denoms: Vec<EF> = (0..skip_domain).map(|_| rng.random::<EF>()).collect();
+
+            // --- eager reference: `fold_ple_evals_rotate`'s two launches into
+            //     one allocation (`fold_ple.rs:30-56`).
+            let d_mat: DeviceBuffer<F> = mat.as_slice().to_device_on(&ctx).unwrap();
+            let d_omega: DeviceBuffer<F> = omega.as_slice().to_device_on(&ctx).unwrap();
+            let d_denoms: DeviceBuffer<EF> = denoms.as_slice().to_device_on(&ctx).unwrap();
+            let d_out: DeviceBuffer<EF> = DeviceBuffer::with_capacity_on(out_len, &ctx);
+            for (rotate, off) in [(false, 0usize), (true, num_x * width)] {
+                unsafe {
+                    fold_ple_from_evals(
+                        &d_mat,
+                        d_out.as_mut_ptr().add(off),
+                        &d_omega,
+                        &d_denoms,
+                        height as u32,
+                        width as u32,
+                        l_skip as u32,
+                        num_x as u32,
+                        rotate,
+                        stream,
+                    )
+                    .expect("fold_ple_from_evals");
+                }
+            }
+            ctx.stream.synchronize().unwrap();
+            let want: Vec<EF> = d_out.to_host_on(&ctx).unwrap();
+
+            // --- graph side: exactly the two calls the phase makes.
+            //     `GraphBuilder` is not `Clone` (it owns the blackbox
+            //     closures), so the graph is rebuilt per scheduler.
+            let build = || {
+                let mut g = GraphBuilder::new();
+                let mat_buf = f_slice_const_buf(&mut g, device, "mat", &mat);
+                let omega_buf = f_slice_const_buf(&mut g, device, "omega", &omega);
+                let denom_buf = ef_slice_const_buf(&mut g, device, "denoms", &denoms);
+                let out_buf = add_ef_buf(&mut g, device, "folded", out_len);
+                fold_ple_from_evals_ir(
+                    &mut g,
+                    mat_buf,
+                    height * width,
+                    FoldPleDst::Fresh(out_buf),
+                    0,
+                    omega_buf,
+                    skip_domain,
+                    denom_buf,
+                    height as u32,
+                    width as u32,
+                    l_skip as u32,
+                    num_x as u32,
+                    false,
+                );
+                fold_ple_from_evals_ir(
+                    &mut g,
+                    mat_buf,
+                    height * width,
+                    FoldPleDst::InPlace(out_buf),
+                    num_x * width,
+                    omega_buf,
+                    skip_domain,
+                    denom_buf,
+                    height as u32,
+                    width as u32,
+                    l_skip as u32,
+                    num_x as u32,
+                    true,
+                );
+                (g, out_buf)
+            };
+            let (g, out_buf) = build();
+
+            // (1) no rename anywhere in the graph.
+            assert!(
+                g.aliases.iter().all(|a| a.is_none()),
+                "the fold builder introduced a buffer rename; `alias_bufs` does not make two \
+                 ids one allocation (notes.md:37-44)"
+            );
+            // (2) the rotated launch is a carried mutation of the SAME id.
+            let folds: Vec<_> = g
+                .nodes
+                .iter()
+                .filter_map(|n| match n {
+                    GraphNode::BlackboxKernel(k) if k.name.starts_with("fold_ple_from_evals") => {
+                        Some(k)
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(folds.len(), 2, "expected two fold launches");
+            assert_eq!(folds[0].outputs, vec![out_buf], "plain fold output");
+            assert!(
+                folds[0].carried_outputs.is_empty(),
+                "plain fold must not carry"
+            );
+            assert!(
+                folds[1].outputs.is_empty(),
+                "rotated fold must declare no fresh output, got {:?}",
+                folds[1].outputs
+            );
+            assert_eq!(
+                folds[1].carried_outputs,
+                vec![out_buf],
+                "rotated fold must carry the plain fold's buffer"
+            );
+
+            // (3) the bytes, under both shipped schedulers.
+            drop(g);
+            for mode in [scheduler_v1(), scheduler_v2()] {
+                let (g, out_buf) = build();
+                let got = run_graph_read_bufs_with(mode, g, &[out_buf], &ctx).remove(0);
+                assert_eq!(
+                    &got[..],
+                    ef_bytes(&want),
+                    "rotated fold mismatch (l_skip={l_skip}, log_height={log_height}, \
+                     width={width}); the lower half is written by the plain fold and the upper \
+                     half by the rotated one — a mismatch confined to one half means they \
+                     landed in different allocations"
+                );
+            }
         }
     }
 

@@ -32,8 +32,23 @@ struct ZerocheckCtx {
     uint32_t buffer_size;
 };
 
-struct ZerocheckCtxRT {
-    EvalCoreRT eval_ctx;
+/// The raw-pointer twin of [`ZerocheckCtx`]: the ORIGINAL eager ABI, kept so
+/// the eager prover stays an independent reference for the base+offset one.
+/// See `eval_ctx.cuh`'s note on `EvalCoreCtxRaw`.
+struct ZerocheckCtxRaw {
+    EvalCoreCtxRaw eval_ctx;
+    FpExt *d_intermediates;
+    uint32_t num_y;
+    const FpExt *d_eq_xi;
+    const Rule *d_rules;
+    size_t rules_len;
+    const size_t *d_used_nodes;
+    size_t used_nodes_len;
+    uint32_t buffer_size;
+};
+
+template <typename MainT> struct ZerocheckCtxRTT {
+    EvalCoreRTT<MainT> eval_ctx;
     FpExt *__restrict__ d_intermediates;
     uint32_t num_y;
     const FpExt *__restrict__ d_eq_xi;
@@ -43,6 +58,8 @@ struct ZerocheckCtxRT {
     size_t used_nodes_len;
     uint32_t buffer_size;
 };
+
+using ZerocheckCtxRT = ZerocheckCtxRTT<MainMatrixDesc>;
 
 __device__ __forceinline__ ZerocheckCtxRT
 resolve_zerocheck_ctx(const ZerocheckCtx &c, const uint8_t *base) {
@@ -54,6 +71,22 @@ resolve_zerocheck_ctx(const ZerocheckCtx &c, const uint8_t *base) {
         base_off_ptr<const Rule>(base, c.d_rules),
         c.rules_len,
         base_off_ptr<const size_t>(base, c.d_used_nodes),
+        c.used_nodes_len,
+        c.buffer_size
+    };
+}
+
+/// The eager path's "decode": a field copy. No arithmetic, no sentinel.
+__device__ __forceinline__ ZerocheckCtxRTT<MainMatrixPtrs<FpExt>>
+resolve_zerocheck_ctx(const ZerocheckCtxRaw &c, const uint8_t * /*base*/) {
+    return ZerocheckCtxRTT<MainMatrixPtrs<FpExt>>{
+        resolve_eval_core(c.eval_ctx, nullptr),
+        c.d_intermediates,
+        c.num_y,
+        c.d_eq_xi,
+        c.d_rules,
+        c.rules_len,
+        c.d_used_nodes,
         c.used_nodes_len,
         c.buffer_size
     };
@@ -74,8 +107,24 @@ struct LogupCtx {
     uint32_t buffer_size;
 };
 
-struct LogupCtxRT {
-    EvalCoreRT eval_ctx;
+/// The raw-pointer twin of [`LogupCtx`] -- see [`ZerocheckCtxRaw`].
+struct LogupCtxRaw {
+    EvalCoreCtxRaw eval_ctx;
+    FpExt *d_intermediates;
+    uint32_t num_y;
+    const FpExt *d_eq_xi;
+    const FpExt *d_challenges;
+    const FpExt *d_eq_3bs;
+    const Rule *d_rules;
+    size_t rules_len;
+    const size_t *d_used_nodes;
+    const uint32_t *d_pair_idxs;
+    size_t used_nodes_len;
+    uint32_t buffer_size;
+};
+
+template <typename MainT> struct LogupCtxRTT {
+    EvalCoreRTT<MainT> eval_ctx;
     FpExt *__restrict__ d_intermediates;
     uint32_t num_y;
     const FpExt *__restrict__ d_eq_xi;
@@ -88,6 +137,8 @@ struct LogupCtxRT {
     size_t used_nodes_len;
     uint32_t buffer_size;
 };
+
+using LogupCtxRT = LogupCtxRTT<MainMatrixDesc>;
 
 __device__ __forceinline__ LogupCtxRT resolve_logup_ctx(const LogupCtx &c, const uint8_t *base) {
     return LogupCtxRT{
@@ -106,21 +157,45 @@ __device__ __forceinline__ LogupCtxRT resolve_logup_ctx(const LogupCtx &c, const
     };
 }
 
-// Local context for device use only
-struct EvalCtx {
+/// The eager path's "decode": a field copy. No arithmetic, no sentinel.
+__device__ __forceinline__ LogupCtxRTT<MainMatrixPtrs<FpExt>>
+resolve_logup_ctx(const LogupCtxRaw &c, const uint8_t * /*base*/) {
+    return LogupCtxRTT<MainMatrixPtrs<FpExt>>{
+        resolve_eval_core(c.eval_ctx, nullptr),
+        c.d_intermediates,
+        c.num_y,
+        c.d_eq_xi,
+        c.d_challenges,
+        c.d_eq_3bs,
+        c.d_rules,
+        c.rules_len,
+        c.d_used_nodes,
+        c.d_pair_idxs,
+        c.used_nodes_len,
+        c.buffer_size
+    };
+}
+
+// Local context for device use only. `MainT` is the element type of the main
+// matrix array -- `MainMatrixDesc` on the graph-IR path, `MainMatrixPtrs<FpExt>`
+// on the eager one. The evaluator body below is shared; only the addressing of
+// a main matrix differs, and that goes through the overloaded
+// `resolve_main_matrix` (`matrix.cuh`).
+template <typename MainT> struct EvalCtxT {
     const FpExt *__restrict__ d_selectors;
     const MainMatrixPtrs<FpExt> d_preprocessed;
-    const MainMatrixDesc *__restrict__ d_main;
+    const MainT *__restrict__ d_main;
     const Fp *__restrict__ d_public;
     FpExt *__restrict__ d_intermediates;
     uint32_t height;
     const uint8_t *base;
 };
 
+template <typename MainT>
 __device__ __forceinline__ FpExt evaluate_mle_entry(
     const SourceInfo &src,
     uint32_t row,
-    const EvalCtx &ctx,
+    const EvalCtxT<MainT> &ctx,
     uint32_t buffer_stride,
     const FpExt *__restrict__ d_challenges = nullptr
 ) {
@@ -174,10 +249,11 @@ __device__ __forceinline__ FpExt evaluate_mle_entry(
 // KERNELS
 // ============================================================================
 
+template <typename CtxT>
 __global__ void zerocheck_batch_mle_kernel(
     FpExt *__restrict__ tmp_sums_buffer,
     const BlockCtx *__restrict__ d_block_ctxs,
-    const ZerocheckCtx *__restrict__ d_zc_ctxs,
+    const CtxT *__restrict__ d_zc_ctxs,
     const uint8_t *__restrict__ pool_base,
     const FpExt *__restrict__ d_lambda_pows,
     size_t lambda_len
@@ -186,7 +262,7 @@ __global__ void zerocheck_batch_mle_kernel(
     FpExt *shared = (FpExt *)smem;
 
     BlockCtx block_ctx = d_block_ctxs[blockIdx.x];
-    ZerocheckCtxRT zc_ctx = resolve_zerocheck_ctx(d_zc_ctxs[block_ctx.air_idx], pool_base);
+    auto zc_ctx = resolve_zerocheck_ctx(d_zc_ctxs[block_ctx.air_idx], pool_base);
 
     uint32_t num_x = gridDim.y;
     uint32_t x_int = blockIdx.y;
@@ -208,7 +284,7 @@ __global__ void zerocheck_batch_mle_kernel(
             intermediates = zc_ctx.d_intermediates + row;
             buffer_stride = height;
         }
-        EvalCtx eval_ctx{
+        EvalCtxT<typename decltype(zc_ctx.eval_ctx)::MainType> eval_ctx{
             zc_ctx.eval_ctx.d_selectors,
             zc_ctx.eval_ctx.d_preprocessed,
             zc_ctx.eval_ctx.d_main,
@@ -273,17 +349,18 @@ __global__ void zerocheck_batch_mle_kernel(
     }
 }
 
+template <typename CtxT>
 __global__ void logup_batch_mle_kernel(
     FracExt *__restrict__ tmp_sums_buffer,
     const BlockCtx *__restrict__ d_block_ctxs,
-    const LogupCtx *__restrict__ d_logup_ctxs,
+    const CtxT *__restrict__ d_logup_ctxs,
     const uint8_t *__restrict__ pool_base
 ) {
     extern __shared__ char smem[];
     FpExt *shared = reinterpret_cast<FpExt *>(smem);
 
     BlockCtx block_ctx = d_block_ctxs[blockIdx.x];
-    LogupCtxRT logup_ctx = resolve_logup_ctx(d_logup_ctxs[block_ctx.air_idx], pool_base);
+    auto logup_ctx = resolve_logup_ctx(d_logup_ctxs[block_ctx.air_idx], pool_base);
 
     uint32_t num_x = gridDim.y;
     uint32_t x_int = blockIdx.y;
@@ -308,7 +385,7 @@ __global__ void logup_batch_mle_kernel(
         // Build local EvalCtx with correct intermediates backing.
         // NOTE: `eval_ctx.d_intermediates` points at the current task's base, so indexing uses
         // `decoded.z_index * buffer_stride`.
-        EvalCtx eval_ctx{
+        EvalCtxT<typename decltype(logup_ctx.eval_ctx)::MainType> eval_ctx{
             logup_ctx.eval_ctx.d_selectors,
             logup_ctx.eval_ctx.d_preprocessed,
             logup_ctx.eval_ctx.d_main,
@@ -445,11 +522,15 @@ extern "C" size_t _logup_batch_mle_intermediates_buffer_size(
     return height * buffer_size;
 }
 
-extern "C" int _zerocheck_batch_eval_mle(
+// One launcher body, two context ABIs. `CtxT = ZerocheckCtx` is the graph-IR
+// base+offset path (`pool_base` is the exe's pool); `CtxT = ZerocheckCtxRaw` is
+// the eager path, which passes raw pointers and ignores `pool_base`.
+template <typename CtxT>
+static int zerocheck_batch_eval_mle_impl(
     FpExt *tmp_sums_buffer,
     FpExt *output,
     const BlockCtx *block_ctxs,
-    const ZerocheckCtx *zc_ctxs,
+    const CtxT *zc_ctxs,
     const uint8_t *pool_base,
     const uint32_t *air_block_offsets, // size = num_airs + 1, grouped by air_idx
     const FpExt *lambda_pows,
@@ -487,11 +568,13 @@ extern "C" int _zerocheck_batch_eval_mle(
     return CHECK_KERNEL();
 }
 
-extern "C" int _logup_batch_eval_mle(
+// See [`zerocheck_batch_eval_mle_impl`].
+template <typename CtxT>
+static int logup_batch_eval_mle_impl(
     FracExt *tmp_sums_buffer,
     FracExt *output,
     const BlockCtx *block_ctxs,
-    const LogupCtx *logup_ctxs,
+    const CtxT *logup_ctxs,
     const uint8_t *pool_base,
     const uint32_t *air_block_offsets, // size = num_airs + 1, grouped by air_idx
     uint32_t num_blocks,
@@ -531,12 +614,149 @@ extern "C" int _logup_batch_eval_mle(
     return CHECK_KERNEL();
 }
 
+// ----------------------------------------------------------------------------
+// Entry points.
+//
+// `_*_batch_eval_mle`      -- graph-IR, base+offset contexts + a real pool base.
+// `_*_batch_eval_mle_raw`  -- eager, raw-pointer contexts. These are the
+//                             ORIGINAL pre-base+offset entry points, kept so
+//                             the eager prover remains an independent
+//                             reference for the ABI the graph path uses. Only
+//                             the context decode differs; the evaluator body is
+//                             the same template instantiation.
+// ----------------------------------------------------------------------------
+
+extern "C" int _zerocheck_batch_eval_mle(
+    FpExt *tmp_sums_buffer,
+    FpExt *output,
+    const BlockCtx *block_ctxs,
+    const ZerocheckCtx *zc_ctxs,
+    const uint8_t *pool_base,
+    const uint32_t *air_block_offsets,
+    const FpExt *lambda_pows,
+    size_t lambda_len,
+    uint32_t num_blocks,
+    uint32_t num_x,
+    uint32_t num_airs,
+    uint32_t threads_per_block,
+    cudaStream_t stream
+) {
+    return zerocheck_batch_eval_mle_impl(
+        tmp_sums_buffer,
+        output,
+        block_ctxs,
+        zc_ctxs,
+        pool_base,
+        air_block_offsets,
+        lambda_pows,
+        lambda_len,
+        num_blocks,
+        num_x,
+        num_airs,
+        threads_per_block,
+        stream
+    );
+}
+
+extern "C" int _zerocheck_batch_eval_mle_raw(
+    FpExt *tmp_sums_buffer,
+    FpExt *output,
+    const BlockCtx *block_ctxs,
+    const ZerocheckCtxRaw *zc_ctxs,
+    const uint32_t *air_block_offsets,
+    const FpExt *lambda_pows,
+    size_t lambda_len,
+    uint32_t num_blocks,
+    uint32_t num_x,
+    uint32_t num_airs,
+    uint32_t threads_per_block,
+    cudaStream_t stream
+) {
+    return zerocheck_batch_eval_mle_impl(
+        tmp_sums_buffer,
+        output,
+        block_ctxs,
+        zc_ctxs,
+        /*pool_base=*/nullptr,
+        air_block_offsets,
+        lambda_pows,
+        lambda_len,
+        num_blocks,
+        num_x,
+        num_airs,
+        threads_per_block,
+        stream
+    );
+}
+
+extern "C" int _logup_batch_eval_mle(
+    FracExt *tmp_sums_buffer,
+    FracExt *output,
+    const BlockCtx *block_ctxs,
+    const LogupCtx *logup_ctxs,
+    const uint8_t *pool_base,
+    const uint32_t *air_block_offsets,
+    uint32_t num_blocks,
+    uint32_t num_x,
+    uint32_t num_airs,
+    uint32_t threads_per_block,
+    cudaStream_t stream
+) {
+    return logup_batch_eval_mle_impl(
+        tmp_sums_buffer,
+        output,
+        block_ctxs,
+        logup_ctxs,
+        pool_base,
+        air_block_offsets,
+        num_blocks,
+        num_x,
+        num_airs,
+        threads_per_block,
+        stream
+    );
+}
+
+extern "C" int _logup_batch_eval_mle_raw(
+    FracExt *tmp_sums_buffer,
+    FracExt *output,
+    const BlockCtx *block_ctxs,
+    const LogupCtxRaw *logup_ctxs,
+    const uint32_t *air_block_offsets,
+    uint32_t num_blocks,
+    uint32_t num_x,
+    uint32_t num_airs,
+    uint32_t threads_per_block,
+    cudaStream_t stream
+) {
+    return logup_batch_eval_mle_impl(
+        tmp_sums_buffer,
+        output,
+        block_ctxs,
+        logup_ctxs,
+        /*pool_base=*/nullptr,
+        air_block_offsets,
+        num_blocks,
+        num_x,
+        num_airs,
+        threads_per_block,
+        stream
+    );
+}
+
 // Byte sizes of the batched ctx ABI, so the Rust mirrors in
 // `src/cuda/logup_zerocheck.rs` can be static-asserted against the C++ truth.
 extern "C" size_t _main_matrix_desc_size() { return sizeof(MainMatrixDesc); }
 extern "C" size_t _eval_core_ctx_size() { return sizeof(EvalCoreCtx); }
 extern "C" size_t _zerocheck_ctx_size() { return sizeof(ZerocheckCtx); }
 extern "C" size_t _logup_ctx_size() { return sizeof(LogupCtx); }
+
+// The raw-pointer (eager) mirrors get the same treatment: they are a second
+// ABI, so they need a second guard.
+extern "C" size_t _main_matrix_ptrs_size() { return sizeof(MainMatrixPtrs<FpExt>); }
+extern "C" size_t _eval_core_ctx_raw_size() { return sizeof(EvalCoreCtxRaw); }
+extern "C" size_t _zerocheck_ctx_raw_size() { return sizeof(ZerocheckCtxRaw); }
+extern "C" size_t _logup_ctx_raw_size() { return sizeof(LogupCtxRaw); }
 
 // Field offsets and the null sentinel of the base+offset ABI. These are what
 // the round-0 entry points decode against (`_zerocheck_ntt_eval_constraints`,

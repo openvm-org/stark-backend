@@ -770,7 +770,8 @@ fn test_monomial_vs_dag_equivalence() {
 
     use crate::{
         cuda::logup_zerocheck::{
-            fold_selectors_round0, interpolate_columns_gpu, BaseOff, MainMatrixDesc,
+            fold_selectors_round0, interpolate_columns_gpu, BaseOff, EvalCoreCtx, MainMatrixDesc,
+            MainMatrixPtrs, ZerocheckCtx,
         },
         logup_zerocheck::{
             batch_mle::{TraceCtx, ZerocheckMleBatchBuilder},
@@ -970,13 +971,13 @@ fn test_monomial_vs_dag_equivalence() {
             .as_ptr()
             .wrapping_add(interpolated_height);
 
-        let main_ptrs = [MainMatrixDesc::from_ptr(
-            interpolated
+        let main_ptrs = [MainMatrixPtrs {
+            data: interpolated
                 .buffer()
                 .as_ptr()
                 .wrapping_add(4 * interpolated_height),
-            mat_folded.width() as u32 / 2,
-        )];
+            air_width: mat_folded.width() as u32 / 2,
+        }];
         let main_ptrs_dev = main_ptrs.to_device_on(&gpu_ctx).unwrap();
 
         let trace_ctx = TraceCtx {
@@ -989,7 +990,7 @@ fn test_monomial_vs_dag_equivalence() {
             norm_factor: F::ONE,
             eq_xi_ptr,
             sels_ptr,
-            prep_ptr: MainMatrixDesc::ABSENT,
+            prep_ptr: MainMatrixPtrs::ABSENT,
             main_ptrs_dev,
             public_ptr: d_public_values.as_ptr(),
             eq_3bs_ptr: std::ptr::null(),
@@ -1001,17 +1002,22 @@ fn test_monomial_vs_dag_equivalence() {
         let dag_output = dag_builder.evaluate(&d_lambda_pows, s_deg as u32).unwrap();
         let dag_results: Vec<EF> = dag_output.to_host_on(&gpu_ctx).expect("copy DAG output");
 
-        // --- R6: the base+offset decode path must be byte-identical to the
-        //     pointer path it replaces.
+        // --- R6: the base+offset ABI must be byte-identical to the raw
+        //     pointer ABI it sits beside.
         //
-        // `dag_output` above was produced from the *eager* encoding: absolute
-        // device addresses with a null pool base. Here the very same launch is
-        // repeated with every `BaseOff` re-expressed relative to an arbitrary
-        // base `P`, and `P` handed to the kernel. Same buffers, same rules,
-        // same geometry — only the encoding differs, so the outputs must match
-        // byte for byte. This exercises the decode in
-        // `resolve_zerocheck_ctx` / `resolve_eval_core` / `resolve_main_matrix`
-        // with a *non-null* base, which the eager path never does.
+        // `dag_output` above came from the EAGER path, which is on the
+        // original raw-pointer contexts (`ZerocheckCtxRaw` / `MainMatrixPtrs`)
+        // and never touches `BaseOff`, `base_off_ptr` or the null sentinel.
+        // Here the very same launch is repeated with every device pointer
+        // re-expressed as an offset from an arbitrary base `P`, and `P` handed
+        // to the kernel. Same buffers, same rules, same geometry — only the
+        // context ABI and its decoder differ, so the outputs must match byte
+        // for byte.
+        //
+        // That the two sides share no encoder and no decoder is the point: it
+        // is what lets a wrong null sentinel, a bad offset computation, or a
+        // Rust/C++ layout drift in `MainMatrixDesc` / `ZerocheckCtx` show up
+        // here instead of being applied identically to both sides.
         //
         // `P` is deliberately not a real allocation: `base + off` is computed
         // with wrapping `uintptr_t` arithmetic on both sides, so any `P`
@@ -1019,27 +1025,32 @@ fn test_monomial_vs_dag_equivalence() {
         // large value also proves the decode makes no alignment assumption of
         // its own.
         let rebase_base = 0x5a5a_0000_0123usize;
-        let rebase = |off: BaseOff| -> BaseOff {
-            if off == BaseOff::NULL {
-                off
+        let encode = |p: *const u8| -> BaseOff {
+            if p.is_null() {
+                BaseOff::NULL
             } else {
-                BaseOff::from_offset(off.0.wrapping_sub(rebase_base as u64))
+                BaseOff::from_offset((p as usize).wrapping_sub(rebase_base) as u64)
             }
         };
 
-        // The `MainMatrixDesc` array `d_main` points at is re-encoded too:
-        // base+offset has to survive *both* descriptor levels.
-        let mut rebased_descs = trace_ctx
+        // The main-matrix array is re-encoded too, from `MainMatrixPtrs` into
+        // `MainMatrixDesc`: base+offset has to survive *both* descriptor
+        // levels.
+        let raw_descs = trace_ctx
             .main_ptrs_dev
             .to_host_on(&gpu_ctx)
             .expect("D2H main descriptors");
-        for d in rebased_descs.iter_mut() {
-            d.data = rebase(d.data);
-        }
+        let rebased_descs: Vec<MainMatrixDesc> = raw_descs
+            .iter()
+            .map(|d| MainMatrixDesc {
+                data: encode(d.data as *const u8),
+                air_width: d.air_width,
+            })
+            .collect();
         let rebased_descs_dev = rebased_descs
             .to_device_on(&gpu_ctx)
             .expect("H2D main descriptors");
-        let rebased_main = rebase(BaseOff::from_ptr(rebased_descs_dev.as_ptr()));
+        let rebased_main = encode(rebased_descs_dev.as_ptr() as *const u8);
 
         let rebased_output = dag_builder
             .evaluate_with_base(
@@ -1048,16 +1059,24 @@ fn test_monomial_vs_dag_equivalence() {
                 rebase_base as *const u8,
                 |ctxs| {
                     ctxs.into_iter()
-                        .map(|mut c| {
-                            c.eval_ctx.d_selectors = rebase(c.eval_ctx.d_selectors);
-                            c.eval_ctx.d_preprocessed.data = rebase(c.eval_ctx.d_preprocessed.data);
-                            c.eval_ctx.d_main = rebased_main;
-                            c.eval_ctx.d_public = rebase(c.eval_ctx.d_public);
-                            c.d_intermediates = rebase(c.d_intermediates);
-                            c.d_eq_xi = rebase(c.d_eq_xi);
-                            c.d_rules = rebase(c.d_rules);
-                            c.d_used_nodes = rebase(c.d_used_nodes);
-                            c
+                        .map(|c| ZerocheckCtx {
+                            eval_ctx: EvalCoreCtx {
+                                d_selectors: encode(c.eval_ctx.d_selectors as *const u8),
+                                d_preprocessed: MainMatrixDesc {
+                                    data: encode(c.eval_ctx.d_preprocessed.data as *const u8),
+                                    air_width: c.eval_ctx.d_preprocessed.air_width,
+                                },
+                                d_main: rebased_main,
+                                d_public: encode(c.eval_ctx.d_public as *const u8),
+                            },
+                            d_intermediates: encode(c.d_intermediates as *const u8),
+                            num_y: c.num_y,
+                            d_eq_xi: encode(c.d_eq_xi as *const u8),
+                            d_rules: encode(c.d_rules as *const u8),
+                            rules_len: c.rules_len,
+                            d_used_nodes: encode(c.d_used_nodes as *const u8),
+                            used_nodes_len: c.used_nodes_len,
+                            buffer_size: c.buffer_size,
                         })
                         .collect()
                 },
