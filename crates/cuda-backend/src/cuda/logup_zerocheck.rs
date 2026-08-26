@@ -152,6 +152,48 @@ pub struct MainMatrixDesc {
     pub air_width: u32,
 }
 
+/// One trace's compact round-evaluator outputs, addressed in the base+offset
+/// ABI. Mirrors `BatchSRingTraceDesc` in
+/// `cuda/src/logup_zerocheck/ring.cu`.
+///
+/// The graph's stage-D evaluators emit compact per-batch `[air][num_x]`
+/// buffers — `EF` for the constraint family, `Frac<EF>` for the interaction
+/// family. Rather than repack them into one canonical array before the ring
+/// kernel, each trace carries the address of its own slice inside whichever
+/// batch produced it. [`BaseOff::NULL`] marks a family that is absent for
+/// this trace or exhausted for this round.
+///
+/// The layout is hand-duplicated on the CUDA side, so it is pinned by C++
+/// `static_assert`s there and probed from Rust by
+/// [`assert_batch_s_ring_abi_matches_cuda`].
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BatchSRingTraceDesc {
+    pub zc_evals: BaseOff,
+    pub logup_evals: BaseOff,
+    pub n_lift: u32,
+    pub flags: u32,
+}
+
+/// This trace has constraints (`dag.constraints.num_constraints() > 0`,
+/// `logup_zerocheck/mod.rs:1139`).
+pub const BATCH_S_RING_HAS_CONSTRAINTS: u32 = 1 << 0;
+/// This trace has interactions (`!dag.interactions.is_empty()`,
+/// `logup_zerocheck/mod.rs:1140`).
+pub const BATCH_S_RING_HAS_INTERACTIONS: u32 = 1 << 1;
+
+impl BatchSRingTraceDesc {
+    /// A trace whose two families are both absent for this round.
+    pub const fn absent(n_lift: u32) -> Self {
+        Self {
+            zc_evals: BaseOff::NULL,
+            logup_evals: BaseOff::NULL,
+            n_lift,
+            flags: 0,
+        }
+    }
+}
+
 impl MainMatrixDesc {
     /// The eager encoding of one main/preprocessed matrix.
     pub fn from_ptr(data: *const EF, air_width: u32) -> Self {
@@ -931,6 +973,48 @@ extern "C" {
     pub fn _base_off_null() -> u64;
     pub fn _main_matrix_desc_data_offset() -> usize;
     pub fn _main_matrix_desc_air_width_offset() -> usize;
+
+    /// The batched-sumcheck ring (`cuda/src/logup_zerocheck/ring.cu`): the
+    /// device half of `compute_batch_s_poly`, split at the transcript.
+    fn _batch_s_ring_pre(
+        trace_descs: *const BatchSRingTraceDesc,
+        pool_base: *const u8,
+        tilde_in: *const EF,
+        mu_pows: *const EF,
+        norm_factors: *const F,
+        scalar_state_in: *const EF,
+        xi_j: *const EF,
+        r_prev: *const EF,
+        tilde_out: *mut EF,
+        poly_coeffs_out: *mut EF,
+        s_evals_out: *mut EF,
+        num_traces: u32,
+        constraint_degree: u32,
+        round: u32,
+        stream: cudaStream_t,
+    ) -> i32;
+
+    fn _batch_s_ring_post(
+        poly_coeffs: *const EF,
+        scalar_state_in: *const EF,
+        xi_j: *const EF,
+        r_round: *const EF,
+        scalar_state_out: *mut EF,
+        constraint_degree: u32,
+        stream: cudaStream_t,
+    ) -> i32;
+
+    /// Layout probes for [`BatchSRingTraceDesc`], asserted by
+    /// [`assert_batch_s_ring_abi_matches_cuda`].
+    pub fn _batch_s_ring_trace_desc_size() -> usize;
+    pub fn _batch_s_ring_trace_desc_align() -> usize;
+    pub fn _batch_s_ring_trace_desc_zc_offset() -> usize;
+    pub fn _batch_s_ring_trace_desc_logup_offset() -> usize;
+    pub fn _batch_s_ring_trace_desc_n_lift_offset() -> usize;
+    pub fn _batch_s_ring_trace_desc_flags_offset() -> usize;
+    pub fn _batch_s_ring_has_constraints_flag() -> u32;
+    pub fn _batch_s_ring_has_interactions_flag() -> u32;
+    pub fn _batch_s_ring_max_degree() -> u32;
 
     /// `sizeof` of the raw-pointer (eager) ctx ABI — a second ABI, so a
     /// second guard.
@@ -2524,6 +2608,180 @@ pub unsafe fn fold_selectors_round0(
 // These are `unsafe fn`s over raw pointers on purpose: the graph-facing
 // wrappers must not construct owning `DeviceBuffer`s (that would free pool
 // memory on drop), matching `fractional_ir.rs`'s device-challenge wrappers.
+
+// ---------------------------------------------------------------------------
+// The batched-sumcheck ring.
+//
+// Raw-pointer wrappers, like the device-challenge ones above: the graph-IR
+// closures must not construct owning `DeviceBuffer`s over pool memory.
+
+/// Compute this round's batched sumcheck polynomial from graph-resident
+/// evaluator outputs, and evaluate it at `1..=constraint_degree + 1`.
+///
+/// The device half of everything `compute_batch_s_poly`
+/// (`logup_zerocheck/mod.rs:1448-1520`) does BEFORE the transcript observes.
+///
+/// # Safety
+/// - `trace_descs` must point to `num_traces` readable [`BatchSRingTraceDesc`]s whose non-null
+///   `BaseOff`s decode against `pool_base` to `constraint_degree` (early) or `1` (late) readable
+///   elements of the matching type.
+/// - `tilde_in` / `tilde_out` / `mu_pows` must each point to `3 * num_traces` device `EF`s, and
+///   `norm_factors` to `num_traces` device `F`s.
+/// - `scalar_state_in`, `xi_j` and `r_prev` must each point to readable device `EF`s (3, 1 and 1
+///   respectively).
+/// - `poly_coeffs_out` must have room for `constraint_degree + 2` `EF`s and `s_evals_out` for
+///   `constraint_degree + 1`.
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn batch_s_ring_pre(
+    trace_descs: *const BatchSRingTraceDesc,
+    pool_base: *const u8,
+    tilde_in: *const EF,
+    mu_pows: *const EF,
+    norm_factors: *const F,
+    scalar_state_in: *const EF,
+    xi_j: *const EF,
+    r_prev: *const EF,
+    tilde_out: *mut EF,
+    poly_coeffs_out: *mut EF,
+    s_evals_out: *mut EF,
+    num_traces: u32,
+    constraint_degree: u32,
+    round: u32,
+    stream: cudaStream_t,
+) -> Result<(), CudaError> {
+    debug_assert!(!trace_descs.is_null());
+    debug_assert!(!tilde_in.is_null());
+    debug_assert!(!tilde_out.is_null());
+    debug_assert!(!mu_pows.is_null());
+    debug_assert!(!norm_factors.is_null());
+    debug_assert!(!scalar_state_in.is_null());
+    debug_assert!(!xi_j.is_null());
+    debug_assert!(!r_prev.is_null());
+    debug_assert!(!poly_coeffs_out.is_null());
+    debug_assert!(!s_evals_out.is_null());
+    CudaError::from_result(_batch_s_ring_pre(
+        trace_descs,
+        pool_base,
+        tilde_in,
+        mu_pows,
+        norm_factors,
+        scalar_state_in,
+        xi_j,
+        r_prev,
+        tilde_out,
+        poly_coeffs_out,
+        s_evals_out,
+        num_traces,
+        constraint_degree,
+        round,
+        stream,
+    ))
+}
+
+/// Evaluate the round polynomial at the sampled challenge and advance the two
+/// running equality products — everything `compute_batch_s_poly`'s caller does
+/// AFTER `sample_ext` (`logup_zerocheck/mod.rs:401`, `:1612-1614`).
+///
+/// # Safety
+/// - `poly_coeffs` must point to `constraint_degree + 2` readable device `EF`s.
+/// - `scalar_state_in` / `scalar_state_out` must each point to 3 device `EF`s, and `xi_j` /
+///   `r_round` to one readable device `EF` each.
+pub unsafe fn batch_s_ring_post(
+    poly_coeffs: *const EF,
+    scalar_state_in: *const EF,
+    xi_j: *const EF,
+    r_round: *const EF,
+    scalar_state_out: *mut EF,
+    constraint_degree: u32,
+    stream: cudaStream_t,
+) -> Result<(), CudaError> {
+    debug_assert!(!poly_coeffs.is_null());
+    debug_assert!(!scalar_state_in.is_null());
+    debug_assert!(!xi_j.is_null());
+    debug_assert!(!r_round.is_null());
+    debug_assert!(!scalar_state_out.is_null());
+    CudaError::from_result(_batch_s_ring_post(
+        poly_coeffs,
+        scalar_state_in,
+        xi_j,
+        r_round,
+        scalar_state_out,
+        constraint_degree,
+        stream,
+    ))
+}
+
+/// Panics unless the Rust [`BatchSRingTraceDesc`] mirror agrees with the C++
+/// definition in `ring.cu` on size, alignment and every field offset, and
+/// unless the two flag constants and the degree bound agree.
+///
+/// The C++ side additionally `static_assert`s its own layout, so a drift on
+/// either side is caught: theirs at compile time, ours here. We have already
+/// shipped one ABI bug on this branch (`f31e750f`); a struct that both sides
+/// declare by hand does not get to be trusted.
+pub fn assert_batch_s_ring_abi_matches_cuda() {
+    unsafe {
+        assert_eq!(
+            std::mem::size_of::<BatchSRingTraceDesc>(),
+            _batch_s_ring_trace_desc_size(),
+            "BatchSRingTraceDesc size drift vs CUDA"
+        );
+        assert_eq!(
+            std::mem::align_of::<BatchSRingTraceDesc>(),
+            _batch_s_ring_trace_desc_align(),
+            "BatchSRingTraceDesc alignment drift vs CUDA"
+        );
+        assert_eq!(
+            std::mem::offset_of!(BatchSRingTraceDesc, zc_evals),
+            _batch_s_ring_trace_desc_zc_offset(),
+            "BatchSRingTraceDesc::zc_evals offset drift vs CUDA"
+        );
+        assert_eq!(
+            std::mem::offset_of!(BatchSRingTraceDesc, logup_evals),
+            _batch_s_ring_trace_desc_logup_offset(),
+            "BatchSRingTraceDesc::logup_evals offset drift vs CUDA"
+        );
+        assert_eq!(
+            std::mem::offset_of!(BatchSRingTraceDesc, n_lift),
+            _batch_s_ring_trace_desc_n_lift_offset(),
+            "BatchSRingTraceDesc::n_lift offset drift vs CUDA"
+        );
+        assert_eq!(
+            std::mem::offset_of!(BatchSRingTraceDesc, flags),
+            _batch_s_ring_trace_desc_flags_offset(),
+            "BatchSRingTraceDesc::flags offset drift vs CUDA"
+        );
+        assert_eq!(
+            BATCH_S_RING_HAS_CONSTRAINTS,
+            _batch_s_ring_has_constraints_flag(),
+            "BATCH_S_RING_HAS_CONSTRAINTS drift vs CUDA"
+        );
+        assert_eq!(
+            BATCH_S_RING_HAS_INTERACTIONS,
+            _batch_s_ring_has_interactions_flag(),
+            "BATCH_S_RING_HAS_INTERACTIONS drift vs CUDA"
+        );
+        assert_eq!(
+            BATCH_S_RING_MAX_DEGREE,
+            _batch_s_ring_max_degree(),
+            "BATCH_S_RING_MAX_DEGREE drift vs CUDA"
+        );
+        // Offset 0 is a live pool offset, so the absent encoding must not be
+        // it — the ring dereferences `zc_evals` / `logup_evals` only when the
+        // decode returns non-null.
+        assert_ne!(
+            BaseOff::NULL,
+            BaseOff::from_offset(0),
+            "offset 0 must not be the absent encoding"
+        );
+    }
+}
+
+/// The largest `constraint_degree` the ring kernels accept; both launchers
+/// return `cudaErrorInvalidValue` above it rather than overrunning their
+/// fixed-size locals. Matches `BATCH_S_RING_MAX_DEGREE` in `ring.cu` and the
+/// production SDK maximum (`stark-sdk/src/config/mod.rs:41-44`).
+pub const BATCH_S_RING_MAX_DEGREE: u32 = 4;
 
 /// Panics unless the Rust ctx mirrors agree byte-for-byte in size with the
 /// private C++ definitions in `batch_mle.cu`.

@@ -461,6 +461,112 @@ where
     Ok((gkr_proof, batch_constraint_proof, r))
 }
 
+/// Exactly the state [`LogupZerocheckGpu::compute_batch_s_poly`] reads and
+/// writes.
+///
+/// Split out so the graph-IR mirror's byte-equality oracle can drive the
+/// **production** algebra directly: `LogupZerocheckGpu` borrows a
+/// `DeviceMultiStarkProvingKey`, and this crate has no fixture that builds
+/// one, so a unit test cannot construct the prover just to call one pure
+/// method on it. Nothing about the eager path's behaviour changes — the
+/// method is a delegation and this function is its former body verbatim.
+pub(super) struct BatchSPolyState<'a> {
+    pub constraint_degree: usize,
+    pub l_skip: usize,
+    pub xi: &'a [EF],
+    pub prev_s_eval: EF,
+    pub n_per_trace: &'a [isize],
+    pub eq_ns: &'a [EF],
+    pub eq_sharp_ns: &'a [EF],
+    pub zerocheck_tilde_evals: &'a mut [EF],
+    pub logup_tilde_evals: &'a mut [[EF; 2]],
+}
+
+/// The batched sumcheck polynomial for one steady MLE round.
+///
+/// See [`BatchSPolyState`] for why this is a free function.
+pub(super) fn compute_batch_s_poly_from_state(
+    st: BatchSPolyState<'_>,
+    sp_round_evals: Vec<Vec<EF>>,
+    num_traces: usize,
+    round: usize,
+    mu_pows: &[EF],
+) -> UnivariatePoly<EF> {
+    let BatchSPolyState {
+        constraint_degree,
+        l_skip,
+        xi,
+        prev_s_eval,
+        n_per_trace,
+        eq_ns,
+        eq_sharp_ns,
+        zerocheck_tilde_evals,
+        logup_tilde_evals,
+    } = st;
+    debug_assert_eq!(sp_round_evals.len(), 3 * num_traces);
+    debug_assert_eq!(sp_round_evals.len(), mu_pows.len());
+    let mut sp_head_zc = vec![EF::ZERO; constraint_degree];
+    let mut sp_head_logup = vec![EF::ZERO; constraint_degree];
+    let mut sp_tail = EF::ZERO;
+    for (trace_idx, &n) in n_per_trace.iter().enumerate() {
+        let n_lift = n.max(0) as usize;
+        let zc_idx = 2 * num_traces + trace_idx;
+        let numer_idx = 2 * trace_idx;
+        let denom_idx = numer_idx + 1;
+        if round == n_lift + 1 {
+            let eq_r_acc = *eq_ns.last().unwrap();
+            let eq_sharp_r_acc = *eq_sharp_ns.last().unwrap();
+            zerocheck_tilde_evals[trace_idx] *= eq_r_acc;
+            logup_tilde_evals[trace_idx][0] *= eq_sharp_r_acc;
+            logup_tilde_evals[trace_idx][1] *= eq_sharp_r_acc;
+        }
+        if round <= n_lift {
+            for i in 0..constraint_degree {
+                sp_head_zc[i] += mu_pows[zc_idx] * sp_round_evals[zc_idx][i];
+                sp_head_logup[i] += mu_pows[numer_idx] * sp_round_evals[numer_idx][i]
+                    + mu_pows[denom_idx] * sp_round_evals[denom_idx][i];
+            }
+        } else {
+            sp_tail += mu_pows[zc_idx] * zerocheck_tilde_evals[trace_idx]
+                + mu_pows[numer_idx] * logup_tilde_evals[trace_idx][0]
+                + mu_pows[denom_idx] * logup_tilde_evals[trace_idx][1];
+        }
+    }
+    let s_deg = constraint_degree + 1;
+    // With eq(xi,r) contributions
+    let mut sp_head_evals = vec![EF::ZERO; s_deg];
+    for i in 0..constraint_degree {
+        sp_head_evals[i + 1] =
+            eq_ns[round - 1] * sp_head_zc[i] + eq_sharp_ns[round - 1] * sp_head_logup[i];
+    }
+    // We need to derive s'(0).
+    // We use that s_j(0) + s_j(1) = s_{j-1}(r_{j-1})
+    let xi_cur = xi[l_skip + round - 1];
+    {
+        let eq_xi_0 = EF::ONE - xi_cur;
+        let eq_xi_1 = xi_cur;
+        sp_head_evals[0] = (prev_s_eval - eq_xi_1 * sp_head_evals[1] - sp_tail) * eq_xi_0.inverse();
+    }
+    // s' has degree s_deg - 1
+    let sp_head = UnivariatePoly::lagrange_interpolate(
+        &(0..s_deg).map(F::from_usize).collect_vec(),
+        &sp_head_evals,
+    );
+    // eq(xi, X) = (2 * xi - 1) * X + (1 - xi)
+    // Compute s(X) = eq(xi, X) * s'_head(X) + s'_tail * X (s'_head now contains eq(..,r))
+    // s(X) has degree s_deg
+    let mut coeffs = sp_head.into_coeffs();
+    coeffs.push(EF::ZERO);
+    let b = EF::ONE - xi_cur;
+    let a = xi_cur - b;
+    for i in (0..s_deg).rev() {
+        coeffs[i + 1] = a * coeffs[i] + b * coeffs[i + 1];
+    }
+    coeffs[0] *= b;
+    coeffs[1] += sp_tail;
+    UnivariatePoly::new(coeffs)
+}
+
 pub struct LogupZerocheckGpu<'a, HS: GpuHashScheme> {
     pub alpha_logup: EF,
     pub beta_pows: Vec<EF>,
@@ -1453,71 +1559,23 @@ impl<'a, HS: GpuHashScheme> LogupZerocheckGpu<'a, HS> {
         round: usize,
         mu_pows: &[EF],
     ) -> UnivariatePoly<EF> {
-        debug_assert_eq!(sp_round_evals.len(), 3 * num_traces);
-        debug_assert_eq!(sp_round_evals.len(), mu_pows.len());
-        let constraint_degree = self.constraint_degree;
-        let mut sp_head_zc = vec![EF::ZERO; constraint_degree];
-        let mut sp_head_logup = vec![EF::ZERO; constraint_degree];
-        let mut sp_tail = EF::ZERO;
-        for (trace_idx, &n) in self.n_per_trace.iter().enumerate() {
-            let n_lift = n.max(0) as usize;
-            let zc_idx = 2 * num_traces + trace_idx;
-            let numer_idx = 2 * trace_idx;
-            let denom_idx = numer_idx + 1;
-            if round == n_lift + 1 {
-                let eq_r_acc = *self.eq_ns.last().unwrap();
-                let eq_sharp_r_acc = *self.eq_sharp_ns.last().unwrap();
-                self.zerocheck_tilde_evals[trace_idx] *= eq_r_acc;
-                self.logup_tilde_evals[trace_idx][0] *= eq_sharp_r_acc;
-                self.logup_tilde_evals[trace_idx][1] *= eq_sharp_r_acc;
-            }
-            if round <= n_lift {
-                for i in 0..constraint_degree {
-                    sp_head_zc[i] += mu_pows[zc_idx] * sp_round_evals[zc_idx][i];
-                    sp_head_logup[i] += mu_pows[numer_idx] * sp_round_evals[numer_idx][i]
-                        + mu_pows[denom_idx] * sp_round_evals[denom_idx][i];
-                }
-            } else {
-                sp_tail += mu_pows[zc_idx] * self.zerocheck_tilde_evals[trace_idx]
-                    + mu_pows[numer_idx] * self.logup_tilde_evals[trace_idx][0]
-                    + mu_pows[denom_idx] * self.logup_tilde_evals[trace_idx][1];
-            }
-        }
-        let s_deg = constraint_degree + 1;
-        let l_skip = self.l_skip;
-        // With eq(xi,r) contributions
-        let mut sp_head_evals = vec![EF::ZERO; s_deg];
-        for i in 0..constraint_degree {
-            sp_head_evals[i + 1] = self.eq_ns[round - 1] * sp_head_zc[i]
-                + self.eq_sharp_ns[round - 1] * sp_head_logup[i];
-        }
-        // We need to derive s'(0).
-        // We use that s_j(0) + s_j(1) = s_{j-1}(r_{j-1})
-        let xi_cur = self.xi[l_skip + round - 1];
-        {
-            let eq_xi_0 = EF::ONE - xi_cur;
-            let eq_xi_1 = xi_cur;
-            sp_head_evals[0] =
-                (self.prev_s_eval - eq_xi_1 * sp_head_evals[1] - sp_tail) * eq_xi_0.inverse();
-        }
-        // s' has degree s_deg - 1
-        let sp_head = UnivariatePoly::lagrange_interpolate(
-            &(0..s_deg).map(F::from_usize).collect_vec(),
-            &sp_head_evals,
-        );
-        // eq(xi, X) = (2 * xi - 1) * X + (1 - xi)
-        // Compute s(X) = eq(xi, X) * s'_head(X) + s'_tail * X (s'_head now contains eq(..,r))
-        // s(X) has degree s_deg
-        let mut coeffs = sp_head.into_coeffs();
-        coeffs.push(EF::ZERO);
-        let b = EF::ONE - xi_cur;
-        let a = xi_cur - b;
-        for i in (0..s_deg).rev() {
-            coeffs[i + 1] = a * coeffs[i] + b * coeffs[i + 1];
-        }
-        coeffs[0] *= b;
-        coeffs[1] += sp_tail;
-        UnivariatePoly::new(coeffs)
+        compute_batch_s_poly_from_state(
+            BatchSPolyState {
+                constraint_degree: self.constraint_degree,
+                l_skip: self.l_skip,
+                xi: &self.xi,
+                prev_s_eval: self.prev_s_eval,
+                n_per_trace: &self.n_per_trace,
+                eq_ns: &self.eq_ns,
+                eq_sharp_ns: &self.eq_sharp_ns,
+                zerocheck_tilde_evals: &mut self.zerocheck_tilde_evals,
+                logup_tilde_evals: &mut self.logup_tilde_evals,
+            },
+            sp_round_evals,
+            num_traces,
+            round,
+            mu_pows,
+        )
     }
 
     #[instrument(name = "LogupZerocheck::fold_mle_evals", level = "debug", skip_all, fields(round = round))]

@@ -27,25 +27,26 @@
 //!
 //! # Host seams
 //!
-//! The eager phase is not a pure kernel DAG: three host computations sit
-//! *on the data path* between kernels, and no device equivalent exists yet.
-//! They are the honest seams of this port, and every one of them is marked
-//! with a `TODO(cc-ir)` at its site:
+//! The eager phase is not a pure kernel DAG: host computations sit *on the
+//! data path* between kernels. They are the honest seams of this port, and
+//! every one that remains is marked with a `TODO(cc-ir)` at its site:
 //!
 //! 1. **Round 0's iDFT chain** (`mod.rs:270-352, 858-875, 918-946`) — there is no device `EF` iDFT,
 //!    so `UnivariatePoly::from_geometric_cosets_evals_idft` and the `s_0_poly` assembly stay on the
 //!    host.
-//! 2. **`compute_batch_s_poly`** (`mod.rs:1430-1502`) — ~70 lines of host `EF` algebra between a
-//!    round's evaluator output and its `observe_ext` / `sample_ext`. Closing this on-device is the
-//!    campaign's HIGH-risk item.
-//! 3. **Fiat–Shamir values.** Because of (1) and (2) the challenge *values* (`lambda`, `mu`, `r_0`,
-//!    `r_round`) are known on the host at graph-build time and are captured by value into kernel
-//!    closures, exactly like `fractional_ir.rs`'s plain (non-`_bufid`) wrappers. The transcript's
-//!    *state* still threads through the graph as a `BufId`: [`ZerocheckPhasePlan`] supplies the
-//!    host values and this module emits the matching `observe_ext` / `sample_ext` nodes in the same
-//!    order, so the sponge chain in the graph is bit-identical to the eager one. Promoting the
-//!    values to `BufId`s is the `_dev_challenge` follow-up (B3 §4 lists the four challenge-by-value
-//!    entry points that need a `template <bool DEV_CH>` sibling).
+//! 2. **`compute_batch_s_poly`** (`mod.rs:1448-1520`) — **CLOSED (P1)**. Every steady MLE round now
+//!    computes its batched sumcheck polynomial on device from graph-resident evaluator outputs
+//!    (`observe_and_update_zerocheck_round_ir` → `batch_s_ring_pre` / `batch_s_ring_post`),
+//!    observes `s(1)..s(s_deg)` from device buffers, samples `r_round` into a device buffer, and
+//!    hands that same buffer to both folds. `{tilde[3T], prev_s_eval, eq_n, eq_sharp_n}` update on
+//!    device.
+//! 3. **Fiat–Shamir values.** Because of (1) the round-0 challenge *values* (`lambda`, `mu`, `r_0`)
+//!    are still known on the host at graph-build time and are captured by value into the round-0
+//!    kernel closures, exactly like `fractional_ir.rs`'s plain (non-`_bufid`) wrappers. `r_1..r_n`
+//!    are **not**: after P1 they exist only as device buffers. `xi`, `lambda_pows` and `mu_pows`
+//!    remain const producers because stages A/B (grinding, GKR) are out of this module's scope, so
+//!    do not read this graph as device-input-only. The remaining challenge-by-value entry points
+//!    are listed in B3 §4.
 //!
 //! # `ctx`-struct buffers
 //!
@@ -101,27 +102,32 @@ use crypto_compiler::{
     quast::Quast,
 };
 use openvm_cuda_common::d_buffer::DeviceBuffer;
-use openvm_stark_backend::prover::fractional_sumcheck_gkr::Frac;
-use p3_field::PrimeCharacteristicRing;
+use openvm_stark_backend::{
+    poly_common::{eval_eq_sharp_uni, eval_eq_uni, horner_eval},
+    prover::fractional_sumcheck_gkr::Frac,
+};
+use p3_field::{Field, PrimeCharacteristicRing, TwoAdicField};
 
 use super::{
     batch_mle_monomial::{DEFAULT_MAX_MONOMIALS_PER_THREAD, THREADS_PER_BLOCK_PAR_Y, WAVES_TARGET},
-    fractional_ir_utils::{add_ef_buf, ef_const_ext_scalar_buf},
+    fractional_ir_utils::{add_ef_buf, add_ext_scalar_buf, ef_const_ext_scalar_buf},
 };
 use crate::{
     cuda::{
         logup_zerocheck::{
             _logup_batch_mle_intermediates_buffer_size,
-            _zerocheck_batch_mle_intermediates_buffer_size, fold_ple_from_evals,
-            fold_selectors_round0, interpolate_columns_gpu, logup_bary_eval_interactions_round0,
-            logup_batch_eval_mle, logup_monomial_batched, precompute_lambda_combinations,
-            precompute_logup_denom_combinations, precompute_logup_numer_combinations,
-            zerocheck_batch_eval_mle, zerocheck_monomial_batched, zerocheck_monomial_par_y_batched,
-            zerocheck_ntt_eval_constraints, BaseOff, BlockCtx, EvalCoreCtx, LogupCtx,
-            LogupMonomialCommonCtx, LogupMonomialCtx, MainMatrixDesc, MonomialAirCtx, ZerocheckCtx,
+            _zerocheck_batch_mle_intermediates_buffer_size, batch_s_ring_post, batch_s_ring_pre,
+            fold_ple_from_evals, fold_selectors_round0, interpolate_columns_gpu,
+            logup_bary_eval_interactions_round0, logup_batch_eval_mle, logup_monomial_batched,
+            precompute_lambda_combinations, precompute_logup_denom_combinations,
+            precompute_logup_numer_combinations, zerocheck_batch_eval_mle,
+            zerocheck_monomial_batched, zerocheck_monomial_par_y_batched,
+            zerocheck_ntt_eval_constraints, BaseOff, BatchSRingTraceDesc, BlockCtx, EvalCoreCtx,
+            LogupCtx, LogupMonomialCommonCtx, LogupMonomialCtx, MainMatrixDesc, MonomialAirCtx,
+            ZerocheckCtx, BATCH_S_RING_HAS_CONSTRAINTS, BATCH_S_RING_HAS_INTERACTIONS,
         },
         poly::eq_hypercube_interleaved_stage_ext,
-        sumcheck::batch_fold_mle,
+        sumcheck::batch_fold_mle_dev_challenge,
     },
     monomial::{InteractionMonomialTerm, LambdaTerm, MonomialHeader},
     prelude::{EF, F},
@@ -1184,6 +1190,24 @@ pub struct LogupCtxArgs {
     pub buffer_size: u32,
 }
 
+/// Every field of `BatchSRingTraceDesc` (`cuda/src/logup_zerocheck/ring.cu`).
+///
+/// Unlike the three `*Ctx` arrays this one is not consumed by an evaluator: it
+/// tells the ring kernel where *this round's* compact evaluator outputs live
+/// for each trace. Both pointer fields still flow through [`OffSink`], so the
+/// buffers they address land in the read set the consuming node declares.
+#[derive(Clone, Copy, Debug)]
+pub struct BatchSRingTraceDescArgs {
+    /// `[num_x] EF` for this trace inside its zerocheck batch, or
+    /// [`DevicePtrArg::NULL`].
+    pub zc_evals: DevicePtrArg,
+    /// `[num_x] Frac<EF>` for this trace inside its logup batch, or
+    /// [`DevicePtrArg::NULL`].
+    pub logup_evals: DevicePtrArg,
+    pub n_lift: u32,
+    pub flags: u32,
+}
+
 // ---------------------------------------------------------------------------
 // Descriptor writers.
 //
@@ -1248,6 +1272,19 @@ fn write_logup_ctx<S: OffSink>(s: &mut S, a: &LogupCtxArgs) -> LogupCtx {
     }
 }
 
+/// Mirrors the ring's per-trace descriptor (`ring.cu`) field for field.
+fn write_batch_s_ring_trace_desc<S: OffSink>(
+    s: &mut S,
+    a: &BatchSRingTraceDescArgs,
+) -> BatchSRingTraceDesc {
+    BatchSRingTraceDesc {
+        zc_evals: s.off(a.zc_evals),
+        logup_evals: s.off(a.logup_evals),
+        n_lift: a.n_lift,
+        flags: a.flags,
+    }
+}
+
 /// One element of a descriptor array, recorded at graph-build time and encoded
 /// at bind time.
 #[derive(Clone, Debug)]
@@ -1264,6 +1301,9 @@ enum DescElem {
     /// table (`mod.rs:1196-1199`). Encodes to the 8-byte absolute device
     /// address.
     RawPtr(DevicePtrArg),
+    /// One entry of the ring's per-trace evaluator-output table
+    /// (`batch_s_ring_pre`).
+    BatchSRingTrace(Box<BatchSRingTraceDescArgs>),
 }
 
 // ---------------------------------------------------------------------------
@@ -1396,6 +1436,18 @@ fn encode_logup_ctx(c: &LogupCtx) -> AbiBytes {
     b
 }
 
+fn encode_batch_s_ring_trace_desc(d: &BatchSRingTraceDesc) -> AbiBytes {
+    let mut b = AbiBytes::new::<BatchSRingTraceDesc>();
+    b.put(offset_of!(BatchSRingTraceDesc, zc_evals), d.zc_evals.0);
+    b.put(
+        offset_of!(BatchSRingTraceDesc, logup_evals),
+        d.logup_evals.0,
+    );
+    b.put(offset_of!(BatchSRingTraceDesc, n_lift), d.n_lift);
+    b.put(offset_of!(BatchSRingTraceDesc, flags), d.flags);
+    b
+}
+
 impl DescElem {
     /// Run this element's writer against `sink`, returning its raw ABI bytes.
     ///
@@ -1414,6 +1466,9 @@ impl DescElem {
             // A bare `u64` has no padding, but it still goes through the same
             // explicit path rather than a whole-struct byte view.
             DescElem::RawPtr(data) => sink.addr(*data).to_ne_bytes().to_vec(),
+            DescElem::BatchSRingTrace(a) => {
+                encode_batch_s_ring_trace_desc(&write_batch_s_ring_trace_desc(sink, a)).into_vec()
+            }
         }
     }
 }
@@ -1556,6 +1611,28 @@ impl DescriptorPlan {
         args: LogupCtxArgs,
     ) -> Vec<BufId> {
         self.set(arr, idx, DescElem::Logup(Box::new(args)))
+    }
+
+    /// Register `buf` as a `len`-element [`BatchSRingTraceDesc`] array.
+    pub fn add_batch_s_ring_trace_array(
+        &mut self,
+        g: &mut GraphBuilder,
+        buf: BufId,
+        name: &str,
+        len: usize,
+    ) -> DescArrayId {
+        self.add_array::<BatchSRingTraceDesc>(g, buf, name, len)
+    }
+
+    /// Record `out[idx]` of a [`BatchSRingTraceDesc`] array.
+    #[must_use = "the declared reads must reach the consuming node's inputs"]
+    pub fn set_batch_s_ring_trace(
+        &mut self,
+        arr: DescArrayId,
+        idx: usize,
+        args: BatchSRingTraceDescArgs,
+    ) -> Vec<BufId> {
+        self.set(arr, idx, DescElem::BatchSRingTrace(Box::new(args)))
     }
 
     /// Every graph buffer reachable from the descriptor array `root` by
@@ -2213,15 +2290,14 @@ pub fn logup_monomial_batched_ir(
 
 /// Insert a `batch_fold_mle` node (`mod.rs:1541`) — the end-of-round fold
 /// `out = in[i] + r·(in[i|half] − in[i])` over ragged-height matrices.
-// TODO(cc-ir): `r_val: EF` is the round challenge, captured by value.
-// WHY: `_batch_fold_mle` (`cuda/mod.rs:64-72`) has no `_dev_challenge`
-//   sibling. Adding one is the established `template <bool DEV_CH>` pattern
-//   (six precedents at `b566fed5` in `gkr.cu`) and is the single highest-value
-//   `.cu` change for this port: it is the one kernel on the *round-to-round*
-//   critical path that forces the challenge back to the host.
-// RISK: with `compute_batch_s_poly` still on the host, `r_round` is a host
-//   value anyway, so this changes nothing today. It becomes blocking the
-//   moment seam (2) closes.
+///
+/// `r` is the round challenge as a **device buffer**, not a host `EF`: it is
+/// sampled from the graph transcript and must never be resolved on the host,
+/// which is the whole point of the ring. The launch goes to
+/// `batch_fold_mle_dev_challenge` (`cuda/src/sumcheck.cu:200-238`,
+/// `cuda/mod.rs:201-240`), whose `DEV_CH == true` instantiation reads it from
+/// `*r_dev`; that ABI is byte-for-byte equivalent to the by-value one and is
+/// already pinned by `batch_fold_mle_dev_challenge_matches_host_value`.
 #[allow(clippy::too_many_arguments)]
 pub fn batch_fold_mle_ir(
     g: &mut GraphBuilder,
@@ -2233,12 +2309,16 @@ pub fn batch_fold_mle_ir(
     dsts: &[BufId],
     num_matrices: u16,
     max_output_cells: u32,
-    r_val: EF,
+    r: BufId,
 ) {
     // The kernel reaches its operands through `input_ptrs` / `output_ptrs`,
     // which the planner cannot see through. Naming the pointed-to buffers as
     // real inputs and outputs of the node restores every dependency edge.
-    let mut inputs = vec![input_ptrs, output_ptrs, widths, log_output_heights];
+    //
+    // `srcs` therefore starts at index 5 of `inputs`, but only as a dependency
+    // declaration: the closure must NOT build views over those slots, it
+    // reaches the matrices through the two pointer tables.
+    let mut inputs = vec![input_ptrs, output_ptrs, widths, log_output_heights, r];
     inputs.extend_from_slice(srcs);
     let modifies: Vec<bool> = inputs.iter().map(|_| false).collect();
     g.insert_blackbox_kernel(
@@ -2252,17 +2332,17 @@ pub fn batch_fold_mle_ir(
             let outs = DeviceBuffer::<*mut EF>::from_raw_parts(inputs[1] as *mut *mut EF, n);
             let widths = DeviceBuffer::<u32>::from_raw_parts(inputs[2] as *mut u32, n);
             let logh = DeviceBuffer::<u8>::from_raw_parts(inputs[3] as *mut u8, n);
-            batch_fold_mle(
-                &ins,
-                &outs,
-                &widths,
+            batch_fold_mle_dev_challenge(
+                ins.as_ptr(),
+                outs.as_mut_ptr(),
+                widths.as_ptr(),
                 num_matrices,
-                &logh,
+                logh.as_ptr(),
                 max_output_cells,
-                r_val,
+                inputs[4] as *const EF,
                 stream,
             )
-            .expect("batch_fold_mle");
+            .expect("batch_fold_mle_dev_challenge");
             forget(ins);
             forget(outs);
             forget(widths);
@@ -2451,8 +2531,13 @@ pub struct ZerocheckPhasePlan {
     pub lambda_pows: Vec<EF>,
     /// `mu_pows`, `3 * num_traces` of them (`mod.rs:322-324`).
     pub mu_pows: Vec<EF>,
-    /// `r_0 .. r_{n_max}` — `n_max + 1` values (`mod.rs:405`).
-    pub r: Vec<EF>,
+    /// `r_0` (`mod.rs:385`).
+    ///
+    /// `r_1 .. r_{n_max}` are **not** here any more: after P1 the steady
+    /// rounds sample them into device buffers and never resolve them on the
+    /// host (`ZerocheckPhaseProofIR::r`). `r_0` survives only because the
+    /// round-0 launchers still take their challenge by value.
+    pub r_0: EF,
     /// `omega_skip_pows`, `2^l_skip` of them (`mod.rs:529`).
     pub omega_skip_pows: Vec<F>,
     /// `compute_barycentric_inv_lagrange_denoms(l_skip, ω*, r_0)` (`mod.rs:960`).
@@ -2467,9 +2552,6 @@ pub struct ZerocheckPhasePlan {
     pub s_0_coeffs: Vec<EF>,
     /// Per-trace `(sum_claim_p, sum_claim_q)` observed at `mod.rs:315-316`.
     pub logup_sum_claims: Vec<(EF, EF)>,
-    /// `batch_s_evals[round - 1][i]` for `i in 0..s_deg` — the values
-    /// observed at `mod.rs:394`.
-    pub round_evals: Vec<Vec<EF>>,
     /// Column-opening claims observed at `mod.rs:415-428`, already in
     /// transcript order (common main first, then preprocessed/cached).
     pub opening_claims: Vec<EF>,
@@ -3069,9 +3151,16 @@ pub struct ZerocheckPhaseProofIR {
     pub round0_zc_evals: Vec<BufId>,
     /// Per-trace round-0 interaction evaluations (`mod.rs:896` output).
     pub round0_logup_evals: Vec<BufId>,
-    /// `[round][0] = zerocheck evals, [round][1] = logup evals` for each of
-    /// the `n_max` MLE rounds.
-    pub round_evals: Vec<[Option<BufId>; 2]>,
+    /// The compact stage-D evaluator outputs, one entry per launch, for each
+    /// of the `n_max` MLE rounds. Debug/inspection only — the ring reads them
+    /// through the descriptor array, not from here.
+    pub evaluator_outputs: Vec<Vec<BufId>>,
+    /// `s_round(1) .. s_round(s_deg)` per steady round: `n_max` vectors of
+    /// `constraint_degree + 1` device buffers. These are proof messages, and
+    /// after P1 they are *computed* rather than supplied.
+    pub sumcheck_round_polys: Vec<Vec<BufId>>,
+    /// `r_0 .. r_{n_max}`, as device buffers.
+    pub r: Vec<BufId>,
     /// Per-trace, per-matrix final folded buffers — the column openings
     /// before the host-side doubled-width split.
     pub column_openings: Vec<Vec<BufId>>,
@@ -3125,16 +3214,9 @@ where
         plan.num_traces(),
         "one TraceBufs per trace required"
     );
-    assert_eq!(
-        plan.r.len(),
-        plan.n_max + 1,
-        "plan.r must hold r_0 .. r_{{n_max}}"
-    );
-
     let num_traces = plan.num_traces();
     let l_skip = plan.l_skip;
     let sp_deg = plan.constraint_degree;
-    let s_deg = plan.s_deg();
     let skip_domain = 1usize << l_skip;
 
     // Every base+offset descriptor array this phase needs. Filled in after
@@ -3458,8 +3540,13 @@ where
         transcript.observe_ext(g, b);
     }
     // `r_0 = sample_ext()` (`mod.rs:367`).
-    let _r0_buf = transcript.sample_ext(g);
-    let r_0 = plan.r[0];
+    //
+    // The *value* still comes from the plan (the round-0 launchers below take
+    // their challenge by value), but the sampled buffer is retained: it is the
+    // first `r_prev` the ring consumes, and the first entry of the proof's
+    // challenge list.
+    let r0_buf = transcript.sample_ext(g);
+    let r_0 = plan.r_0;
 
     // C.6 — `fold_ple_evals` (`mod.rs:373` → `:954`).
     let inv_denoms = ef_slice_const_buf(g, device, "inv_lagrange_denoms_r0", &{
@@ -3533,10 +3620,50 @@ where
     // -----------------------------------------------------------------------
     // STAGE D — the `n_max` MLE rounds (`mod.rs:387-404`), fully unrolled.
     // -----------------------------------------------------------------------
-    let mut round_evals: Vec<[Option<BufId>; 2]> = Vec::with_capacity(plan.n_max);
+    let mut evaluator_outputs: Vec<Vec<BufId>> = Vec::with_capacity(plan.n_max);
+    let mut sumcheck_round_polys: Vec<Vec<BufId>> = Vec::with_capacity(plan.n_max);
+    let mut r_bufs: Vec<BufId> = Vec::with_capacity(plan.n_max + 1);
+    g.register_output(r0_buf);
+    r_bufs.push(r0_buf);
     // Current per-trace folded buffers; rebound each round by the fold.
     let mut cur_mats: Vec<Vec<BufId>> = folded_after_r0;
     let mut cur_sels: Vec<BufId> = bufs.iter().map(|b| b.selectors_folded).collect();
+
+    // ---- ring state, initialized from the eager round-0 state.
+    //
+    // `mu_pows` and `norm_factors` are constant for the whole phase;
+    // `norm_factors[t] = F::from_usize(1 << max(-n, 0)).inverse()`
+    // (`mod.rs:1144-1146`), i.e. `F::ONE` for every trace at least as tall as
+    // the skip domain.
+    let mu_pows_buf = ef_slice_const_buf(g, device, "mu_pows", &plan.mu_pows);
+    let norm_factors_buf = f_slice_const_buf(g, device, "norm_factors", &{
+        plan.traces
+            .iter()
+            .map(|tp| F::from_usize(1usize << (-tp.n).max(0)).inverse())
+            .collect::<Vec<F>>()
+    });
+    // `tilde[3 * T]` starts at zero exactly as `zerocheck_tilde_evals` /
+    // `logup_tilde_evals` do (`mod.rs:628-629`). A memset is a genuine
+    // in-place write, so it keeps its own `BufId` (`notes.md:37-44`).
+    let tilde0 = add_ef_buf(g, device, "r0_tilde", 3 * num_traces);
+    g.insert_memset(tilde0, 0);
+    // `[prev_s_eval, eq_n, eq_sharp_n]` after round 0 (`mod.rs:388`,
+    // `mod.rs:1083-1088`).
+    let scalars0 = ef_slice_const_buf(
+        g,
+        device,
+        "r0_ring_scalars",
+        &[
+            horner_eval::<EF, EF, EF>(&plan.s_0_coeffs, r_0),
+            eval_eq_uni(l_skip, plan.xi[0], r_0),
+            eval_eq_sharp_uni(&plan.omega_skip_pows, &plan.xi[..l_skip], r_0),
+        ],
+    );
+    let mut ring_state = ZerocheckRoundStateIr {
+        tilde: tilde0,
+        scalars: scalars0,
+    };
+    let mut r_prev = r0_buf;
 
     for round in 1..=plan.n_max {
         // D.1 — per-trace column interpolation for traces still "early"
@@ -3627,20 +3754,22 @@ where
         // RISK: WRONG ANSWER, not just wrong performance, for every round in
         //   which some trace is late (i.e. every round past the shortest
         //   trace's `n_lift`). The fix is a second launch per family with
-        //   `num_x = 1` and its own `BatchEvalShape`; it also widens
-        //   `ZerocheckPhaseProofIR::round_evals` to carry two outputs per
-        //   family per round, which is why it is not a one-line change.
+        //   `num_x = 1` and its own `BatchEvalShape`.
+        // STATUS (P1): no longer silent. `build_batch_s_ring_trace_descs`
+        //   asserts that a late trace's batch has `num_x == 1`, so a
+        //   mixed-height plan now PANICS at graph-build time instead of
+        //   emitting a graph that computes the wrong polynomial. Nothing in
+        //   production calls this driver yet, and every fixture is
+        //   equal-height, so the assertion is currently unreachable in tests
+        //   — it exists so that S1.4-a cannot be forgotten.
         //
-        // TODO(cc-ir,S1.4-b): `norm_factor` is implemented nowhere.
-        // WHY: for a trace with `n < 0` (shorter than the skip domain,
-        //   `TracePlan::n` is `isize` and documented as possibly negative)
-        //   the eager path scales the logup NUMERATOR ONLY by
-        //   `F::from_usize(1 << -n).inverse()` (`mod.rs:1135-1136`), applied
-        //   at `mod.rs:1314` and consumed in `batch_mle.rs:575-583, 660-669`.
-        //   `grep -n norm_factor zerocheck_ir.rs` returns nothing.
-        // RISK: WRONG ANSWER for any AIR shorter than `2^l_skip`. Harmless
-        //   for `synthetic_plan` (every trace has `n = n_max >= 0`), which is
-        //   exactly why no existing test catches it.
+        // RESOLVED (P1): `norm_factor` now exists, in ONE place — the ring's
+        // `pre` kernel scales the interaction numerator by
+        // `norm_factors[t] = F::from_usize(1 << max(-n, 0)).inverse()`
+        // (`mod.rs:1144-1146`) as it reads the raw evaluator output. Keeping
+        // the graph evaluators' output raw is what makes "exactly once"
+        // checkable: `batch_s_ring_pre_post_matches_eager` covers an `n < 0`
+        // trace and fails if the factor is dropped or applied twice.
         let zc_traces: Vec<usize> = early
             .iter()
             .chain(late.iter())
@@ -3730,31 +3859,50 @@ where
                 &mut descs,
             )
         });
-        round_evals.push([zc_eval, lg_eval]);
+        let batches: Vec<RoundEvalBatchIr> = zc_eval.into_iter().chain(lg_eval).collect();
+        evaluator_outputs.push(batches.iter().map(|b| b.evals).collect());
 
-        // D.3 — HOST SEAM (module docs, seam 2).
+        // D.3 — THE RING (was seam 2).
         //
-        // TODO(cc-ir): `compute_batch_s_poly` (`mod.rs:1430-1502`) runs on the
-        //   host between the evaluator output and `observe_ext`.
-        // WHY: it is ~70 lines of `EF` algebra over `3 * num_traces`
-        //   accumulands with a head/tail split on `round <= n_lift`, two
-        //   running eq chains, an `EF` inverse (`mod.rs:1477-1483`) and a
-        //   `lagrange_interpolate` over `s_deg` points. None of those exist
-        //   as device kernels; the fractional twin's much smaller
-        //   `reconstruct_s_evals` needed four purpose-built DSL modules
-        //   (`fractional_ir.rs:1334-1500`) to close.
-        // RISK: this is THE ring of the port. Until it closes, every round
-        //   still ends in a D2H + host algebra + H2D, so the graph is a
-        //   per-round DAG rather than a whole-phase one. Everything else
-        //   here is structured so that replacing this block with device
-        //   nodes is a local change: the observes below already take
-        //   `BufId`s.
-        for (i, &eval) in plan.round_evals[round - 1].iter().enumerate().take(s_deg) {
-            let b = ef_const_ext_scalar_buf(g, device, &format!("r{round}_s{i}"), eval);
-            transcript.observe_ext(g, b);
+        // `compute_batch_s_poly` (`mod.rs:1448-1520`), the `s_deg` observes,
+        // `sample_ext`, and the running-scalar updates, all as graph nodes.
+        // Nothing between the evaluator outputs and the fold below touches the
+        // host any more: `s_round(1..=s_deg)` is observed from device buffers,
+        // `r_round` is sampled into one, and the same buffer drives both folds.
+        //
+        // `xi_j` is still a const producer — `xi` comes back from fractional
+        // GKR on the host (stage B, out of scope) — but the ring ABI takes it
+        // as a pointer so closing that stage later is a producer swap, not a
+        // signature change.
+        let xi_j = ef_const_ext_scalar_buf(
+            g,
+            device,
+            &format!("r{round}_xi"),
+            plan.xi[l_skip + round - 1],
+        );
+        let ring = observe_and_update_zerocheck_round_ir(
+            g,
+            transcript,
+            &mut descs,
+            plan,
+            &batches,
+            mu_pows_buf,
+            norm_factors_buf,
+            xi_j,
+            r_prev,
+            ring_state,
+            round,
+            device,
+        );
+        // Proof artifacts: the caller reads them out of the compiled exe, so
+        // they must survive DCE and the memory planner's liveness analysis.
+        for &b in &ring.s_evals {
+            g.register_output(b);
         }
-        let _r_buf = transcript.sample_ext(g);
-        let r_round = plan.r[round];
+        g.register_output(ring.r_round);
+        sumcheck_round_polys.push(ring.s_evals.clone());
+        r_bufs.push(ring.r_round);
+        let r_round = ring.r_round;
 
         // D.4 — `fold_mle_evals` (`mod.rs:403` → `:1505`).
         //
@@ -3871,6 +4019,10 @@ where
                 layers.pop();
             }
         }
+        // The ring's state is a value, not a slot: the next round reads the
+        // buffers this round produced.
+        ring_state = ring.state;
+        r_prev = ring.r_round;
     }
 
     // -----------------------------------------------------------------------
@@ -3909,15 +4061,15 @@ where
     ZerocheckPhaseProofIR {
         round0_zc_evals,
         round0_logup_evals,
-        round_evals,
+        evaluator_outputs,
+        sumcheck_round_polys,
+        r: r_bufs,
         column_openings,
         transcript_state,
         descriptors: descs,
     }
 }
 
-/// Emit the round's zerocheck evaluator for `traces`, returning its output
-/// buffer.
 /// Which ctx struct a batched evaluator's per-AIR array holds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CtxKind {
@@ -4260,6 +4412,407 @@ fn push_monomial_reads(reads: &mut Vec<BufId>, rb: &RoundTraceBufs) {
     }
 }
 
+/// The ring state carried from one steady MLE round to the next.
+///
+/// Both members are *values*, never host scalars: `tilde` is the `[3 * T]`
+/// vector of per-trace exhausted/late evaluations in the `mu_pows` slot order
+/// (`p_t = 2t`, `q_t = 2t + 1`, `zc_t = 2T + t`), and `scalars` is
+/// `[prev_s_eval, eq_n, eq_sharp_n]`.
+#[derive(Clone, Copy, Debug)]
+pub struct ZerocheckRoundStateIr {
+    /// `[3 * num_traces] EF`.
+    pub tilde: BufId,
+    /// `[3] EF` — `prev_s_eval`, `eq_ns[round - 1]`, `eq_sharp_ns[round - 1]`.
+    pub scalars: BufId,
+}
+
+/// What one steady round's ring leaves on the graph.
+#[derive(Clone, Debug)]
+pub struct ZerocheckRoundRingOut {
+    /// The challenge this round sampled — feeds both folds, and the next
+    /// round's `r_prev`.
+    pub r_round: BufId,
+    /// `s_round(1) .. s_round(s_deg)`, one `[D_EF]` buffer each, in the order
+    /// they were observed.
+    pub s_evals: Vec<BufId>,
+    /// `[constraint_degree + 2] EF` — the round polynomial in coefficient
+    /// form. Not part of the proof (the verifier gets the evaluations); kept
+    /// because it is what `post` consumes and what the byte-equality oracle
+    /// compares against `compute_batch_s_poly`'s output.
+    pub poly_coeffs: BufId,
+    /// State for the next round.
+    pub state: ZerocheckRoundStateIr,
+}
+
+/// Insert the ring's `pre` node: the whole of `compute_batch_s_poly`
+/// (`mod.rs:1448-1520`) plus the Horner evaluations at `1..=s_deg`.
+///
+/// Returns `(tilde_out, poly_coeffs, s_evals_contiguous)`, all three fresh —
+/// the round's tilde vector and scalar state are mathematically new values,
+/// not an in-place edit of the previous round's (`notes.md:37-44` is about
+/// *genuine* mutations, which these are not).
+///
+/// `trace_desc_reads` is appended verbatim to the explicit inputs: the kernel
+/// reaches this round's evaluator outputs only through offsets stored in
+/// `trace_descs`, which the planner cannot see through.
+#[allow(clippy::too_many_arguments)]
+fn batch_s_ring_pre_ir(
+    g: &mut GraphBuilder,
+    trace_descs: BufId,
+    trace_desc_reads: &[BufId],
+    pool_base: PoolBase,
+    tilde_in: BufId,
+    mu_pows: BufId,
+    norm_factors: BufId,
+    scalar_state_in: BufId,
+    xi_j: BufId,
+    r_prev: BufId,
+    num_traces: usize,
+    constraint_degree: usize,
+    round: usize,
+    device: DeviceType,
+) -> (BufId, BufId, BufId) {
+    let tilde_out = add_ef_buf(g, device, &format!("r{round}_tilde"), 3 * num_traces);
+    let poly_coeffs = add_ef_buf(
+        g,
+        device,
+        &format!("r{round}_s_coeffs"),
+        constraint_degree + 2,
+    );
+    let s_evals = add_ef_buf(
+        g,
+        device,
+        &format!("r{round}_s_evals"),
+        constraint_degree + 1,
+    );
+
+    let mut inputs = vec![
+        trace_descs,
+        tilde_in,
+        mu_pows,
+        norm_factors,
+        scalar_state_in,
+        xi_j,
+        r_prev,
+    ];
+    inputs.extend_from_slice(trace_desc_reads);
+    let modifies: Vec<bool> = inputs.iter().map(|_| false).collect();
+    let (t, d, r) = (num_traces as u32, constraint_degree as u32, round as u32);
+    g.insert_blackbox_kernel(
+        "batch_s_ring_pre",
+        inputs.into_iter(),
+        [tilde_out, poly_coeffs, s_evals].into_iter(),
+        modifies.into_iter(),
+        move |inputs, outputs, stream| unsafe {
+            batch_s_ring_pre(
+                inputs[0] as *const BatchSRingTraceDesc,
+                pool_base.get(),
+                inputs[1] as *const EF,
+                inputs[2] as *const EF,
+                inputs[3] as *const F,
+                inputs[4] as *const EF,
+                inputs[5] as *const EF,
+                inputs[6] as *const EF,
+                outputs[0] as *mut EF,
+                outputs[1] as *mut EF,
+                outputs[2] as *mut EF,
+                t,
+                d,
+                r,
+                stream,
+            )
+            .expect("batch_s_ring_pre");
+        },
+    );
+    (tilde_out, poly_coeffs, s_evals)
+}
+
+/// Insert the ring's `post` node: `s(r_round)` and the two running
+/// equality-product updates (`mod.rs:401`, `:1612-1614`).
+fn batch_s_ring_post_ir(
+    g: &mut GraphBuilder,
+    poly_coeffs: BufId,
+    scalar_state_in: BufId,
+    xi_j: BufId,
+    r_round: BufId,
+    constraint_degree: usize,
+    device: DeviceType,
+) -> BufId {
+    let scalar_state_out = add_ef_buf(g, device, "ring_scalars", 3);
+    let d = constraint_degree as u32;
+    g.insert_blackbox_kernel(
+        "batch_s_ring_post",
+        [poly_coeffs, scalar_state_in, xi_j, r_round].into_iter(),
+        std::iter::once(scalar_state_out),
+        [false, false, false, false].into_iter(),
+        move |inputs, outputs, stream| unsafe {
+            batch_s_ring_post(
+                inputs[0] as *const EF,
+                inputs[1] as *const EF,
+                inputs[2] as *const EF,
+                inputs[3] as *const EF,
+                outputs[0] as *mut EF,
+                d,
+                stream,
+            )
+            .expect("batch_s_ring_post");
+        },
+    );
+    scalar_state_out
+}
+
+/// One steady MLE round's compute -> observe -> sample -> update block, as
+/// graph nodes.
+///
+/// The graph-IR mirror of `mod.rs:393-402`: `compute_batch_s_poly`, the
+/// `s_deg` `observe_ext` calls, `sample_ext`, and the `prev_s_eval` /
+/// `eq_ns` / `eq_sharp_ns` updates that `fold_mle_evals` performs
+/// (`mod.rs:1610-1615`).
+///
+/// Shaped exactly like `fractional_ir::observe_and_update_ir`: the
+/// transcript's *control* state stays on the host (it picks which sponge
+/// module each observe/sample emits) while every *value* stays a `BufId`.
+/// Deliberately does not fold — the driver owns the two shape-specific fold
+/// plans and this helper has no business rebuilding them.
+#[allow(clippy::too_many_arguments)]
+fn observe_and_update_zerocheck_round_ir<TS: FiatShamirTranscriptGraphIR>(
+    g: &mut GraphBuilder,
+    transcript: &mut TS,
+    descs: &mut DescriptorPlan,
+    plan: &ZerocheckPhasePlan,
+    batches: &[RoundEvalBatchIr],
+    mu_pows: BufId,
+    norm_factors: BufId,
+    xi_j: BufId,
+    r_prev: BufId,
+    state: ZerocheckRoundStateIr,
+    round: usize,
+    device: DeviceType,
+) -> ZerocheckRoundRingOut {
+    let s_deg = plan.s_deg();
+    let pool_base = descs.pool_base().clone();
+    let (trace_descs, trace_desc_reads) = build_batch_s_ring_trace_descs(
+        g,
+        descs,
+        device,
+        &format!("r{round}_ring_descs"),
+        plan,
+        round,
+        batches,
+    );
+    let (tilde_out, poly_coeffs, s_evals_contig) = batch_s_ring_pre_ir(
+        g,
+        trace_descs,
+        &trace_desc_reads,
+        pool_base,
+        state.tilde,
+        mu_pows,
+        norm_factors,
+        state.scalars,
+        xi_j,
+        r_prev,
+        plan.num_traces(),
+        plan.constraint_degree,
+        round,
+        device,
+    );
+
+    // The transcript absorbs one `[D_EF]` buffer per point, in increasing
+    // point order, so the contiguous `[s_deg] EF` output is split by explicit
+    // 16-byte range copies rather than observed as a block.
+    let s_evals: Vec<BufId> = (0..s_deg)
+        .map(|i| {
+            let b = add_ext_scalar_buf(g, device, &format!("r{round}_s{i}"));
+            g.insert_memcpy_range(
+                s_evals_contig,
+                Quast::cst((i * EF_BYTES) as i64),
+                b,
+                Quast::cst(0),
+                Quast::cst(EF_BYTES as i64),
+            );
+            b
+        })
+        .collect();
+    for &b in &s_evals {
+        transcript.observe_ext(g, b);
+    }
+    let r_round = transcript.sample_ext(g);
+    let scalars = batch_s_ring_post_ir(
+        g,
+        poly_coeffs,
+        state.scalars,
+        xi_j,
+        r_round,
+        plan.constraint_degree,
+        device,
+    );
+
+    ZerocheckRoundRingOut {
+        r_round,
+        s_evals,
+        poly_coeffs,
+        state: ZerocheckRoundStateIr {
+            tilde: tilde_out,
+            scalars,
+        },
+    }
+}
+
+/// Which family produced one compact evaluator batch.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RoundEvalFamily {
+    Zerocheck,
+    Logup,
+}
+
+/// One stage-D evaluator launch, as the ring needs to see it.
+///
+/// The emitters used to return a bare `BufId`, which loses the two facts the
+/// ring cannot recover: which traces are inside the batch and in what order
+/// (the kernel writes `out[air * num_x + i]`, `air` being the position in
+/// `traces`), and how many values per trace there are. Carrying them as a
+/// typed value is what lets the descriptor builder compute byte offsets that
+/// cannot silently drift when the dispatch grows more batches (S1.4).
+#[derive(Clone, Debug)]
+struct RoundEvalBatchIr {
+    family: RoundEvalFamily,
+    /// The compact `[air][num_x]` output buffer: `EF` for
+    /// [`RoundEvalFamily::Zerocheck`], `Frac<EF>` for
+    /// [`RoundEvalFamily::Logup`].
+    evals: BufId,
+    /// Trace indices, in the batch's `air` order.
+    traces: Vec<usize>,
+    num_x: usize,
+}
+
+/// Build this round's `BatchSRingTraceDesc[num_traces]` array.
+///
+/// Returns `(array buffer, the graph buffers its offsets point into)`. The
+/// second half is not decoration: the ring kernel dereferences those buffers
+/// through the descriptor, and a pointer the consuming node does not declare
+/// lets the planner hand that pool slot to someone else while the kernel still
+/// needs it. Deriving it from the same writer that produces the bytes is what
+/// makes an under-declared set unrepresentable — see [`OffSink`].
+fn build_batch_s_ring_trace_descs(
+    g: &mut GraphBuilder,
+    descs: &mut DescriptorPlan,
+    device: DeviceType,
+    name: &str,
+    plan: &ZerocheckPhasePlan,
+    round: usize,
+    batches: &[RoundEvalBatchIr],
+) -> (BufId, Vec<BufId>) {
+    let num_traces = plan.num_traces();
+    let buf = add_typed_buf::<BatchSRingTraceDesc>(g, device, name, num_traces);
+    let arr = descs.add_batch_s_ring_trace_array(g, buf, name, num_traces);
+
+    let mut args: Vec<BatchSRingTraceDescArgs> = plan
+        .traces
+        .iter()
+        .map(|tp| BatchSRingTraceDescArgs {
+            zc_evals: DevicePtrArg::NULL,
+            logup_evals: DevicePtrArg::NULL,
+            n_lift: tp.n_lift() as u32,
+            flags: if tp.has_constraints {
+                BATCH_S_RING_HAS_CONSTRAINTS
+            } else {
+                0
+            } | if tp.has_interactions {
+                BATCH_S_RING_HAS_INTERACTIONS
+            } else {
+                0
+            },
+        })
+        .collect();
+
+    for b in batches {
+        for (air, &t) in b.traces.iter().enumerate() {
+            let tp = &plan.traces[t];
+            let n_lift = tp.n_lift();
+            // The eager shapes: an early trace yields `constraint_degree` head
+            // values, a late one yields exactly one (`mod.rs:1309-1311`,
+            // `mod.rs:1333-1335`). A late trace merged into an early batch is
+            // the known S1.4-a defect; refuse it here rather than silently
+            // reading `num_x` values where one exists.
+            if round <= n_lift {
+                assert_eq!(
+                    b.num_x, plan.constraint_degree,
+                    "round {round}: early trace {t} evaluated at num_x = {} instead of the \
+                     constraint degree {}",
+                    b.num_x, plan.constraint_degree
+                );
+            } else if round == n_lift + 1 {
+                assert_eq!(
+                    b.num_x, 1,
+                    "round {round}: late trace {t} (n_lift = {n_lift}) evaluated at num_x = {} \
+                     instead of 1 — late traces need their own launch (S1.4-a)",
+                    b.num_x
+                );
+            } else {
+                panic!(
+                    "round {round}: exhausted trace {t} (n_lift = {n_lift}) must not be in an \
+                     evaluator batch at all"
+                );
+            }
+            match b.family {
+                RoundEvalFamily::Zerocheck => {
+                    assert!(
+                        tp.has_constraints,
+                        "round {round}: trace {t} has no constraints but appears in a \
+                         zerocheck batch"
+                    );
+                    assert!(
+                        matches!(args[t].zc_evals, DevicePtrArg::Static(0)),
+                        "round {round}: trace {t} appears in two zerocheck batches"
+                    );
+                    args[t].zc_evals = DevicePtrArg::at(b.evals, air * b.num_x * size_of::<EF>());
+                }
+                RoundEvalFamily::Logup => {
+                    assert!(
+                        tp.has_interactions,
+                        "round {round}: trace {t} has no interactions but appears in a \
+                         logup batch"
+                    );
+                    assert!(
+                        matches!(args[t].logup_evals, DevicePtrArg::Static(0)),
+                        "round {round}: trace {t} appears in two logup batches"
+                    );
+                    args[t].logup_evals =
+                        DevicePtrArg::at(b.evals, air * b.num_x * size_of::<Frac<EF>>());
+                }
+            }
+        }
+    }
+
+    // Every trace that is still evaluated this round must have a pointer for
+    // each family it enables; an exhausted or disabled family keeps its null.
+    for (t, tp) in plan.traces.iter().enumerate() {
+        if round > tp.n_lift() + 1 {
+            continue;
+        }
+        if tp.has_constraints {
+            assert!(
+                !matches!(args[t].zc_evals, DevicePtrArg::Static(0)),
+                "round {round}: trace {t} has constraints and is not exhausted, but no \
+                 zerocheck batch claimed it"
+            );
+        }
+        if tp.has_interactions {
+            assert!(
+                !matches!(args[t].logup_evals, DevicePtrArg::Static(0)),
+                "round {round}: trace {t} has interactions and is not exhausted, but no \
+                 logup batch claimed it"
+            );
+        }
+    }
+
+    let mut reads = Vec::new();
+    for (t, a) in args.into_iter().enumerate() {
+        extend_reads(&mut reads, descs.set_batch_s_ring_trace(arr, t, a));
+    }
+    (buf, reads)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn emit_zerocheck_round_eval(
     g: &mut GraphBuilder,
@@ -4271,7 +4824,7 @@ fn emit_zerocheck_round_eval(
     round_bufs: &[Option<RoundTraceBufs>],
     main_descs: &mut MainDescCache,
     descs: &mut DescriptorPlan,
-) -> BufId {
+) -> RoundEvalBatchIr {
     let num_airs = traces.len() as u32;
     let num_x = plan.constraint_degree as u32;
     let shape = BatchEvalShape {
@@ -4323,7 +4876,12 @@ fn emit_zerocheck_round_eval(
         RoundEvalKind::MonomialParY => zerocheck_monomial_batched_ir(g, &bufs, shape, true),
     }
     g.register_output(bufs.out);
-    bufs.out
+    RoundEvalBatchIr {
+        family: RoundEvalFamily::Zerocheck,
+        evals: bufs.out,
+        traces: traces.to_vec(),
+        num_x: num_x as usize,
+    }
 }
 
 /// Emit the round's logup evaluator for `traces`, returning its output
@@ -4338,7 +4896,7 @@ fn emit_logup_round_eval(
     round_bufs: &[Option<RoundTraceBufs>],
     main_descs: &mut MainDescCache,
     descs: &mut DescriptorPlan,
-) -> BufId {
+) -> RoundEvalBatchIr {
     let num_airs = traces.len() as u32;
     let num_x = plan.constraint_degree as u32;
     let shape = BatchEvalShape {
@@ -4400,7 +4958,12 @@ fn emit_logup_round_eval(
             shape,
         );
         g.register_output(out);
-        out
+        RoundEvalBatchIr {
+            family: RoundEvalFamily::Logup,
+            evals: out,
+            traces: traces.to_vec(),
+            num_x: num_x as usize,
+        }
     } else {
         let mut bufs = alloc_eval_bufs(
             g,
@@ -4424,7 +4987,12 @@ fn emit_logup_round_eval(
         }
         logup_batch_eval_mle_ir(g, &bufs, shape);
         g.register_output(bufs.out);
-        bufs.out
+        RoundEvalBatchIr {
+            family: RoundEvalFamily::Logup,
+            evals: bufs.out,
+            traces: traces.to_vec(),
+            num_x: num_x as usize,
+        }
     }
 }
 
@@ -4560,15 +5128,21 @@ pub fn synthetic_plan(num_traces: usize, l_skip: usize, n_max: usize) -> Zeroche
         xi: (0..l_skip + n_max + 1).map(ef).collect(),
         lambda_pows: (0..8).map(ef).collect(),
         mu_pows: (0..3 * num_traces).map(ef).collect(),
-        r: (0..=n_max).map(ef).collect(),
-        omega_skip_pows: (0..1 << l_skip).map(F::from_usize).collect(),
+        r_0: ef(0),
+        // Real powers of the skip-domain generator, not `0..2^l_skip`: the
+        // ring's round-0 `eq_sharp` seed goes through
+        // `eval_eq_sharp_uni`, whose debug identity is only true for an
+        // actual multiplicative subgroup (`poly_common.rs:143-166`).
+        omega_skip_pows: F::two_adic_generator(l_skip)
+            .powers()
+            .take(1 << l_skip)
+            .collect(),
         inv_lagrange_denoms_r0: (0..1 << l_skip).map(ef).collect(),
         fold_selector_scalars: (0..num_traces).map(|t| (ef(t), ef(t + 1))).collect(),
         round0_denom_sum_init: (0..num_traces).map(ef).collect(),
         round0_g_shift: (0..num_traces).map(|_| F::ONE).collect(),
         s_0_coeffs: (0..=(1 << l_skip) * s_deg).map(ef).collect(),
         logup_sum_claims: (0..num_traces).map(|t| (ef(t), ef(t + 1))).collect(),
-        round_evals: (0..n_max).map(|_| (0..s_deg).map(ef).collect()).collect(),
         opening_claims: (0..2 * num_traces).map(ef).collect(),
         threads_per_block: 128,
         num_blocks: 32,
@@ -4590,17 +5164,25 @@ mod zerocheck_ir_tests {
         graph_ir::{DeviceType, GraphBuilder, GraphNode},
         planner::{ListSchedulerV1, ListSchedulerV2, SchedulerMode},
     };
+    use itertools::Itertools;
     use openvm_cuda_common::{
         common::get_device,
         copy::{MemCopyD2H, MemCopyH2D},
         d_buffer::{cudaMemsetAsync, DeviceBuffer},
         stream::{CudaStream, GpuDeviceCtx, StreamGuard},
     };
+    use openvm_stark_backend::poly_common::{eval_eq_mle, UnivariatePoly};
     use p3_field::PrimeCharacteristicRing;
     use rand::{rngs::StdRng, Rng, SeedableRng};
 
     use super::*;
-    use crate::{cuda::logup_zerocheck::fold_selectors_round0, sponge_graph_ir::DuplexSpongeGpuIR};
+    use crate::{
+        cuda::{logup_zerocheck::fold_selectors_round0, sumcheck::batch_fold_mle},
+        logup_zerocheck::{compute_batch_s_poly_from_state, BatchSPolyState},
+        prelude::SC,
+        sponge::DuplexSpongeGpu,
+        sponge_graph_ir::DuplexSpongeGpuIR,
+    };
 
     fn test_ctx() -> GpuDeviceCtx {
         GpuDeviceCtx {
@@ -5130,6 +5712,11 @@ mod zerocheck_ir_tests {
                 fold_ptr_tables(&mut g, &mut descs, device, "t", &srcs, &dsts);
             let widths = typed_slice_const_buf(&mut g, device, "w", &widths_h);
             let logh = typed_slice_const_buf(&mut g, device, "lh", &logh_h);
+            // The challenge is a device buffer now; here it is a constant so
+            // this test stays about the four pointer/shape tables. The
+            // transcript-sampled path is
+            // `batch_fold_mle_ir_uses_sampled_device_challenge`.
+            let r_buf = ef_const_ext_scalar_buf(&mut g, device, "r", r_val);
             batch_fold_mle_ir(
                 &mut g,
                 in_ptrs,
@@ -5140,7 +5727,7 @@ mod zerocheck_ir_tests {
                 &dsts,
                 shapes.len() as u16,
                 max_cells,
-                r_val,
+                r_buf,
             );
             let got = run_graph_with_descs(g, &descs, &dsts, &ctx);
 
@@ -6831,45 +7418,6 @@ mod zerocheck_ir_tests {
         }
     }
 
-    /// The acceptance bar: the whole phase builds as a graph and the graph
-    /// compiles to a `GraphExe`.
-    ///
-    /// This does **not** run the graph — its inputs are registered but
-    /// unbound (`TraceBufs::alloc_inputs`), so `run` would refuse. It
-    /// asserts the thing the port is for: `logup_zerocheck_gpu_ir` emits a
-    /// well-formed graph for a realistic phase shape and `GraphCompiler`
-    /// accepts it.
-    #[test]
-    fn logup_zerocheck_phase_graph_compiles() {
-        let device = DeviceType::Cuda(0);
-        let plan = synthetic_plan(
-            /* num_traces */ 3, /* l_skip */ 2, /* n_max */ 4,
-        );
-
-        let mut g = GraphBuilder::new();
-        let mut transcript = DuplexSpongeGpuIR::new(&mut g, device);
-        let mut inputs = PhaseInputBinder::new();
-        let bufs: Vec<TraceBufs> = (0..plan.num_traces())
-            .map(|t| TraceBufs::alloc_inputs(&mut g, device, &plan, t, &mut inputs))
-            .collect();
-        let proof =
-            logup_zerocheck_gpu_ir(&mut g, &mut transcript, &plan, &bufs, device, &mut inputs);
-
-        assert_eq!(proof.round0_zc_evals.len(), plan.num_traces());
-        assert_eq!(proof.round0_logup_evals.len(), plan.num_traces());
-        assert_eq!(proof.round_evals.len(), plan.n_max);
-        assert_eq!(proof.column_openings.len(), plan.num_traces());
-
-        let exe = GraphCompiler::new()
-            .device(device)
-            .scheduler(SchedulerMode::ListV1 {
-                params: ListSchedulerV1::default(),
-            })
-            .compile(g)
-            .expect("phase graph compile");
-        assert!(exe.num_outputs() > 0, "phase graph produced no outputs");
-    }
-
     /// R6 at phase scale: the whole logup-zerocheck graph binds, and every
     /// offset it encoded lands inside the pool we handed the exe.
     ///
@@ -6970,5 +7518,1395 @@ mod zerocheck_ir_tests {
             })
             .compile(g)
             .expect("seeded phase graph compile");
+    }
+
+    // =======================================================================
+    // The ring: `batch_s_ring_{pre,post}`, the composer, and the folds.
+    // =======================================================================
+
+    /// One trace of a ring fixture. `n` may be negative — that is the only
+    /// case in which `norm_factor != 1` (`mod.rs:1144-1146`).
+    #[derive(Clone, Copy, Debug)]
+    struct RingTraceSpec {
+        n: isize,
+        has_constraints: bool,
+        has_interactions: bool,
+    }
+
+    impl RingTraceSpec {
+        fn n_lift(&self) -> usize {
+            self.n.max(0) as usize
+        }
+    }
+
+    /// One seeded steady round, with everything both sides consume.
+    ///
+    /// The raw evaluator values are stored *unnormalized*: normalization of
+    /// the interaction numerator is the ring kernel's job, and making it the
+    /// descriptor contract is what stops it from being applied twice.
+    struct RingCase {
+        round: usize,
+        d: usize,
+        l_skip: usize,
+        specs: Vec<RingTraceSpec>,
+        xi: Vec<EF>,
+        mu_pows: Vec<EF>,
+        /// `[3 * T]` in the `mu_pows` slot order.
+        tilde_in: Vec<EF>,
+        prev_s_eval: EF,
+        eq_n: EF,
+        eq_sharp_n: EF,
+        r_prev: EF,
+        r_round: EF,
+        /// Raw constraint evaluations per trace: `d` values when early, one
+        /// when late, none when exhausted or absent.
+        zc_raw: Vec<Vec<EF>>,
+        /// Raw interaction evaluations per trace, same shape.
+        lg_raw: Vec<Vec<Frac<EF>>>,
+    }
+
+    /// Which of the three eager cases a trace is in this round.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum RingPhase {
+        Early,
+        Late,
+        Exhausted,
+    }
+
+    impl RingCase {
+        fn new(seed: u64, round: usize, d: usize, specs: Vec<RingTraceSpec>) -> Self {
+            let mut rng = StdRng::seed_from_u64(seed);
+            let t_n = specs.len();
+            let l_skip = 1usize;
+            let xi: Vec<EF> = (0..l_skip + round + 2)
+                .map(|_| rng.random::<EF>())
+                .collect();
+            let mu_pows: Vec<EF> = (0..3 * t_n).map(|_| rng.random::<EF>()).collect();
+            let mut tilde_in: Vec<EF> = (0..3 * t_n).map(|_| rng.random::<EF>()).collect();
+            // A disabled family's tilde slot is ZERO in production
+            // (`mod.rs:628-629` initializes both vectors to zero and nothing
+            // ever writes a slot whose family is absent). The eager
+            // `round == n_lift + 1` equality correction is unguarded
+            // (`mod.rs:1467-1472`), so a nonzero disabled slot here would make
+            // the fixture, not the kernel, the thing that disagrees.
+            for (t, spec) in specs.iter().enumerate() {
+                if !spec.has_interactions {
+                    tilde_in[2 * t] = EF::ZERO;
+                    tilde_in[2 * t + 1] = EF::ZERO;
+                }
+                if !spec.has_constraints {
+                    tilde_in[2 * t_n + t] = EF::ZERO;
+                }
+            }
+            let mut zc_raw = Vec::with_capacity(t_n);
+            let mut lg_raw = Vec::with_capacity(t_n);
+            for spec in &specs {
+                let num_x = match ring_phase(round, spec) {
+                    RingPhase::Early => d,
+                    RingPhase::Late => 1,
+                    RingPhase::Exhausted => 0,
+                };
+                zc_raw.push(if spec.has_constraints {
+                    (0..num_x).map(|_| rng.random::<EF>()).collect()
+                } else {
+                    Vec::new()
+                });
+                lg_raw.push(if spec.has_interactions {
+                    (0..num_x)
+                        .map(|_| Frac::new(rng.random::<EF>(), rng.random::<EF>()))
+                        .collect()
+                } else {
+                    Vec::new()
+                });
+            }
+            Self {
+                round,
+                d,
+                l_skip,
+                specs,
+                xi,
+                mu_pows,
+                tilde_in,
+                prev_s_eval: rng.random(),
+                eq_n: rng.random(),
+                eq_sharp_n: rng.random(),
+                r_prev: rng.random(),
+                r_round: rng.random(),
+                zc_raw,
+                lg_raw,
+            }
+        }
+
+        fn num_traces(&self) -> usize {
+            self.specs.len()
+        }
+
+        fn s_deg(&self) -> usize {
+            self.d + 1
+        }
+
+        /// `F::from_usize(1 << max(-n, 0)).inverse()` — `mod.rs:1144-1146`.
+        fn norm(&self, t: usize) -> F {
+            F::from_usize(1usize << (-self.specs[t].n).max(0)).inverse()
+        }
+
+        fn norm_factors(&self) -> Vec<F> {
+            (0..self.num_traces()).map(|t| self.norm(t)).collect()
+        }
+
+        /// A `ZerocheckPhasePlan` whose *ring-relevant* fields match this case.
+        ///
+        /// Only `num_traces`, `constraint_degree` and each trace's
+        /// `n` / `has_constraints` / `has_interactions` are read by the
+        /// composer and the descriptor builder; the rest is `synthetic_plan`'s
+        /// filler.
+        fn plan(&self) -> ZerocheckPhasePlan {
+            let mut plan = synthetic_plan(self.num_traces(), self.l_skip, self.round.max(1));
+            plan.constraint_degree = self.d;
+            plan.mu_pows = self.mu_pows.clone();
+            for (t, spec) in self.specs.iter().enumerate() {
+                plan.traces[t].n = spec.n;
+                plan.traces[t].has_constraints = spec.has_constraints;
+                plan.traces[t].has_interactions = spec.has_interactions;
+            }
+            plan
+        }
+
+        /// The eager reference: `(poly coefficients, s(1..=s_deg), tilde_out)`.
+        ///
+        /// The polynomial comes from the **production**
+        /// `compute_batch_s_poly_from_state` (`mod.rs`), which is
+        /// `LogupZerocheckGpu::compute_batch_s_poly`'s body verbatim — not a
+        /// formula retyped for the test.
+        fn host_pre(&self, sabotage: Option<(usize, bool)>) -> (Vec<EF>, Vec<EF>, Vec<EF>) {
+            let t_n = self.num_traces();
+            let mut zc_tilde: Vec<EF> = (0..t_n).map(|t| self.tilde_in[2 * t_n + t]).collect();
+            let mut lg_tilde: Vec<[EF; 2]> = (0..t_n)
+                .map(|t| [self.tilde_in[2 * t], self.tilde_in[2 * t + 1]])
+                .collect();
+            // Exactly what `sumcheck_polys_batch_eval` leaves behind
+            // (`mod.rs:1107-1203`): a `3 * T` list of `d`-long vectors, the
+            // numerator already normalized, late values installed into tilde,
+            // exhausted tilde pre-scaled by `r_prev`.
+            let mut sp: Vec<Vec<EF>> = vec![vec![EF::ZERO; self.d]; 3 * t_n];
+            for (t, spec) in self.specs.iter().enumerate() {
+                let norm = self.norm(t);
+                let bump = |v: EF, is_zc: bool| match sabotage {
+                    Some((st, sz)) if st == t && sz == is_zc => v + EF::ONE,
+                    _ => v,
+                };
+                match ring_phase(self.round, spec) {
+                    RingPhase::Early => {
+                        if spec.has_constraints {
+                            for (i, out) in sp[2 * t_n + t].iter_mut().enumerate() {
+                                *out = bump(self.zc_raw[t][i], true);
+                            }
+                        }
+                        if spec.has_interactions {
+                            let (numer, rest) = sp[2 * t..].split_first_mut().unwrap();
+                            let denom = &mut rest[0];
+                            for (i, f) in self.lg_raw[t].iter().enumerate() {
+                                numer[i] = bump(f.p, false) * norm;
+                                denom[i] = f.q;
+                            }
+                        }
+                    }
+                    RingPhase::Late => {
+                        if spec.has_constraints {
+                            zc_tilde[t] = bump(self.zc_raw[t][0], true);
+                        }
+                        if spec.has_interactions {
+                            lg_tilde[t][0] = bump(self.lg_raw[t][0].p, false) * norm;
+                            lg_tilde[t][1] = self.lg_raw[t][0].q;
+                        }
+                    }
+                    RingPhase::Exhausted => {
+                        if spec.has_constraints {
+                            zc_tilde[t] *= self.r_prev;
+                        }
+                        if spec.has_interactions {
+                            for x in lg_tilde[t].iter_mut() {
+                                *x *= self.r_prev;
+                            }
+                        }
+                    }
+                }
+            }
+            // `eq_ns.len() == round` and `last() == [round - 1]` at this point
+            // (`mod.rs:1083-1088`, `mod.rs:1606-1615`), which is exactly why
+            // the ring carries ONE of each.
+            let eq_ns = vec![self.eq_n; self.round];
+            let eq_sharp_ns = vec![self.eq_sharp_n; self.round];
+            let poly = compute_batch_s_poly_from_state(
+                BatchSPolyState {
+                    constraint_degree: self.d,
+                    l_skip: self.l_skip,
+                    xi: &self.xi,
+                    prev_s_eval: self.prev_s_eval,
+                    n_per_trace: &self.specs.iter().map(|s| s.n).collect_vec(),
+                    eq_ns: &eq_ns,
+                    eq_sharp_ns: &eq_sharp_ns,
+                    zerocheck_tilde_evals: &mut zc_tilde,
+                    logup_tilde_evals: &mut lg_tilde,
+                },
+                sp,
+                t_n,
+                self.round,
+                &self.mu_pows,
+            );
+            let coeffs = poly.coeffs().to_vec();
+            let s_evals = (1..=self.s_deg())
+                .map(|i| poly.eval_at_point(EF::from_usize(i)))
+                .collect_vec();
+            let mut tilde_out = vec![EF::ZERO; 3 * t_n];
+            for t in 0..t_n {
+                tilde_out[2 * t] = lg_tilde[t][0];
+                tilde_out[2 * t + 1] = lg_tilde[t][1];
+                tilde_out[2 * t_n + t] = zc_tilde[t];
+            }
+            (coeffs, s_evals, tilde_out)
+        }
+
+        /// `[s(r), eq_n * eq_r, eq_sharp_n * eq_r]` — `mod.rs:401`,
+        /// `mod.rs:1612-1614`.
+        fn host_post(&self, coeffs: &[EF], r_round: EF) -> Vec<EF> {
+            let poly = UnivariatePoly::new(coeffs.to_vec());
+            let eq_r: EF = eval_eq_mle(&[self.xi[self.l_skip + self.round - 1]], &[r_round]);
+            vec![
+                poly.eval_at_point(r_round),
+                self.eq_n * eq_r,
+                self.eq_sharp_n * eq_r,
+            ]
+        }
+    }
+
+    fn ring_phase(round: usize, spec: &RingTraceSpec) -> RingPhase {
+        let n_lift = spec.n_lift();
+        if round <= n_lift {
+            RingPhase::Early
+        } else if round == n_lift + 1 {
+            RingPhase::Late
+        } else {
+            RingPhase::Exhausted
+        }
+    }
+
+    /// One compact evaluator batch of a fixture, in `air` order.
+    struct RingBatchSpec {
+        family: RoundEvalFamily,
+        num_x: usize,
+        /// Trace indices in batch order — deliberately not identity.
+        order: Vec<usize>,
+    }
+
+    /// The four batches the *fixed* stage-D dispatch will emit: early and late
+    /// are separate launches with different `num_x` (S1.4-a), one per family.
+    ///
+    /// The order inside each batch is reversed so that `air != trace_idx`: a
+    /// descriptor builder that used the trace index as the batch position
+    /// would pass with identity ordering and fail here.
+    fn ring_batches(case: &RingCase) -> Vec<RingBatchSpec> {
+        let mut out = Vec::new();
+        for (phase, num_x) in [(RingPhase::Early, case.d), (RingPhase::Late, 1)] {
+            for family in [RoundEvalFamily::Zerocheck, RoundEvalFamily::Logup] {
+                let order: Vec<usize> = (0..case.num_traces())
+                    .rev()
+                    .filter(|&t| {
+                        ring_phase(case.round, &case.specs[t]) == phase
+                            && match family {
+                                RoundEvalFamily::Zerocheck => case.specs[t].has_constraints,
+                                RoundEvalFamily::Logup => case.specs[t].has_interactions,
+                            }
+                    })
+                    .collect();
+                if !order.is_empty() {
+                    out.push(RingBatchSpec {
+                        family,
+                        num_x,
+                        order,
+                    });
+                }
+            }
+        }
+        out
+    }
+
+    /// Flatten one batch's raw values, optionally perturbing one trace's
+    /// contribution by `EF::ONE` (the sabotage leg).
+    fn ring_batch_zc_host(case: &RingCase, b: &RingBatchSpec, sab: Option<usize>) -> Vec<EF> {
+        b.order
+            .iter()
+            .flat_map(|&t| {
+                case.zc_raw[t]
+                    .iter()
+                    .map(move |&v| if sab == Some(t) { v + EF::ONE } else { v })
+            })
+            .collect()
+    }
+
+    fn ring_batch_lg_host(case: &RingCase, b: &RingBatchSpec, sab: Option<usize>) -> Vec<Frac<EF>> {
+        b.order
+            .iter()
+            .flat_map(|&t| {
+                case.lg_raw[t].iter().map(move |f| {
+                    if sab == Some(t) {
+                        Frac::new(f.p + EF::ONE, f.q)
+                    } else {
+                        *f
+                    }
+                })
+            })
+            .collect()
+    }
+
+    /// The fixtures: both production degrees, `T` of 1 / 2 / 5, permuted
+    /// batches, both / one / neither family, a mixed early+late+exhausted
+    /// round, and the `n < 0` normalization.
+    fn ring_cases() -> Vec<(&'static str, RingCase)> {
+        let both = |n: isize| RingTraceSpec {
+            n,
+            has_constraints: true,
+            has_interactions: true,
+        };
+        let zc_only = |n: isize| RingTraceSpec {
+            n,
+            has_constraints: true,
+            has_interactions: false,
+        };
+        let lg_only = |n: isize| RingTraceSpec {
+            n,
+            has_constraints: false,
+            has_interactions: true,
+        };
+        let neither = |n: isize| RingTraceSpec {
+            n,
+            has_constraints: false,
+            has_interactions: false,
+        };
+        vec![
+            ("d3_T1_early", RingCase::new(0x11, 1, 3, vec![both(3)])),
+            (
+                "d4_T2_early",
+                RingCase::new(0x22, 2, 4, vec![both(4), zc_only(5)]),
+            ),
+            (
+                "d3_T5_mixed",
+                RingCase::new(
+                    0x33,
+                    3,
+                    3,
+                    vec![both(5), both(2), both(1), zc_only(4), lg_only(3)],
+                ),
+            ),
+            (
+                "d4_T3_late_and_exhausted",
+                RingCase::new(0x44, 4, 4, vec![both(3), lg_only(2), both(6)]),
+            ),
+            (
+                "d3_T2_negative_n_late",
+                RingCase::new(0x55, 1, 3, vec![both(-2), both(2)]),
+            ),
+            (
+                "d3_T2_family_free_trace",
+                RingCase::new(0x66, 2, 3, vec![neither(3), both(3)]),
+            ),
+        ]
+    }
+
+    /// Step 1 — the shared descriptor ABI, Rust mirror vs the C++ definition.
+    #[test]
+    fn batch_s_ring_trace_desc_layout_matches_cuda() {
+        crate::cuda::logup_zerocheck::assert_batch_s_ring_abi_matches_cuda();
+        // Spelled out here too, so a silent change on BOTH sides still has to
+        // get past a literal.
+        assert_eq!(size_of::<BatchSRingTraceDesc>(), 24);
+        assert_eq!(align_of::<BatchSRingTraceDesc>(), 8);
+        assert_eq!(offset_of!(BatchSRingTraceDesc, zc_evals), 0);
+        assert_eq!(offset_of!(BatchSRingTraceDesc, logup_evals), 8);
+        assert_eq!(offset_of!(BatchSRingTraceDesc, n_lift), 16);
+        assert_eq!(offset_of!(BatchSRingTraceDesc, flags), 20);
+        assert_eq!(BATCH_S_RING_HAS_CONSTRAINTS, 1);
+        assert_eq!(BATCH_S_RING_HAS_INTERACTIONS, 2);
+    }
+
+    /// Step 1 — the descriptor array addresses the *permuted* compact batches,
+    /// nulls the absent families, and declares every buffer it points into.
+    #[test]
+    fn batch_s_ring_descriptor_offsets_match_compact_batches() {
+        let ctx = test_ctx();
+        let device = DeviceType::Cuda(0);
+        for (name, case) in ring_cases() {
+            let plan = case.plan();
+            let batches_spec = ring_batches(&case);
+            let mut g = GraphBuilder::new();
+            let mut descs = DescriptorPlan::new();
+
+            // Stand-in producers for the evaluator outputs; only their
+            // addresses matter here.
+            let mut batches = Vec::new();
+            for (i, b) in batches_spec.iter().enumerate() {
+                let evals = match b.family {
+                    RoundEvalFamily::Zerocheck => ef_slice_const_buf(
+                        &mut g,
+                        device,
+                        &format!("zc{i}"),
+                        &ring_batch_zc_host(&case, b, None),
+                    ),
+                    RoundEvalFamily::Logup => {
+                        let host = ring_batch_lg_host(&case, b, None);
+                        let buf = add_frac_buf(&mut g, device, &format!("lg{i}"), host.len());
+                        let bytes = unsafe {
+                            std::slice::from_raw_parts(
+                                host.as_ptr() as *const u8,
+                                std::mem::size_of_val(&host[..]),
+                            )
+                            .to_vec()
+                        };
+                        g.insert_const(buf, ConstBuf::HostBuf(bytes));
+                        buf
+                    }
+                };
+                batches.push(RoundEvalBatchIr {
+                    family: b.family,
+                    evals,
+                    traces: b.order.clone(),
+                    num_x: b.num_x,
+                });
+            }
+            let (desc_buf, reads) = build_batch_s_ring_trace_descs(
+                &mut g,
+                &mut descs,
+                device,
+                "ring_descs",
+                &plan,
+                case.round,
+                &batches,
+            );
+
+            // Every buffer a descriptor points into must be in the declared
+            // read set — that list is what the consuming blackbox declares.
+            for b in &batches {
+                let referenced = case.specs.iter().enumerate().any(|(t, spec)| {
+                    b.traces.contains(&t)
+                        && match b.family {
+                            RoundEvalFamily::Zerocheck => spec.has_constraints,
+                            RoundEvalFamily::Logup => spec.has_interactions,
+                        }
+                });
+                assert_eq!(
+                    referenced,
+                    reads.contains(&b.evals),
+                    "{name}: batch {:?} declared-read mismatch",
+                    b.family
+                );
+            }
+            assert_eq!(
+                reads,
+                descs.referenced_bufs(desc_buf)[1..].to_vec(),
+                "{name}: the returned reads must be the descriptor's dereference closure"
+            );
+
+            // Now bind for real and check the decoded addresses. The ring's
+            // `pre` node is inserted so the descriptor array and the compact
+            // batches have a real consumer — a registered input nothing reads
+            // is rejected outright (`graph_compiler.rs:1236-1266`), and an
+            // unread const would have no pool slot for its offset to name.
+            let tilde_in = ef_slice_const_buf(&mut g, device, "tilde_in", &case.tilde_in);
+            let mu = ef_slice_const_buf(&mut g, device, "mu", &case.mu_pows);
+            let norm = f_slice_const_buf(&mut g, device, "norm", &case.norm_factors());
+            let scalars = ef_slice_const_buf(
+                &mut g,
+                device,
+                "scalars",
+                &[case.prev_s_eval, case.eq_n, case.eq_sharp_n],
+            );
+            let xi_j = ef_const_ext_scalar_buf(&mut g, device, "xi", case.xi[case.l_skip]);
+            let r_prev = ef_const_ext_scalar_buf(&mut g, device, "r_prev", case.r_prev);
+            let (tilde_out, _, _) = batch_s_ring_pre_ir(
+                &mut g,
+                desc_buf,
+                &reads,
+                descs.pool_base().clone(),
+                tilde_in,
+                mu,
+                norm,
+                scalars,
+                xi_j,
+                r_prev,
+                case.num_traces(),
+                case.d,
+                case.round,
+                device,
+            );
+            // Export through a fresh copy rather than pinning the descriptor
+            // input itself.
+            let desc_copy = add_typed_buf::<BatchSRingTraceDesc>(
+                &mut g,
+                device,
+                "desc_copy",
+                case.num_traces(),
+            );
+            g.insert_memcpy(desc_buf, desc_copy);
+            let bytes = run_graph_with_descs(g, &descs, &[desc_copy, tilde_out], &ctx).remove(0);
+            let decoded: &[BatchSRingTraceDesc] = unsafe {
+                std::slice::from_raw_parts(
+                    bytes.as_ptr() as *const BatchSRingTraceDesc,
+                    case.num_traces(),
+                )
+            };
+            for (t, spec) in case.specs.iter().enumerate() {
+                assert_eq!(
+                    decoded[t].n_lift as usize,
+                    spec.n_lift(),
+                    "{name}: n_lift[{t}]"
+                );
+                let want_flags = (u32::from(spec.has_constraints) * BATCH_S_RING_HAS_CONSTRAINTS)
+                    | (u32::from(spec.has_interactions) * BATCH_S_RING_HAS_INTERACTIONS);
+                assert_eq!(decoded[t].flags, want_flags, "{name}: flags[{t}]");
+                let phase = ring_phase(case.round, spec);
+                for (family, got) in [
+                    (RoundEvalFamily::Zerocheck, decoded[t].zc_evals),
+                    (RoundEvalFamily::Logup, decoded[t].logup_evals),
+                ] {
+                    let enabled = match family {
+                        RoundEvalFamily::Zerocheck => spec.has_constraints,
+                        RoundEvalFamily::Logup => spec.has_interactions,
+                    };
+                    if !enabled || phase == RingPhase::Exhausted {
+                        assert_eq!(
+                            got,
+                            BaseOff::NULL,
+                            "{name}: trace {t} family {family:?} must be the absent encoding"
+                        );
+                        continue;
+                    }
+                    assert_ne!(
+                        got,
+                        BaseOff::NULL,
+                        "{name}: trace {t} family {family:?} must carry an address"
+                    );
+                }
+            }
+            // Distinct traces in the same batch must decode to distinct,
+            // correctly strided addresses.
+            for b in &batches_spec {
+                let stride = match b.family {
+                    RoundEvalFamily::Zerocheck => b.num_x * size_of::<EF>(),
+                    RoundEvalFamily::Logup => b.num_x * size_of::<Frac<EF>>(),
+                } as u64;
+                let off = |t: usize| match b.family {
+                    RoundEvalFamily::Zerocheck => decoded[t].zc_evals.0,
+                    RoundEvalFamily::Logup => decoded[t].logup_evals.0,
+                };
+                for (air, &t) in b.order.iter().enumerate() {
+                    assert_eq!(
+                        off(t),
+                        off(b.order[0]) + air as u64 * stride,
+                        "{name}: trace {t} sits at batch position {air}, so its offset must be \
+                         the batch base plus {air} * {stride}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Upload a case's batches eagerly and build the eager (absolute-address,
+    /// null-pool-base) descriptor array the CUDA launcher decodes.
+    ///
+    /// Returns the descriptors plus the device buffers they point at, which
+    /// the caller must keep alive across the launch.
+    #[allow(clippy::type_complexity)]
+    fn eager_ring_descs(
+        case: &RingCase,
+        sabotage: Option<(usize, bool)>,
+        ctx: &GpuDeviceCtx,
+    ) -> (
+        Vec<BatchSRingTraceDesc>,
+        Vec<DeviceBuffer<EF>>,
+        Vec<DeviceBuffer<Frac<EF>>>,
+    ) {
+        let mut descs: Vec<BatchSRingTraceDesc> = case
+            .specs
+            .iter()
+            .map(|spec| BatchSRingTraceDesc {
+                zc_evals: BaseOff::NULL,
+                logup_evals: BaseOff::NULL,
+                n_lift: spec.n_lift() as u32,
+                flags: (u32::from(spec.has_constraints) * BATCH_S_RING_HAS_CONSTRAINTS)
+                    | (u32::from(spec.has_interactions) * BATCH_S_RING_HAS_INTERACTIONS),
+            })
+            .collect();
+        let mut zc_bufs = Vec::new();
+        let mut lg_bufs = Vec::new();
+        for b in ring_batches(case) {
+            match b.family {
+                RoundEvalFamily::Zerocheck => {
+                    let sab = sabotage.and_then(|(t, is_zc)| is_zc.then_some(t));
+                    let host = ring_batch_zc_host(case, &b, sab);
+                    let dev = host.as_slice().to_device_on(ctx).expect("H2D zc batch");
+                    for (air, &t) in b.order.iter().enumerate() {
+                        descs[t].zc_evals =
+                            BaseOff::from_ptr(dev.as_ptr().wrapping_add(air * b.num_x));
+                    }
+                    zc_bufs.push(dev);
+                }
+                RoundEvalFamily::Logup => {
+                    let sab = sabotage.and_then(|(t, is_zc)| (!is_zc).then_some(t));
+                    let host = ring_batch_lg_host(case, &b, sab);
+                    let dev = host.as_slice().to_device_on(ctx).expect("H2D lg batch");
+                    for (air, &t) in b.order.iter().enumerate() {
+                        descs[t].logup_evals =
+                            BaseOff::from_ptr(dev.as_ptr().wrapping_add(air * b.num_x));
+                    }
+                    lg_bufs.push(dev);
+                }
+            }
+        }
+        (descs, zc_bufs, lg_bufs)
+    }
+
+    /// Run `batch_s_ring_pre` + `batch_s_ring_post` eagerly on one case.
+    ///
+    /// Returns `(tilde_out, poly_coeffs, s_evals, scalar_state_out)`.
+    #[allow(clippy::type_complexity)]
+    fn run_eager_ring(
+        case: &RingCase,
+        sabotage: Option<(usize, bool)>,
+        ctx: &GpuDeviceCtx,
+    ) -> (Vec<EF>, Vec<EF>, Vec<EF>, Vec<EF>) {
+        let stream = ctx.stream.as_raw();
+        let t_n = case.num_traces();
+        let (descs, _zc_keep, _lg_keep) = eager_ring_descs(case, sabotage, ctx);
+        let d_descs = descs.as_slice().to_device_on(ctx).expect("H2D descs");
+        let d_tilde_in = case
+            .tilde_in
+            .as_slice()
+            .to_device_on(ctx)
+            .expect("H2D tilde");
+        let d_mu = case.mu_pows.as_slice().to_device_on(ctx).expect("H2D mu");
+        let d_norm = case
+            .norm_factors()
+            .as_slice()
+            .to_device_on(ctx)
+            .expect("H2D norm");
+        let d_state_in = [case.prev_s_eval, case.eq_n, case.eq_sharp_n]
+            .as_slice()
+            .to_device_on(ctx)
+            .expect("H2D state");
+        let d_xi = [case.xi[case.l_skip + case.round - 1]]
+            .as_slice()
+            .to_device_on(ctx)
+            .expect("H2D xi");
+        let d_r_prev = [case.r_prev]
+            .as_slice()
+            .to_device_on(ctx)
+            .expect("H2D r_prev");
+        let d_r_round = [case.r_round]
+            .as_slice()
+            .to_device_on(ctx)
+            .expect("H2D r_round");
+        let d_tilde_out = DeviceBuffer::<EF>::with_capacity_on(3 * t_n, ctx);
+        let d_coeffs = DeviceBuffer::<EF>::with_capacity_on(case.d + 2, ctx);
+        let d_s_evals = DeviceBuffer::<EF>::with_capacity_on(case.d + 1, ctx);
+        let d_state_out = DeviceBuffer::<EF>::with_capacity_on(3, ctx);
+        unsafe {
+            batch_s_ring_pre(
+                d_descs.as_ptr(),
+                std::ptr::null(),
+                d_tilde_in.as_ptr(),
+                d_mu.as_ptr(),
+                d_norm.as_ptr(),
+                d_state_in.as_ptr(),
+                d_xi.as_ptr(),
+                d_r_prev.as_ptr(),
+                d_tilde_out.as_mut_ptr(),
+                d_coeffs.as_mut_ptr(),
+                d_s_evals.as_mut_ptr(),
+                t_n as u32,
+                case.d as u32,
+                case.round as u32,
+                stream,
+            )
+            .expect("batch_s_ring_pre");
+            batch_s_ring_post(
+                d_coeffs.as_ptr(),
+                d_state_in.as_ptr(),
+                d_xi.as_ptr(),
+                d_r_round.as_ptr(),
+                d_state_out.as_mut_ptr(),
+                case.d as u32,
+                stream,
+            )
+            .expect("batch_s_ring_post");
+        }
+        ctx.stream.synchronize().expect("sync");
+        (
+            d_tilde_out.to_host_on(ctx).expect("D2H tilde"),
+            d_coeffs.to_host_on(ctx).expect("D2H coeffs"),
+            d_s_evals.to_host_on(ctx).expect("D2H s_evals"),
+            d_state_out.to_host_on(ctx).expect("D2H state"),
+        )
+    }
+
+    /// Step 2 — the two ring kernels reproduce `compute_batch_s_poly` and its
+    /// caller's post-sample updates, byte for byte, on every seeded shape.
+    #[test]
+    fn batch_s_ring_pre_post_matches_eager() {
+        let ctx = test_ctx();
+        for (name, case) in ring_cases() {
+            let (want_coeffs, want_s, want_tilde) = case.host_pre(None);
+            let want_state = case.host_post(&want_coeffs, case.r_round);
+            let (got_tilde, got_coeffs, got_s, got_state) = run_eager_ring(&case, None, &ctx);
+            assert_eq!(
+                ef_bytes(&got_coeffs),
+                ef_bytes(&want_coeffs),
+                "{name}: coeffs"
+            );
+            assert_eq!(ef_bytes(&got_s), ef_bytes(&want_s), "{name}: s(1..=s_deg)");
+            assert_eq!(ef_bytes(&got_tilde), ef_bytes(&want_tilde), "{name}: tilde");
+            assert_eq!(
+                ef_bytes(&got_state),
+                ef_bytes(&want_state),
+                "{name}: [s(r), eq_n', eq_sharp_n']"
+            );
+        }
+    }
+
+    /// Step 2 — the oracle has teeth: perturbing ONE raw evaluator value on
+    /// the device side, after the eager bytes are frozen, must change the
+    /// result.
+    ///
+    /// Both families are perturbed in turn, including a numerator (which is
+    /// the one value the ring normalizes) so a dropped `norm_factor` cannot
+    /// hide behind an untested path.
+    #[test]
+    fn batch_s_ring_oracle_detects_sabotage() {
+        let ctx = test_ctx();
+        for (name, case) in ring_cases() {
+            let (want_coeffs, want_s, want_tilde) = case.host_pre(None);
+            for t in 0..case.num_traces() {
+                for is_zc in [true, false] {
+                    let spec = case.specs[t];
+                    let enabled = if is_zc {
+                        spec.has_constraints
+                    } else {
+                        spec.has_interactions
+                    };
+                    if !enabled || ring_phase(case.round, &spec) == RingPhase::Exhausted {
+                        continue;
+                    }
+                    let sab = Some((t, is_zc));
+                    // The host reference under the SAME perturbation must
+                    // differ from the frozen one; otherwise the fixture, not
+                    // the kernel, is blind.
+                    let (host_coeffs, host_s, host_tilde) = case.host_pre(sab);
+                    assert!(
+                        host_coeffs != want_coeffs || host_s != want_s || host_tilde != want_tilde,
+                        "{name}: perturbing trace {t} (zc={is_zc}) does not move the EAGER \
+                         result — the fixture cannot detect anything here"
+                    );
+                    let (got_tilde, got_coeffs, got_s, _) = run_eager_ring(&case, sab, &ctx);
+                    assert!(
+                        ef_bytes(&got_coeffs) != ef_bytes(&want_coeffs)
+                            || ef_bytes(&got_s) != ef_bytes(&want_s)
+                            || ef_bytes(&got_tilde) != ef_bytes(&want_tilde),
+                        "SABOTAGE LEG IS BLIND: {name}, trace {t} (zc={is_zc}) — a corrupted \
+                         evaluator value produced the frozen eager bytes"
+                    );
+                    // ...and the corrupted device result must still equal the
+                    // corrupted host result, which is what makes the pass
+                    // meaningful rather than merely different.
+                    assert_eq!(
+                        ef_bytes(&got_coeffs),
+                        ef_bytes(&host_coeffs),
+                        "{name}: sabotaged device coeffs must track the sabotaged host coeffs"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Wire one case's compact batches into a graph and run the composer.
+    ///
+    /// Returns `(observed s-evals, sampled r, tilde_out, scalar_state_out,
+    /// coeffs, final sponge state)` on the graph side and the eager side.
+    #[allow(clippy::type_complexity)]
+    struct RingRoundGraph {
+        s_evals: Vec<EF>,
+        r: EF,
+        tilde: Vec<EF>,
+        state: Vec<EF>,
+        coeffs: Vec<EF>,
+        sponge: Vec<u8>,
+        /// Folded outputs, when the caller asked for folds.
+        folded: Vec<Vec<EF>>,
+        /// Node count of the composer plus the folds, and the blackbox names
+        /// it inserted.
+        nodes: usize,
+        node_names: Vec<String>,
+    }
+
+    /// Ragged fold shapes, matching the low-level device-challenge ABI test
+    /// (`cuda/mod.rs:358`): unequal heights, unequal widths, one height-1
+    /// output.
+    const RING_FOLD_SHAPES: [(usize, usize); 3] = [(8, 3), (4, 5), (2, 7)];
+
+    /// Host `batch_fold_mle`, column-major with ADJACENT pairing:
+    /// `out[col][row] = t0 + r * (t1 - t0)` for `t0 = in[col][2 * row]`,
+    /// `t1 = in[col][2 * row + 1]`.
+    ///
+    /// Same reference as `cuda::sumcheck::dev_challenge_tests::host_fold`
+    /// (`cuda/mod.rs:329-340`), which the already-green low-level ABI test
+    /// pins the kernel against.
+    fn host_fold_matrix(input: &[EF], height: usize, width: usize, r: EF) -> Vec<EF> {
+        let out_h = height >> 1;
+        let mut out = Vec::with_capacity(out_h * width);
+        for col in 0..width {
+            for row in 0..out_h {
+                let t0 = input[col * height + 2 * row];
+                let t1 = input[col * height + 2 * row + 1];
+                out.push(t0 + r * (t1 - t0));
+            }
+        }
+        out
+    }
+
+    /// Build + run one round of the ring as graph nodes, optionally followed
+    /// by the two `batch_fold_mle` launches driven by the sampled challenge.
+    fn run_ring_round_graph(
+        case: &RingCase,
+        sabotage: Option<(usize, bool)>,
+        fold_inputs: Option<&[Vec<EF>]>,
+        snap: &crate::sponge::SpongeSnapshot,
+        ctx: &GpuDeviceCtx,
+    ) -> RingRoundGraph {
+        let device = DeviceType::Cuda(0);
+        let plan = case.plan();
+        let t_n = case.num_traces();
+        let mut g = GraphBuilder::new();
+        let (mut transcript, seed_buf) = DuplexSpongeGpuIR::from_live_input(&mut g, device, snap);
+        let mut descs = DescriptorPlan::new();
+
+        let mut batches = Vec::new();
+        for (i, b) in ring_batches(case).iter().enumerate() {
+            let evals = match b.family {
+                RoundEvalFamily::Zerocheck => {
+                    let sab = sabotage.and_then(|(t, is_zc)| is_zc.then_some(t));
+                    ef_slice_const_buf(
+                        &mut g,
+                        device,
+                        &format!("zc{i}"),
+                        &ring_batch_zc_host(case, b, sab),
+                    )
+                }
+                RoundEvalFamily::Logup => {
+                    let sab = sabotage.and_then(|(t, is_zc)| (!is_zc).then_some(t));
+                    let host = ring_batch_lg_host(case, b, sab);
+                    let buf = add_frac_buf(&mut g, device, &format!("lg{i}"), host.len());
+                    let bytes = unsafe {
+                        std::slice::from_raw_parts(
+                            host.as_ptr() as *const u8,
+                            std::mem::size_of_val(&host[..]),
+                        )
+                        .to_vec()
+                    };
+                    g.insert_const(buf, ConstBuf::HostBuf(bytes));
+                    buf
+                }
+            };
+            batches.push(RoundEvalBatchIr {
+                family: b.family,
+                evals,
+                traces: b.order.clone(),
+                num_x: b.num_x,
+            });
+        }
+
+        let mu = ef_slice_const_buf(&mut g, device, "mu_pows", &case.mu_pows);
+        let norm = f_slice_const_buf(&mut g, device, "norm", &case.norm_factors());
+        let xi_j = ef_const_ext_scalar_buf(
+            &mut g,
+            device,
+            "xi_j",
+            case.xi[case.l_skip + case.round - 1],
+        );
+        let r_prev = ef_const_ext_scalar_buf(&mut g, device, "r_prev", case.r_prev);
+        let tilde_in = ef_slice_const_buf(&mut g, device, "tilde_in", &case.tilde_in);
+        let scalars_in = ef_slice_const_buf(
+            &mut g,
+            device,
+            "scalars_in",
+            &[case.prev_s_eval, case.eq_n, case.eq_sharp_n],
+        );
+
+        // Fold *setup* (const matrices, pointer tables, shape tables) is
+        // hoisted out of the node-count window: the budget is about the ring
+        // and the two launches, not about how a test fixture materializes its
+        // matrices. Two groups, mirroring the driver's matrix + selector
+        // folds.
+        struct FoldGroup {
+            srcs: Vec<BufId>,
+            dsts: Vec<BufId>,
+            in_ptrs: BufId,
+            out_ptrs: BufId,
+            widths: BufId,
+            logh: BufId,
+            max_cells: u32,
+        }
+        let mut fold_groups: Vec<FoldGroup> = Vec::new();
+        if let Some(mats) = fold_inputs {
+            for tag in ["mats", "sels"] {
+                let srcs: Vec<BufId> = mats
+                    .iter()
+                    .enumerate()
+                    .map(|(i, m)| ef_slice_const_buf(&mut g, device, &format!("{tag}_src{i}"), m))
+                    .collect();
+                let dsts: Vec<BufId> = RING_FOLD_SHAPES
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &(h, w))| {
+                        add_ef_buf(&mut g, device, &format!("{tag}_dst{i}"), (h / 2) * w)
+                    })
+                    .collect();
+                let widths_h: Vec<u32> = RING_FOLD_SHAPES.iter().map(|&(_, w)| w as u32).collect();
+                let logh_h: Vec<u8> = RING_FOLD_SHAPES
+                    .iter()
+                    .map(|&(h, _)| ((h / 2) as u32).ilog2() as u8)
+                    .collect();
+                let max_cells = RING_FOLD_SHAPES
+                    .iter()
+                    .map(|&(h, w)| ((h / 2) * w) as u32)
+                    .max()
+                    .unwrap();
+                let (in_ptrs, out_ptrs) =
+                    fold_ptr_tables(&mut g, &mut descs, device, tag, &srcs, &dsts);
+                let widths = typed_slice_const_buf(&mut g, device, &format!("{tag}_w"), &widths_h);
+                let logh = typed_slice_const_buf(&mut g, device, &format!("{tag}_lh"), &logh_h);
+                fold_groups.push(FoldGroup {
+                    srcs,
+                    dsts,
+                    in_ptrs,
+                    out_ptrs,
+                    widths,
+                    logh,
+                    max_cells,
+                });
+            }
+        }
+
+        let nodes_before = g.nodes.len();
+        let ring = observe_and_update_zerocheck_round_ir(
+            &mut g,
+            &mut transcript,
+            &mut descs,
+            &plan,
+            &batches,
+            mu,
+            norm,
+            xi_j,
+            r_prev,
+            ZerocheckRoundStateIr {
+                tilde: tilde_in,
+                scalars: scalars_in,
+            },
+            case.round,
+            device,
+        );
+
+        // The two folds, driven by the SAME sampled buffer the ring produced.
+        let mut fold_dsts: Vec<BufId> = Vec::new();
+        for fg in &fold_groups {
+            batch_fold_mle_ir(
+                &mut g,
+                fg.in_ptrs,
+                fg.out_ptrs,
+                fg.widths,
+                fg.logh,
+                &fg.srcs,
+                &fg.dsts,
+                RING_FOLD_SHAPES.len() as u16,
+                fg.max_cells,
+                ring.r_round,
+            );
+            fold_dsts.extend(fg.dsts.iter().copied());
+        }
+        let nodes_after = g.nodes.len();
+        let node_names: Vec<String> = g.nodes[nodes_before..nodes_after]
+            .iter()
+            .filter_map(|n| match n {
+                GraphNode::BlackboxKernel(k) => Some(k.name.clone()),
+                _ => None,
+            })
+            .collect();
+
+        // Every artifact is exported through a FRESH memcpy: exporting an
+        // internal producer directly can change fusion and liveness, so the
+        // oracle would no longer be measuring the same graph.
+        let s_outs: Vec<BufId> = ring
+            .s_evals
+            .iter()
+            .enumerate()
+            .map(|(i, &b)| {
+                let o = add_ext_scalar_buf(&mut g, device, &format!("s_out{i}"));
+                g.insert_memcpy(b, o);
+                o
+            })
+            .collect();
+        let r_out = add_ext_scalar_buf(&mut g, device, "r_out");
+        g.insert_memcpy(ring.r_round, r_out);
+        let tilde_out = add_ef_buf(&mut g, device, "tilde_out", 3 * t_n);
+        g.insert_memcpy(ring.state.tilde, tilde_out);
+        let state_out = add_ef_buf(&mut g, device, "state_out", 3);
+        g.insert_memcpy(ring.state.scalars, state_out);
+        let coeffs_out = add_ef_buf(&mut g, device, "coeffs_out", case.d + 2);
+        g.insert_memcpy(ring.poly_coeffs, coeffs_out);
+        let sponge_out = transcript.state_buf();
+
+        let mut wanted = s_outs.clone();
+        wanted.extend([r_out, tilde_out, state_out, coeffs_out, sponge_out]);
+        wanted.extend(fold_dsts.iter().copied());
+
+        for &b in &wanted {
+            g.register_output(b);
+        }
+        let mut exe = GraphCompiler::new()
+            .device(device)
+            .scheduler(scheduler_v1())
+            .compile(g)
+            .expect("ring graph compile");
+        let pool = DescriptorPlan::alloc_pool(&exe, ctx);
+        descs.bind(&mut exe, ctx, pool).expect("descriptor bind");
+        crate::sponge_graph_ir::bind_sponge_seed(&mut exe, ctx, seed_buf, snap)
+            .expect("bind_sponge_seed");
+        exe.run(ctx).expect("ring graph run");
+        let read = |b: BufId| -> Vec<u8> {
+            let idx = (0..exe.num_outputs())
+                .find(|&i| exe.output_buf_id(i) == b)
+                .expect("output buf");
+            exe.get_output(idx).to_host_on(ctx).expect("D2H")
+        };
+        let ef_of = |bytes: &[u8]| -> Vec<EF> {
+            unsafe {
+                std::slice::from_raw_parts(
+                    bytes.as_ptr() as *const EF,
+                    bytes.len() / size_of::<EF>(),
+                )
+                .to_vec()
+            }
+        };
+        RingRoundGraph {
+            s_evals: s_outs.iter().map(|&b| ef_of(&read(b))[0]).collect(),
+            r: ef_of(&read(r_out))[0],
+            tilde: ef_of(&read(tilde_out)),
+            state: ef_of(&read(state_out)),
+            coeffs: ef_of(&read(coeffs_out)),
+            sponge: read(sponge_out),
+            folded: fold_dsts.iter().map(|&b| ef_of(&read(b))).collect(),
+            nodes: nodes_after - nodes_before,
+            node_names,
+        }
+    }
+
+    /// A live sponge that has already absorbed, so the graph transcript is
+    /// seeded mid-stream exactly as the phase driver seeds it.
+    ///
+    /// No grinding happens anywhere in these fixtures — the transcript is
+    /// driven only through `observe_ext` / `sample_ext`, and both PoW paths
+    /// (`transcript/traits.rs:83-86`, `sponge.cu:80-86`) are only reachable
+    /// through `grind`, which is never called. There is therefore no
+    /// nondeterminism for `pow_bits = 0` to remove here.
+    fn seeded_sponge(seed: u64) -> (DuplexSpongeGpu, crate::sponge::SpongeSnapshot) {
+        use openvm_stark_backend::FiatShamirTranscript;
+        let mut live = DuplexSpongeGpu::default();
+        for i in 0..(3 + seed % 5) as u32 {
+            FiatShamirTranscript::<SC>::observe(&mut live, F::from_u32(i + 1));
+        }
+        let snap = live.snapshot();
+        (live, snap)
+    }
+
+    /// The eager tail of one steady round: observe `s(1..=s_deg)`, sample `r`.
+    fn host_observe_and_sample(sponge: &mut DuplexSpongeGpu, s_evals: &[EF]) -> EF {
+        use openvm_stark_backend::FiatShamirTranscript;
+        for &e in s_evals {
+            FiatShamirTranscript::<SC>::observe_ext(sponge, e);
+        }
+        FiatShamirTranscript::<SC>::sample_ext(sponge)
+    }
+
+    /// Step 3 — the composer: observed values, sampled challenge, next state
+    /// and the final sponge state all agree with the eager path, on bytes.
+    #[test]
+    fn observe_and_update_zerocheck_round_ir_matches_eager() {
+        let ctx = test_ctx();
+        for (i, (name, case)) in ring_cases().into_iter().enumerate() {
+            let (mut sponge, snap) = seeded_sponge(i as u64);
+            let (want_coeffs, want_s, want_tilde) = case.host_pre(None);
+            let want_r = host_observe_and_sample(&mut sponge, &want_s);
+            let want_state = case.host_post(&want_coeffs, want_r);
+            let want_sponge = sponge.snapshot();
+
+            let got = run_ring_round_graph(&case, None, None, &snap, &ctx);
+            assert_eq!(
+                ef_bytes(&got.coeffs),
+                ef_bytes(&want_coeffs),
+                "{name}: coeffs"
+            );
+            assert_eq!(
+                ef_bytes(&got.s_evals),
+                ef_bytes(&want_s),
+                "{name}: observed s-evals"
+            );
+            assert_eq!(ef_bytes(&[got.r]), ef_bytes(&[want_r]), "{name}: sampled r");
+            assert_eq!(ef_bytes(&got.tilde), ef_bytes(&want_tilde), "{name}: tilde");
+            assert_eq!(
+                ef_bytes(&got.state),
+                ef_bytes(&want_state),
+                "{name}: scalar state"
+            );
+            assert_eq!(
+                got.sponge,
+                sponge_state_bytes(&want_sponge),
+                "{name}: final sponge state — the transcript diverged even though the values did not"
+            );
+        }
+    }
+
+    fn sponge_state_bytes(snap: &crate::sponge::SpongeSnapshot) -> Vec<u8> {
+        unsafe {
+            std::slice::from_raw_parts(
+                snap.state().as_ptr() as *const u8,
+                std::mem::size_of_val(snap.state()),
+            )
+            .to_vec()
+        }
+    }
+
+    /// Random ragged fold inputs for [`RING_FOLD_SHAPES`].
+    fn ring_fold_inputs(seed: u64) -> Vec<Vec<EF>> {
+        let mut rng = StdRng::seed_from_u64(seed);
+        RING_FOLD_SHAPES
+            .iter()
+            .map(|&(h, w)| (0..h * w).map(|_| rng.random::<EF>()).collect())
+            .collect()
+    }
+
+    /// Step 4 — `batch_fold_mle_ir` folds with the challenge the graph
+    /// transcript sampled, never a host `EF`.
+    #[test]
+    fn batch_fold_mle_ir_uses_sampled_device_challenge() {
+        let ctx = test_ctx();
+        let (_, case) = ring_cases().into_iter().next().unwrap();
+        let (mut sponge, snap) = seeded_sponge(7);
+        let mats = ring_fold_inputs(0xF01D_0001);
+
+        let (want_coeffs, want_s, _) = case.host_pre(None);
+        let want_r = host_observe_and_sample(&mut sponge, &want_s);
+        let _ = want_coeffs;
+
+        let got = run_ring_round_graph(&case, None, Some(&mats), &snap, &ctx);
+        assert_eq!(ef_bytes(&[got.r]), ef_bytes(&[want_r]), "sampled r");
+        assert_eq!(got.folded.len(), 2 * RING_FOLD_SHAPES.len());
+        for (i, folded) in got.folded.iter().enumerate() {
+            let (h, w) = RING_FOLD_SHAPES[i % RING_FOLD_SHAPES.len()];
+            let want = host_fold_matrix(&mats[i % RING_FOLD_SHAPES.len()], h, w, want_r);
+            assert_eq!(
+                ef_bytes(folded),
+                ef_bytes(&want),
+                "matrix {i}: graph fold under the sampled device challenge differs from the \
+                 by-value host fold"
+            );
+        }
+    }
+
+    /// Step 6 — the whole ring, end to end: compute -> observe -> sample ->
+    /// fold, all compared on raw bytes against the eager path.
+    #[test]
+    fn observe_and_fold_zerocheck_round_ir_matches_eager() {
+        let ctx = test_ctx();
+        for (i, (name, case)) in ring_cases().into_iter().enumerate() {
+            let (mut sponge, snap) = seeded_sponge(i as u64 + 11);
+            let mats = ring_fold_inputs(0xF01D_1000 + i as u64);
+
+            let (want_coeffs, want_s, want_tilde) = case.host_pre(None);
+            let want_r = host_observe_and_sample(&mut sponge, &want_s);
+            let want_state = case.host_post(&want_coeffs, want_r);
+            let want_sponge = sponge.snapshot();
+
+            let got = run_ring_round_graph(&case, None, Some(&mats), &snap, &ctx);
+            assert_eq!(
+                ef_bytes(&got.coeffs),
+                ef_bytes(&want_coeffs),
+                "{name}: coeffs"
+            );
+            assert_eq!(
+                ef_bytes(&got.s_evals),
+                ef_bytes(&want_s),
+                "{name}: observed s-evals"
+            );
+            assert_eq!(ef_bytes(&[got.r]), ef_bytes(&[want_r]), "{name}: sampled r");
+            assert_eq!(ef_bytes(&got.tilde), ef_bytes(&want_tilde), "{name}: tilde");
+            assert_eq!(
+                ef_bytes(&got.state),
+                ef_bytes(&want_state),
+                "{name}: scalar state"
+            );
+            assert_eq!(
+                got.sponge,
+                sponge_state_bytes(&want_sponge),
+                "{name}: sponge state"
+            );
+            for (j, folded) in got.folded.iter().enumerate() {
+                let k = j % RING_FOLD_SHAPES.len();
+                let (h, w) = RING_FOLD_SHAPES[k];
+                let want = host_fold_matrix(&mats[k], h, w, want_r);
+                assert_eq!(
+                    ef_bytes(folded),
+                    ef_bytes(&want),
+                    "{name}: folded matrix {j}"
+                );
+            }
+        }
+    }
+
+    /// Step 6 — the end-to-end oracle has teeth across the whole chain, not
+    /// only at the pre kernel: one corrupted evaluator value must move the
+    /// polynomial AND at least one folded buffer (via the sampled challenge).
+    #[test]
+    fn observe_and_fold_zerocheck_round_ir_detects_sabotage() {
+        let ctx = test_ctx();
+        for (i, (name, case)) in ring_cases().into_iter().enumerate() {
+            // Pick the first trace/family that actually contributes.
+            let Some((t, is_zc)) = (0..case.num_traces())
+                .flat_map(|t| [(t, true), (t, false)])
+                .find(|&(t, is_zc)| {
+                    let spec = case.specs[t];
+                    ring_phase(case.round, &spec) != RingPhase::Exhausted
+                        && if is_zc {
+                            spec.has_constraints
+                        } else {
+                            spec.has_interactions
+                        }
+                })
+            else {
+                continue;
+            };
+
+            let (mut sponge, snap) = seeded_sponge(i as u64 + 23);
+            let mats = ring_fold_inputs(0xF01D_2000 + i as u64);
+            let (want_coeffs, want_s, _) = case.host_pre(None);
+            let want_r = host_observe_and_sample(&mut sponge, &want_s);
+            let want_folded: Vec<Vec<EF>> = (0..2 * RING_FOLD_SHAPES.len())
+                .map(|j| {
+                    let k = j % RING_FOLD_SHAPES.len();
+                    let (h, w) = RING_FOLD_SHAPES[k];
+                    host_fold_matrix(&mats[k], h, w, want_r)
+                })
+                .collect();
+
+            let got = run_ring_round_graph(&case, Some((t, is_zc)), Some(&mats), &snap, &ctx);
+            assert_ne!(
+                ef_bytes(&got.coeffs),
+                ef_bytes(&want_coeffs),
+                "SABOTAGE LEG IS BLIND: {name}, trace {t} (zc={is_zc}) — the polynomial did not \
+                 move"
+            );
+            assert!(
+                (0..want_folded.len())
+                    .any(|j| ef_bytes(&got.folded[j]) != ef_bytes(&want_folded[j])),
+                "SABOTAGE LEG IS BLIND: {name}, trace {t} (zc={is_zc}) — the polynomial moved but \
+                 no folded buffer did, so the sampled challenge is not actually driving the fold"
+            );
+        }
+    }
+
+    /// Step 6 — the per-round node budget.
+    ///
+    /// `1 pre + s_deg split copies + s_deg observes + (1..2) sample + 1 post`
+    /// from the composer, plus the two fold launches: `5 + 2s` or `6 + 2s`
+    /// depending on whether `sample_ext` needs a permutation at the
+    /// transcript position it lands on (`sponge_graph_ir.rs:339-345`).
+    #[test]
+    fn zerocheck_ring_node_budget() {
+        let ctx = test_ctx();
+        let (_, case) = ring_cases().into_iter().next().unwrap();
+        let (_, snap) = seeded_sponge(3);
+        let mats = ring_fold_inputs(0xF01D_3000);
+        // A second fold group, so the count includes BOTH launches the driver
+        // makes (matrices and selectors).
+        let got = run_ring_round_graph(&case, None, Some(&mats), &snap, &ctx);
+        let s = case.s_deg();
+        let lo = 5 + 2 * s;
+        assert!(
+            got.nodes == lo || got.nodes == lo + 1,
+            "ring node count {} is outside {{{lo}, {}}} for s_deg = {s}",
+            got.nodes,
+            lo + 1
+        );
+        let count = |n: &str| got.node_names.iter().filter(|x| x.as_str() == n).count();
+        assert_eq!(count("batch_s_ring_pre"), 1, "exactly one pre kernel");
+        assert_eq!(count("batch_s_ring_post"), 1, "exactly one post kernel");
+        assert_eq!(count("batch_fold_mle"), 2, "exactly two fold launches");
+    }
+
+    /// The acceptance bar (was `logup_zerocheck_phase_graph_compiles`): the
+    /// whole phase builds as a graph and the graph compiles to a `GraphExe`
+    /// — now from a plan that supplies **no** steady-round polynomial
+    /// evaluations and **no** `r_1..r_n`.
+    ///
+    /// This does **not** run the graph — its inputs are registered but
+    /// unbound (`TraceBufs::alloc_inputs`), so `run` would refuse. It asserts
+    /// the thing the port is for: `logup_zerocheck_gpu_ir` emits a well-formed
+    /// graph for a realistic phase shape, `GraphCompiler` accepts it, and the
+    /// round polynomials and challenges are resident rather than supplied.
+    #[test]
+    fn logup_zerocheck_phase_graph_compiles_without_round_messages() {
+        let device = DeviceType::Cuda(0);
+        let plan = synthetic_plan(
+            /* num_traces */ 3, /* l_skip */ 2, /* n_max */ 4,
+        );
+
+        let mut g = GraphBuilder::new();
+        let mut transcript = DuplexSpongeGpuIR::new(&mut g, device);
+        let mut inputs = PhaseInputBinder::new();
+        let bufs: Vec<TraceBufs> = (0..plan.num_traces())
+            .map(|t| TraceBufs::alloc_inputs(&mut g, device, &plan, t, &mut inputs))
+            .collect();
+        let proof =
+            logup_zerocheck_gpu_ir(&mut g, &mut transcript, &plan, &bufs, device, &mut inputs);
+
+        assert_eq!(proof.round0_zc_evals.len(), plan.num_traces());
+        assert_eq!(proof.round0_logup_evals.len(), plan.num_traces());
+        assert_eq!(proof.evaluator_outputs.len(), plan.n_max);
+        assert_eq!(proof.column_openings.len(), plan.num_traces());
+        // The two shapes that used to come from `ZerocheckPhasePlan`.
+        assert_eq!(
+            proof.sumcheck_round_polys.len(),
+            plan.n_max,
+            "one round polynomial per steady round"
+        );
+        for (i, polys) in proof.sumcheck_round_polys.iter().enumerate() {
+            assert_eq!(
+                polys.len(),
+                plan.s_deg(),
+                "round {}: expected s_deg = {} resident evaluations",
+                i + 1,
+                plan.s_deg()
+            );
+        }
+        assert_eq!(
+            proof.r.len(),
+            plan.n_max + 1,
+            "r_0 .. r_{{n_max}} are resident"
+        );
+
+        let exe = GraphCompiler::new()
+            .device(device)
+            .scheduler(SchedulerMode::ListV1 {
+                params: ListSchedulerV1::default(),
+            })
+            .compile(g)
+            .expect("phase graph compile");
+        assert!(exe.num_outputs() > 0, "phase graph produced no outputs");
     }
 }

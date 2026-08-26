@@ -80,7 +80,7 @@ fn main() {
         "graph built: {} round-0 zerocheck evals, {} round-0 logup evals, {} MLE rounds, {} traces of openings",
         proof.round0_zc_evals.len(),
         proof.round0_logup_evals.len(),
-        proof.round_evals.len(),
+        proof.evaluator_outputs.len(),
         proof.column_openings.len(),
     );
 
