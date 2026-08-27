@@ -31,7 +31,8 @@ use crypto_compiler::{
 };
 use openvm_cuda_backend::{
     logup_zerocheck::zerocheck_ir::{
-        logup_zerocheck_gpu_ir, synthetic_plan, PhaseInputBinder, TraceBufs,
+        export_phase_outputs, logup_zerocheck_gpu_ir, synthetic_plan, synthetic_xi, xi_const_bufs,
+        PhaseInputBinder, TraceBufs,
     },
     sponge_graph_ir::DuplexSpongeGpuIR,
 };
@@ -75,7 +76,28 @@ fn main() {
         .map(|t| TraceBufs::alloc_inputs(&mut g, device, &plan, t, &mut inputs))
         .collect();
 
-    let proof = logup_zerocheck_gpu_ir(&mut g, &mut transcript, &plan, &bufs, device, &mut inputs);
+    // A2: the phase consumes `xi` as graph values. A real prove hands it the
+    // `Vec<BufId>` the fractional-GKR transcript already produced; the dump
+    // stands in with const buffers holding the synthetic fixture's values.
+    let xi = xi_const_bufs(&mut g, device, &synthetic_xi(l_skip, n_max));
+
+    let proof = logup_zerocheck_gpu_ir(
+        &mut g,
+        &mut transcript,
+        &plan,
+        &xi,
+        &bufs,
+        device,
+        &mut inputs,
+    );
+    // A3: the builder registers nothing; exporting the returned proof — in
+    // `phase_export_order` — is the caller's job. Direct registration (no
+    // copy) is the right mode for a dump: the readback shape is simplest and
+    // nothing here depends on the producers staying fusable.
+    let exports = export_phase_outputs(
+        &mut g, &proof, device, /* copy_before_register */ false,
+    );
+    println!("exported {} phase outputs", exports.len());
     println!(
         "graph built: {} round-0 zerocheck evals, {} round-0 logup evals, {} MLE rounds, {} traces of openings",
         proof.round0_zc_evals.len(),

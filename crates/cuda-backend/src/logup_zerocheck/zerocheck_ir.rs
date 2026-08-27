@@ -43,10 +43,27 @@
 //! 3. **Fiat–Shamir values.** Because of (1) the round-0 challenge *values* (`lambda`, `mu`, `r_0`)
 //!    are still known on the host at graph-build time and are captured by value into the round-0
 //!    kernel closures, exactly like `fractional_ir.rs`'s plain (non-`_bufid`) wrappers. `r_1..r_n`
-//!    are **not**: after P1 they exist only as device buffers. `xi`, `lambda_pows` and `mu_pows`
-//!    remain const producers because stages A/B (grinding, GKR) are out of this module's scope, so
-//!    do not read this graph as device-input-only. The remaining challenge-by-value entry points
-//!    are listed in B3 §4.
+//!    are **not**: after P1 they exist only as device buffers. `xi` is **not** either: after A2 it
+//!    enters as `&[BufId]` — one `[D_EF]`-shaped BabyBear buffer per challenge, the shape
+//!    `sample_ext` produces — so a caller wires the fractional-GKR transcript's own `Vec<BufId>`
+//!    straight in and nothing resolves it on the host. `lambda_pows` and `mu_pows` remain const
+//!    producers because stages A/B (grinding, GKR) are out of this module's scope, so do not read
+//!    this graph as device-input-only. `round0_denom_sum_init`, `fold_selector_scalars` and
+//!    `r0_eq_seeds` are the three remaining challenge-derived host scalars; all three are round-0
+//!    values, and closing them is the `R0-DERIVED-SCALARS` gate, not A2. The remaining
+//!    challenge-by-value entry points are listed in B3 §4.
+//!
+//! # Graph outputs are the caller's (A3)
+//!
+//! [`logup_zerocheck_gpu_ir`] never calls [`GraphBuilder::register_output`].
+//! Graph output *position* is registration order, so a builder that registers
+//! on the caller's behalf silently owns the caller's output indices. The
+//! driver returns [`ZerocheckPhaseProofIR`] and the caller exports it —
+//! [`phase_export_order`] fixes the positional contract and
+//! [`export_phase_outputs`] performs the registration, in either the direct or
+//! the copy-to-fresh-output mode the fractional harness uses
+//! (`fractional_sumcheck_gpu_irv2.rs:579-605,631-650`). A caller that exports
+//! nothing gets a DCE'd graph, which is the intended, loud failure.
 //!
 //! # `ctx`-struct buffers
 //!
@@ -99,6 +116,7 @@ use std::{
 
 use crypto_compiler::{
     graph_ir::{BufId, BufInfo, ConstBuf, DeviceType, GraphBuilder},
+    ir::{IRBuilder, Module, ScalarType, SizeExpr},
     quast::Quast,
 };
 use openvm_cuda_common::d_buffer::DeviceBuffer;
@@ -110,7 +128,9 @@ use p3_field::{Field, PrimeCharacteristicRing, TwoAdicField};
 
 use super::{
     batch_mle_monomial::{DEFAULT_MAX_MONOMIALS_PER_THREAD, THREADS_PER_BLOCK_PAR_Y, WAVES_TARGET},
-    fractional_ir_utils::{add_ef_buf, add_ext_scalar_buf, ef_const_ext_scalar_buf},
+    fractional_ir_utils::{
+        add_ef_buf, add_ext_scalar_buf, ef_const_ext_scalar_buf, fpext_from_coeffs, load_ext_coeffs,
+    },
 };
 use crate::{
     cuda::{
@@ -126,12 +146,12 @@ use crate::{
             LogupCtx, LogupMonomialCommonCtx, LogupMonomialCtx, MainMatrixDesc, MonomialAirCtx,
             ZerocheckCtx, BATCH_S_RING_HAS_CONSTRAINTS, BATCH_S_RING_HAS_INTERACTIONS,
         },
-        poly::eq_hypercube_interleaved_stage_ext,
         sumcheck::batch_fold_mle_dev_challenge,
     },
     monomial::{InteractionMonomialTerm, LambdaTerm, MonomialHeader},
     prelude::{EF, F},
     sponge_graph_ir::FiatShamirTranscriptGraphIR,
+    types::D_EF,
 };
 
 // ---------------------------------------------------------------------------
@@ -252,40 +272,83 @@ pub fn f_slice_const_buf(g: &mut GraphBuilder, device: DeviceType, name: &str, x
 /// Insert one `eq_hypercube_interleaved_stage_ext` stage node: doubles an
 /// `eq` hypercube layer by splitting on `x_i`.
 ///
-/// This is the interleaved index map (`poly.cu:157`), *not* the
+/// This is the interleaved index map (`poly.cu:156-169`), *not* the
 /// nonoverlapping one [`super::fractional_ir::eq_hypercube_nonoverlapping_stage_ext_ir`]
 /// wraps — `EqEvalLayers::new_rev` (`poly.rs:417-445`) is what stage C uses.
-// TODO(cc-ir): `x_i` is a Fiat-Shamir challenge captured by value.
-// WHY: `_eq_hypercube_interleaved_stage_ext` takes `x_i: EF` by value
-//      (`cuda/poly.rs:42-48`) and has no `_dev_challenge` sibling; the
-//      fractional twin was given a *structured module* instead
-//      (`fractional_ir.rs:922-955`), which is the better long-term answer.
-// RISK: as long as `xi` comes from the host (it does — GKR returns it to
-//      the host), this is exactly what the eager path does and is bit-exact.
-//      It blocks a fully device-resident Fiat-Shamir chain, nothing else.
+///
+/// `x_i` is a `[D_EF]`-shaped `BabyBear` [`BufId`] (the shape
+/// [`FiatShamirTranscriptGraphIR::sample_ext`] produces), exactly as the
+/// fractional twin takes it
+/// ([`super::fractional_ir::eq_hypercube_nonoverlapping_stage_ext_ir`],
+/// `fractional_ir.rs:824-833`) — the challenge stays on-device, so no host
+/// `EF` is captured at graph-build time. The launch is a structured
+/// [`crypto_compiler::graph_ir::GraphNode::Kernel`] rather than a blackbox
+/// because there is no `_dev_challenge` sibling for the CUDA entry point and
+/// the author already made that DSL choice for the analogous elementwise map.
+///
+/// # Layout: for each output index `j`, with `y = j / 2`
+/// ```text
+/// out[2*y]     = src[y] - src[y] * x_i
+/// out[2*y + 1] = src[y] * x_i
+/// ```
 pub fn eq_hypercube_interleaved_stage_ext_ir(
     g: &mut GraphBuilder,
     input: BufId,
     out: BufId,
-    x_i: EF,
-    step: u32,
+    x_i: BufId,
+    step: usize,
 ) {
-    g.insert_blackbox_kernel(
-        "eq_hypercube_interleaved_stage_ext",
-        std::iter::once(input),
-        std::iter::once(out),
-        std::iter::once(false),
-        move |inputs, outputs, stream| unsafe {
-            eq_hypercube_interleaved_stage_ext(
-                outputs[0] as *mut EF,
-                inputs[0] as *const EF,
-                x_i,
-                step,
-                stream,
-            )
-            .expect("eq_hypercube_interleaved_stage_ext");
-        },
+    assert!(step >= 1, "eq stage needs at least one source element");
+    g.insert_kernel(
+        build_eq_hypercube_interleaved_stage_ext_module(),
+        [input, x_i],
+        [out],
+        &[],
     );
+}
+
+/// The `ir::Module` behind [`eq_hypercube_interleaved_stage_ext_ir`].
+///
+/// Symbolic over the stage size `s` (= `step`): inputs are `src: [s] FpExt`
+/// and `x_i: [D_EF] BabyBear`, and the single `[2*s] FpExt` output is one
+/// `compute(s*2, ..)` loop. `s` binds from the `src` buffer shape at
+/// [`GraphBuilder::insert_kernel`] time, so every stage of every eq tree
+/// shares one module (and one JIT compilation).
+///
+/// The body keeps the eager kernel's **subtraction** form
+/// (`hi = prev * x_i; lo = prev - hi`, `poly.cu:165-168`) rather than the
+/// algebraically equal `prev * (1 - x_i)`, so the equality test compares the
+/// same sequence of field operations the launcher performs.
+fn build_eq_hypercube_interleaved_stage_ext_module() -> Module {
+    let mut b = IRBuilder::new();
+    let s = b.symbol("s");
+    let src = b.input("src", ScalarType::FpExt, vec![SizeExpr::from(s)]);
+    let x_i = b.input("x_i", ScalarType::BabyBear, vec![D_EF]);
+
+    // `x_i` as an FpExt scalar: lift each of the four BabyBear coeffs and
+    // recombine against `{1, t, t², t³}`, once per kernel invocation.
+    let x_i_ext = {
+        let coeffs = load_ext_coeffs(&mut b, x_i);
+        let combined = fpext_from_coeffs(&mut b, coeffs);
+        b.let_bound(combined)
+    };
+
+    let body = b.compute(s * 2, move |b, j| {
+        // `y = j / 2` and `parity = j - 2 * y`; both stay quasi-affine in `j`
+        // so the index checker accepts `src[y]`.
+        let two_c = b.const_u32(2);
+        let y = b.div(j, two_c);
+        let twice = b.mul(y, two_c);
+        let parity = b.sub(j, twice);
+        let src_val = b.index(src, &[y]);
+        let hi = b.mul(src_val, x_i_ext);
+        let lo = b.sub(src_val, hi);
+        // Branch on the parity *value*, not on an index — `select` on FpExt.
+        let one_c = b.const_u32(1);
+        let is_lo = b.lt(parity, one_c);
+        b.select(is_lo, lo, hi)
+    });
+    b.finish("eq_hypercube_interleaved_stage_ext", body)
 }
 
 /// Insert a `precompute_lambda_combinations` node
@@ -2525,8 +2588,6 @@ pub struct ZerocheckPhasePlan {
     /// evaluator is launched with (`mod.rs:1396`).
     pub constraint_degree: usize,
     pub traces: Vec<TracePlan>,
-    /// `xi` from fractional GKR, padded to `l_skip + n_global` (`mod.rs:246-248`).
-    pub xi: Vec<EF>,
     /// `lambda` (`mod.rs:261`) and its powers (`mod.rs:654`).
     pub lambda_pows: Vec<EF>,
     /// `mu_pows`, `3 * num_traces` of them (`mod.rs:322-324`).
@@ -2542,6 +2603,27 @@ pub struct ZerocheckPhasePlan {
     pub omega_skip_pows: Vec<F>,
     /// `compute_barycentric_inv_lagrange_denoms(l_skip, ω*, r_0)` (`mod.rs:960`).
     pub inv_lagrange_denoms_r0: Vec<EF>,
+    /// `(eval_eq_uni(l_skip, xi[0], r_0),
+    ///   eval_eq_sharp_uni(&omega_skip_pows, &xi[..l_skip], r_0))` — the two
+    /// eq seeds the ring's round-0 state carries (`mod.rs:388`,
+    /// `mod.rs:1083-1088`).
+    ///
+    /// `xi` itself is **not** a plan field any more (A2): every `xi[j]` the
+    /// graph consumes arrives as a `BufId`. These two are host *round-0*
+    /// constants of the same class as [`Self::s_0_coeffs`] and
+    /// [`Self::inv_lagrange_denoms_r0`] — the round-0 seam the module docs
+    /// call seam (1).
+    // TODO(cc-ir): both should be graph values, derived on-device from
+    //   `xi[0] / xi[..l_skip]` and `r_0`.
+    // WHY: `eval_eq_uni` / `eval_eq_sharp_uni` (`poly_common.rs`) are host
+    //   functions with no CUDA sibling, and round 0 as a whole still enters
+    //   the graph as constants (`s_0_coeffs`, `inv_lagrange_denoms_r0`,
+    //   `opening_claims`). Promoting these two alone would not close the
+    //   seam and would need a new kernel.
+    // RISK: the phase graph is not device-input-only at round 0. It matches
+    //   the eager path exactly for a given `r_0`, but a graph reused across
+    //   proves would carry a stale seed. Tracked by `R0-DERIVED-SCALARS`.
+    pub r0_eq_seeds: (EF, EF),
     /// Per-trace `(is_first, is_last)` for `fold_selectors_round0` (`mod.rs:1040-1041`).
     pub fold_selector_scalars: Vec<(EF, EF)>,
     /// `denom_sum_init` per trace for the round-0 interaction evaluator.
@@ -3173,6 +3255,102 @@ pub struct ZerocheckPhaseProofIR {
     pub descriptors: DescriptorPlan,
 }
 
+/// The phase's proof buffers in one flat, **positional** order.
+///
+/// A3: [`logup_zerocheck_gpu_ir`] does not call
+/// [`GraphBuilder::register_output`]. Graph output *position* is registration
+/// order (`graph_ir.rs:1058-1073`), so a builder that registers on the
+/// caller's behalf makes the positions impossible to track from the call site.
+/// The driver therefore returns [`ZerocheckPhaseProofIR`] and the caller
+/// exports it, exactly as the fractional driver returns `FracSumcheckProofIR`
+/// and its callers register or copy it
+/// (`fractional_sumcheck_gpu_irv2.rs:274-282,438-443,535-605`).
+///
+/// The order is fixed and is the contract every caller reads back against:
+///
+/// 1. `round0_zc_evals`, per trace;
+/// 2. `round0_logup_evals`, per trace;
+/// 3. `evaluator_outputs[round]`, rounds in order, launches in launch order;
+/// 4. `sumcheck_round_polys[round]`, rounds in order, `s(1)..s(s_deg)` in observe order;
+/// 5. `r[0..=n_max]`, in round order;
+/// 6. `column_openings[trace][matrix]`, in returned order;
+/// 7. `transcript_state`.
+///
+/// A buffer that appears twice (the round-0 `r_0` const, a fold that reuses
+/// one allocation) keeps **both** positions: the order is positional, not a
+/// set.
+pub fn phase_export_order(proof: &ZerocheckPhaseProofIR) -> Vec<BufId> {
+    let mut out = Vec::new();
+    out.extend(proof.round0_zc_evals.iter().copied());
+    out.extend(proof.round0_logup_evals.iter().copied());
+    for round in &proof.evaluator_outputs {
+        out.extend(round.iter().copied());
+    }
+    for round in &proof.sumcheck_round_polys {
+        out.extend(round.iter().copied());
+    }
+    out.extend(proof.r.iter().copied());
+    for trace in &proof.column_openings {
+        out.extend(trace.iter().copied());
+    }
+    out.push(proof.transcript_state);
+    out
+}
+
+/// Register the phase's proof buffers as graph outputs, in
+/// [`phase_export_order`], and return the registered ids.
+///
+/// This is a **caller-side** helper — it is what a caller of
+/// [`logup_zerocheck_gpu_ir`] runs after the builder returns, never something
+/// the builder runs for them. It mirrors the two patterns the author's
+/// fractional harness uses (`fractional_sumcheck_gpu_irv2.rs:579-605,631-650`):
+///
+/// * `copy_before_register == false` — register the returned ids directly. Simplest readback shape,
+///   but it pins each producer as an interface writer and blocks its fusion with the downstream
+///   transcript-observe. Right for dumps and benchmarks.
+/// * `copy_before_register == true` — memcpy each buffer into a fresh same-sized output and
+///   register the copy, so the internal producer stays fusable. Right for equality fixtures, whose
+///   whole point is that the graph the oracle compares against is the one that would ship.
+///
+/// In copy mode the returned ids are the *copies*, so `output_buf_id(i)`
+/// still matches position `i` of the returned vector; in direct mode they are
+/// exactly [`phase_export_order`]. A buffer that occupies two positions is
+/// registered once in direct mode (`register_output` deduplicates by
+/// position lookup at readback), and copied twice in copy mode.
+pub fn export_phase_outputs(
+    g: &mut GraphBuilder,
+    proof: &ZerocheckPhaseProofIR,
+    device: DeviceType,
+    copy_before_register: bool,
+) -> Vec<BufId> {
+    let order = phase_export_order(proof);
+    if !copy_before_register {
+        for &b in &order {
+            g.register_output(b);
+        }
+        return order;
+    }
+    order
+        .into_iter()
+        .enumerate()
+        .map(|(i, src)| {
+            // Same byte size and element size as the source, so the memcpy is
+            // a whole-buffer copy and the readback bytes are identical.
+            let info = &g.bufs[src.0];
+            let out = g.add_buf(BufInfo {
+                name: Some(format!("phase_export{i}")),
+                device_type: device,
+                size: info.size.clone(),
+                concrete_size: info.concrete_size,
+                elem_size: info.elem_size,
+            });
+            g.insert_memcpy(src, out);
+            g.register_output(out);
+            out
+        })
+        .collect()
+}
+
 // ===========================================================================
 // The phase driver.
 // ===========================================================================
@@ -3202,6 +3380,7 @@ pub fn logup_zerocheck_gpu_ir<TS>(
     g: &mut GraphBuilder,
     transcript: &mut TS,
     plan: &ZerocheckPhasePlan,
+    xi: &[BufId],
     bufs: &[TraceBufs],
     device: DeviceType,
     inputs: &mut PhaseInputBinder,
@@ -3213,6 +3392,22 @@ where
         bufs.len(),
         plan.num_traces(),
         "one TraceBufs per trace required"
+    );
+    // A2: `xi` arrives as graph values, one `[D_EF]`-shaped BabyBear buffer
+    // per challenge, exactly as `sample_ext` produces them. A short `xi` is a
+    // *shape* error, not a licence to substitute `EF::ONE`: the eq tree indexes
+    // `xi[l_skip + 1 + i]` for `i < n_lift` and the ring indexes
+    // `xi[l_skip + round - 1]` for `round <= n_max`.
+    let max_n_lift = plan.distinct_n_lifts().last().copied().unwrap_or(0);
+    let xi_needed = (plan.l_skip + plan.n_max).max(plan.l_skip + max_n_lift + 1);
+    assert!(
+        xi.len() >= xi_needed,
+        "xi has {} challenges, the phase indexes up to {} (l_skip={}, n_max={}, max n_lift={})",
+        xi.len(),
+        xi_needed,
+        plan.l_skip,
+        plan.n_max,
+        max_n_lift,
     );
     let num_traces = plan.num_traces();
     let l_skip = plan.l_skip;
@@ -3356,14 +3551,8 @@ where
             let out = add_ef_buf(g, device, &format!("eq_n{n_lift}_l{}", i + 1), 2 * step);
             // `EqEvalLayers::new_rev` inserts `x_i` from the front, and the
             // eager caller passes `xi[l_skip + 1 ..]` (`mod.rs:758`).
-            let x_i = plan.xi.get(l_skip + 1 + i).copied().unwrap_or(EF::ONE);
-            eq_hypercube_interleaved_stage_ext_ir(
-                g,
-                *layers.last().unwrap(),
-                out,
-                x_i,
-                step as u32,
-            );
+            let x_i = xi[l_skip + 1 + i];
+            eq_hypercube_interleaved_stage_ext_ir(g, *layers.last().unwrap(), out, x_i, step);
             layers.push(out);
         }
         eq_layers.insert(n_lift, layers);
@@ -3454,7 +3643,6 @@ where
             // No producer otherwise — keep the registered output well-formed.
             g.insert_memset(zc_out, 0);
         }
-        g.register_output(zc_out);
         round0_zc_evals.push(zc_out);
 
         // Interaction side.
@@ -3508,7 +3696,6 @@ where
         } else {
             g.insert_memset(lg_out, 0);
         }
-        g.register_output(lg_out);
         round0_logup_evals.push(lg_out);
     }
 
@@ -3623,7 +3810,6 @@ where
     let mut evaluator_outputs: Vec<Vec<BufId>> = Vec::with_capacity(plan.n_max);
     let mut sumcheck_round_polys: Vec<Vec<BufId>> = Vec::with_capacity(plan.n_max);
     let mut r_bufs: Vec<BufId> = Vec::with_capacity(plan.n_max + 1);
-    g.register_output(r0_buf);
     r_bufs.push(r0_buf);
     // Current per-trace folded buffers; rebound each round by the fold.
     let mut cur_mats: Vec<Vec<BufId>> = folded_after_r0;
@@ -3649,14 +3835,15 @@ where
     g.insert_memset(tilde0, 0);
     // `[prev_s_eval, eq_n, eq_sharp_n]` after round 0 (`mod.rs:388`,
     // `mod.rs:1083-1088`).
+    let (eq_n_r0, eq_sharp_n_r0) = plan.r0_eq_seeds;
     let scalars0 = ef_slice_const_buf(
         g,
         device,
         "r0_ring_scalars",
         &[
             horner_eval::<EF, EF, EF>(&plan.s_0_coeffs, r_0),
-            eval_eq_uni(l_skip, plan.xi[0], r_0),
-            eval_eq_sharp_uni(&plan.omega_skip_pows, &plan.xi[..l_skip], r_0),
+            eq_n_r0,
+            eq_sharp_n_r0,
         ],
     );
     let mut ring_state = ZerocheckRoundStateIr {
@@ -3870,16 +4057,9 @@ where
         // host any more: `s_round(1..=s_deg)` is observed from device buffers,
         // `r_round` is sampled into one, and the same buffer drives both folds.
         //
-        // `xi_j` is still a const producer — `xi` comes back from fractional
-        // GKR on the host (stage B, out of scope) — but the ring ABI takes it
-        // as a pointer so closing that stage later is a producer swap, not a
-        // signature change.
-        let xi_j = ef_const_ext_scalar_buf(
-            g,
-            device,
-            &format!("r{round}_xi"),
-            plan.xi[l_skip + round - 1],
-        );
+        // A2: `xi_j` is the caller's graph value — the ring ABI already took
+        // it as a pointer, so this is a producer swap, not a signature change.
+        let xi_j = xi[l_skip + round - 1];
         let ring = observe_and_update_zerocheck_round_ir(
             g,
             transcript,
@@ -3894,12 +4074,9 @@ where
             round,
             device,
         );
-        // Proof artifacts: the caller reads them out of the compiled exe, so
-        // they must survive DCE and the memory planner's liveness analysis.
-        for &b in &ring.s_evals {
-            g.register_output(b);
-        }
-        g.register_output(ring.r_round);
+        // A3: proof artifacts are *returned*, never registered here. The
+        // caller decides which of them become graph outputs and in what
+        // position — see `phase_export_order` / `export_phase_outputs`.
         sumcheck_round_polys.push(ring.s_evals.clone());
         r_bufs.push(ring.r_round);
         let r_round = ring.r_round;
@@ -4047,16 +4224,14 @@ where
     }
     let mut column_openings = Vec::with_capacity(num_traces);
     for mats in &cur_mats {
-        for &m in mats {
-            g.register_output(m);
-        }
         column_openings.push(mats.clone());
     }
 
     // The final sponge state is a phase output: without it the whole
     // Fiat-Shamir chain is dead code and DCE removes every transcript node.
+    // A3: registering it is the *caller's* job — `export_phase_outputs` puts
+    // it last, and every caller must export it or the transcript is DCE'd.
     let transcript_state = transcript_state_of(g, transcript);
-    g.register_output(transcript_state);
 
     ZerocheckPhaseProofIR {
         round0_zc_evals,
@@ -4875,7 +5050,6 @@ fn emit_zerocheck_round_eval(
         RoundEvalKind::Monomial => zerocheck_monomial_batched_ir(g, &bufs, shape, false),
         RoundEvalKind::MonomialParY => zerocheck_monomial_batched_ir(g, &bufs, shape, true),
     }
-    g.register_output(bufs.out);
     RoundEvalBatchIr {
         family: RoundEvalFamily::Zerocheck,
         evals: bufs.out,
@@ -4957,7 +5131,6 @@ fn emit_logup_round_eval(
             },
             shape,
         );
-        g.register_output(out);
         RoundEvalBatchIr {
             family: RoundEvalFamily::Logup,
             evals: out,
@@ -4986,7 +5159,6 @@ fn emit_logup_round_eval(
             );
         }
         logup_batch_eval_mle_ir(g, &bufs, shape);
-        g.register_output(bufs.out);
         RoundEvalBatchIr {
             family: RoundEvalFamily::Logup,
             evals: bufs.out,
@@ -5089,6 +5261,35 @@ fn transcript_state_of<TS: FiatShamirTranscriptGraphIR>(
     transcript.state_buf()
 }
 
+/// The `xi` challenge *values* [`synthetic_plan`]'s seeds were derived from.
+///
+/// A2 removed `xi` from [`ZerocheckPhasePlan`], so a caller of
+/// [`logup_zerocheck_gpu_ir`] supplies the challenges as `BufId`s. This is the
+/// synthetic fixture's half of that split: the same `EF::from_usize(i + 1)`
+/// sequence the plan's `r0_eq_seeds` were computed from. Pair it with
+/// [`xi_const_bufs`].
+pub fn synthetic_xi(l_skip: usize, n_max: usize) -> Vec<EF> {
+    (0..l_skip + n_max + 1)
+        .map(|i| EF::from_usize(i + 1))
+        .collect()
+}
+
+/// Stage a host `xi` list as one `[D_EF]`-shaped BabyBear const buffer per
+/// challenge — the shape
+/// [`FiatShamirTranscriptGraphIR::sample_ext`] produces, and the shape
+/// [`logup_zerocheck_gpu_ir`] expects.
+///
+/// This is a **caller-side** helper: a real prove hands the phase the
+/// `Vec<BufId>` its fractional-GKR transcript already returned
+/// (`fractional_sumcheck_gpu_irv2.rs:396-443`) and never calls this. Dumps
+/// and fixtures use it to stand in for that producer.
+pub fn xi_const_bufs(g: &mut GraphBuilder, device: DeviceType, xi: &[EF]) -> Vec<BufId> {
+    xi.iter()
+        .enumerate()
+        .map(|(i, &v)| ef_const_ext_scalar_buf(g, device, &format!("xi{i}"), v))
+        .collect()
+}
+
 /// Build a minimal but structurally faithful plan: `num_traces` AIRs, all
 /// of the same height, one common-main matrix each.
 ///
@@ -5098,6 +5299,18 @@ pub fn synthetic_plan(num_traces: usize, l_skip: usize, n_max: usize) -> Zeroche
     let constraint_degree = 3usize;
     let s_deg = constraint_degree + 1;
     let ef = |i: usize| EF::from_usize(i + 1);
+    let xi = synthetic_xi(l_skip, n_max);
+    // Real powers of the skip-domain generator, not `0..2^l_skip`: the ring's
+    // round-0 `eq_sharp` seed goes through `eval_eq_sharp_uni`, whose debug
+    // identity is only true for an actual multiplicative subgroup
+    // (`poly_common.rs:143-166`).
+    let omega_skip_pows: Vec<F> = F::two_adic_generator(l_skip)
+        .powers()
+        .collect_n(1 << l_skip);
+    let r0_eq_seeds = (
+        eval_eq_uni(l_skip, xi[0], ef(0)),
+        eval_eq_sharp_uni(&omega_skip_pows, &xi[..l_skip], ef(0)),
+    );
     let height = 1usize << (l_skip + n_max);
     let traces = (0..num_traces)
         .map(|t| TracePlan {
@@ -5125,19 +5338,12 @@ pub fn synthetic_plan(num_traces: usize, l_skip: usize, n_max: usize) -> Zeroche
         n_max,
         constraint_degree,
         traces,
-        xi: (0..l_skip + n_max + 1).map(ef).collect(),
         lambda_pows: (0..8).map(ef).collect(),
         mu_pows: (0..3 * num_traces).map(ef).collect(),
         r_0: ef(0),
-        // Real powers of the skip-domain generator, not `0..2^l_skip`: the
-        // ring's round-0 `eq_sharp` seed goes through
-        // `eval_eq_sharp_uni`, whose debug identity is only true for an
-        // actual multiplicative subgroup (`poly_common.rs:143-166`).
-        omega_skip_pows: F::two_adic_generator(l_skip)
-            .powers()
-            .take(1 << l_skip)
-            .collect(),
+        omega_skip_pows,
         inv_lagrange_denoms_r0: (0..1 << l_skip).map(ef).collect(),
+        r0_eq_seeds,
         fold_selector_scalars: (0..num_traces).map(|t| (ef(t), ef(t + 1))).collect(),
         round0_denom_sum_init: (0..num_traces).map(ef).collect(),
         round0_g_shift: (0..num_traces).map(|_| F::ONE).collect(),
@@ -5272,8 +5478,22 @@ mod zerocheck_ir_tests {
         let bufs: Vec<TraceBufs> = (0..plan.num_traces())
             .map(|t| TraceBufs::alloc_inputs(&mut g, device, &plan, t, &mut inputs))
             .collect();
-        let proof =
-            logup_zerocheck_gpu_ir(&mut g, &mut transcript, &plan, &bufs, device, &mut inputs);
+        let xi = xi_const_bufs(&mut g, device, &synthetic_xi(plan.l_skip, plan.n_max));
+        let proof = logup_zerocheck_gpu_ir(
+            &mut g,
+            &mut transcript,
+            &plan,
+            &xi,
+            &bufs,
+            device,
+            &mut inputs,
+        );
+        // A3: the builder registers nothing, so the caller exports before
+        // compiling — otherwise DCE takes the phase and the registered inputs
+        // lose their readers.
+        export_phase_outputs(
+            &mut g, &proof, device, /* copy_before_register */ false,
+        );
 
         let exe = GraphCompiler::new()
             .device(device)
@@ -5339,7 +5559,19 @@ mod zerocheck_ir_tests {
         let bufs: Vec<TraceBufs> = (0..plan.num_traces())
             .map(|t| TraceBufs::alloc_inputs(&mut g, device, &plan, t, &mut inputs))
             .collect();
-        let _ = logup_zerocheck_gpu_ir(&mut g, &mut transcript, &plan, &bufs, device, &mut inputs);
+        let xi = xi_const_bufs(&mut g, device, &synthetic_xi(plan.l_skip, plan.n_max));
+        let proof = logup_zerocheck_gpu_ir(
+            &mut g,
+            &mut transcript,
+            &plan,
+            &xi,
+            &bufs,
+            device,
+            &mut inputs,
+        );
+        export_phase_outputs(
+            &mut g, &proof, device, /* copy_before_register */ false,
+        );
 
         let names: Vec<String> = inputs.manifest().into_iter().map(|(_, n)| n).collect();
         assert!(
@@ -5796,8 +6028,16 @@ mod zerocheck_ir_tests {
         let bufs: Vec<TraceBufs> = (0..plan.num_traces())
             .map(|t| TraceBufs::alloc_inputs(&mut g, device, &plan, t, &mut inputs))
             .collect();
-        let proof =
-            logup_zerocheck_gpu_ir(&mut g, &mut transcript, &plan, &bufs, device, &mut inputs);
+        let xi = xi_const_bufs(&mut g, device, &synthetic_xi(plan.l_skip, plan.n_max));
+        let proof = logup_zerocheck_gpu_ir(
+            &mut g,
+            &mut transcript,
+            &plan,
+            &xi,
+            &bufs,
+            device,
+            &mut inputs,
+        );
 
         let mut evaluators = 0usize;
         let mut widest = 0usize;
@@ -5833,6 +6073,269 @@ mod zerocheck_ir_tests {
         );
     }
 
+    // =======================================================================
+    // A1 — the descriptor/liveness closure, universally.
+    // =======================================================================
+
+    /// The A1 invariant, as a checker over a whole graph.
+    ///
+    /// Returns one message per violation; empty means the graph satisfies the
+    /// contract. Two properties, both structural:
+    ///
+    /// 1. **Closure coverage.** For every node input that is a descriptor array, every buffer
+    ///    reachable from it by following stored offsets — transitively, so a `ZerocheckCtx`'s
+    ///    nested `MainMatrixDesc` array counts — must appear in that node's declared access set
+    ///    (`inputs`, `outputs`, or `carried_outputs`). `outputs` is the documented **write-only**
+    ///    exception: `batch_fold_mle`'s output table points at `dsts`, which the node declares as
+    ///    outputs rather than reads, and that is the right declaration — the planner gets the write
+    ///    lifetime without the graph pretending the kernel reads the destination
+    ///    (`zerocheck_ir.rs:2468-2480`).
+    /// 2. **Consumer reachability.** Every descriptor array must be reachable from some descriptor
+    ///    root that a node actually consumes. A nested `MainMatrixDesc` array is never a direct
+    ///    kernel parameter, so property 1 alone would not cover it; an array reachable from nothing
+    ///    is either dead or, worse, dereferenced by a node that never declared its root.
+    ///
+    /// This is deliberately a *function*, not an inline loop: the phase test
+    /// and the negative fixture below run the same code, so the negative
+    /// fixture proves the phase test has teeth.
+    fn descriptor_closure_violations(g: &GraphBuilder, descs: &DescriptorPlan) -> Vec<String> {
+        let desc_bufs: Vec<BufId> = descs.array_summary().iter().map(|(b, ..)| *b).collect();
+        let mut violations = Vec::new();
+        let mut consumed_roots: Vec<BufId> = Vec::new();
+
+        for node in &g.nodes {
+            let (name, inputs, writes): (&str, &[BufId], Vec<BufId>) = match node {
+                GraphNode::BlackboxKernel(k) => (
+                    k.name.as_str(),
+                    &k.inputs,
+                    k.outputs
+                        .iter()
+                        .chain(k.carried_outputs.iter())
+                        .copied()
+                        .collect(),
+                ),
+                GraphNode::Kernel(k) => (k.module.name.as_str(), &k.inputs, k.outputs.clone()),
+                _ => continue,
+            };
+            for &root in inputs {
+                if !desc_bufs.contains(&root) {
+                    continue;
+                }
+                if !consumed_roots.contains(&root) {
+                    consumed_roots.push(root);
+                }
+                for b in descs.referenced_bufs(root) {
+                    if inputs.contains(&b) || writes.contains(&b) {
+                        continue;
+                    }
+                    violations.push(format!(
+                        "`{name}` does not declare `{}` ({b:?}), which its descriptor array \
+                         `{}` ({root:?}) reaches (directly or through a nested array). An \
+                         undeclared pointee is a pool-reuse corruption hazard.",
+                        buf_name(g, b),
+                        buf_name(g, root),
+                    ));
+                }
+            }
+        }
+
+        // Property 2: transitive reachability from a consumed root.
+        let mut reachable: Vec<BufId> = Vec::new();
+        for root in &consumed_roots {
+            for b in descs.referenced_bufs(*root) {
+                if !reachable.contains(&b) {
+                    reachable.push(b);
+                }
+            }
+        }
+        for (buf, name, ..) in descs.array_summary() {
+            if !reachable.contains(&buf) {
+                violations.push(format!(
+                    "descriptor array `{name}` ({buf:?}) is reachable from no descriptor root \
+                     that any node consumes, so nothing declares the buffers it points at"
+                ));
+            }
+        }
+        violations
+    }
+
+    /// A1 — **every** descriptor's transitive pointee closure is declared by
+    /// its consumer, over the whole phase graph.
+    ///
+    /// The author's review comment was about liveness, not pointer
+    /// representation: "the compiler doesn't know that the original lifetime
+    /// could be extended and could reuse the existing buffer". Base+offset did
+    /// not close that — an offset into a reassigned pool slot is exactly as
+    /// stale as a pointer. What closes it is that the consuming node declares
+    /// the descriptor's pointees, so the planner keeps them alive
+    /// (`zerocheck_ir.rs:1893-1904`). `evaluator_declares_every_referenced_buffer`
+    /// checks that for the batched evaluators; this checks it for *every*
+    /// descriptor array in the graph, so a future descriptor cannot silently
+    /// omit one by being consumed somewhere the older test does not look.
+    ///
+    /// The fixture reaches all five `DescElem` variants: `MainMatrix` (the
+    /// per-`(round, trace)` main descs and `main_ptrs`), `Zerocheck` and
+    /// `Logup` (the Stage-D ctx arrays — `synthetic_plan` puts every trace on
+    /// the DAG arm), `RawPtr` (the interpolation column table and both fold
+    /// tables) and `BatchSRingTrace` (the ring's per-trace evaluator-output
+    /// table).
+    #[test]
+    fn every_indirect_pointee_has_matching_consumer_access() {
+        let device = DeviceType::Cuda(0);
+        let plan = synthetic_plan(
+            /* num_traces */ 3, /* l_skip */ 2, /* n_max */ 3,
+        );
+
+        let mut g = GraphBuilder::new();
+        let mut transcript = DuplexSpongeGpuIR::new(&mut g, device);
+        let mut inputs = PhaseInputBinder::new();
+        let bufs: Vec<TraceBufs> = (0..plan.num_traces())
+            .map(|t| TraceBufs::alloc_inputs(&mut g, device, &plan, t, &mut inputs))
+            .collect();
+        let xi = xi_const_bufs(&mut g, device, &synthetic_xi(plan.l_skip, plan.n_max));
+        let proof = logup_zerocheck_gpu_ir(
+            &mut g,
+            &mut transcript,
+            &plan,
+            &xi,
+            &bufs,
+            device,
+            &mut inputs,
+        );
+
+        let violations = descriptor_closure_violations(&g, &proof.descriptors);
+        assert!(
+            violations.is_empty(),
+            "{} descriptor-closure violation(s):\n{}",
+            violations.len(),
+            violations.join("\n"),
+        );
+
+        // --- non-vacuity. All five encoding paths must be present, or an
+        // empty violation list proves nothing about the variants that are not.
+        let names: Vec<String> = proof
+            .descriptors
+            .array_summary()
+            .into_iter()
+            .map(|(_, n, ..)| n)
+            .collect();
+        for want in [
+            "_main_desc",  // MainMatrix — per (round, trace)
+            "_main_ptrs",  // MainMatrix — round 0
+            "zc_r",        // Zerocheck  — `zc_r{round}_ctxs`
+            "lg_r",        // Logup      — `lg_r{round}_ctxs`
+            "_cols",       // RawPtr     — interpolation column table
+            "_fold_in",    // RawPtr     — fold input table
+            "_fold_out",   // RawPtr     — fold output table (write-only)
+            "_ring_descs", // BatchSRingTrace
+        ] {
+            assert!(
+                names.iter().any(|n| n.contains(want)),
+                "fixture emitted no `{want}` descriptor array; the closure check would \
+                 not have exercised that encoding path. Arrays: {names:?}"
+            );
+        }
+        // And at least one closure must be wider than the bare root, or every
+        // per-node loop above ran zero times.
+        let widest = proof
+            .descriptors
+            .array_summary()
+            .iter()
+            .map(|(b, ..)| proof.descriptors.referenced_bufs(*b).len())
+            .max()
+            .unwrap_or(0);
+        assert!(
+            widest > 1,
+            "every closure was the bare array — check is vacuous"
+        );
+    }
+
+    /// A1 RED — the checker fires when a descriptor grows a pointee its
+    /// consumer does not declare.
+    ///
+    /// This is the throwaway-pointee red/green for
+    /// [`every_indirect_pointee_has_matching_consumer_access`]. It builds the
+    /// smallest thing the contract applies to — one `MainMatrixDesc` array
+    /// pointing at one buffer, consumed by one blackbox — and runs the *same*
+    /// checker twice: once with the pointee omitted from the node's access
+    /// set (must fail), once with it declared (must pass). Without this, an
+    /// empty violation list on the phase graph would be indistinguishable from
+    /// a checker that never looks at anything.
+    #[test]
+    fn descriptor_closure_check_catches_an_undeclared_pointee() {
+        let device = DeviceType::Cuda(0);
+
+        // `declare_pointee == false` is the sabotage: the node takes the
+        // descriptor array but not the buffer the array points at.
+        let build = |declare_pointee: bool| {
+            let mut g = GraphBuilder::new();
+            let mut descs = DescriptorPlan::new();
+            let pointee = add_ef_buf(&mut g, device, "throwaway_pointee", 8);
+            g.insert_memset(pointee, 0);
+            let arr_buf = add_typed_buf::<MainMatrixDesc>(&mut g, device, "sabotage_desc", 1);
+            let arr = descs.add_array::<MainMatrixDesc>(&mut g, arr_buf, "sabotage_desc", 1);
+            let reads = descs.set_main_matrix_desc(arr, 0, DevicePtrArg::buf(pointee), 4);
+            assert_eq!(reads, vec![pointee], "the writer must derive the pointee");
+            let out = add_ef_buf(&mut g, device, "sabotage_out", 8);
+
+            let mut node_inputs = vec![arr_buf];
+            if declare_pointee {
+                node_inputs.extend(reads);
+            }
+            let n_in = node_inputs.len();
+            g.insert_blackbox_kernel(
+                "sabotage_consumer",
+                node_inputs.into_iter(),
+                std::iter::once(out),
+                std::iter::repeat_n(false, n_in),
+                move |_inputs, _outputs, _stream| {},
+            );
+            (g, descs)
+        };
+
+        let (g_bad, d_bad) = build(false);
+        let bad = descriptor_closure_violations(&g_bad, &d_bad);
+        assert_eq!(
+            bad.len(),
+            1,
+            "expected exactly one violation from the undeclared pointee, got: {bad:?}"
+        );
+        assert!(
+            bad[0].contains("throwaway_pointee") && bad[0].contains("sabotage_consumer"),
+            "violation message must name the node and the buffer: {}",
+            bad[0]
+        );
+
+        let (g_good, d_good) = build(true);
+        assert!(
+            descriptor_closure_violations(&g_good, &d_good).is_empty(),
+            "declaring the pointee must restore the invariant"
+        );
+    }
+
+    /// A1 RED — the checker fires when a descriptor array reaches no consumer.
+    ///
+    /// The nested-array half of the contract: a `MainMatrixDesc` array is
+    /// never a direct kernel parameter, it is reached through a ctx array's
+    /// `d_main`. If nothing consumes the root, nothing declares the nested
+    /// array's pointees either, and the older per-evaluator test would not
+    /// notice because it only looks at inputs it can see.
+    #[test]
+    fn descriptor_closure_check_catches_an_unconsumed_array() {
+        let device = DeviceType::Cuda(0);
+        let mut g = GraphBuilder::new();
+        let mut descs = DescriptorPlan::new();
+        let pointee = add_ef_buf(&mut g, device, "orphan_pointee", 8);
+        g.insert_memset(pointee, 0);
+        let arr_buf = add_typed_buf::<MainMatrixDesc>(&mut g, device, "orphan_desc", 1);
+        let arr = descs.add_array::<MainMatrixDesc>(&mut g, arr_buf, "orphan_desc", 1);
+        let _ = descs.set_main_matrix_desc(arr, 0, DevicePtrArg::buf(pointee), 4);
+        // No node consumes `arr_buf`.
+        let v = descriptor_closure_violations(&g, &descs);
+        assert_eq!(v.len(), 1, "expected the unconsumed-array violation: {v:?}");
+        assert!(v[0].contains("orphan_desc"), "{}", v[0]);
+    }
+
     /// R6: every descriptor array is a registered graph input, and every
     /// element that an evaluator will index is filled.
     ///
@@ -5854,8 +6357,16 @@ mod zerocheck_ir_tests {
         let bufs: Vec<TraceBufs> = (0..plan.num_traces())
             .map(|t| TraceBufs::alloc_inputs(&mut g, device, &plan, t, &mut inputs))
             .collect();
-        let proof =
-            logup_zerocheck_gpu_ir(&mut g, &mut transcript, &plan, &bufs, device, &mut inputs);
+        let xi = xi_const_bufs(&mut g, device, &synthetic_xi(plan.l_skip, plan.n_max));
+        let proof = logup_zerocheck_gpu_ir(
+            &mut g,
+            &mut transcript,
+            &plan,
+            &xi,
+            &bufs,
+            device,
+            &mut inputs,
+        );
 
         let summary = proof.descriptors.array_summary();
         assert!(!summary.is_empty(), "fixture emitted no descriptor arrays");
@@ -5910,8 +6421,16 @@ mod zerocheck_ir_tests {
         let bufs: Vec<TraceBufs> = (0..plan.num_traces())
             .map(|t| TraceBufs::alloc_inputs(&mut g, device, &plan, t, &mut inputs))
             .collect();
-        let proof =
-            logup_zerocheck_gpu_ir(&mut g, &mut transcript, &plan, &bufs, device, &mut inputs);
+        let xi = xi_const_bufs(&mut g, device, &synthetic_xi(plan.l_skip, plan.n_max));
+        let proof = logup_zerocheck_gpu_ir(
+            &mut g,
+            &mut transcript,
+            &plan,
+            &xi,
+            &bufs,
+            device,
+            &mut inputs,
+        );
 
         // --- one array per (round, trace), not per (round, family, trace)
         let mut got: Vec<String> = g
@@ -7377,7 +7896,16 @@ mod zerocheck_ir_tests {
         }
     }
 
-    /// `eq_hypercube_interleaved_stage_ext`: graph node vs eager launcher.
+    /// A2 — `eq_hypercube_interleaved_stage_ext`: structured module vs eager
+    /// launcher, with `x_i` supplied at **run** time.
+    ///
+    /// The point of A2 is that the challenge is a graph value, so the oracle
+    /// has to be a graph value oracle: ONE compiled graph is executed twice
+    /// with two different `x_i` buffers, and both executions are byte-compared
+    /// against the eager launcher run with the same `x_i`. A build-time
+    /// constant would pass the first comparison and fail the second — that is
+    /// exactly the RED this test is shaped to catch (see the report's sabotage
+    /// run).
     #[test]
     fn eq_hypercube_interleaved_stage_ir_matches_eager() {
         let ctx = test_ctx();
@@ -7388,33 +7916,82 @@ mod zerocheck_ir_tests {
         for log_step in [0usize, 3, 7] {
             let step = 1usize << log_step;
             let input: Vec<EF> = (0..step).map(|_| rng.random::<EF>()).collect();
-            let x_i: EF = rng.random();
+            // Two distinct challenges through one compiled graph.
+            let challenges: [EF; 2] = [rng.random(), rng.random()];
+            assert_ne!(challenges[0], challenges[1]);
 
+            // --- eager oracle, once per challenge.
             let d_in: DeviceBuffer<EF> = input.as_slice().to_device_on(&ctx).unwrap();
-            let d_out: DeviceBuffer<EF> = DeviceBuffer::with_capacity_on(2 * step, &ctx);
-            unsafe {
-                crate::cuda::poly::eq_hypercube_interleaved_stage_ext(
-                    d_out.as_mut_ptr(),
-                    d_in.as_ptr(),
-                    x_i,
-                    step as u32,
-                    stream,
-                )
-                .expect("eq_hypercube_interleaved_stage_ext");
-            }
-            ctx.stream.synchronize().unwrap();
-            let want: Vec<EF> = d_out.to_host_on(&ctx).unwrap();
+            let want: Vec<Vec<EF>> = challenges
+                .iter()
+                .map(|&x_i| {
+                    let d_out: DeviceBuffer<EF> = DeviceBuffer::with_capacity_on(2 * step, &ctx);
+                    unsafe {
+                        crate::cuda::poly::eq_hypercube_interleaved_stage_ext(
+                            d_out.as_mut_ptr(),
+                            d_in.as_ptr(),
+                            x_i,
+                            step as u32,
+                            stream,
+                        )
+                        .expect("eq_hypercube_interleaved_stage_ext");
+                    }
+                    ctx.stream.synchronize().unwrap();
+                    d_out.to_host_on(&ctx).unwrap()
+                })
+                .collect();
 
+            // --- one graph, `x_i` as a registered runtime input.
             let mut g = GraphBuilder::new();
             let in_buf = ef_slice_const_buf(&mut g, device, "eq_in", &input);
+            let x_buf = add_ext_scalar_buf(&mut g, device, "eq_xi");
+            g.register_input(x_buf);
             let out_buf = add_ef_buf(&mut g, device, "eq_out", 2 * step);
-            eq_hypercube_interleaved_stage_ext_ir(&mut g, in_buf, out_buf, x_i, step as u32);
-            let got = run_graph_read_bufs(g, &[out_buf], &ctx).remove(0);
+            eq_hypercube_interleaved_stage_ext_ir(&mut g, in_buf, out_buf, x_buf, step);
+
+            // Structural half of the A2 bar: the module's inputs are
+            // `[src, x_i]`, in that order — the challenge is a graph edge,
+            // not a captured host value.
+            let kernels: Vec<&crypto_compiler::graph_ir::KernelModuleNode> = g
+                .nodes
+                .iter()
+                .filter_map(|n| match n {
+                    GraphNode::Kernel(k) => Some(k),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(kernels.len(), 1, "expected exactly one structured kernel");
             assert_eq!(
-                &got[..],
-                ef_bytes(&want),
-                "eq_hypercube_interleaved_stage_ir mismatch at step={step}"
+                kernels[0].inputs,
+                vec![in_buf, x_buf],
+                "`x_i` must be input 1 of the structured eq module"
             );
+
+            g.register_output(out_buf);
+            let mut exe = GraphCompiler::new()
+                .device(device)
+                .scheduler(scheduler_v1())
+                .compile(g)
+                .expect("eq graph compile");
+            let out_idx = (0..exe.num_outputs())
+                .find(|&i| exe.output_buf_id(i) == out_buf)
+                .expect("eq_out is an output");
+            let in_idx = (0..exe.num_inputs())
+                .find(|&i| exe.input_buf_id(i) == x_buf)
+                .expect("eq_xi is an input");
+
+            for (run, (&x_i, want)) in challenges.iter().zip(want.iter()).enumerate() {
+                let bytes: Vec<u8> = ef_bytes(std::slice::from_ref(&x_i)).to_vec();
+                let d_x: DeviceBuffer<u8> = bytes.as_slice().to_device_on(&ctx).unwrap();
+                exe.set_input(&ctx, in_idx, &d_x).expect("set x_i");
+                exe.run(&ctx).expect("eq graph run");
+                let got = exe.get_output(out_idx).to_host_on(&ctx).expect("D2H");
+                assert_eq!(
+                    &got[..],
+                    ef_bytes(want),
+                    "eq_hypercube_interleaved_stage_ir mismatch at step={step}, run={run}"
+                );
+            }
         }
     }
 
@@ -7445,8 +8022,19 @@ mod zerocheck_ir_tests {
         let bufs: Vec<TraceBufs> = (0..plan.num_traces())
             .map(|t| TraceBufs::alloc_inputs(&mut g, device, &plan, t, &mut inputs))
             .collect();
-        let proof =
-            logup_zerocheck_gpu_ir(&mut g, &mut transcript, &plan, &bufs, device, &mut inputs);
+        let xi = xi_const_bufs(&mut g, device, &synthetic_xi(plan.l_skip, plan.n_max));
+        let proof = logup_zerocheck_gpu_ir(
+            &mut g,
+            &mut transcript,
+            &plan,
+            &xi,
+            &bufs,
+            device,
+            &mut inputs,
+        );
+        export_phase_outputs(
+            &mut g, &proof, device, /* copy_before_register */ false,
+        );
         let descs = proof.descriptors.clone();
 
         let mut exe = GraphCompiler::new()
@@ -7510,7 +8098,19 @@ mod zerocheck_ir_tests {
         let bufs: Vec<TraceBufs> = (0..plan.num_traces())
             .map(|t| TraceBufs::alloc_inputs(&mut g, device, &plan, t, &mut inputs))
             .collect();
-        let _ = logup_zerocheck_gpu_ir(&mut g, &mut transcript, &plan, &bufs, device, &mut inputs);
+        let xi = xi_const_bufs(&mut g, device, &synthetic_xi(plan.l_skip, plan.n_max));
+        let proof = logup_zerocheck_gpu_ir(
+            &mut g,
+            &mut transcript,
+            &plan,
+            &xi,
+            &bufs,
+            device,
+            &mut inputs,
+        );
+        export_phase_outputs(
+            &mut g, &proof, device, /* copy_before_register */ false,
+        );
         GraphCompiler::new()
             .device(device)
             .scheduler(SchedulerMode::ListV1 {
@@ -8872,8 +9472,16 @@ mod zerocheck_ir_tests {
         let bufs: Vec<TraceBufs> = (0..plan.num_traces())
             .map(|t| TraceBufs::alloc_inputs(&mut g, device, &plan, t, &mut inputs))
             .collect();
-        let proof =
-            logup_zerocheck_gpu_ir(&mut g, &mut transcript, &plan, &bufs, device, &mut inputs);
+        let xi = xi_const_bufs(&mut g, device, &synthetic_xi(plan.l_skip, plan.n_max));
+        let proof = logup_zerocheck_gpu_ir(
+            &mut g,
+            &mut transcript,
+            &plan,
+            &xi,
+            &bufs,
+            device,
+            &mut inputs,
+        );
 
         assert_eq!(proof.round0_zc_evals.len(), plan.num_traces());
         assert_eq!(proof.round0_logup_evals.len(), plan.num_traces());
@@ -8900,6 +9508,7 @@ mod zerocheck_ir_tests {
             "r_0 .. r_{{n_max}} are resident"
         );
 
+        let exported = export_phase_outputs(&mut g, &proof, device, /* copy */ false);
         let exe = GraphCompiler::new()
             .device(device)
             .scheduler(SchedulerMode::ListV1 {
@@ -8908,5 +9517,159 @@ mod zerocheck_ir_tests {
             .compile(g)
             .expect("phase graph compile");
         assert!(exe.num_outputs() > 0, "phase graph produced no outputs");
+        assert!(!exported.is_empty());
+    }
+
+    // =======================================================================
+    // A3 — the builder returns positions; the caller exports them.
+    // =======================================================================
+
+    /// A3 — `logup_zerocheck_gpu_ir` must not touch `GraphBuilder::output_bufs`.
+    ///
+    /// Graph output *position* is registration order
+    /// (`graph_ir.rs:1058-1073`), so a builder that registers on the caller's
+    /// behalf silently owns the caller's output indices — the exact thing the
+    /// IR author asked us to stop doing. This is the machine check: snapshot
+    /// the output list, build the whole phase, and require the list to be
+    /// **identical**, including a pre-existing entry the builder could have
+    /// appended after.
+    ///
+    /// RED at `83ae7e1b`: ten production `register_output` call sites
+    /// (`:3457, 3511, 3626, 3900-3902, 4051-4059, 4878, 4960, 4989`) made this
+    /// list grow by the whole proof.
+    #[test]
+    fn logup_zerocheck_builder_does_not_register_outputs() {
+        let device = DeviceType::Cuda(0);
+        let plan = synthetic_plan(
+            /* num_traces */ 3, /* l_skip */ 2, /* n_max */ 3,
+        );
+
+        let mut g = GraphBuilder::new();
+        // A pre-existing caller output: if the builder appended anything, this
+        // would no longer be the *only* entry, and its position could shift.
+        let sentinel = add_ef_buf(&mut g, device, "caller_sentinel", 1);
+        g.insert_memset(sentinel, 0);
+        g.register_output(sentinel);
+        let before = g.output_bufs().to_vec();
+        assert_eq!(before, vec![sentinel]);
+
+        let mut transcript = DuplexSpongeGpuIR::new(&mut g, device);
+        let mut inputs = PhaseInputBinder::new();
+        let bufs: Vec<TraceBufs> = (0..plan.num_traces())
+            .map(|t| TraceBufs::alloc_inputs(&mut g, device, &plan, t, &mut inputs))
+            .collect();
+        let xi = xi_const_bufs(&mut g, device, &synthetic_xi(plan.l_skip, plan.n_max));
+        let proof = logup_zerocheck_gpu_ir(
+            &mut g,
+            &mut transcript,
+            &plan,
+            &xi,
+            &bufs,
+            device,
+            &mut inputs,
+        );
+
+        assert_eq!(
+            g.output_bufs(),
+            &before[..],
+            "the IR builder registered graph outputs; output position is registration \
+             order, so the caller can no longer track its own indices"
+        );
+
+        // And the proof it returned is non-trivial, so the assertion above is
+        // not passing because the builder produced nothing.
+        assert!(!phase_export_order(&proof).is_empty());
+    }
+
+    /// A3 — the caller's export order is exactly `phase_export_order`, in both
+    /// export modes, and `GraphExe::output_buf_id(i)` agrees position by
+    /// position.
+    ///
+    /// Direct mode registers the returned ids themselves; copy mode registers
+    /// a fresh same-sized buffer per position so the internal producer stays
+    /// fusable (the author's own two caller patterns,
+    /// `fractional_sumcheck_gpu_irv2.rs:579-605,631-650`). Both must expose
+    /// the same *number* of positions in the same *order*.
+    #[test]
+    fn caller_export_positions_match_phase_export_order() {
+        let device = DeviceType::Cuda(0);
+        let plan = synthetic_plan(
+            /* num_traces */ 2, /* l_skip */ 1, /* n_max */ 2,
+        );
+
+        // --- direct mode
+        let (order, exported, exe) = {
+            let mut g = GraphBuilder::new();
+            let mut transcript = DuplexSpongeGpuIR::new(&mut g, device);
+            let mut inputs = PhaseInputBinder::new();
+            let bufs: Vec<TraceBufs> = (0..plan.num_traces())
+                .map(|t| TraceBufs::alloc_inputs(&mut g, device, &plan, t, &mut inputs))
+                .collect();
+            let xi = xi_const_bufs(&mut g, device, &synthetic_xi(plan.l_skip, plan.n_max));
+            let proof = logup_zerocheck_gpu_ir(
+                &mut g,
+                &mut transcript,
+                &plan,
+                &xi,
+                &bufs,
+                device,
+                &mut inputs,
+            );
+            let order = phase_export_order(&proof);
+            let exported = export_phase_outputs(&mut g, &proof, device, false);
+            let exe = GraphCompiler::new()
+                .device(device)
+                .scheduler(scheduler_v1())
+                .compile(g)
+                .expect("direct-export phase graph compile");
+            (order, exported, exe)
+        };
+        assert_eq!(exported, order, "direct mode exports the returned ids");
+        // `register_output` de-duplicates, so the exe's output list is the
+        // order with repeats collapsed — every position still resolves.
+        for (i, &b) in order.iter().enumerate() {
+            assert!(
+                (0..exe.num_outputs()).any(|j| exe.output_buf_id(j) == b),
+                "export position {i} ({b:?}) is not a graph output"
+            );
+        }
+
+        // --- copy mode: one fresh output per position, no collapsing.
+        let mut g = GraphBuilder::new();
+        let mut transcript = DuplexSpongeGpuIR::new(&mut g, device);
+        let mut inputs = PhaseInputBinder::new();
+        let bufs: Vec<TraceBufs> = (0..plan.num_traces())
+            .map(|t| TraceBufs::alloc_inputs(&mut g, device, &plan, t, &mut inputs))
+            .collect();
+        let xi = xi_const_bufs(&mut g, device, &synthetic_xi(plan.l_skip, plan.n_max));
+        let proof = logup_zerocheck_gpu_ir(
+            &mut g,
+            &mut transcript,
+            &plan,
+            &xi,
+            &bufs,
+            device,
+            &mut inputs,
+        );
+        let order2 = phase_export_order(&proof);
+        let copies = export_phase_outputs(&mut g, &proof, device, true);
+        assert_eq!(order2.len(), order.len(), "same shape as the direct build");
+        assert_eq!(copies.len(), order2.len(), "one copy per export position");
+        assert!(
+            copies.iter().all(|c| !order2.contains(c)),
+            "copy mode must register fresh buffers, not the producers themselves"
+        );
+        let exe2 = GraphCompiler::new()
+            .device(device)
+            .scheduler(scheduler_v1())
+            .compile(g)
+            .expect("copy-export phase graph compile");
+        for (i, &c) in copies.iter().enumerate() {
+            assert_eq!(
+                exe2.output_buf_id(i),
+                c,
+                "copy-mode output position {i} does not match the export order"
+            );
+        }
     }
 }
