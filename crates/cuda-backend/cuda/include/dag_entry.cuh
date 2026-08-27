@@ -1,8 +1,10 @@
 #pragma once
 
+#include "base_off.cuh"
 #include "codec.cuh"
 #include "device_ntt.cuh"
 #include "fp.h"
+#include "matrix.cuh"
 #include <cassert>
 #include <cstdint>
 #include <vector_types.h>
@@ -15,7 +17,12 @@ namespace symbolic_dag {
 // - For each coset: apply shift, forward NTT, store result
 template <uint32_t NUM_COSETS> struct NttEvalContext {
     const Fp *__restrict__ preprocessed;
-    const Fp *const *__restrict__ main_parts;
+    // The main-matrix table in the base+offset ABI (`base_off.cuh`): descriptors
+    // holding byte offsets, decoded against `pool_base` at use. The eager path
+    // encodes absolute addresses against a null `pool_base`, so `base + off`
+    // reproduces the original pointer exactly.
+    const MainMatrixDesc *__restrict__ main_descs;
+    const uint8_t *__restrict__ pool_base;
     const Fp *__restrict__ public_values;
     Fp *__restrict__ inter_buffer; // [buffer_size][NUM_COSETS] per thread
     Fp *__restrict__ ntt_buffer;   // shared memory for NTT scratch (only when NEEDS_SHMEM)
@@ -162,7 +169,9 @@ __device__ __forceinline__ void ntt_eval_dag_entry(
         return;
     }
     case ENTRY_MAIN: {
-        auto main_ptr = ctx.main_parts[src.part];
+        // Round 0 addresses a main matrix column-major with stride `height`; the
+        // descriptor's `air_width` is not consumed here (see `matrix.cuh`).
+        auto main_ptr = base_off_ptr<const Fp>(ctx.pool_base, ctx.main_descs[src.part].data);
         const Fp *col = main_ptr + ctx.height * src.index;
         ntt_coset_interpolate<NUM_COSETS, NEEDS_SHMEM, FIRST_COSET_IS_IDENTITY>(
             results,

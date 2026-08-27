@@ -15,10 +15,10 @@ use tracing::debug;
 
 use crate::{
     cuda::logup_zerocheck::{
-        logup_monomial_batched, precompute_lambda_combinations,
+        logup_monomial_batched_raw, precompute_lambda_combinations,
         precompute_logup_denom_combinations, precompute_logup_numer_combinations,
-        zerocheck_monomial_batched, zerocheck_monomial_par_y_batched, BlockCtx, EvalCoreCtx,
-        LogupMonomialCommonCtx, LogupMonomialCtx, MonomialAirCtx,
+        zerocheck_monomial_batched_raw, zerocheck_monomial_par_y_batched_raw, BlockCtx,
+        EvalCoreCtxRaw, LogupMonomialCommonCtxRaw, LogupMonomialCtx, MonomialAirCtxRaw,
     },
     error::KernelError,
     gpu_backend::GenericGpuBackend,
@@ -115,7 +115,7 @@ pub(crate) fn compute_lambda_combinations<HS: GpuHashScheme>(
 pub(crate) struct ZerocheckMonomialBatch<'a> {
     traces: Vec<&'a TraceCtx>,
     block_ctxs: DeviceBuffer<BlockCtx>,
-    air_ctxs: DeviceBuffer<MonomialAirCtx>,
+    air_ctxs: DeviceBuffer<MonomialAirCtxRaw>,
     air_offsets: DeviceBuffer<u32>,
     /// Cheap clone: just `(device_id, Arc<CudaStream>)`.
     device_ctx: GpuDeviceCtx,
@@ -162,8 +162,8 @@ impl<'a> ZerocheckMonomialBatch<'a> {
             mono_blocks * t.num_y
         }));
 
-        // Build MonomialAirCtx for each trace
-        let air_ctxs_h: Vec<MonomialAirCtx> = traces
+        // Build the eager (raw-pointer) MonomialAirCtx for each trace
+        let air_ctxs_h: Vec<MonomialAirCtxRaw> = traces
             .iter()
             .zip(lambda_combinations)
             .map(|(t, lc)| {
@@ -173,14 +173,15 @@ impl<'a> ZerocheckMonomialBatch<'a> {
                     .as_ref()
                     .unwrap();
 
-                let eval_ctx = EvalCoreCtx {
+                // Eager: raw pointers, no `BaseOff`. See [`MainMatrixPtrs`].
+                let eval_ctx = EvalCoreCtxRaw {
                     d_selectors: t.sels_ptr,
                     d_preprocessed: t.prep_ptr,
                     d_main: t.main_ptrs_dev.as_ptr(),
                     d_public: t.public_ptr,
                 };
 
-                MonomialAirCtx {
+                MonomialAirCtxRaw {
                     d_headers: monomials.d_headers.as_ptr(),
                     d_variables: monomials.d_variables.as_ptr(),
                     d_lambda_combinations: lc.as_ptr(),
@@ -247,7 +248,7 @@ impl<'a> ZerocheckMonomialBatch<'a> {
         // valid DeviceBuffers that outlive this call (TraceCtx references, pk monomial data,
         // lambda_combinations). The air_offsets buffer has length num_airs + 1 as required.
         unsafe {
-            zerocheck_monomial_batched(
+            zerocheck_monomial_batched_raw(
                 &mut tmp_sums,
                 &mut output,
                 &self.block_ctxs,
@@ -266,9 +267,9 @@ impl<'a> ZerocheckMonomialBatch<'a> {
 }
 
 // Constants for par-y kernel
-const THREADS_PER_BLOCK_PAR_Y: u32 = 128;
-const DEFAULT_MAX_MONOMIALS_PER_THREAD: u32 = 64;
-const WAVES_TARGET: u32 = 4;
+pub(super) const THREADS_PER_BLOCK_PAR_Y: u32 = 128;
+pub(super) const DEFAULT_MAX_MONOMIALS_PER_THREAD: u32 = 64;
+pub(super) const WAVES_TARGET: u32 = 4;
 
 /// Batch evaluator for monomial-based zerocheck MLE evaluation, parallelizing over y_int.
 ///
@@ -280,7 +281,7 @@ const WAVES_TARGET: u32 = 4;
 pub(crate) struct ZerocheckMonomialParYBatch<'a> {
     traces: Vec<&'a TraceCtx>,
     block_ctxs: DeviceBuffer<BlockCtx>,
-    air_ctxs: DeviceBuffer<MonomialAirCtx>,
+    air_ctxs: DeviceBuffer<MonomialAirCtxRaw>,
     air_offsets: DeviceBuffer<u32>,
     num_blocks: u32,
     chunk_size: u32,
@@ -380,8 +381,8 @@ impl<'a> ZerocheckMonomialParYBatch<'a> {
 
         let num_blocks = block_ctxs_h.len() as u32;
 
-        // Build MonomialAirCtx for each trace
-        let air_ctxs_h: Vec<MonomialAirCtx> = traces
+        // Build the eager (raw-pointer) MonomialAirCtx for each trace
+        let air_ctxs_h: Vec<MonomialAirCtxRaw> = traces
             .iter()
             .zip(lambda_combinations)
             .map(|(t, lc)| {
@@ -391,14 +392,15 @@ impl<'a> ZerocheckMonomialParYBatch<'a> {
                     .as_ref()
                     .unwrap();
 
-                let eval_ctx = EvalCoreCtx {
+                // Eager: raw pointers, no `BaseOff`. See [`MainMatrixPtrs`].
+                let eval_ctx = EvalCoreCtxRaw {
                     d_selectors: t.sels_ptr,
                     d_preprocessed: t.prep_ptr,
                     d_main: t.main_ptrs_dev.as_ptr(),
                     d_public: t.public_ptr,
                 };
 
-                MonomialAirCtx {
+                MonomialAirCtxRaw {
                     d_headers: monomials.d_headers.as_ptr(),
                     d_variables: monomials.d_variables.as_ptr(),
                     d_lambda_combinations: lc.as_ptr(),
@@ -468,7 +470,7 @@ impl<'a> ZerocheckMonomialParYBatch<'a> {
         // valid DeviceBuffers that outlive this call (TraceCtx references, pk monomial data,
         // lambda_combinations). The air_offsets buffer has length num_airs + 1 as required.
         unsafe {
-            zerocheck_monomial_par_y_batched(
+            zerocheck_monomial_par_y_batched_raw(
                 &mut tmp_sums,
                 &mut output,
                 &self.block_ctxs,
@@ -588,7 +590,7 @@ const THREADS_PER_BLOCK_LOGUP: u32 = 128;
 pub(crate) struct LogupMonomialBatch<'a> {
     traces: Vec<&'a TraceCtx>,
     block_ctxs: DeviceBuffer<BlockCtx>,
-    common_ctxs: DeviceBuffer<LogupMonomialCommonCtx>,
+    common_ctxs: DeviceBuffer<LogupMonomialCommonCtxRaw>,
     numer_ctxs: DeviceBuffer<LogupMonomialCtx>,
     denom_ctxs: DeviceBuffer<LogupMonomialCtx>,
     air_offsets: DeviceBuffer<u32>,
@@ -644,7 +646,7 @@ impl<'a> LogupMonomialBatch<'a> {
         let num_blocks = block_ctxs_h.len() as u32;
 
         // Build logup monomial ctxs for each trace
-        let common_ctxs_h: Vec<LogupMonomialCommonCtx> = traces
+        let common_ctxs_h: Vec<LogupMonomialCommonCtxRaw> = traces
             .iter()
             .zip(logup_combinations)
             .map(|(t, lc)| {
@@ -658,14 +660,15 @@ impl<'a> LogupMonomialBatch<'a> {
                     .max(monomials.num_denom_monomials);
                 let mono_blocks = max_monomials.div_ceil(threads_per_block).max(1);
 
-                let eval_ctx = EvalCoreCtx {
+                // Eager: raw pointers, no `BaseOff`. See [`MainMatrixPtrs`].
+                let eval_ctx = EvalCoreCtxRaw {
                     d_selectors: t.sels_ptr,
                     d_preprocessed: t.prep_ptr,
                     d_main: t.main_ptrs_dev.as_ptr(),
                     d_public: t.public_ptr,
                 };
 
-                LogupMonomialCommonCtx {
+                LogupMonomialCommonCtxRaw {
                     eval_ctx,
                     d_eq_xi: t.eq_xi_ptr,
                     bus_term_sum: lc.bus_term_sum,
@@ -769,7 +772,7 @@ impl<'a> LogupMonomialBatch<'a> {
         // SAFETY: All device pointers were constructed from valid DeviceBuffers that outlive this
         // call.
         unsafe {
-            logup_monomial_batched(
+            logup_monomial_batched_raw(
                 &mut tmp_sums,
                 &mut output,
                 &self.block_ctxs,

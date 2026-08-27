@@ -60,3 +60,8 @@ graph-ir = ["dep:crypto-compiler", "crypto-compiler/planner-ortools"]
 [[bin]]
 name = "bench"
 path = "src/bin/bench.rs"
+
+[[example]]
+name = "dump_ir_zerocheck_phase"
+path = "examples/dump_ir_zerocheck_phase.rs"
+required-features = ["graph-ir"]

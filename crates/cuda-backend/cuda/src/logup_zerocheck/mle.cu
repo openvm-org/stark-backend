@@ -15,6 +15,21 @@
 
 namespace logup_zerocheck_mle {
 
+// The single-AIR `mle.cu` entry points are reached only from the eager prover
+// (`mle_round.rs` <- `batch_mle.rs`'s `batch.len() == 1` fast path); the
+// graph-IR mirror uses the batched entry points in `batch_mle.cu`.
+//
+// They therefore keep the ORIGINAL raw-pointer ABI (`MainMatrixPtrs`) and
+// never touch `base_off.cuh`. That is deliberate: every equality test in this
+// branch compares a graph result against an eager one, so the eager side has
+// to be independent of the base+offset encode/decode it is being used to
+// check. Routing both through one decoder makes a sentinel or Rust/C++ layout
+// defect identically wrong on both sides and therefore invisible.
+//
+// If these ever join the graph they need a real `pool_base` argument and the
+// descriptor ABI, like the batched launchers -- but then a *different* eager
+// reference has to be kept for them.
+
 __device__ __forceinline__ FpExt evaluate_mle_entry(
     const SourceInfo &src,
     uint32_t row,

@@ -769,7 +769,10 @@ fn test_monomial_vs_dag_equivalence() {
     use p3_util::log2_strict_usize;
 
     use crate::{
-        cuda::logup_zerocheck::{fold_selectors_round0, interpolate_columns_gpu, MainMatrixPtrs},
+        cuda::logup_zerocheck::{
+            fold_selectors_round0, interpolate_columns_gpu, BaseOff, EvalCoreCtx, MainMatrixDesc,
+            MainMatrixPtrs, ZerocheckCtx,
+        },
         logup_zerocheck::{
             batch_mle::{TraceCtx, ZerocheckMleBatchBuilder},
             batch_mle_monomial::{compute_lambda_combinations, ZerocheckMonomialBatch},
@@ -987,10 +990,7 @@ fn test_monomial_vs_dag_equivalence() {
             norm_factor: F::ONE,
             eq_xi_ptr,
             sels_ptr,
-            prep_ptr: MainMatrixPtrs {
-                data: std::ptr::null(),
-                air_width: 0,
-            },
+            prep_ptr: MainMatrixPtrs::ABSENT,
             main_ptrs_dev,
             public_ptr: d_public_values.as_ptr(),
             eq_3bs_ptr: std::ptr::null(),
@@ -1001,6 +1001,103 @@ fn test_monomial_vs_dag_equivalence() {
                 .unwrap();
         let dag_output = dag_builder.evaluate(&d_lambda_pows, s_deg as u32).unwrap();
         let dag_results: Vec<EF> = dag_output.to_host_on(&gpu_ctx).expect("copy DAG output");
+
+        // --- R6: the base+offset ABI must be byte-identical to the raw
+        //     pointer ABI it sits beside.
+        //
+        // `dag_output` above came from the EAGER path, which is on the
+        // original raw-pointer contexts (`ZerocheckCtxRaw` / `MainMatrixPtrs`)
+        // and never touches `BaseOff`, `base_off_ptr` or the null sentinel.
+        // Here the very same launch is repeated with every device pointer
+        // re-expressed as an offset from an arbitrary base `P`, and `P` handed
+        // to the kernel. Same buffers, same rules, same geometry — only the
+        // context ABI and its decoder differ, so the outputs must match byte
+        // for byte.
+        //
+        // That the two sides share no encoder and no decoder is the point: it
+        // is what lets a wrong null sentinel, a bad offset computation, or a
+        // Rust/C++ layout drift in `MainMatrixDesc` / `ZerocheckCtx` show up
+        // here instead of being applied identically to both sides.
+        //
+        // `P` is deliberately not a real allocation: `base + off` is computed
+        // with wrapping `uintptr_t` arithmetic on both sides, so any `P`
+        // recovers the original address exactly. An unaligned, deliberately
+        // large value also proves the decode makes no alignment assumption of
+        // its own.
+        let rebase_base = 0x5a5a_0000_0123usize;
+        let encode = |p: *const u8| -> BaseOff {
+            if p.is_null() {
+                BaseOff::NULL
+            } else {
+                BaseOff::from_offset((p as usize).wrapping_sub(rebase_base) as u64)
+            }
+        };
+
+        // The main-matrix array is re-encoded too, from `MainMatrixPtrs` into
+        // `MainMatrixDesc`: base+offset has to survive *both* descriptor
+        // levels.
+        let raw_descs = trace_ctx
+            .main_ptrs_dev
+            .to_host_on(&gpu_ctx)
+            .expect("D2H main descriptors");
+        let rebased_descs: Vec<MainMatrixDesc> = raw_descs
+            .iter()
+            .map(|d| MainMatrixDesc {
+                data: encode(d.data as *const u8),
+                air_width: d.air_width,
+            })
+            .collect();
+        let rebased_descs_dev = rebased_descs
+            .to_device_on(&gpu_ctx)
+            .expect("H2D main descriptors");
+        let rebased_main = encode(rebased_descs_dev.as_ptr() as *const u8);
+
+        let rebased_output = dag_builder
+            .evaluate_with_base(
+                &d_lambda_pows,
+                s_deg as u32,
+                rebase_base as *const u8,
+                |ctxs| {
+                    ctxs.into_iter()
+                        .map(|c| ZerocheckCtx {
+                            eval_ctx: EvalCoreCtx {
+                                d_selectors: encode(c.eval_ctx.d_selectors as *const u8),
+                                d_preprocessed: MainMatrixDesc {
+                                    data: encode(c.eval_ctx.d_preprocessed.data as *const u8),
+                                    air_width: c.eval_ctx.d_preprocessed.air_width,
+                                },
+                                d_main: rebased_main,
+                                d_public: encode(c.eval_ctx.d_public as *const u8),
+                            },
+                            d_intermediates: encode(c.d_intermediates as *const u8),
+                            num_y: c.num_y,
+                            d_eq_xi: encode(c.d_eq_xi as *const u8),
+                            d_rules: encode(c.d_rules as *const u8),
+                            rules_len: c.rules_len,
+                            d_used_nodes: encode(c.d_used_nodes as *const u8),
+                            used_nodes_len: c.used_nodes_len,
+                            buffer_size: c.buffer_size,
+                        })
+                        .collect()
+                },
+            )
+            .unwrap();
+        let rebased_results: Vec<EF> = rebased_output
+            .to_host_on(&gpu_ctx)
+            .expect("copy rebased output");
+        let as_bytes = |xs: &[EF]| -> Vec<u8> {
+            unsafe {
+                std::slice::from_raw_parts(xs.as_ptr() as *const u8, std::mem::size_of_val(xs))
+            }
+            .to_vec()
+        };
+        assert_eq!(
+            as_bytes(&rebased_results),
+            as_bytes(&dag_results),
+            "num_y={num_y}: the base+offset decode path disagrees with the \
+             absolute-address encoding it replaces"
+        );
+        drop(rebased_descs_dev);
 
         let lambda_comb = compute_lambda_combinations(&pk, 0, &d_lambda_pows, &gpu_ctx).unwrap();
         let mono_batch = ZerocheckMonomialBatch::new(

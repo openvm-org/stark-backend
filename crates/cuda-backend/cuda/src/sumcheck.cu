@@ -197,15 +197,26 @@ __global__ void fold_mle_column_kernel(FpExt *buffer, size_t half, FpExt r) {
     t0 += r * (t1 - t0);
 }
 
-// Folds MLE evaluations as in fold_mle_kernel above, but supports matrices of different heights
+// Folds MLE evaluations as in fold_mle_kernel above, but supports matrices of different heights.
+//
+// `DEV_CH == false`: the round challenge is the by-value `r_val` (eager path).
+// `DEV_CH == true`:  the round challenge is read on-device from `r_dev` and the
+// by-value slot is dead (graph-IR path, where the challenge only exists as a
+// runtime device buffer). See the same dual-ABI pattern in
+// `logup_zerocheck/gkr.cu`.
+template <bool DEV_CH>
 __global__ void batch_fold_mle_kernel(
     const FpExt *__restrict__ const *__restrict__ input_matrices, // Array of input matrix pointers
     FpExt *__restrict__ const *__restrict__ output_matrices,      // Array of output matrix pointers
     const uint32_t *widths,                                       // Width of each matrix
     const uint32_t num_matrices,
     const uint8_t *log_output_heights,
-    const FpExt r_val
+    FpExt r_val,
+    const FpExt *__restrict__ r_dev
 ) {
+    if constexpr (DEV_CH) {
+        r_val = *r_dev;
+    }
     uint32_t mat_idx = blockIdx.y * blockDim.y + threadIdx.y;
     uint32_t tidx = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -322,6 +333,35 @@ extern "C" int _fold_mle_column(FpExt *buffer, size_t size, FpExt r, cudaStream_
     return CHECK_KERNEL();
 }
 
+// Host-safe zero FpExt for the unused by-value challenge slot of the
+// _dev_challenge launcher: FpExt only has __device__ constructors, so we
+// materialize it from zeroed bytes via the implicit (host+device) copy ctor.
+// The value is never read when DEV_CH is true.
+// (Same helper as in logup_zerocheck/gkr.cu; kept TU-local there and here.)
+static inline FpExt host_dummy_fpext() {
+    alignas(FpExt) unsigned char bytes[sizeof(FpExt)] = {};
+    return *reinterpret_cast<FpExt *>(bytes);
+}
+
+template <bool DEV_CH>
+static int batch_fold_mle_impl(
+    const FpExt *const *input_matrices,
+    FpExt *const *output_matrices,
+    const uint32_t *widths,
+    const uint16_t num_matrices,
+    const uint8_t *log_output_heights,
+    const uint32_t max_output_cells, // max(height * width)
+    const FpExt r_val,
+    const FpExt *r_dev,
+    cudaStream_t stream
+) {
+    auto [grid, block] = fold_mle_launch_params(max_output_cells, num_matrices);
+    batch_fold_mle_kernel<DEV_CH><<<grid, block, 0, stream>>>(
+        input_matrices, output_matrices, widths, num_matrices, log_output_heights, r_val, r_dev
+    );
+    return CHECK_KERNEL();
+}
+
 extern "C" int _batch_fold_mle(
     const FpExt *const *input_matrices,
     FpExt *const *output_matrices,
@@ -332,11 +372,42 @@ extern "C" int _batch_fold_mle(
     const FpExt r_val,
     cudaStream_t stream
 ) {
-    auto [grid, block] = fold_mle_launch_params(max_output_cells, num_matrices);
-    batch_fold_mle_kernel<<<grid, block, 0, stream>>>(
-        input_matrices, output_matrices, widths, num_matrices, log_output_heights, r_val
+    return batch_fold_mle_impl<false>(
+        input_matrices,
+        output_matrices,
+        widths,
+        num_matrices,
+        log_output_heights,
+        max_output_cells,
+        r_val,
+        nullptr,
+        stream
     );
-    return CHECK_KERNEL();
+}
+
+// Device-challenge variant: `r_val` is read on-device from `r_dev` (graph-IR path).
+// Behaviourally identical to _batch_fold_mle when *r_dev holds the same challenge.
+extern "C" int _batch_fold_mle_dev_challenge(
+    const FpExt *const *input_matrices,
+    FpExt *const *output_matrices,
+    const uint32_t *widths,
+    const uint16_t num_matrices,
+    const uint8_t *log_output_heights,
+    const uint32_t max_output_cells, // max(height * width)
+    const FpExt *r_dev,
+    cudaStream_t stream
+) {
+    return batch_fold_mle_impl<true>(
+        input_matrices,
+        output_matrices,
+        widths,
+        num_matrices,
+        log_output_heights,
+        max_output_cells,
+        host_dummy_fpext(),
+        r_dev,
+        stream
+    );
 }
 
 extern "C" int _fold_ple_from_coeffs(

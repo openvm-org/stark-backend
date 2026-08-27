@@ -149,7 +149,8 @@ __global__ void zerocheck_ntt_evaluate_constraints_kernel(
     FpExt *__restrict__ tmp_sums_buffer,   // [num_blocks][NUM_COSETS][skip_domain]
     const Fp *__restrict__ selectors_cube, // [3][num_x]
     const Fp *__restrict__ preprocessed,
-    const Fp *const *__restrict__ main_parts,
+    const MainMatrixDesc *__restrict__ main_descs,
+    const uint8_t *__restrict__ pool_base,
     const FpExt *__restrict__ eq_cube, // [num_x]
     const FpExt *__restrict__ d_lambda_pows,
     const Fp *__restrict__ public_values,
@@ -232,7 +233,8 @@ __global__ void zerocheck_ntt_evaluate_constraints_kernel(
     // Initialize eval_ctx once with loop-invariant fields
     NttEvalContext<NUM_COSETS> eval_ctx{
         preprocessed,
-        main_parts,
+        main_descs,
+        pool_base,
         public_values,
         inter_buffer,
         ntt_buffer,
@@ -337,7 +339,8 @@ __global__ void zerocheck_ntt_evaluate_constraints_coset_parallel_kernel(
     FpExt *__restrict__ tmp_sums_buffer,   // [num_blocks][num_cosets * skip_domain]
     const Fp *__restrict__ selectors_cube, // [3][num_x]
     const Fp *__restrict__ preprocessed,
-    const Fp *const *__restrict__ main_parts,
+    const MainMatrixDesc *__restrict__ main_descs,
+    const uint8_t *__restrict__ pool_base,
     const FpExt *__restrict__ eq_cube, // [num_x]
     const FpExt *__restrict__ d_lambda_pows,
     const Fp *__restrict__ public_values,
@@ -415,7 +418,8 @@ __global__ void zerocheck_ntt_evaluate_constraints_coset_parallel_kernel(
     // Single-coset context (NUM_COSETS=1), loop-invariant fields only
     NttEvalContext<1> eval_ctx{
         preprocessed,
-        main_parts,
+        main_descs,
+        pool_base,
         public_values,
         inter_buffer,
         ntt_buffer,
@@ -528,7 +532,8 @@ int launch_zerocheck_ntt_evaluate_constraints(
     FpExt *output,
     const Fp *selectors_cube, // [3][num_x]
     const Fp *preprocessed,
-    const Fp *const *main_parts,
+    const MainMatrixDesc *main_descs,
+    const uint8_t *pool_base,
     const FpExt *eq_cube, // [num_x]
     const FpExt *d_lambda_pows,
     const Fp *public_values,
@@ -560,7 +565,8 @@ int launch_zerocheck_ntt_evaluate_constraints(
             tmp_sums_buffer,
             selectors_cube,
             preprocessed,
-            main_parts,
+            main_descs,
+            pool_base,
             eq_cube,
             d_lambda_pows,
             public_values,
@@ -603,7 +609,8 @@ int launch_zerocheck_coset_parallel(
     FpExt *output,
     const Fp *selectors_cube,
     const Fp *preprocessed,
-    const Fp *const *main_parts,
+    const MainMatrixDesc *main_descs,
+    const uint8_t *pool_base,
     const FpExt *eq_cube,
     const FpExt *d_lambda_pows,
     const Fp *public_values,
@@ -635,7 +642,8 @@ int launch_zerocheck_coset_parallel(
             tmp_sums_buffer,
             selectors_cube,
             preprocessed,
-            main_parts,
+            main_descs,
+            pool_base,
             eq_cube,
             d_lambda_pows,
             public_values,
@@ -673,7 +681,8 @@ extern "C" int _zerocheck_ntt_eval_constraints(
     FpExt *output,            // [num_cosets * skip_domain]
     const Fp *selectors_cube, // [3][num_x]
     const Fp *preprocessed,
-    const Fp *const *main_parts,
+    const MainMatrixDesc *main_descs,
+    const uint8_t *pool_base,
     const FpExt *eq_cube, // [num_x]
     const FpExt *d_lambda_pows,
     const Fp *public_values,
@@ -699,9 +708,9 @@ extern "C" int _zerocheck_ntt_eval_constraints(
     }
 
 #define KERNEL_ARGS                                                                                \
-    tmp_sums_buffer, output, selectors_cube, preprocessed, main_parts, eq_cube, d_lambda_pows,     \
-        public_values, d_rules, rules_len, d_used_nodes, used_nodes_len, lambda_len, buffer_size,  \
-        d_intermediates, skip_domain, num_x, height
+    tmp_sums_buffer, output, selectors_cube, preprocessed, main_descs, pool_base, eq_cube,         \
+        d_lambda_pows, public_values, d_rules, rules_len, d_used_nodes, used_nodes_len,            \
+        lambda_len, buffer_size, d_intermediates, skip_domain, num_x, height
 
     if (skip_domain == 1) {
         if (use_coset_parallel) {

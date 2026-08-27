@@ -5,6 +5,8 @@
   - [Metrics](./metrics.md): Guide to metrics collected by the prover.
 - [GPU Memory Manager with Virtual Pool (VPMM)](./vpmm_spec.md): Spec for the GPU memory manager used by the CUDA backend.
 - [GKR Fractional Sumcheck Prover](./cuda-backend/gkr-prover.md): Protocol and CUDA implementation of the GKR prover for logup.
+- [logup-zerocheck Graph-IR Port](./cuda-backend/logup-zerocheck-graph-ir-porting.md): Phase-specific porting guide for the graph-IR mirror of the logup-zerocheck prover.
+  - [Progress](./cuda-backend/logup-zerocheck-graph-ir-progress.md): Milestone status and verification evidence for that port.
 
 ## Development without CUDA
 

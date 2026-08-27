@@ -17,7 +17,7 @@ use crate::{
     cuda::logup_zerocheck::{
         _logup_r0_intermediates_buffer_size, _logup_r0_temp_sums_buffer_size,
         _zerocheck_r0_intermediates_buffer_size, _zerocheck_r0_temp_sums_buffer_size,
-        logup_bary_eval_interactions_round0, zerocheck_ntt_eval_constraints,
+        logup_bary_eval_interactions_round0, zerocheck_ntt_eval_constraints, MainMatrixDesc,
     },
     gpu_backend::GenericGpuBackend,
     hash_scheme::GpuHashScheme,
@@ -51,7 +51,7 @@ fn validate_round0_num_cosets(
 pub fn evaluate_round0_constraints_gpu<HS: GpuHashScheme>(
     pk: &DeviceStarkProvingKey<GenericGpuBackend<HS>>,
     selectors_cube: &DeviceBuffer<F>,
-    main_parts: &DeviceBuffer<*const F>,
+    main_descs: &DeviceBuffer<MainMatrixDesc>,
     public_values: &DeviceBuffer<F>,
     eq_cube: *const EF,
     lambda_pows: &DeviceBuffer<EF>,
@@ -129,7 +129,10 @@ pub fn evaluate_round0_constraints_gpu<HS: GpuHashScheme>(
             &mut sp_evals,
             selectors_cube,
             preprocessed_ptr,
-            main_parts,
+            main_descs.as_ptr(),
+            // Eager encoding: absolute addresses against a null pool base, so
+            // `base + off` reproduces the original pointer (`base_off.cuh`).
+            std::ptr::null(),
             eq_cube,
             lambda_pows,
             public_values,
@@ -160,7 +163,7 @@ pub fn evaluate_round0_interactions_gpu<HS: GpuHashScheme>(
     pk: &DeviceStarkProvingKey<GenericGpuBackend<HS>>,
     symbolic: &SymbolicConstraints<F>,
     selectors_cube: &DeviceBuffer<F>,
-    main_parts: &DeviceBuffer<*const F>,
+    main_descs: &DeviceBuffer<MainMatrixDesc>,
     public_values: &DeviceBuffer<F>,
     eq_cube: *const EF,
     beta_pows: &[EF],
@@ -284,7 +287,10 @@ pub fn evaluate_round0_interactions_gpu<HS: GpuHashScheme>(
             &mut s_evals,
             selectors_cube,
             preprocessed_ptr,
-            main_parts,
+            main_descs.as_ptr(),
+            // Eager encoding: absolute addresses against a null pool base, so
+            // `base + off` reproduces the original pointer (`base_off.cuh`).
+            std::ptr::null(),
             eq_cube,
             public_values,
             &d_numer_weights,

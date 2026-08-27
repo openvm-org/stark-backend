@@ -13,6 +13,9 @@ pub mod merkle_tree;
 pub mod monomial;
 pub mod ntt;
 pub mod poly;
+/// Graph-IR helpers for `EF` batch NTTs over small (`2^l_skip`) domains.
+#[cfg(feature = "graph-ir")]
+pub mod poly_graph_ir;
 pub mod sponge;
 #[cfg(feature = "graph-ir")]
 pub mod sponge_graph_ir;
