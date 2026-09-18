@@ -1,7 +1,6 @@
 use std::{
     io::{self, Read, Write},
     marker::PhantomData,
-    sync::OnceLock,
 };
 
 use openvm_stark_backend::{
@@ -257,9 +256,17 @@ mod cpu_engine {
 pub use cpu_engine::{BabyBearPoseidon2CpuEngine, CpuTranscript};
 
 // Fixed Poseidon2 configuration
-pub fn poseidon2_perm() -> &'static Poseidon2BabyBear<WIDTH> {
-    static PERM: OnceLock<Poseidon2BabyBear<WIDTH>> = OnceLock::new();
-    PERM.get_or_init(default_babybear_poseidon2_16)
+//
+// ⛔ RETURNS BY VALUE, NOT `&'static`, BECAUSE A `OnceLock` IS A WRITABLE STATIC AND THE SOLANA
+// LOADER REFUSES THE WHOLE ELF FOR ONE. The failure names a SECTION, never the code:
+// `Section or symbol name '.data.<mangled>' is longer than 16 bytes` — which reads like a linker
+// quirk and is actually "this program has mutable global state". It is the same class that makes
+// SP1's verifier unloadable, and `lazy_static!` tables in openvm-poseidon2-air are the other case.
+//
+// The permutation is CHEAP to construct (round constants from a `const` table), so caching it
+// bought little and cost portability to an entire target.
+pub fn poseidon2_perm() -> Poseidon2BabyBear<WIDTH> {
+    default_babybear_poseidon2_16()
 }
 
 pub fn poseidon2_compress_with_capacity(

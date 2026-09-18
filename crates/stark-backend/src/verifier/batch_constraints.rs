@@ -344,16 +344,32 @@ pub fn verify_zerocheck_and_logup<SC: StarkProtocolConfig, TS: FiatShamirTranscr
         debug!(%trace_idx, %eq_xi_r);
         constraints_evals.push(eq_xi_r * expr);
 
-        let symbolic_constraints = SymbolicConstraints::from(&vk.symbolic_constraints);
-        let interactions = &symbolic_constraints.interactions;
+        // ⭐⭐ READ THE INTERACTIONS OUT OF THE DAG INSTEAD OF REBUILDING TREES AND RECURSING.
+        //
+        // 🔴 THE OLD PATH WAS THE ONLY RECURSION LEFT ON THE VERIFY PATH, AND IT IS WHY THIS
+        // VERIFIER CANNOT RUN ON SOLANA. `eval_expr` walks a `SymbolicExpression` TREE —
+        // `eval_expr(x) + eval_expr(y)` — so the STACK DEPTH IS THE EXPRESSION DEPTH, and SBF caps
+        // BPF-to-BPF nesting at **64 FRAMES**. Measured: the verifier aborts with `exceeded max BPF
+        // to BPF call depth` after 54.9M CU of a 1.4-BILLION budget, and `lto = "fat"` +
+        // `codegen-units = 1` + `opt-level = 3` moved the abort by 4,885 CU — i.e. not at all.
+        //
+        // ✅ AND THE FIX IS OPENVM'S OWN DATA LAYOUT, NOT A REWRITE. `SymbolicConstraintsDag` says
+        // so in its own docstring: the nodes "include expressions for plain AIR constraints AS WELL
+        // AS symbolic expressions used for `interactions`", and interactions are "referenced by
+        // node idx as `usize`". `eval_nodes` above ALREADY evaluated every one of those nodes.
+        //
+        // ⇒ so the old path did three wasteful things at once: it rebuilt the whole expression
+        // tree from the DAG (`SymbolicConstraints::from`) once per trace, it RE-EVALUATED
+        // expressions already sitting in `nodes`, and it recursed to do it.
+        let interactions = &vk.symbolic_constraints.interactions;
         let cur_interactions_evals = interactions
             .iter()
             .map(|interaction| {
-                let num = evaluator.eval_expr(&interaction.count);
+                let num = nodes[interaction.count];
                 let denom = interaction
                     .message
                     .iter()
-                    .map(|expr| evaluator.eval_expr(expr))
+                    .map(|&idx| nodes[idx])
                     .chain(std::iter::once(
                         SC::EF::from_u16(interaction.bus_index) + SC::EF::ONE,
                     ))
