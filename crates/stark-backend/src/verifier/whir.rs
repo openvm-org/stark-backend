@@ -201,7 +201,8 @@ pub fn verify_whir<SC: StarkProtocolConfig, TS: FiatShamirTranscript<SC>>(
                     merkle_verify(hasher, commit, index as u32, query_digest, merkle_proof)?;
 
                     for c in 0..width {
-                        let mu_pow = mu_pow_iter.next().unwrap(); // ok; mu_pows has total_width length
+                        // mu_pows has total_width length.
+                        let mu_pow = mu_pow_iter.next().unwrap();
                         for j in 0..(1 << k_whir) {
                             codeword_vals[j] += *mu_pow * opened_rows[j][c];
                         }

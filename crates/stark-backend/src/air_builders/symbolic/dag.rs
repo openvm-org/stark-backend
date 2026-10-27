@@ -525,8 +525,8 @@ mod tests {
         // Test x + 0 = x
         let expr_add_zero = x.clone() + zero.clone();
         let dag = build_symbolic_constraints_dag(&[expr_add_zero], &[]);
-        // Should only have Variable node, no Add node
-        assert_eq!(dag.constraints.nodes.len(), 2); // Variable + Constant(0) interned but Add simplified away
+        // Variable and Constant(0) are interned, but Add is simplified away.
+        assert_eq!(dag.constraints.nodes.len(), 2);
         assert!(matches!(
             dag.constraints.nodes[dag.constraints.constraint_idx[0]],
             SymbolicExpressionNode::Variable(_)
