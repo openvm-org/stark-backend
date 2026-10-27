@@ -67,6 +67,7 @@ __device__ __forceinline__ FpExt evaluate_dag_entry_gkr(
         result = d_challenges[src.index];
         break;
     case SRC_INTERMEDIATE:
+        assert(d_intermediates);
         result = d_intermediates[task_stride * src.index];
         break;
     case SRC_CONSTANT:
@@ -124,6 +125,7 @@ __global__ void evaluate_interactions_gkr_kernel(
                         );
                     } else {
                         uint32_t z_index = decode_z_index(rule);
+                        assert(intermediates_ptr);
                         result = intermediates_ptr[z_index * task_stride];
                     }
                 } else {
@@ -179,6 +181,7 @@ __global__ void evaluate_interactions_gkr_kernel(
 
                         if (header.buffer_result) {
                             uint32_t z_index = decode_z_index(rule);
+                            assert(intermediates_ptr);
                             intermediates_ptr[z_index * task_stride] = result;
                         }
                     }
