@@ -17,6 +17,7 @@ use p3_util::log2_ceil_u64;
 /// AIR builders for prover and verifier, including support for cross-matrix permutation arguments.
 pub mod air_builders;
 pub mod codec;
+mod decode;
 /// Copy of Plonky3's DFT module without parallelism (Rayon) for faster single-threaded execution.
 /// Used by the prover **only**.
 pub mod dft;
