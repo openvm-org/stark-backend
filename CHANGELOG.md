@@ -4,7 +4,12 @@ All notable changes to STARK Backend will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
-## Unreleased
+## v2.1.0
+
+### Added
+- VK-aware proof decoding via `Proof::decode_using_vk` and `Proof::decode_from_bytes_using_vk`, bounding allocations using a trusted verifying key without changing the proof wire format.
+
+## v2.0.1 (2026-08-14)
 
 ### Added
 - (CUDA common) `DeviceBuffer::mut_slice(range)` returning a `DeviceBufferMutSlice<'_, T>` with a `copy_from_host` method for overwriting a subrange of a device buffer from a host slice on a caller-supplied stream.

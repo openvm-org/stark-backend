@@ -231,13 +231,13 @@ pub(crate) fn decode_batch_constraint_proof<SC: DecodableConfig, R: Read>(
     )?;
     let mut sumcheck_round_polys = vec_with_capped_capacity(n_max);
     if n_max > 0 {
-        let width = decode_len(
+        let max_degree_plus_one = decode_len(
             reader,
             limit.map(|l| l.round_width),
             "batch sumcheck round width",
         )?;
         for _ in 0..n_max {
-            sumcheck_round_polys.push(SC::decode_extension_field_n(reader, width)?);
+            sumcheck_round_polys.push(SC::decode_extension_field_n(reader, max_degree_plus_one)?);
         }
     }
 
