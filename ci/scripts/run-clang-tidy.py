@@ -15,9 +15,9 @@ def run_clang_tidy_single(file: Path, clang_tidy: str, cuda_path: str, cuda_arch
     """Run clang-tidy on a single file with optional include dirs."""
     cmd = [
         clang_tidy,
-        "--checks='*'",
-        "--warnings-as-errors='*'",
-        "--header-filter='.*'",
+        "--checks=*",
+        "--warnings-as-errors=*",
+        "--header-filter=.*",
         "--extra-arg=-Wno-unknown-cuda-version",
         str(file),
         "--",
