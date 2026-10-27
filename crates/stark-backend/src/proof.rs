@@ -5,8 +5,8 @@ use p3_field::PrimeCharacteristicRing;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    codec::{vec_with_capped_capacity, DecodableConfig, Decode, EncodableConfig, Encode},
-    StarkProtocolConfig,
+    codec::{DecodableConfig, Decode, EncodableConfig, Encode},
+    decode, StarkProtocolConfig,
 };
 
 #[derive(Derivative, Serialize, Deserialize)]
@@ -423,10 +423,7 @@ impl<SC: EncodableConfig> Encode for WhirProof<SC> {
 
 impl<SC: DecodableConfig> Decode for TraceVData<SC> {
     fn decode<R: Read>(reader: &mut R) -> Result<Self> {
-        Ok(Self {
-            log_height: usize::decode(reader)?,
-            cached_commitments: SC::decode_digest_vec(reader)?,
-        })
+        decode::decode_trace_vdata(reader, None)
     }
 }
 
@@ -443,51 +440,12 @@ impl<SC: DecodableConfig> Decode for GkrLayerClaims<SC> {
 
 impl<SC: DecodableConfig> Decode for Proof<SC> {
     fn decode<R: Read>(reader: &mut R) -> Result<Self> {
-        // We explicitly implement Decode for Proof to check CODEC_VERSION
-        let codec_version = u32::decode(reader)?;
-        if codec_version != CODEC_VERSION {
-            return Err(Error::other(format!(
-                "CODEC_VERSION mismatch, expected: {}, actual: {}",
-                CODEC_VERSION, codec_version
-            )));
-        }
-        let common_main_commit = SC::decode_digest(reader)?;
-
-        let num_airs = usize::decode(reader)?;
-        let bitmap_len = num_airs.div_ceil(8);
-        let mut bitmap: Vec<u8> = vec_with_capped_capacity(bitmap_len);
-        for _ in 0..bitmap_len {
-            bitmap.push(u8::decode(reader)?);
-        }
-        let mut trace_vdata = vec_with_capped_capacity(num_airs);
-        for byte in bitmap {
-            for i in 0u8..8 {
-                if trace_vdata.len() >= num_airs {
-                    // Padding bits must be zero for the encoding to be canonical.
-                    if byte >> i != 0 {
-                        return Err(Error::other("trace_vdata bitmap padding bits set"));
-                    }
-                    break;
-                }
-                if byte & (1u8 << i) != 0 {
-                    trace_vdata.push(Some(TraceVData::decode(reader)?));
-                } else {
-                    trace_vdata.push(None);
-                }
-            }
-        }
-
-        // public_values: Vec<Vec<SC::F>>
-        let num_pvs = usize::decode(reader)?;
-        let mut public_values = vec_with_capped_capacity(num_pvs);
-        for _ in 0..num_pvs {
-            public_values.push(SC::decode_base_field_vec(reader)?);
-        }
+        let preamble = decode::decode_preamble(reader, None)?;
 
         Ok(Self {
-            common_main_commit,
-            trace_vdata,
-            public_values,
+            common_main_commit: preamble.common_main_commit,
+            trace_vdata: preamble.trace_vdata,
+            public_values: preamble.public_values,
             gkr_proof: GkrProof::decode(reader)?,
             batch_constraint_proof: BatchConstraintProof::decode(reader)?,
             stacking_proof: StackingProof::decode(reader)?,
@@ -498,209 +456,24 @@ impl<SC: DecodableConfig> Decode for Proof<SC> {
 
 impl<SC: DecodableConfig> Decode for GkrProof<SC> {
     fn decode<R: Read>(reader: &mut R) -> Result<Self> {
-        let logup_pow_witness = SC::decode_base_field(reader)?;
-        let q0_claim = SC::decode_extension_field(reader)?;
-        let claims_per_layer = Vec::<GkrLayerClaims<SC>>::decode(reader)?;
-
-        let num_sumcheck_polys = claims_per_layer.len().saturating_sub(1);
-        let mut sumcheck_polys = vec_with_capped_capacity(num_sumcheck_polys);
-        for round_idx_minus_one in 0..num_sumcheck_polys {
-            let n = round_idx_minus_one + 1;
-            let mut round = vec_with_capped_capacity(n);
-            for _ in 0..n {
-                round.push([
-                    SC::decode_extension_field(reader)?,
-                    SC::decode_extension_field(reader)?,
-                    SC::decode_extension_field(reader)?,
-                ]);
-            }
-            sumcheck_polys.push(round);
-        }
-
-        Ok(Self {
-            logup_pow_witness,
-            q0_claim,
-            claims_per_layer,
-            sumcheck_polys,
-        })
+        decode::decode_gkr_proof(reader, None)
     }
 }
 
 impl<SC: DecodableConfig> Decode for BatchConstraintProof<SC> {
     fn decode<R: Read>(reader: &mut R) -> Result<Self> {
-        let numerator_term_per_air = SC::decode_extension_field_vec(reader)?;
-        let num_present_airs = numerator_term_per_air.len();
-        let denominator_term_per_air = SC::decode_extension_field_n(reader, num_present_airs)?;
-
-        let univariate_round_coeffs = SC::decode_extension_field_vec(reader)?;
-
-        let n_max = usize::decode(reader)?;
-        let mut sumcheck_round_polys = vec_with_capped_capacity(n_max);
-        if n_max > 0 {
-            let max_degree_plus_one = usize::decode(reader)?;
-            for _ in 0..n_max {
-                sumcheck_round_polys
-                    .push(SC::decode_extension_field_n(reader, max_degree_plus_one)?);
-            }
-        }
-
-        let mut column_openings = vec_with_capped_capacity(num_present_airs);
-        for _ in 0..num_present_airs {
-            // Vec<Vec<SC::EF>>: length-prefixed outer, then each inner
-            let num_parts = usize::decode(reader)?;
-            let mut parts = vec_with_capped_capacity(num_parts);
-            for _ in 0..num_parts {
-                parts.push(SC::decode_extension_field_vec(reader)?);
-            }
-            column_openings.push(parts);
-        }
-
-        Ok(Self {
-            numerator_term_per_air,
-            denominator_term_per_air,
-            univariate_round_coeffs,
-            sumcheck_round_polys,
-            column_openings,
-        })
+        decode::decode_batch_constraint_proof(reader, None)
     }
 }
 
 impl<SC: DecodableConfig> Decode for StackingProof<SC> {
     fn decode<R: Read>(reader: &mut R) -> Result<Self> {
-        let univariate_round_coeffs = SC::decode_extension_field_vec(reader)?;
-        // sumcheck_round_polys: Vec<[SC::EF; 2]>
-        let num_rounds = usize::decode(reader)?;
-        let mut sumcheck_round_polys = vec_with_capped_capacity(num_rounds);
-        for _ in 0..num_rounds {
-            sumcheck_round_polys.push([
-                SC::decode_extension_field(reader)?,
-                SC::decode_extension_field(reader)?,
-            ]);
-        }
-        // stacking_openings: Vec<Vec<SC::EF>>
-        let num_openings = usize::decode(reader)?;
-        let mut stacking_openings = vec_with_capped_capacity(num_openings);
-        for _ in 0..num_openings {
-            stacking_openings.push(SC::decode_extension_field_vec(reader)?);
-        }
-        Ok(Self {
-            univariate_round_coeffs,
-            sumcheck_round_polys,
-            stacking_openings,
-        })
+        decode::decode_stacking_proof(reader, None)
     }
 }
 
 impl<SC: DecodableConfig> Decode for WhirProof<SC> {
     fn decode<R: Read>(reader: &mut R) -> Result<Self> {
-        let mu_pow_witness = SC::decode_base_field(reader)?;
-        // whir_sumcheck_polys: Vec<[SC::EF; 2]>
-        let num_whir_sumcheck_rounds = usize::decode(reader)?;
-        let mut whir_sumcheck_polys = vec_with_capped_capacity(num_whir_sumcheck_rounds);
-        for _ in 0..num_whir_sumcheck_rounds {
-            whir_sumcheck_polys.push([
-                SC::decode_extension_field(reader)?,
-                SC::decode_extension_field(reader)?,
-            ]);
-        }
-
-        let codeword_commits = SC::decode_digest_vec(reader)?;
-        let num_whir_rounds = codeword_commits.len() + 1;
-        if num_whir_sumcheck_rounds % num_whir_rounds != 0 {
-            return Err(Error::new(
-                std::io::ErrorKind::InvalidData,
-                "num_whir_sumcheck_rounds must be a multiple of num_whir_rounds",
-            ));
-        }
-        let k_whir = num_whir_sumcheck_rounds / num_whir_rounds;
-        let ood_values = SC::decode_extension_field_n(reader, num_whir_rounds - 1)?;
-        let folding_pow_witnesses = SC::decode_base_field_n(reader, num_whir_sumcheck_rounds)?;
-        let query_phase_pow_witnesses = SC::decode_base_field_n(reader, num_whir_rounds)?;
-
-        let num_commits = usize::decode(reader)?;
-        if num_commits == 0 {
-            return Err(Error::new(
-                std::io::ErrorKind::InvalidData,
-                "num_commits must be nonzero",
-            ));
-        }
-        let initial_num_whir_queries = usize::decode(reader)?;
-        let k_whir_exp = 1 << k_whir;
-        let mut merkle_depth = 0;
-        if initial_num_whir_queries > 0 {
-            merkle_depth = usize::decode(reader)?;
-        }
-
-        let mut widths = vec_with_capped_capacity(num_commits);
-        if initial_num_whir_queries > 0 {
-            for _ in 0..num_commits {
-                widths.push(usize::decode(reader)?);
-            }
-        }
-
-        let decoded_widths = widths.len();
-        let mut initial_round_opened_rows = vec_with_capped_capacity(num_commits);
-        for width in widths.into_iter().chain(std::iter::repeat_n(
-            0,
-            num_commits.saturating_sub(decoded_widths),
-        )) {
-            let mut opened_rows = vec_with_capped_capacity(initial_num_whir_queries);
-            for _ in 0..initial_num_whir_queries {
-                // Each query has k_whir_exp rows. Each row is a fixed-width list of F elements.
-                let mut rows = vec_with_capped_capacity(k_whir_exp);
-                for _ in 0..k_whir_exp {
-                    rows.push(SC::decode_base_field_n(reader, width)?);
-                }
-                opened_rows.push(rows);
-            }
-            initial_round_opened_rows.push(opened_rows);
-        }
-
-        let mut initial_round_merkle_proofs = vec_with_capped_capacity(num_commits);
-        for _ in 0..num_commits {
-            let mut merkle_proofs = vec_with_capped_capacity(initial_num_whir_queries);
-            for _ in 0..initial_num_whir_queries {
-                merkle_proofs.push(SC::decode_digest_n(reader, merkle_depth)?);
-            }
-            initial_round_merkle_proofs.push(merkle_proofs);
-        }
-
-        let mut codeword_opened_values = vec_with_capped_capacity(num_whir_rounds - 1);
-        for _ in 0..num_whir_rounds - 1 {
-            let num_queries = usize::decode(reader)?;
-            let mut opened_values = vec_with_capped_capacity(num_queries);
-            for _ in 0..num_queries {
-                opened_values.push(SC::decode_extension_field_n(reader, k_whir_exp)?);
-            }
-            codeword_opened_values.push(opened_values);
-        }
-
-        merkle_depth = usize::decode(reader)?;
-        let mut codeword_merkle_proofs = vec_with_capped_capacity(num_whir_rounds - 1);
-        for opened_values in codeword_opened_values.iter() {
-            let num_queries = opened_values.len();
-            let mut merkle_proof: Vec<_> = vec_with_capped_capacity(num_queries);
-            for _ in 0..num_queries {
-                merkle_proof.push(SC::decode_digest_n(reader, merkle_depth)?);
-            }
-            codeword_merkle_proofs.push(merkle_proof);
-            merkle_depth -= 1;
-        }
-
-        let final_poly = SC::decode_extension_field_vec(reader)?;
-
-        Ok(Self {
-            mu_pow_witness,
-            whir_sumcheck_polys,
-            codeword_commits,
-            ood_values,
-            folding_pow_witnesses,
-            query_phase_pow_witnesses,
-            initial_round_opened_rows,
-            initial_round_merkle_proofs,
-            codeword_opened_values,
-            codeword_merkle_proofs,
-            final_poly,
-        })
+        decode::decode_whir_proof(reader, None)
     }
 }

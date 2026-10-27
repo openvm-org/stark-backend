@@ -498,6 +498,7 @@ extern "C" int _stacked_reduction_sumcheck_mle_round(
     uint32_t window_len,
     uint32_t num_y,
     uint32_t sm_count, cudaStream_t stream) {
+    assert(num_y);
     // Smaller block size for more eligible warps to hide latency
     auto [grid, block] = kernel_launch_params(num_y, 256);
     assert(sm_count);
