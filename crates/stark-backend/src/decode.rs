@@ -145,7 +145,8 @@ pub(crate) fn decode_preamble<SC: DecodableConfig, R: Read>(
     }
     let common_main_commit = SC::decode_digest(reader)?;
 
-    let num_airs = decode_len(reader, mvk.map(|vk| vk.per_air.len()), "trace_vdata length")?;
+    let expected_num_airs = mvk.map(|vk| vk.per_air.len());
+    let num_airs = decode_len(reader, expected_num_airs, "trace_vdata length")?;
     let bitmap = decode_into_vec::<u8, _>(reader, num_airs.div_ceil(8))?;
     if !num_airs.is_multiple_of(8) && bitmap.last().unwrap() >> (num_airs % 8) != 0 {
         return Err(Error::other("trace_vdata bitmap padding bits set"));
@@ -159,19 +160,12 @@ pub(crate) fn decode_preamble<SC: DecodableConfig, R: Read>(
     for (i, present) in present.enumerate() {
         trace_vdata.push(
             present
-                .then(|| match mvk {
-                    Some(vk) => decode_trace_vdata(reader, Some(vk.per_air[i].num_cached_mains())),
-                    None => TraceVData::decode(reader),
-                })
+                .then(|| decode_trace_vdata(reader, mvk.map(|vk| vk.per_air[i].num_cached_mains())))
                 .transpose()?,
         );
     }
 
-    let num_pvs = decode_len(
-        reader,
-        mvk.map(|vk| vk.per_air.len()),
-        "public_values length",
-    )?;
+    let num_pvs = decode_len(reader, expected_num_airs, "public_values length")?;
     let mut public_values = vec_with_capped_capacity(num_pvs);
     let mut limit_pvs = mvk
         .into_iter()
