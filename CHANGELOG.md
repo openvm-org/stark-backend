@@ -4,10 +4,18 @@ All notable changes to STARK Backend will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
-## v2.1.0
+## Unreleased
+
+## v2.1.0 (2026-11-02)
 
 ### Added
 - VK-aware proof decoding via `Proof::decode_using_vk` and `Proof::decode_from_bytes_using_vk`, bounding allocations using a trusted verifying key without changing the proof wire format.
+
+### Changed
+- Proof decoding now validates bitmap padding before trace metadata and calls `DecodableConfig::decode_*_n` directly instead of `decode_*_vec`, bypassing downstream overrides of the vector decoding methods.
+
+### Fixed
+- WHIR proof decoding now rejects shift and round-count overflow and avoids unnecessary Merkle-depth subtraction for empty query lists.
 
 ## v2.0.1 (2026-08-14)
 
