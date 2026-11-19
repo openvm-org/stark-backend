@@ -161,60 +161,56 @@ pub(crate) fn stack_traces_into_expanded(
         let trace = traces[*mat_idx];
         let s_len = s.len(l_skip);
         debug_assert_eq!(trace.height(), 1 << s.log_height());
-        if s.log_height() >= l_skip {
-            debug_assert_eq!(trace.height(), s_len);
-            let mut copy_len = s_len;
-            let mut end = idx + 1;
-            while end < layout.sorted_cols.len() {
-                let (next_mat_idx, next_j, next_s) = &layout.sorted_cols[end];
-                if *next_mat_idx != *mat_idx || next_s.log_height() != s.log_height() {
-                    break;
-                }
-                let expected_j = *j + (end - idx);
-                let next_len = next_s.len(l_skip);
-                let next_start = next_s.col_idx * padded_height + next_s.row_idx;
-                if *next_j != expected_j || next_len != s_len || next_start != start + copy_len {
-                    break;
-                }
-                copy_len += next_len;
-                end += 1;
+        let stride = s.stride(l_skip);
+        debug_assert_eq!(stride * trace.height(), s_len);
+        // For a strided copy, each source element is one column of the padding kernel.
+        // Keep grouped launches in one CUDA grid-y plane (a single column may be taller).
+        let remaining = layout.sorted_cols.len() - idx;
+        let max_cols = if stride == 1 {
+            remaining
+        } else {
+            remaining.min((u16::MAX as usize / trace.height()).max(1))
+        };
+        let mut end = idx + 1;
+        let mut copy_len = s_len;
+        while end < idx + max_cols {
+            let (next_mat_idx, next_j, next_s) = &layout.sorted_cols[end];
+            if next_mat_idx != mat_idx
+                || *next_j != *j + (end - idx)
+                || next_s.log_height() != s.log_height()
+                || next_s.col_idx * padded_height + next_s.row_idx != start + copy_len
+            {
+                break;
             }
+            copy_len += s_len;
+            end += 1;
+        }
 
-            // SAFETY: matrix buffers are allocated correctly with respect to dimensions.
-            // The grouped columns are contiguous in both source and destination buffers.
-            unsafe {
-                let src = trace.buffer().as_ptr().add(*j * s_len);
-                let dst = buffer.as_mut_ptr().add(start);
+        // SAFETY: the run is consecutive in the source matrix and its expanded destination.
+        // Checking physical offsets above excludes any gap between padded stacked columns.
+        unsafe {
+            let src = trace.buffer().as_ptr().add(*j * trace.height());
+            let dst = buffer.as_mut_ptr().add(start);
+            if stride == 1 {
                 cuda_memcpy_on::<true, true>(
                     dst as *mut c_void,
                     src as *const c_void,
                     copy_len * size_of::<F>(),
                     device_ctx,
                 )?;
-            }
-            idx = end;
-        } else {
-            let stride = s.stride(l_skip);
-            debug_assert_eq!(stride * trace.height(), s_len);
-            // SAFETY: matrix buffers are allocated correctly
-            // - `q_buf` has enough capacity by definition of stacked `layout`
-            // - we abuse `batch_expand_pad` with `poly_count = trace.height()` to create a strided
-            //   column of length `s_len = stride * trace.height()`
-            unsafe {
-                let src = trace.buffer().as_ptr().add(*j * trace.height());
-                let dst = buffer.as_mut_ptr().add(start);
+            } else {
                 batch_expand_pad_wide(
                     dst,
                     src,
-                    trace.height() as u32,
+                    ((end - idx) * trace.height()) as u32,
                     stride as u32,
                     1,
                     device_ctx.stream.as_raw(),
                 )
                 .map_err(StackTracesError::BatchExpandPadWide)?;
             }
-            idx += 1;
         }
+        idx = end;
     }
     Ok(())
 }
@@ -374,6 +370,7 @@ mod tests {
     use itertools::Itertools;
     use openvm_cuda_common::{
         common::get_device,
+        copy::MemCopyD2H,
         stream::{CudaStream, GpuDeviceCtx, StreamGuard},
     };
     use openvm_stark_backend::{
@@ -450,6 +447,29 @@ mod tests {
             .map(F::from_u32),
         );
         assert_eq!(stacked_h_mat.values, expected);
+    }
+
+    #[test]
+    fn short_columns_cross_launch_and_stacked_column_boundaries() {
+        let ctx = test_ctx();
+        let width = 65_537;
+        let matrix = ColMajorMatrix::new((1..=width).map(F::from_usize).collect(), width);
+        let trace = transport_matrix_h2d_col_major(&matrix, &ctx).unwrap();
+        let traces = [&trace];
+        // 65,536 height-one columns fit at stride two; the last goes into column two.
+        // The first launch ends one source element before the stacked-column boundary.
+        let layout = get_stacked_layout(1, 16, &traces);
+        for padded_height in [1 << 17, 1 << 18] {
+            let mut out = DeviceBuffer::with_capacity_on(2 * padded_height, &ctx);
+            stack_traces_into_expanded(&layout, &traces, &mut out, padded_height, &ctx).unwrap();
+
+            let mut expected = vec![F::ZERO; 2 * padded_height];
+            for i in 0..width - 1 {
+                expected[2 * i] = matrix.values[i];
+            }
+            expected[padded_height] = matrix.values[width - 1];
+            assert_eq!(out.to_host_on(&ctx).unwrap(), expected);
+        }
     }
 
     #[test]
