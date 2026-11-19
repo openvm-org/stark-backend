@@ -99,7 +99,11 @@ extern "C" int _sponge_grind(
     if (bits >= 32 || (uint64_t{1} << bits) >= Fp::P) {
         return cudaErrorInvalidValue;
     }
-    auto const [grid, block] = kernel_launch_params(1 << bits);
+    const size_t count = size_t{1} << bits;
+    // Small searches leave most SMs idle at 1024 threads per block. Aim for 64
+    // blocks without shrinking below four warps; keep the usual geometry for large searches.
+    const size_t threads = std::clamp<size_t>(count / 64, 128, MAX_THREADS);
+    auto const [grid, block] = kernel_launch_params(count, threads);
     grind_kernel<<<grid, block, 0, stream>>>(init_state, bits, min_witness, max_witness, result);
 
     cudaError_t err = cudaGetLastError();
