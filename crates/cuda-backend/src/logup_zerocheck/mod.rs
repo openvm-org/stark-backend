@@ -835,6 +835,7 @@ impl<'a, HS: GpuHashScheme> LogupZerocheckGpu<'a, HS> {
                 public_values,
                 eq_xi_tree.get_ptr(n_lift),
                 d_lambda_pows,
+                self.lambda_combinations[*air_idx].as_ref(),
                 1 << l_skip,
                 1 << n_lift,
                 height as u32,

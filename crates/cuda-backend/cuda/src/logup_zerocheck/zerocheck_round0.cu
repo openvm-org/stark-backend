@@ -13,6 +13,7 @@
 #include "fp.h"
 #include "fpext.h"
 #include "launcher.cuh"
+#include "monomial.cuh"
 #include "sumcheck.cuh"
 #include "utils.cuh"
 
@@ -472,6 +473,115 @@ __global__ void zerocheck_ntt_evaluate_constraints_coset_parallel_kernel(
 // LAUNCHERS
 // ============================================================================
 constexpr uint32_t MAX_THREADS = 128;
+
+// One block owns one (coset, skip-domain point) output. Its threads evaluate
+// different monomials of the same lambda-weighted constraint polynomial. This
+// avoids both DAG intermediates and a global array of partial sums.
+__global__ void zerocheck_r0_monomials_kernel(
+    FpExt *output,
+    const MonomialHeader *headers,
+    const PackedVar *variables,
+    const FpExt *weights,
+    const Fp *selectors,
+    const Fp *preprocessed,
+    const Fp *const *main_parts,
+    const Fp *public_values,
+    const FpExt *eq,
+    uint32_t num_monomials,
+    uint32_t skip_domain,
+    uint32_t num_x,
+    uint32_t height,
+    Fp g_shift
+) {
+    extern __shared__ char smem[];
+    auto *warp_sums = reinterpret_cast<FpExt *>(smem);
+    auto *basis = reinterpret_cast<Fp *>(warp_sums + blockDim.x / WARP_SIZE);
+    const uint32_t l_skip = __ffs(skip_domain) - 1;
+    const uint32_t segment = min(height, skip_domain);
+    const uint32_t log_segment = __ffs(segment) - 1;
+    const Fp point = pow(g_shift, blockIdx.y + 1) *
+                     (l_skip ? device_ntt::get_twiddle(l_skip, blockIdx.x) : Fp::one());
+
+    // The iNTT + coset NTT evaluates the interpolant of the segment at `point`.
+    // When height < skip_domain the samples repeat: the interpolant is f(Z^(skip/height)).
+    // Thus L_j(t) = avg_gp(t * omega^(-j), segment), also valid for segment = 1.
+    const uint32_t tid = threadIdx.x;
+    if (tid < segment) {
+        const Fp t = exp_power_of_2(point, l_skip - log_segment);
+        const Fp inv_root = log_segment
+                                ? device_ntt::get_twiddle(log_segment, (-tid) & (segment - 1))
+                                : Fp::one();
+        basis[tid] = avg_gp(t * inv_root, segment);
+    }
+    __syncthreads();
+
+    FpExt sum(Fp::zero());
+    for (uint32_t x = 0; x < num_x; ++x) {
+        const Fp first = selectors[x] * basis[0];
+        const Fp last = selectors[2 * num_x + x] * basis[segment - 1];
+        FpExt constraint_sum(Fp::zero());
+        for (size_t m = tid; m < num_monomials; m += blockDim.x) {
+            const MonomialHeader header = headers[m];
+            Fp product = Fp::one();
+            for (uint32_t v = 0; v < header.num_vars; ++v) {
+                const PackedVar var = variables[size_t(header.var_offset) + v];
+                switch (var.entry_type()) {
+                case 0: // preprocessed
+                case 1: { // main
+                    const Fp *base =
+                        var.entry_type() == 0 ? preprocessed : main_parts[var.part_index()];
+                    const Fp *column = base + size_t(height) * var.col_index();
+                    Fp value = Fp::zero();
+                    for (uint32_t j = 0; j < segment; ++j) {
+                        const uint32_t row = (x * skip_domain + var.offset() + j) & (height - 1);
+                        value += basis[j] * column[row];
+                    }
+                    product *= value;
+                    break;
+                }
+                case 3: product *= public_values[var.col_index()]; break;
+                case 8: product *= first; break;
+                case 9: product *= last; break;
+                case 10: product *= Fp::one() - last; break;
+                default: assert(false); break; // keygen only emits the entries above
+                }
+            }
+            constraint_sum += weights[m] * product;
+        }
+        sum += constraint_sum * eq[x];
+    }
+    sum = sumcheck::block_reduce_sum(sum, warp_sums);
+    if (tid == 0) {
+        output[blockIdx.y * skip_domain + blockIdx.x] =
+            sum * inv(exp_power_of_2(point, l_skip) - Fp::one());
+    }
+}
+
+extern "C" int _zerocheck_r0_monomials(
+    FpExt *output,
+    const MonomialHeader *headers,
+    const PackedVar *variables,
+    const FpExt *weights,
+    const Fp *selectors,
+    const Fp *preprocessed,
+    const Fp *const *main_parts,
+    const Fp *public_values,
+    const FpExt *eq,
+    uint32_t num_monomials,
+    uint32_t skip_domain,
+    uint32_t num_x,
+    uint32_t height,
+    uint32_t num_cosets,
+    Fp g_shift,
+    cudaStream_t stream
+) {
+    const size_t shmem = MAX_THREADS / WARP_SIZE * sizeof(FpExt) + skip_domain * sizeof(Fp);
+    zerocheck_r0_monomials_kernel<<<dim3(skip_domain, num_cosets), MAX_THREADS, shmem, stream>>>(
+        output, headers, variables, weights, selectors, preprocessed, main_parts, public_values,
+        eq, num_monomials, skip_domain, num_x, height, g_shift
+    );
+    return CHECK_KERNEL();
+}
 
 // Helper to determine which mode to use based on threshold
 inline bool use_coset_parallel_mode(uint32_t num_x, uint32_t skip_domain) {

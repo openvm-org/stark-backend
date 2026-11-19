@@ -192,6 +192,8 @@ impl ProvingMemoryConfig {
     /// workspace (typically `/4`), without GKR-only `tmp_block_sums`. The GKR
     /// estimate instead uses default precompute-M (`/16` plus `tmp_block_sums`).
     /// Missing `constraint_eval_cells` (`0`) makes `round0_spill` use the full limit.
+    /// Keep the DAG spill estimate even for small traces: the monomial evaluator
+    /// needs no global scratch, but its availability is determined by the proving key.
     ///
     /// ```text
     /// round0_max_temp_bytes = gkr_mem_contribution(interaction_cells)

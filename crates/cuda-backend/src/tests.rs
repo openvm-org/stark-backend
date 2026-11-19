@@ -618,6 +618,25 @@ fn test_batch_ntt_small_partial_last_block_roundtrip(l_skip: usize) {
     assert_eq!(d_values.to_host_on(&gpu_ctx).unwrap(), original);
 }
 
+// Exercise local and rotated accesses across preprocessed, cached, and common
+// columns, including a trace shorter than the round-zero interpolation domain.
+#[test_case(8)]
+#[test_case(64)]
+fn small_round0_partitioned_trace(height: usize) {
+    use openvm_stark_backend::test_utils::{
+        test_system_params_small, PreprocessedAndCachedFixture,
+    };
+
+    let params = test_system_params_small(4, 8, 3);
+    let cpu = RefEngine::new(params.clone());
+    let gpu = BabyBearPoseidon2GpuEngine::new(params);
+    let selectors = (0..height).map(|row| row % 3 == 1).collect();
+    let fixture = PreprocessedAndCachedFixture::new(selectors, cpu.config().clone(), 32);
+    let (pk, vk) = fixture.keygen(&cpu);
+    let proof = fixture.prove(&gpu, &pk);
+    cpu.verify(&vk, &proof).unwrap();
+}
+
 /// GPU integration regression for multi-warp skip-domain sizes.
 ///
 /// These cases exercise `ntt_coset_interpolate` through the normal proving path with

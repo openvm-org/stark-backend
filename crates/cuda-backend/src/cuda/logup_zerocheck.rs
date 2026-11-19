@@ -382,6 +382,25 @@ extern "C" {
     ) -> i32;
 
     // zerocheck_round0.cu
+    pub(crate) fn _zerocheck_r0_monomials(
+        output: *mut EF,
+        headers: *const MonomialHeader,
+        variables: *const PackedVar,
+        weights: *const EF,
+        selectors: *const F,
+        preprocessed: *const F,
+        main_parts: *const *const F,
+        public_values: *const F,
+        eq: *const EF,
+        num_monomials: u32,
+        skip_domain: u32,
+        num_x: u32,
+        height: u32,
+        num_cosets: u32,
+        g_shift: F,
+        stream: cudaStream_t,
+    ) -> i32;
+
     pub fn _zerocheck_r0_temp_sums_buffer_size(
         buffer_size: u32,
         skip_domain: u32,
