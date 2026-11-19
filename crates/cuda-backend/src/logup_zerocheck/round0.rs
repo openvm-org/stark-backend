@@ -94,6 +94,7 @@ pub fn evaluate_round0_constraints_gpu<HS: GpuHashScheme>(
             && num_cosets <= u32::from(u16::MAX)
             && rules.inner.d_rules.len() >= 128
             && monomials.num_monomials != 0
+            && !super::prefer_constraint_dag(monomials.num_monomials, rules.inner.d_rules.len())
         {
             let output = DeviceBuffer::<EF>::with_capacity_on(output_len, device_ctx);
             // SAFETY: keygen validates each monomial's variable range; weights are
