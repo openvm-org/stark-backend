@@ -471,6 +471,25 @@ mod tests {
         }
     }
 
+    #[test]
+    fn gpu_grind_matches_cpu_check_across_launch_sizes() {
+        let ctx = test_ctx();
+        for bits in [5, 8, 12, 15, 16] {
+            let mut cpu = default_duplex_sponge();
+            let mut gpu = DuplexSpongeGpu::default();
+            for i in 1..=3 {
+                let value = F::from_usize(i * bits);
+                FiatShamirTranscript::<SC>::observe(&mut cpu, value);
+                gpu.observe(value);
+            }
+            let witness = gpu.grind_gpu(bits, &ctx).unwrap();
+            assert!(FiatShamirTranscript::<SC>::check_witness(
+                &mut cpu, bits, witness
+            ));
+            assert_eq!(gpu.sample(), FiatShamirTranscript::<SC>::sample(&mut cpu));
+        }
+    }
+
     /// Benchmark test comparing CPU vs GPU grinding performance.
     ///
     /// Run with: `cargo test -p openvm-cuda-backend test_grind_cpu_vs_gpu -- --nocapture`
