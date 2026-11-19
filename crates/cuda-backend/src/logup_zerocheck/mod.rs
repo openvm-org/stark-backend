@@ -88,11 +88,15 @@ pub use fractional::{fractional_sumcheck_gpu, make_synthetic_leaves, FractionalI
 use gkr_input::{collect_trace_interactions, log_gkr_input_evals};
 use round0::evaluate_round0_constraints_gpu;
 
-/// When `num_monomials >= DAG_FALLBACK_MONOMIAL_RATIO * rules_len`, use DAG evaluation
-/// instead of the monomial kernel for high num_y traces.
+/// Use the DAG when expanding its shared expressions substantially increases the work.
 /// This ratio can be tuned. Currently it is set to prefer the monomial kernel except for the
 /// Poseidon2Air where the DAG node size is much smaller than number of monomials.
 const DAG_FALLBACK_MONOMIAL_RATIO: usize = 2;
+
+fn prefer_constraint_dag(num_monomials: u32, rules_len: usize) -> bool {
+    num_monomials as usize >= DAG_FALLBACK_MONOMIAL_RATIO * rules_len
+}
+
 // Batch MLE launch overhead dominates in the non-save-memory path, so keep at least this
 // much batching budget there.
 const BATCH_MLE_DEFAULT_MEMORY_FLOOR: usize = 6 << 30; // 6GiB
@@ -835,6 +839,7 @@ impl<'a, HS: GpuHashScheme> LogupZerocheckGpu<'a, HS> {
                 public_values,
                 eq_xi_tree.get_ptr(n_lift),
                 d_lambda_pows,
+                self.lambda_combinations[*air_idx].as_ref(),
                 1 << l_skip,
                 1 << n_lift,
                 height as u32,
@@ -1348,8 +1353,7 @@ impl<'a, HS: GpuHashScheme> LogupZerocheckGpu<'a, HS> {
             high_early.iter().partition(|t| {
                 let num_monomials = get_num_monomials(t, self.pk);
                 let rules_len = get_zerocheck_rules_len(t, self.pk);
-                // Use DAG when monomial expansion significantly increased the term count
-                num_monomials as usize >= DAG_FALLBACK_MONOMIAL_RATIO * rules_len
+                prefer_constraint_dag(num_monomials, rules_len)
             });
 
         // DAG evaluation for high num_y traces with high monomial-to-rules ratio

@@ -16,8 +16,9 @@ use super::errors::Round0EvalError;
 use crate::{
     cuda::logup_zerocheck::{
         _logup_r0_intermediates_buffer_size, _logup_r0_temp_sums_buffer_size,
-        _zerocheck_r0_intermediates_buffer_size, _zerocheck_r0_temp_sums_buffer_size,
-        logup_bary_eval_interactions_round0, zerocheck_ntt_eval_constraints,
+        _zerocheck_r0_intermediates_buffer_size, _zerocheck_r0_monomials,
+        _zerocheck_r0_temp_sums_buffer_size, logup_bary_eval_interactions_round0,
+        zerocheck_ntt_eval_constraints,
     },
     gpu_backend::GenericGpuBackend,
     hash_scheme::GpuHashScheme,
@@ -55,6 +56,7 @@ pub fn evaluate_round0_constraints_gpu<HS: GpuHashScheme>(
     public_values: &DeviceBuffer<F>,
     eq_cube: *const EF,
     lambda_pows: &DeviceBuffer<EF>,
+    lambda_combinations: Option<&DeviceBuffer<EF>>,
     skip_domain: u32,
     num_x: u32,
     height: u32,
@@ -72,6 +74,54 @@ pub fn evaluate_round0_constraints_gpu<HS: GpuHashScheme>(
 
     let stream = device_ctx.stream.as_raw();
     let rules = &pk.other_data.zerocheck_round0;
+    let preprocessed_ptr = pk
+        .preprocessed_data
+        .as_ref()
+        .map(|cd| cd.trace.buffer().as_ptr())
+        .unwrap_or(std::ptr::null());
+
+    // A small trace has too few rows to parallelize a long constraint DAG.
+    // Only use resident monomials and weights; do not expand or stage them here.
+    let output_len = num_cosets as usize * skip_domain as usize;
+    if let (Some(monomials), Some(weights)) =
+        (&pk.other_data.zerocheck_monomials, lambda_combinations)
+    {
+        if skip_domain.is_power_of_two()
+            && skip_domain <= 32
+            && height.is_power_of_two()
+            && height <= 256
+            && num_x == height.div_ceil(skip_domain)
+            && num_cosets <= u32::from(u16::MAX)
+            && rules.inner.d_rules.len() >= 128
+            && monomials.num_monomials != 0
+            && !super::prefer_constraint_dag(monomials.num_monomials, rules.inner.d_rules.len())
+        {
+            let output = DeviceBuffer::<EF>::with_capacity_on(output_len, device_ctx);
+            // SAFETY: keygen validates each monomial's variable range; weights are
+            // indexed by the same AIR and monomial order. One block writes each output.
+            unsafe {
+                CudaError::from_result(_zerocheck_r0_monomials(
+                    output.as_mut_ptr(),
+                    monomials.d_headers.as_ptr(),
+                    monomials.d_variables.as_ptr(),
+                    weights.as_ptr(),
+                    selectors_cube.as_ptr(),
+                    preprocessed_ptr,
+                    main_parts.as_ptr(),
+                    public_values.as_ptr(),
+                    eq_cube,
+                    monomials.num_monomials,
+                    skip_domain,
+                    num_x,
+                    height,
+                    num_cosets,
+                    g_shift,
+                    stream,
+                ))?;
+            }
+            return Ok(output);
+        }
+    }
 
     let buffer_size: u32 = rules.inner.buffer_size;
     let intermed_capacity = unsafe {
@@ -110,16 +160,7 @@ pub fn evaluate_round0_constraints_gpu<HS: GpuHashScheme>(
         warn!("zerocheck used_temp_bytes ({used_temp_bytes}) > max_temp_bytes ({max_temp_bytes})");
     }
 
-    let preprocessed_ptr = pk
-        .preprocessed_data
-        .as_ref()
-        .map(|cd| cd.trace.buffer().as_ptr())
-        .unwrap_or(std::ptr::null());
-
-    let mut sp_evals = DeviceBuffer::<EF>::with_capacity_on(
-        num_cosets as usize * skip_domain as usize,
-        device_ctx,
-    );
+    let mut sp_evals = DeviceBuffer::<EF>::with_capacity_on(output_len, device_ctx);
     // SAFETY:
     // - No bounds checks are done in this kernel. It fully assumes that the Rules are trusted and
     //   all nodes are valid.
